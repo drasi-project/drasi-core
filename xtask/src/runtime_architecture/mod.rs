@@ -490,7 +490,11 @@ impl Model {
                             | "impl_from_float"
                             | "partialeq_numeric"
                             | "from_integer"
+                            | "query_configuration_methods"
                     ) {
+                        if value.mac.path.is_ident("query_configuration_methods") {
+                            syn::parse2::<syn::Ident>(value.mac.tokens.clone())?;
+                        }
                         let template = items
                             .iter()
                             .find_map(|item| match item {
@@ -514,6 +518,35 @@ impl Model {
                         // These declare static values, not nominal source types.
                         // Reject nested type declarations instead of hiding them.
                         reject_type_tokens(value.mac.tokens.clone())?;
+                        continue;
+                    }
+                    if value.mac.path.is_ident("query_configuration") {
+                        let template = items
+                            .iter()
+                            .find_map(|item| match item {
+                                Item::Macro(definition)
+                                    if definition
+                                        .ident
+                                        .as_ref()
+                                        .is_some_and(|name| name == "query_configuration") =>
+                                {
+                                    Some(definition.mac.tokens.clone())
+                                }
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                format!("missing template for {module}::query_configuration")
+                            })?;
+                        let generated =
+                            expand_query_configuration_macro(template, value.mac.tokens.clone())?;
+                        let generated_condition = conditions(&generated.attrs, &condition);
+                        self.definition(
+                            &Item::Struct(generated),
+                            module,
+                            file,
+                            &generated_condition,
+                            Some(value.span().start().line),
+                        )?;
                         continue;
                     }
                     // These three source macros declare the eleven identifier types.
@@ -942,6 +975,91 @@ fn expand_identifier_macro(
         Ok(out)
     }
     substitute(body, name)
+}
+
+fn expand_query_configuration_macro(
+    template: proc_macro2::TokenStream,
+    invocation: proc_macro2::TokenStream,
+) -> Result<syn::ItemStruct> {
+    let (name, input_type, identity) = (|input: syn::parse::ParseStream<'_>| {
+        let name: syn::Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let input_type: Type = input.parse()?;
+        let identity;
+        syn::braced!(identity in input);
+        let fields: proc_macro2::TokenStream = identity.parse()?;
+        (|input: syn::parse::ParseStream<'_>| {
+            Punctuated::<syn::Field, Token![,]>::parse_terminated_with(
+                input,
+                syn::Field::parse_named,
+            )
+        })
+        .parse2(fields.clone())?;
+        Ok((name, input_type, fields))
+    })
+    .parse2(invocation)?;
+    let body = (|input: syn::parse::ParseStream<'_>| {
+        let matcher;
+        syn::parenthesized!(matcher in input);
+        let matcher: proc_macro2::TokenStream = matcher.parse()?;
+        let supported = quote::quote! { $name:ident, $input:ty { $($identity:tt)* } };
+        if matcher.to_string() != supported.to_string() {
+            return Err(input.error("unsupported query_configuration matcher"));
+        }
+        input.parse::<Token![=>]>()?;
+        let body;
+        syn::braced!(body in input);
+        let body: proc_macro2::TokenStream = body.parse()?;
+        input.parse::<Token![;]>()?;
+        Ok(body)
+    })
+    .parse2(template)?;
+    fn substitute(
+        tokens: proc_macro2::TokenStream,
+        name: &syn::Ident,
+        input_type: &Type,
+        identity: &proc_macro2::TokenStream,
+    ) -> Result<proc_macro2::TokenStream> {
+        use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
+        let mut out = TokenStream::new();
+        let mut tokens = tokens.into_iter();
+        while let Some(token) = tokens.next() {
+            match token {
+                TokenTree::Punct(punct) if punct.as_char() == '$' => match tokens.next() {
+                    Some(TokenTree::Ident(variable)) if variable == "name" => {
+                        name.to_tokens(&mut out);
+                    }
+                    Some(TokenTree::Ident(variable)) if variable == "input" => {
+                        input_type.to_tokens(&mut out);
+                    }
+                    Some(TokenTree::Group(group))
+                        if group.delimiter() == Delimiter::Parenthesis
+                            && group.stream().to_string()
+                                == quote::quote! { $identity }.to_string()
+                            && matches!(tokens.next(), Some(TokenTree::Punct(p)) if p.as_char() == '*') =>
+                    {
+                        out.extend(identity.clone());
+                    }
+                    _ => return Err("unsupported query_configuration substitution".into()),
+                },
+                TokenTree::Group(group) => {
+                    let mut replaced = Group::new(
+                        group.delimiter(),
+                        substitute(group.stream(), name, input_type, identity)?,
+                    );
+                    replaced.set_span(group.span());
+                    out.extend([TokenTree::Group(replaced)]);
+                }
+                other => out.extend([other]),
+            }
+        }
+        Ok(out)
+    }
+    let generated: syn::ItemStruct = syn::parse2(substitute(body, &name, &input_type, &identity)?)?;
+    if generated.ident != name || !matches!(generated.fields, Fields::Named(_)) {
+        return Err("unsupported query_configuration expansion; expected the named struct".into());
+    }
+    Ok(generated)
 }
 
 fn reject_type_tokens(tokens: proc_macro2::TokenStream) -> Result<()> {
@@ -1832,6 +1950,163 @@ mod tests {
     }
 
     #[test]
+    fn query_configuration_macros_inventory_actual_identity_and_input_types() {
+        let schema = syn::parse_file(include_str!("../../../lib/src/config/schema.rs")).unwrap();
+        let mut source =
+            String::from("struct ComponentId; struct ComponentName; struct QueryInputConfig;");
+        for item in &schema.items {
+            if let Item::Macro(item) = item {
+                if item.ident.as_ref().is_some_and(|name| {
+                    name == "query_configuration" || name == "query_configuration_methods"
+                }) || item.mac.path.is_ident("query_configuration")
+                    || item.mac.path.is_ident("query_configuration_methods")
+                {
+                    source.push_str(&item.to_token_stream().to_string());
+                }
+            }
+        }
+        let model = fixture(&source);
+        for (name, identity, inputs) in [
+            (
+                "QueryConfig",
+                vec![
+                    ("id", "Option < ComponentId >"),
+                    ("name", "ComponentName"),
+                    ("auto_start", "bool"),
+                ],
+                "Vec < QueryInputConfig >",
+            ),
+            (
+                "AssignedQueryConfig",
+                vec![
+                    ("id", "ComponentId"),
+                    ("name", "ComponentName"),
+                    ("auto_start", "bool"),
+                ],
+                "Vec < QueryInputConfig >",
+            ),
+            ("QuerySettings", vec![], "Vec < QueryInputConfig >"),
+            (
+                "ResolvedQueryConfig",
+                vec![
+                    ("id", "ComponentId"),
+                    (
+                        "source_transactions",
+                        "Option < drasi_computation_contracts :: SourceTransactionLimits >",
+                    ),
+                ],
+                "Vec < drasi_computation_contracts :: QueryInputConfig >",
+            ),
+        ] {
+            let owner = &model.definitions[&format!("drasi_lib::{name}")];
+            let mut expected = identity;
+            expected.extend([
+                ("query", "String"),
+                ("query_language", "QueryLanguage"),
+                ("middleware", "Vec < SourceMiddlewareConfig >"),
+                ("inputs", inputs),
+                ("result", "QueryResultConfig"),
+                ("joins", "Option < Vec < QueryJoinConfig > >"),
+                ("enable_bootstrap", "bool"),
+                ("priority_queue_capacity", "Option < usize >"),
+                ("dispatch_buffer_capacity", "Option < usize >"),
+                ("dispatch_mode", "Option < DispatchMode >"),
+                ("storage_backend", "Option < StorageBackendRef >"),
+                ("recovery_policy", "Option < RecoveryPolicy >"),
+                ("outbox_capacity", "usize"),
+                ("bootstrap_timeout_secs", "u64"),
+            ]);
+            let actual: Vec<_> = owner
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.ty.to_token_stream().to_string()))
+                .collect();
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(|(field, ty)| (field, ty.to_owned()))
+                .collect();
+            assert_eq!(actual, expected, "{name}");
+            let (edges, _) = fixture_edges(&model, name);
+            if name != "QuerySettings" {
+                let id = edges.iter().find(|edge| edge.field == "id").unwrap();
+                assert_eq!(id.to, "drasi_lib::ComponentId");
+                assert_eq!(
+                    id.cardinality,
+                    if name == "QueryConfig" { "0..1" } else { "1" }
+                );
+            }
+            if matches!(name, "QueryConfig" | "AssignedQueryConfig") {
+                let name = edges.iter().find(|edge| edge.field == "name").unwrap();
+                assert_eq!(name.to, "drasi_lib::ComponentName");
+                assert_eq!(name.cardinality, "1");
+            }
+            if name != "ResolvedQueryConfig" {
+                let input = edges.iter().find(|edge| edge.field == "inputs").unwrap();
+                assert_eq!(input.cardinality, "0..*");
+                assert_eq!(input.to, "drasi_lib::QueryInputConfig");
+            }
+        }
+    }
+
+    #[test]
+    fn query_configuration_macros_fail_closed_on_unsupported_shapes() {
+        let template = quote::quote! {
+            ($name:ident, $input:ty { $($identity:tt)* }) => {
+                pub struct $name { $($identity)* pub inputs: Vec<$input> }
+            };
+        };
+        for invocation in [
+            quote::quote! {},
+            quote::quote! { Config, Input },
+            quote::quote! { Config, Input { struct Hidden; } },
+            quote::quote! { Config, Input { pub id: ComponentId } },
+            quote::quote! { Config, Input {} trailing },
+        ] {
+            assert!(expand_query_configuration_macro(template.clone(), invocation).is_err());
+        }
+        for unsupported in [
+            quote::quote! { ($name:ident) => { pub struct $name; }; },
+            quote::quote! {
+                ($name:ident, $input:ty { $($identity:tt)* }) => {
+                    pub struct $name { pub unknown: $other }
+                };
+            },
+            quote::quote! {
+                ($name:ident, $input:ty { $($identity:tt)* }) => {
+                    pub struct $name { $($identity)+ }
+                };
+            },
+            quote::quote! {
+                ($name:ident, $input:ty { $($identity:tt)* }) => {
+                    pub struct $name {} struct Hidden;
+                };
+            },
+            quote::quote! {
+                ($name:ident, $input:ty { $($identity:tt)* }) => { pub struct $name {} };
+                () => {};
+            },
+        ] {
+            assert!(expand_query_configuration_macro(
+                unsupported,
+                quote::quote! { Config, Input {} }
+            )
+            .is_err());
+        }
+        for source in [
+            "query_configuration!(Config, Input {});",
+            "unknown_configuration!(Config);",
+            "macro_rules! query_configuration_methods {
+                 ($name:ident) => { impl $name { fn method() { struct Hidden; } } };
+             }
+             query_configuration_methods!(Config);",
+            "macro_rules! query_configuration_methods { ($name:ident) => { impl $name {} }; }
+             query_configuration_methods!(Config, Extra);",
+        ] {
+            assert!(try_fixture(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn static_macros_cannot_hide_new_type_declarations() {
         assert!(reject_type_tokens(quote::quote! {
             static COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1844,26 +2119,28 @@ mod tests {
     }
 
     fn fixture(source: &str) -> Model {
+        try_fixture(source).unwrap()
+    }
+
+    fn try_fixture(source: &str) -> Result<Model> {
         let mut model = Model::default();
         model
             .external_crates
             .extend(["tokio".into(), "futures".into()]);
         let file = syn::parse_file(source).unwrap();
         let mut owners = vec!["drasi_lib".into(); source.lines().count()];
-        model
-            .read_items(
-                Path::new("."),
-                &file.items,
-                "drasi_lib",
-                "fixture.rs",
-                Path::new("."),
-                Path::new("."),
-                "",
-                &mut owners,
-                &mut Vec::new(),
-            )
-            .unwrap();
-        model
+        model.read_items(
+            Path::new("."),
+            &file.items,
+            "drasi_lib",
+            "fixture.rs",
+            Path::new("."),
+            Path::new("."),
+            "",
+            &mut owners,
+            &mut Vec::new(),
+        )?;
+        Ok(model)
     }
 
     fn fixture_edges(model: &Model, name: &str) -> (Vec<Edge>, BTreeSet<String>) {
@@ -2241,6 +2518,48 @@ mod tests {
         );
         assert!(report.types.windows(2).all(|w| w[0].name < w[1].name));
         for (from, field, to, cardinality) in [
+            (
+                "drasi_lib::config::schema::QueryConfig",
+                "id",
+                "drasi_core_types::component_identity::ComponentId",
+                "0..1",
+            ),
+            (
+                "drasi_lib::config::schema::AssignedQueryConfig",
+                "id",
+                "drasi_core_types::component_identity::ComponentId",
+                "1",
+            ),
+            (
+                "drasi_lib::config::schema::QueryConfig",
+                "name",
+                "drasi_core_types::component_identity::ComponentName",
+                "1",
+            ),
+            (
+                "drasi_lib::config::schema::AssignedQueryConfig",
+                "name",
+                "drasi_core_types::component_identity::ComponentName",
+                "1",
+            ),
+            (
+                "drasi_lib::config::schema::QuerySettings",
+                "inputs",
+                "drasi_lib::config::input::QueryInputConfig",
+                "0..*",
+            ),
+            (
+                "drasi_lib::config::schema::ResolvedQueryConfig",
+                "id",
+                "drasi_core_types::component_identity::ComponentId",
+                "1",
+            ),
+            (
+                "drasi_lib::config::schema::ResolvedQueryConfig",
+                "inputs",
+                "drasi_computation_contracts::query_configuration::QueryInputConfig",
+                "0..*",
+            ),
             (
                 "drasi_lib::lib_core::DrasiLib",
                 "instance_graph",

@@ -84,10 +84,10 @@ async fn main() -> Result<()> {
         )
         .with_id("a2a-helloworld-example")
         .with_state_store_provider(Arc::new(state_store))
-        .with_source(invoices)
+        .with_source(drasi_lib::Source::id(&invoices).to_owned(), invoices)
         .with_query(overdue)
-        .with_reaction(log_reaction)
-        .with_reaction(a2a_reaction)
+        .with_reaction(drasi_lib::Reaction::id(&log_reaction).to_owned(), log_reaction)
+        .with_reaction(drasi_lib::Reaction::id(&a2a_reaction).to_owned(), a2a_reaction)
         .build()
         .await?;
 

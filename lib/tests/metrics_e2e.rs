@@ -17,6 +17,10 @@
 //! These tests verify that metrics structs are correctly incremented during
 //! normal operation using DrasiLib's public API.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureDrasiLibBuilderExt as _;
+
 mod mock_source;
 mod runtime_support;
 
@@ -53,7 +57,7 @@ impl DurableMemoryStateStoreProvider {
 impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvider {
     async fn get(
         &self,
-        store_id: &str,
+        store_id: &drasi_core_types::StorePartition,
         key: &str,
     ) -> drasi_lib::state_store::StateStoreResult<Option<Vec<u8>>> {
         self.inner.get(store_id, key).await
@@ -61,7 +65,7 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
 
     async fn set(
         &self,
-        store_id: &str,
+        store_id: &drasi_core_types::StorePartition,
         key: &str,
         value: Vec<u8>,
     ) -> drasi_lib::state_store::StateStoreResult<()> {
@@ -70,7 +74,7 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
 
     async fn delete(
         &self,
-        store_id: &str,
+        store_id: &drasi_core_types::StorePartition,
         key: &str,
     ) -> drasi_lib::state_store::StateStoreResult<bool> {
         self.inner.delete(store_id, key).await
@@ -78,7 +82,7 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
 
     async fn contains_key(
         &self,
-        store_id: &str,
+        store_id: &drasi_core_types::StorePartition,
         key: &str,
     ) -> drasi_lib::state_store::StateStoreResult<bool> {
         self.inner.contains_key(store_id, key).await
@@ -86,7 +90,7 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
 
     async fn get_many(
         &self,
-        store_id: &str,
+        store_id: &drasi_core_types::StorePartition,
         keys: &[&str],
     ) -> drasi_lib::state_store::StateStoreResult<HashMap<String, Vec<u8>>> {
         self.inner.get_many(store_id, keys).await
@@ -94,7 +98,7 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
 
     async fn set_many(
         &self,
-        store_id: &str,
+        store_id: &drasi_core_types::StorePartition,
         entries: &[(&str, &[u8])],
     ) -> drasi_lib::state_store::StateStoreResult<()> {
         self.inner.set_many(store_id, entries).await
@@ -102,28 +106,37 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
 
     async fn delete_many(
         &self,
-        store_id: &str,
+        store_id: &drasi_core_types::StorePartition,
         keys: &[&str],
     ) -> drasi_lib::state_store::StateStoreResult<usize> {
         self.inner.delete_many(store_id, keys).await
     }
 
-    async fn clear_store(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
+    async fn clear_store(
+        &self,
+        store_id: &drasi_core_types::StorePartition,
+    ) -> drasi_lib::state_store::StateStoreResult<usize> {
         self.inner.clear_store(store_id).await
     }
 
     async fn list_keys(
         &self,
-        store_id: &str,
+        store_id: &drasi_core_types::StorePartition,
     ) -> drasi_lib::state_store::StateStoreResult<Vec<String>> {
         self.inner.list_keys(store_id).await
     }
 
-    async fn store_exists(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<bool> {
+    async fn store_exists(
+        &self,
+        store_id: &drasi_core_types::StorePartition,
+    ) -> drasi_lib::state_store::StateStoreResult<bool> {
         self.inner.store_exists(store_id).await
     }
 
-    async fn key_count(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
+    async fn key_count(
+        &self,
+        store_id: &drasi_core_types::StorePartition,
+    ) -> drasi_lib::state_store::StateStoreResult<usize> {
         self.inner.key_count(store_id).await
     }
 
@@ -153,8 +166,8 @@ impl std::fmt::Debug for RecordingReaction {
 }
 
 fn recording_reaction(
-    id: &str,
-    queries: Vec<String>,
+    id: drasi_core_types::ComponentId,
+    queries: Vec<drasi_computation_contracts::ComponentReference>,
     policy: ReactionRecoveryPolicy,
     durable: bool,
     snapshot_on_fresh: bool,
@@ -199,7 +212,7 @@ impl RecordingReceiver {
 
 #[async_trait::async_trait]
 impl Reaction for RecordingReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.base.id
     }
 
@@ -211,7 +224,7 @@ impl Reaction for RecordingReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -219,8 +232,8 @@ impl Reaction for RecordingReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -285,20 +298,34 @@ async fn query_progress_tracks_commits_not_output_counts() -> Result<()> {
     use drasi_lib::computation::v1::SourceProgressKey;
 
     let (source, handle) = MockSource::new("progress-source")?;
-    let query = Query::cypher("progress-query")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("progress-source")
-        .enable_bootstrap(false)
-        .auto_start(true)
-        .build();
-    let waiting = Query::cypher("waiting-query")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("missing-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("progress-query").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("progress-source")
+            .expect("fixture component name"),
+    )
+    .enable_bootstrap(false)
+    .auto_start(true)
+    .build()?;
+    let waiting = Query::cypher(
+        drasi_core_types::ComponentName::try_new("waiting-query").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("missing-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()?;
     let core = runtime_support::builder()
+        .with_allow_external_component_ids(true)
         .with_id("progress-test")
-        .with_source(source)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("progress-source")
+                .expect("fixture component name"),
+            source,
+        )
         .with_query(query.clone())
         .with_query(waiting)
         .build()
@@ -309,10 +336,18 @@ async fn query_progress_tracks_commits_not_output_counts() -> Result<()> {
         .wait_for_subscription_counts(1, Some(1))
         .await
         .context("initial query subscription")?;
-    let key = SourceProgressKey::Source("progress-source".into());
+    let source_id = core
+        .component_by_name(&drasi_lib::ComponentName::try_new("progress-source")?)?
+        .id()
+        .clone();
+    let query_id = core
+        .component_by_name(&drasi_lib::ComponentName::try_new("progress-query")?)?
+        .id()
+        .clone();
+    let key = SourceProgressKey::Source(source_id);
     let initial = core.get_query_progress_metrics()?;
     assert_eq!(initial.len(), 1);
-    assert_eq!(initial[0].query_id, "progress-query");
+    assert_eq!(initial[0].query_id, query_id);
     assert!(initial[0].input_sequences.is_empty());
     assert_eq!(initial[0].output_sequence, 0);
     assert!(!initial[0].persistent);
@@ -347,14 +382,34 @@ async fn query_progress_tracks_commits_not_output_counts() -> Result<()> {
         )
     })??;
     assert_eq!(completed.output_sequence, 3);
-    assert_eq!(core.get_query_results("progress-query").await?.len(), 3);
-    core.stop_query("progress-query").await?;
+    assert_eq!(
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("progress-query")
+                .expect("fixture component name")
+        )
+        .await?
+        .len(),
+        3
+    );
+    core.stop_query_by_name(
+        &drasi_core_types::ComponentName::try_new("progress-query")
+            .expect("fixture component name"),
+    )
+    .await?;
     assert!(core.get_query_progress_metrics()?.is_empty());
     let mut replacement = query;
     replacement.query = "MATCH (p:Person) RETURN p.name AS full_name".into();
-    core.update_query("progress-query", replacement).await?;
+    replacement.auto_start = false;
+    core.remove_query_by_id(&query_id).await?;
+    let replacement = core.add_query_with_handle(replacement).await?;
+    replacement.wait_created().await?;
+    assert_ne!(replacement.id(), &query_id);
     assert!(core.get_query_progress_metrics()?.is_empty());
-    core.start_query("progress-query").await?;
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("progress-query")
+            .expect("fixture component name"),
+    )
+    .await?;
     handle
         .wait_for_subscription_counts(2, Some(1))
         .await
@@ -403,17 +458,24 @@ async fn query_progress_is_owned_on_multiple_threads() -> Result<()> {
 async fn query_output_metrics_updated_after_events() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_input("test-source")
-        .with_outbox_capacity(100)
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .with_outbox_capacity(100)
+    .auto_start(true)
+    .build()?;
 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let (reaction, mut receiver) = recording_reaction(
-        "rec",
-        vec!["q1".into()],
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000044b")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
         ReactionRecoveryPolicy::Strict,
         false,
         false,
@@ -421,10 +483,18 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
 
     let core = Arc::new(
         runtime_support::builder()
+            .with_allow_external_component_ids(true)
             .with_id("metrics-test")
-            .with_source(mock_source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+                mock_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_fixture_reaction(
+                drasi_core_types::ComponentName::try_new("rec").expect("fixture component name"),
+                reaction,
+            )
             .with_state_store_provider(state_store)
             .build()
             .await?,
@@ -433,7 +503,11 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
     core.start().await?;
 
     // Initially, metrics should show zero advances
-    let initial = core.get_query_output_metrics("q1").await?;
+    let initial = core
+        .get_query_output_metrics_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .await?;
     assert_eq!(initial.result_seq_advances, 0);
 
     // Insert some data
@@ -447,11 +521,18 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
         results.len(),
         3,
         "Should receive 3 events; actual={results:?}; metrics={:?}",
-        core.get_query_output_metrics("q1").await?,
+        core.get_query_output_metrics_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name")
+        )
+        .await?,
     );
 
     // Metrics should now be updated
-    let metrics = core.get_query_output_metrics("q1").await?;
+    let metrics = core
+        .get_query_output_metrics_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .await?;
     assert!(
         metrics.result_seq_advances >= 3,
         "Expected at least 3 sequence advances, got {}",
@@ -480,17 +561,24 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
 async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_input("test-source")
-        .with_outbox_capacity(100)
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .with_outbox_capacity(100)
+    .auto_start(true)
+    .build()?;
 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let (reaction, mut receiver) = recording_reaction(
-        "rec",
-        vec!["q1".into()],
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000044b")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
         ReactionRecoveryPolicy::Strict,
         false,
         false,
@@ -498,10 +586,18 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
 
     let core = Arc::new(
         runtime_support::builder()
+            .with_allow_external_component_ids(true)
             .with_id("reaction-metrics-test")
-            .with_source(mock_source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+                mock_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_fixture_reaction(
+                drasi_core_types::ComponentName::try_new("rec").expect("fixture component name"),
+                reaction,
+            )
             .with_state_store_provider(state_store)
             .build()
             .await?,
@@ -519,9 +615,17 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut q1_metrics_snap = None;
     let mut last_metrics_debug = String::from("(no metrics read yet)");
+    let query_id = core
+        .component_by_name(&drasi_lib::ComponentName::try_new("q1")?)?
+        .id()
+        .clone();
     while tokio::time::Instant::now() < deadline {
-        let metrics = core.get_reaction_metrics("rec").await?;
-        if let Some(m) = metrics.get("q1") {
+        let metrics = core
+            .get_reaction_metrics_by_name(
+                &drasi_core_types::ComponentName::try_new("rec").expect("fixture component name"),
+            )
+            .await?;
+        if let Some(m) = metrics.get(&query_id) {
             last_metrics_debug = format!("{m:?}");
             if m.checkpoint_sequence >= 2 {
                 q1_metrics_snap = Some(m.clone());
@@ -551,20 +655,27 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
 async fn lifecycle_metrics_count_startup_rejections() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_input("test-source")
-        .with_outbox_capacity(100)
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .with_outbox_capacity(100)
+    .auto_start(true)
+    .build()?;
 
     // Use a volatile store (the default MemoryStateStoreProvider)
     let state_store = Arc::new(MemoryStateStoreProvider::new());
 
     // Create a durable reaction with a volatile store — should be rejected
     let (reaction, _receiver) = recording_reaction(
-        "durable-rec",
-        vec!["q1".into()],
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000044c")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
         ReactionRecoveryPolicy::Strict,
         true, // is_durable = true
         false,
@@ -572,10 +683,18 @@ async fn lifecycle_metrics_count_startup_rejections() -> Result<()> {
 
     let core = Arc::new(
         runtime_support::builder()
+            .with_allow_external_component_ids(true)
             .with_id("lifecycle-metrics-test")
-            .with_source(mock_source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+                mock_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_fixture_reaction(
+                drasi_core_types::ComponentName::try_new("rec").expect("fixture component name"),
+                reaction,
+            )
             .with_state_store_provider(state_store)
             .build()
             .await?,
@@ -604,16 +723,25 @@ async fn lifecycle_metrics_count_startup_rejections() -> Result<()> {
 async fn query_output_metrics_error_for_nonexistent() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()?;
 
     let core = Arc::new(
         runtime_support::builder()
+            .with_allow_external_component_ids(true)
             .with_id("no-metrics-test")
-            .with_source(mock_source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+                mock_source,
+            )
             .with_query(query)
             .build()
             .await?,
@@ -621,7 +749,12 @@ async fn query_output_metrics_error_for_nonexistent() -> Result<()> {
 
     core.start().await?;
 
-    let result = core.get_query_output_metrics("nonexistent").await;
+    let result = core
+        .get_query_output_metrics_by_name(
+            &drasi_core_types::ComponentName::try_new("nonexistent")
+                .expect("fixture component name"),
+        )
+        .await;
     assert!(result.is_err(), "Expected error for non-existent query");
 
     Ok(())
@@ -632,16 +765,25 @@ async fn query_output_metrics_error_for_nonexistent() -> Result<()> {
 async fn reaction_metrics_error_for_nonexistent() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()?;
 
     let core = Arc::new(
         runtime_support::builder()
+            .with_allow_external_component_ids(true)
             .with_id("reaction-not-found-test")
-            .with_source(mock_source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+                mock_source,
+            )
             .with_query(query)
             .build()
             .await?,
@@ -649,7 +791,12 @@ async fn reaction_metrics_error_for_nonexistent() -> Result<()> {
 
     core.start().await?;
 
-    let result = core.get_reaction_metrics("nonexistent").await;
+    let result = core
+        .get_reaction_metrics_by_name(
+            &drasi_core_types::ComponentName::try_new("nonexistent")
+                .expect("fixture component name"),
+        )
+        .await;
     assert!(result.is_err(), "Expected error for non-existent reaction");
 
     Ok(())
@@ -660,17 +807,24 @@ async fn reaction_metrics_error_for_nonexistent() -> Result<()> {
 async fn lifecycle_metrics_reject_snapshot_skip_gap() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("test-source")
-        .with_outbox_capacity(100)
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .with_outbox_capacity(100)
+    .auto_start(true)
+    .build()?;
 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let (reaction, _receiver) = recording_reaction(
-        "snap-skip-rec",
-        vec!["q1".into()],
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000044d")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
         ReactionRecoveryPolicy::AutoSkipGap,
         false, // not durable — avoids durable-on-volatile check
         true,  // needs_snapshot_on_fresh_start = true → contradicts AutoSkipGap
@@ -678,10 +832,18 @@ async fn lifecycle_metrics_reject_snapshot_skip_gap() -> Result<()> {
 
     let core = Arc::new(
         runtime_support::builder()
+            .with_allow_external_component_ids(true)
             .with_id("snapshot-skip-gap-test")
-            .with_source(mock_source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+                mock_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_fixture_reaction(
+                drasi_core_types::ComponentName::try_new("rec").expect("fixture component name"),
+                reaction,
+            )
             .with_state_store_provider(state_store)
             .build()
             .await?,
@@ -708,17 +870,24 @@ async fn lifecycle_metrics_reject_snapshot_skip_gap() -> Result<()> {
 async fn lifecycle_metrics_reject_no_snapshot_auto_reset() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("test-source")
-        .with_outbox_capacity(100)
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .with_outbox_capacity(100)
+    .auto_start(true)
+    .build()?;
 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let (reaction, _receiver) = recording_reaction(
-        "no-snap-reset-rec",
-        vec!["q1".into()],
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000044e")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
         ReactionRecoveryPolicy::AutoReset,
         false, // not durable
         false, // needs_snapshot_on_fresh_start = false → contradicts AutoReset
@@ -726,10 +895,18 @@ async fn lifecycle_metrics_reject_no_snapshot_auto_reset() -> Result<()> {
 
     let core = Arc::new(
         runtime_support::builder()
+            .with_allow_external_component_ids(true)
             .with_id("no-snapshot-auto-reset-test")
-            .with_source(mock_source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+                mock_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_fixture_reaction(
+                drasi_core_types::ComponentName::try_new("rec").expect("fixture component name"),
+                reaction,
+            )
             .with_state_store_provider(state_store)
             .build()
             .await?,

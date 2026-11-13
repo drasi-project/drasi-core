@@ -388,16 +388,16 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         let dto: HttpReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let mut builder = HttpReactionBuilder::new(id)
-            .with_queries(query_ids)
+        let mut builder = HttpReactionBuilder::new(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start);
 
         if let Some(ref base_url) = dto.base_url {
@@ -491,7 +491,13 @@ mod tests {
             "recoveryPolicy": "auto_skip_gap"
         });
         let reaction = HttpReactionDescriptor
-            .create_reaction("id", vec![], &cfg, true)
+            .create_reaction(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000da")
+                    .expect("fixture UUID"),
+                vec![],
+                &cfg,
+                true,
+            )
             .await
             .expect("recoveryPolicy create_reaction succeeds");
         // raw_config drives properties(), so the input policy is echoed back —

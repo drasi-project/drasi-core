@@ -28,23 +28,20 @@ use std::{pin::Pin, sync::Arc};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotOpen {
-    pub component: String,
-    pub port: String,
+    pub component: ComponentId,
+    pub port: PortId,
 }
 
 impl SnapshotOpen {
     pub fn new(endpoint: &OutputEndpoint) -> Self {
         Self {
-            component: endpoint.component.to_string(),
-            port: endpoint.port.to_string(),
+            component: endpoint.component.clone(),
+            port: endpoint.port.clone(),
         }
     }
 
-    pub fn endpoint(&self) -> Result<OutputEndpoint, drasi_computation_contracts::ContractError> {
-        Ok(OutputEndpoint::new(
-            ComponentId::try_new(self.component.as_str())?,
-            PortId::try_new(self.port.as_str())?,
-        ))
+    pub fn endpoint(&self) -> OutputEndpoint {
+        OutputEndpoint::new(self.component.clone(), self.port.clone())
     }
 }
 
@@ -53,8 +50,8 @@ impl SnapshotOpen {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSnapshotHeader {
-    pub component: String,
-    pub port: String,
+    pub component: ComponentId,
+    pub port: PortId,
     pub cursor: WireCursor,
     pub dataset: String,
     pub schema: SchemaDescriptor,
@@ -115,8 +112,7 @@ impl NativeOutputSnapshots {
         let outcome: Outcome<OutputSnapshotHeader> = wire::decode(&bytes)?;
         let header = outcome.into_result(endpoint, OutputCapability::Snapshot)?;
         anyhow::ensure!(
-            header.component == endpoint.component.as_str()
-                && header.port == endpoint.port.as_str(),
+            header.component == endpoint.component && header.port == endpoint.port,
             "output snapshot answered for another endpoint"
         );
         anyhow::ensure!(

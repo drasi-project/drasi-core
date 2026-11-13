@@ -43,6 +43,7 @@ use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::reactions::common::checkpoint_state::{CheckpointState, FailureAction};
 use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
+use crate::{config::ComponentReference, ComponentId};
 
 /// Parameters for creating a ReactionBase instance.
 ///
@@ -54,18 +55,22 @@ use crate::state_store::StateStoreProvider;
 /// ```no_run
 /// use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 ///
-/// let params = ReactionBaseParams::new("my-reaction", vec!["query1".to_string()])
+/// let params = ReactionBaseParams::new(
+///     drasi_lib::ComponentId::generate(),
+///     vec![drasi_lib::config::ComponentReference::Name(drasi_lib::ComponentName::try_new("query1")?)],
+/// )
 ///     .with_priority_queue_capacity(5000)
 ///     .with_auto_start(true);
 ///
 /// let base = ReactionBase::new(params);
+/// # Ok::<(), anyhow::Error>(())
 /// ```
 #[derive(Debug, Clone)]
 pub struct ReactionBaseParams {
     /// Unique identifier for the reaction
-    pub id: String,
-    /// List of query IDs this reaction subscribes to
-    pub queries: Vec<String>,
+    pub id: ComponentId,
+    /// Explicit authoring references, resolved by the owning graph.
+    pub queries: Vec<ComponentReference>,
     /// Priority queue capacity - defaults to 10000
     pub priority_queue_capacity: Option<usize>,
     /// Whether this reaction should auto-start - defaults to true
@@ -76,9 +81,9 @@ pub struct ReactionBaseParams {
 
 impl ReactionBaseParams {
     /// Create new params with ID and queries, using defaults for everything else
-    pub fn new(id: impl Into<String>, queries: Vec<String>) -> Self {
+    pub fn new(id: ComponentId, queries: Vec<ComponentReference>) -> Self {
         Self {
-            id: id.into(),
+            id,
             queries,
             priority_queue_capacity: None,
             auto_start: true, // Default to true like queries
@@ -108,9 +113,9 @@ impl ReactionBaseParams {
 /// Base implementation for common reaction functionality
 pub struct ReactionBase {
     /// Reaction identifier
-    pub id: String,
-    /// List of query IDs to subscribe to
-    pub queries: Vec<String>,
+    pub id: ComponentId,
+    /// Explicit authoring references, never inferred from UUID-shaped text.
+    pub queries: Vec<ComponentReference>,
     /// Whether this reaction should auto-start
     pub auto_start: bool,
     /// Optional recovery policy override
@@ -152,7 +157,7 @@ impl ReactionBase {
             queries: params.queries,
             auto_start: params.auto_start,
             recovery_policy: params.recovery_policy,
-            status_handle: ComponentStatusHandle::new(&params.id),
+            status_handle: ComponentStatusHandle::new(params.id.clone()),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
             resource_report_lock: Arc::new(Mutex::new(())),
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
@@ -174,7 +179,7 @@ impl ReactionBase {
     /// - `state_store`: Optional persistent state storage
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
     /// - `resource_observer`: Optional reporting of the actual selected providers
-    pub async fn initialize(&self, context: ReactionRuntimeContext) {
+    pub async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
@@ -338,13 +343,25 @@ impl ReactionBase {
     }
 
     /// Get the reaction ID
-    pub fn get_id(&self) -> &str {
+    pub fn get_id(&self) -> &ComponentId {
         &self.id
     }
 
-    /// Get the query IDs
-    pub fn get_queries(&self) -> &[String] {
+    /// The authored query references, before or after graph binding.
+    pub fn query_inputs(&self) -> &[ComponentReference] {
         &self.queries
+    }
+
+    /// The graph's ordered, resolved query bindings.
+    pub async fn query_ids(&self) -> Result<Vec<ComponentId>> {
+        Ok(self
+            .context
+            .read()
+            .await
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("reaction query bindings have not been initialized"))?
+            .query_ids
+            .clone())
     }
 
     /// Get current status.
@@ -384,7 +401,10 @@ impl ReactionBase {
     ///
     /// Returns `Ok(None)` if no checkpoint exists (fresh start).
     /// Errors propagate from the state store or deserialization.
-    pub async fn read_checkpoint(&self, query_id: &str) -> Result<Option<ReactionCheckpoint>> {
+    pub async fn read_checkpoint(
+        &self,
+        query_id: &ComponentId,
+    ) -> Result<Option<ReactionCheckpoint>> {
         let store = self.state_store.read().await;
         match store.as_ref() {
             Some(s) => {
@@ -400,14 +420,15 @@ impl ReactionBase {
     /// subscriptions) are simply omitted from the result.
     pub async fn read_all_checkpoints(
         &self,
-    ) -> Result<std::collections::HashMap<String, ReactionCheckpoint>> {
+    ) -> Result<std::collections::HashMap<ComponentId, ReactionCheckpoint>> {
+        let query_ids = self.query_ids().await?;
         let store = self.state_store.read().await;
         match store.as_ref() {
             Some(s) => {
                 crate::reactions::checkpoint::read_checkpoints_batch(
                     s.as_ref(),
                     &self.id,
-                    &self.queries,
+                    &query_ids,
                 )
                 .await
             }
@@ -421,7 +442,7 @@ impl ReactionBase {
     /// called after a batch of query results has been successfully processed.
     pub async fn write_checkpoint(
         &self,
-        query_id: &str,
+        query_id: &ComponentId,
         checkpoint: &ReactionCheckpoint,
     ) -> Result<()> {
         let store = self.state_store.read().await;
@@ -527,19 +548,22 @@ impl ReactionBase {
 
     /// Clear the reaction's state store partition.
     ///
-    /// This is called during deprovision to remove all persisted state
-    /// associated with this reaction. Reactions that override `deprovision()`
+    /// This is called during explicit permanent removal to delete persisted state
+    /// associated with this reaction. Reactions that override `delete_owned_resources()`
     /// can call this to clean up their state store.
-    pub async fn deprovision_common(&self) -> Result<()> {
+    pub async fn delete_owned_resources_common(&self) -> Result<()> {
         info!("Deprovisioning reaction '{}'", self.id);
         if let Some(store) = self.state_store().await {
-            let count = store.clear_store(&self.id).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to clear state store for reaction '{}': {}",
-                    self.id,
-                    e
-                )
-            })?;
+            let count = store
+                .clear_store(&crate::StorePartition::component(self.id.clone()))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to clear state store for reaction '{}': {}",
+                        self.id,
+                        e
+                    )
+                })?;
             info!(
                 "Cleared {} keys from state store for reaction '{}'",
                 count, self.id
@@ -594,7 +618,7 @@ impl ReactionBase {
     pub async fn run_standard_loop<F, Fut>(
         &self,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-        initial_checkpoints: std::collections::HashMap<String, ReactionCheckpoint>,
+        initial_checkpoints: std::collections::HashMap<crate::ComponentId, ReactionCheckpoint>,
         policy: ReactionRecoveryPolicy,
         handler: F,
     ) -> Result<()>
@@ -677,7 +701,7 @@ impl ReactionBase {
     async fn persist_after_side_effect(
         &self,
         checkpoints: &mut CheckpointState,
-        query_id: &str,
+        query_id: &crate::ComponentId,
         sequence: u64,
         policy: ReactionRecoveryPolicy,
     ) -> Result<()> {
@@ -708,6 +732,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
+    fn query_id() -> crate::ComponentId {
+        crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002b").expect("fixture UUID")
+    }
+
     struct FailNWritesStore {
         inner: MemoryStateStoreProvider,
         remaining: AtomicU32,
@@ -724,10 +752,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StateStoreProvider for FailNWritesStore {
-        async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+        async fn get(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<Option<Vec<u8>>> {
             self.inner.get(store_id, key).await
         }
-        async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+        async fn set(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            key: &str,
+            value: Vec<u8>,
+        ) -> StateStoreResult<()> {
             let left = self.remaining.load(Ordering::SeqCst);
             if left > 0 {
                 self.remaining.fetch_sub(1, Ordering::SeqCst);
@@ -735,50 +772,84 @@ mod tests {
             }
             self.inner.set(store_id, key, value).await
         }
-        async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        async fn delete(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<bool> {
             self.inner.delete(store_id, key).await
         }
-        async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        async fn contains_key(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<bool> {
             self.inner.contains_key(store_id, key).await
         }
         async fn get_many(
             &self,
-            store_id: &str,
+            store_id: &drasi_core_types::StorePartition,
             keys: &[&str],
         ) -> StateStoreResult<std::collections::HashMap<String, Vec<u8>>> {
             self.inner.get_many(store_id, keys).await
         }
         async fn set_many(
             &self,
-            store_id: &str,
+            store_id: &drasi_core_types::StorePartition,
             entries: &[(&str, &[u8])],
         ) -> StateStoreResult<()> {
             self.inner.set_many(store_id, entries).await
         }
-        async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+        async fn delete_many(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            keys: &[&str],
+        ) -> StateStoreResult<usize> {
             self.inner.delete_many(store_id, keys).await
         }
-        async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+        async fn clear_store(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<usize> {
             self.inner.clear_store(store_id).await
         }
-        async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+        async fn list_keys(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<Vec<String>> {
             self.inner.list_keys(store_id).await
         }
-        async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+        async fn store_exists(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<bool> {
             self.inner.store_exists(store_id).await
         }
-        async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+        async fn key_count(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<usize> {
             self.inner.key_count(store_id).await
         }
     }
 
     #[tokio::test]
     async fn test_reaction_base_creation() {
-        let params = ReactionBaseParams::new("test-reaction", vec!["query1".to_string()])
-            .with_priority_queue_capacity(5000);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query1").expect("fixture component name"),
+            )],
+        )
+        .with_priority_queue_capacity(5000);
 
         let base = ReactionBase::new(params);
-        assert_eq!(base.id, "test-reaction");
+        assert_eq!(
+            base.id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID")
+        );
         assert_eq!(base.get_status().await, ComponentStatus::Stopped);
     }
 
@@ -787,14 +858,25 @@ mod tests {
         use crate::context::ReactionRuntimeContext;
 
         let (update_tx, mut updates) = tokio::sync::mpsc::channel(32);
-        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        );
 
         let base = ReactionBase::new(params);
 
         // Create context and initialize
-        let context =
-            ReactionRuntimeContext::new("test-instance", "test-reaction", None, update_tx, None);
-        base.initialize(context).await;
+        let context = ReactionRuntimeContext::new(
+            "test-instance",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+            None,
+            update_tx,
+            None,
+        );
+        base.bind_runtime_context(context).await;
 
         // Test status transition
         base.set_status(ComponentStatus::Starting, Some("Starting test".to_string()))
@@ -824,14 +906,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_queue_operations() {
-        let params =
-            ReactionBaseParams::new("test-reaction", vec![]).with_priority_queue_capacity(10);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        )
+        .with_priority_queue_capacity(10);
 
         let base = ReactionBase::new(params);
 
         // Create a test query result
         let query_result = QueryResult::new(
-            "test-query".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![],
@@ -850,7 +937,11 @@ mod tests {
     #[tokio::test]
     async fn test_event_without_initialization() {
         // Test that set_status works even without context initialization
-        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        );
 
         let base = ReactionBase::new(params);
 
@@ -864,7 +955,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_shutdown_channel() {
-        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
 
         // Initially no shutdown_tx
@@ -882,7 +977,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_channel_signal() {
-        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
 
         let mut rx = base.create_shutdown_channel().await;
@@ -899,7 +998,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_channel_replaced_on_second_create() {
-        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
 
         // Create first channel
@@ -920,7 +1023,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_common_sends_shutdown_signal() {
-        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
 
         let mut rx = base.create_shutdown_channel().await;
@@ -953,7 +1060,11 @@ mod tests {
     async fn graceful_stop_retains_a_submitted_blocking_operation() -> Result<()> {
         use crate::context::workers::{spawn_owned_worker, WorkerCleanupError};
 
-        let base = ReactionBase::new(ReactionBaseParams::new("blocking-effect", vec![]));
+        let base = ReactionBase::new(ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000022b")
+                .expect("fixture UUID"),
+            vec![],
+        ));
         base.set_status(ComponentStatus::Running, None).await;
         let (release, blocked) = std::sync::mpsc::channel();
         let (started, ready) = tokio::sync::oneshot::channel();
@@ -1004,7 +1115,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_timing() {
-        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
 
         let rx = base.create_shutdown_channel().await;
@@ -1042,7 +1157,11 @@ mod tests {
     #[tokio::test]
     async fn test_stop_common_without_shutdown_channel() {
         // Test that stop_common works even if no shutdown channel was created
-        let params = ReactionBaseParams::new("test-reaction", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
 
         // Don't create shutdown channel - just spawn a short-lived task
@@ -1063,36 +1182,74 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_id() {
-        let params = ReactionBaseParams::new("my-reaction-42", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000022c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
-        assert_eq!(base.get_id(), "my-reaction-42");
+        assert_eq!(
+            base.get_id(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000022c")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn test_get_queries() {
-        let queries = vec!["query-a".to_string(), "query-b".to_string(), "query-c".to_string()];
-        let params = ReactionBaseParams::new("r1", queries.clone());
+        let queries = vec![
+            drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query-a")
+                    .expect("fixture component name"),
+            ),
+            drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query-b")
+                    .expect("fixture component name"),
+            ),
+            drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query-c")
+                    .expect("fixture component name"),
+            ),
+        ];
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            queries.clone(),
+        );
         let base = ReactionBase::new(params);
-        assert_eq!(base.get_queries(), &queries[..]);
+        assert_eq!(base.query_inputs(), &queries[..]);
     }
 
     #[tokio::test]
     async fn test_get_queries_empty() {
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
-        assert!(base.get_queries().is_empty());
+        assert!(base.query_inputs().is_empty());
     }
 
     #[tokio::test]
     async fn test_get_auto_start_default_true() {
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
         assert!(base.get_auto_start());
     }
 
     #[tokio::test]
     async fn test_get_auto_start_override_false() {
-        let params = ReactionBaseParams::new("r1", vec![]).with_auto_start(false);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        )
+        .with_auto_start(false);
         let base = ReactionBase::new(params);
         assert!(!base.get_auto_start());
     }
@@ -1103,7 +1260,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_none_before_initialize() {
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
         assert!(base.context().await.is_none());
     }
@@ -1111,20 +1272,40 @@ mod tests {
     #[tokio::test]
     async fn test_context_some_after_initialize() {
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
-        let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
+        let context = ReactionRuntimeContext::new(
+            "inst",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+            None,
+            update_tx,
+            None,
+        );
 
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let ctx = base.context().await;
         assert!(ctx.is_some());
-        assert_eq!(ctx.unwrap().reaction_id, "r1");
+        assert_eq!(
+            ctx.unwrap().reaction_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn test_state_store_none_when_not_configured() {
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
         assert!(base.state_store().await.is_none());
     }
@@ -1132,18 +1313,34 @@ mod tests {
     #[tokio::test]
     async fn test_state_store_none_after_initialize_without_store() {
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
-        let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
+        let context = ReactionRuntimeContext::new(
+            "inst",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+            None,
+            update_tx,
+            None,
+        );
 
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         assert!(base.state_store().await.is_none());
     }
 
     #[tokio::test]
     async fn test_identity_provider_none_by_default() {
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
         assert!(base.identity_provider().await.is_none());
     }
@@ -1154,7 +1351,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_handle_returns_handle() {
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
 
         let handle = base.status_handle();
@@ -1172,10 +1373,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_deprovision_common_noop_without_state_store() {
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
         // Should succeed without panicking when no state store is configured
-        let result = base.deprovision_common().await;
+        let result = base.delete_owned_resources_common().await;
         assert!(result.is_ok());
     }
 
@@ -1185,7 +1390,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_processing_task_stores_handle() {
-        let params = ReactionBaseParams::new("r1", vec![]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+                .expect("fixture UUID"),
+            vec![],
+        );
         let base = ReactionBase::new(params);
 
         // Initially no processing task
@@ -1211,8 +1420,18 @@ mod tests {
     async fn test_checkpoint_read_write_round_trip() {
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
-        let params =
-            ReactionBaseParams::new("ckpt-reaction", vec!["q1".to_string(), "q2".to_string()]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000022d")
+                .expect("fixture UUID"),
+            vec![
+                drasi_computation_contracts::ComponentReference::by_name(
+                    drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+                ),
+                drasi_computation_contracts::ComponentReference::by_name(
+                    drasi_core_types::ComponentName::try_new("q2").expect("fixture component name"),
+                ),
+            ],
+        );
         let base = ReactionBase::new(params);
 
         // Wire up an in-memory state store via context
@@ -1220,15 +1439,29 @@ mod tests {
             Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let context = crate::context::ReactionRuntimeContext::new(
             "test-instance",
-            "ckpt-reaction",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-00000000022d")
+                .expect("fixture UUID"),
+            vec![
+                crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+            ],
             Some(store),
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         // Initially no checkpoints
-        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
         assert!(base.read_all_checkpoints().await.unwrap().is_empty());
 
         // Write a checkpoint for q1
@@ -1236,36 +1469,93 @@ mod tests {
             sequence: 10,
             config_hash: 42,
         };
-        base.write_checkpoint("q1", &cp1).await.unwrap();
+        base.write_checkpoint(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            &cp1,
+        )
+        .await
+        .unwrap();
 
         // Read it back
-        let read = base.read_checkpoint("q1").await.unwrap().unwrap();
+        let read = base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(read, cp1);
 
         // q2 still absent
-        assert!(base.read_checkpoint("q2").await.unwrap().is_none());
+        assert!(base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
 
         // Write q2 and check read_all_checkpoints
         let cp2 = ReactionCheckpoint {
             sequence: 20,
             config_hash: 99,
         };
-        base.write_checkpoint("q2", &cp2).await.unwrap();
+        base.write_checkpoint(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                .expect("fixture UUID"),
+            &cp2,
+        )
+        .await
+        .unwrap();
 
         let all = base.read_all_checkpoints().await.unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(all["q1"], cp1);
-        assert_eq!(all["q2"], cp2);
+        assert_eq!(
+            all[&drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")],
+            cp1
+        );
+        assert_eq!(
+            all[&drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                .expect("fixture UUID")],
+            cp2
+        );
     }
 
     #[tokio::test]
     async fn test_checkpoint_no_state_store() {
         // Without a state store, reads return None and writes fail
-        let params = ReactionBaseParams::new("no-store", vec!["q1".to_string()]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000022e")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+        );
         let base = ReactionBase::new(params);
+        let (update_tx, _updates) = tokio::sync::mpsc::channel(16);
+        base.bind_runtime_context(ReactionRuntimeContext::new(
+            "checkpoint-without-store",
+            base.id.clone(),
+            vec![crate::test_helpers::component_id(0x2b)],
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
 
         // read_checkpoint returns None without error
-        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
 
         // read_all_checkpoints returns empty
         assert!(base.read_all_checkpoints().await.unwrap().is_empty());
@@ -1275,7 +1565,14 @@ mod tests {
             sequence: 1,
             config_hash: 0,
         };
-        assert!(base.write_checkpoint("q1", &cp).await.is_err());
+        assert!(base
+            .write_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                &cp
+            )
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -1284,25 +1581,34 @@ mod tests {
 
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
-        let params = ReactionBaseParams::new("loop-reaction", vec!["q1".to_string()]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000022f")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+        );
         let base = ReactionBase::new(params);
 
         let store: Arc<dyn StateStoreProvider> =
             Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let context = crate::context::ReactionRuntimeContext::new(
             "test-instance",
-            "loop-reaction",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-00000000022f")
+                .expect("fixture UUID"),
+            vec![crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")],
             Some(store),
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         // Initial checkpoints: seq=5 with config_hash=42
         let initial_checkpoints = {
             let mut m = std::collections::HashMap::new();
             m.insert(
-                "q1".to_string(),
+                query_id(),
                 ReactionCheckpoint {
                     sequence: 5,
                     config_hash: 42,
@@ -1314,7 +1620,12 @@ mod tests {
         // Enqueue events: seq 3 (dup), seq 5 (dup), seq 6, seq 7
         for seq in [3u64, 5, 6, 7] {
             let result = crate::channels::QueryResult {
-                query_id: "q1".to_string(),
+                query_name: None,
+                input_alias: None,
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000002b",
+                )
+                .expect("fixture UUID"),
                 sequence: seq,
                 timestamp: chrono::Utc::now(),
                 results: vec![],
@@ -1370,7 +1681,14 @@ mod tests {
         assert_eq!(*processed, vec![6, 7]);
 
         // Checkpoint should now be at seq=7, preserving config_hash=42
-        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        let cp = base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 7);
         assert_eq!(cp.config_hash, 42);
     }
@@ -1379,31 +1697,51 @@ mod tests {
     async fn test_run_standard_loop_handler_error_does_not_advance_checkpoint() {
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
-        let params = ReactionBaseParams::new("loop-fail", vec!["q1".to_string()])
-            .with_recovery_policy(ReactionRecoveryPolicy::Strict);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000230")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+        )
+        .with_recovery_policy(ReactionRecoveryPolicy::Strict);
         let base = ReactionBase::new(params);
 
         let store: Arc<dyn StateStoreProvider> =
             Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let context = crate::context::ReactionRuntimeContext::new(
             "test-instance",
-            "loop-fail",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000230")
+                .expect("fixture UUID"),
+            vec![crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")],
             Some(store),
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let initial = ReactionCheckpoint {
             sequence: 5,
             config_hash: 42,
         };
-        base.write_checkpoint("q1", &initial).await.unwrap();
+        base.write_checkpoint(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            &initial,
+        )
+        .await
+        .unwrap();
         let mut initial_checkpoints = std::collections::HashMap::new();
-        initial_checkpoints.insert("q1".to_string(), initial.clone());
+        initial_checkpoints.insert(query_id(), initial.clone());
 
         let result = crate::channels::QueryResult {
-            query_id: "q1".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
             sequence: 6,
             timestamp: chrono::Utc::now(),
             results: vec![],
@@ -1436,7 +1774,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        let cp = base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             cp.sequence, 5,
             "side-effect failure must not advance the durable checkpoint"
@@ -1454,31 +1799,51 @@ mod tests {
     async fn test_run_standard_loop_autoskip_advances_past_failed_side_effect() {
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
-        let params = ReactionBaseParams::new("loop-skip", vec!["q1".to_string()])
-            .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000231")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+        )
+        .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap);
         let base = ReactionBase::new(params);
 
         let store: Arc<dyn StateStoreProvider> =
             Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let context = crate::context::ReactionRuntimeContext::new(
             "test-instance",
-            "loop-skip",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000231")
+                .expect("fixture UUID"),
+            vec![crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")],
             Some(store),
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let initial = ReactionCheckpoint {
             sequence: 5,
             config_hash: 42,
         };
-        base.write_checkpoint("q1", &initial).await.unwrap();
+        base.write_checkpoint(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            &initial,
+        )
+        .await
+        .unwrap();
         let mut initial_checkpoints = std::collections::HashMap::new();
-        initial_checkpoints.insert("q1".to_string(), initial);
+        initial_checkpoints.insert(query_id(), initial);
 
         let result = crate::channels::QueryResult {
-            query_id: "q1".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
             sequence: 6,
             timestamp: chrono::Utc::now(),
             results: vec![],
@@ -1504,7 +1869,10 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let seq = base
-                .read_checkpoint("q1")
+                .read_checkpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                )
                 .await
                 .unwrap()
                 .map(|cp| cp.sequence)
@@ -1521,7 +1889,14 @@ mod tests {
         let _ = base.stop_common().await;
         let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
 
-        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        let cp = base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 6);
         assert_eq!(cp.config_hash, 42);
         assert_ne!(base.get_status().await, ComponentStatus::Error);
@@ -1531,23 +1906,32 @@ mod tests {
     async fn test_run_standard_loop_autoreset_retries_then_advances_checkpoint() {
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
-        let params = ReactionBaseParams::new("loop-reset", vec!["q1".to_string()])
-            .with_recovery_policy(ReactionRecoveryPolicy::AutoReset);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000232")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+        )
+        .with_recovery_policy(ReactionRecoveryPolicy::AutoReset);
         let base = ReactionBase::new(params);
 
         let store: Arc<dyn StateStoreProvider> = Arc::new(FailNWritesStore::new(2));
         let context = crate::context::ReactionRuntimeContext::new(
             "test-instance",
-            "loop-reset",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000232")
+                .expect("fixture UUID"),
+            vec![crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")],
             Some(store),
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let mut initial_checkpoints = std::collections::HashMap::new();
         initial_checkpoints.insert(
-            "q1".to_string(),
+            query_id(),
             ReactionCheckpoint {
                 sequence: 5,
                 config_hash: 42,
@@ -1555,7 +1939,12 @@ mod tests {
         );
 
         let result = crate::channels::QueryResult {
-            query_id: "q1".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
             sequence: 6,
             timestamp: chrono::Utc::now(),
             results: vec![],
@@ -1581,7 +1970,10 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let seq = base
-                .read_checkpoint("q1")
+                .read_checkpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                )
                 .await
                 .unwrap()
                 .map(|cp| cp.sequence)
@@ -1598,7 +1990,14 @@ mod tests {
         let _ = base.stop_common().await;
         let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
 
-        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        let cp = base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 6);
         assert_eq!(cp.config_hash, 42);
         assert_ne!(base.get_status().await, ComponentStatus::Error);
@@ -1609,7 +2008,13 @@ mod tests {
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         // No per-instance override on ReactionBaseParams.
-        let params = ReactionBaseParams::new("loop-trait-default", vec!["q1".to_string()]);
+        let params = ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000233")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+        );
         assert!(params.recovery_policy.is_none());
         let base = ReactionBase::new(params);
 
@@ -1617,23 +2022,37 @@ mod tests {
             Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let context = crate::context::ReactionRuntimeContext::new(
             "test-instance",
-            "loop-trait-default",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000233")
+                .expect("fixture UUID"),
+            vec![crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")],
             Some(store),
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let initial = ReactionCheckpoint {
             sequence: 5,
             config_hash: 42,
         };
-        base.write_checkpoint("q1", &initial).await.unwrap();
+        base.write_checkpoint(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            &initial,
+        )
+        .await
+        .unwrap();
         let mut initial_checkpoints = std::collections::HashMap::new();
-        initial_checkpoints.insert("q1".to_string(), initial);
+        initial_checkpoints.insert(query_id(), initial);
 
         let result = crate::channels::QueryResult {
-            query_id: "q1".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
             sequence: 6,
             timestamp: chrono::Utc::now(),
             results: vec![],
@@ -1659,7 +2078,10 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let seq = base
-                .read_checkpoint("q1")
+                .read_checkpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                )
                 .await
                 .unwrap()
                 .map(|cp| cp.sequence)
@@ -1677,7 +2099,14 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
 
         assert_eq!(
-            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            base.read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
             6
         );
         assert_ne!(base.get_status().await, ComponentStatus::Error);

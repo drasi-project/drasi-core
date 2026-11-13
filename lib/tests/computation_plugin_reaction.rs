@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -36,7 +40,12 @@ use std::{
 };
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("id")
+    fixture_support::component_id(match value {
+        "query" => 1,
+        "source" => 2,
+        "sink" => 3,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 fn port(value: &str) -> PortId {
     PortId::try_new(value).expect("port")
@@ -146,11 +155,18 @@ async fn make_graph_query(
     .with_bootstrap(Arc::new(Bootstrap))
     .with_result_catalog(&catalog)
     .expect("catalogue");
-    let factory = Arc::new(ReactionPluginAdapterFactory::default());
+    let factory = FactoryRegistry::standard()
+        .get(
+            &ReactionPluginAdapterFactory::default()
+                .descriptor()
+                .implementation,
+        )
+        .expect("registered reaction adapter factory")
+        .clone();
     let mut builder = services
         .declare(ComputationGraph::builder(instance_graph_id()))
         .expect("services")
-        .source(Box::new(IdleSource(
+        .fixture_source(Box::new(IdleSource(
             ComponentDescriptor::try_new(
                 id("source"),
                 vec![PortDescriptor::new(
@@ -162,8 +178,9 @@ async fn make_graph_query(
             )
             .expect("source"),
         )))
-        .transformer(Box::new(query))
+        .fixture_transformer(Box::new(query))
         .component(
+            ComponentName::try_new("sink").expect("fixture name"),
             ComponentSpecification {
                 descriptor: ComponentDescriptor::try_new(
                     id("sink"),
@@ -242,6 +259,7 @@ async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_conte
             .expect("store"),
     );
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -261,8 +279,11 @@ async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_conte
         .expect("instance");
     let services = drasi.computation_plugin_services().expect("services");
     let catalog = QueryResultsCatalog::new(instance_graph_id()).expect("catalogue");
-    let (reaction, report) =
-        drasi_reaction_snapshot_test::SnapshotTestReaction::new("snapshot", vec!["query".into()]);
+    let (reaction, report) = drasi_reaction_snapshot_test::SnapshotTestReaction::new(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bf")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("query"))],
+    );
     let host = ReactionPluginHost::owned(
         Box::new(reaction),
         services.clone(),
@@ -295,12 +316,24 @@ async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_conte
         .state_store
         .as_ref()
         .expect("state")
-        .get("snapshot", "checkpoint:query")
+        .get(
+            &drasi_core_types::StorePartition::component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bf")
+                    .expect("fixture UUID")
+            ),
+            &format!("checkpoint:{}", id("query"))
+        )
         .await
         .expect("checkpoint")
         .is_some());
     assert!(state
-        .get("snapshot", "checkpoint:query")
+        .get(
+            &drasi_core_types::StorePartition::component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bf")
+                    .expect("fixture UUID")
+            ),
+            &format!("checkpoint:{}", id("query"))
+        )
         .await
         .expect("instance namespace")
         .is_some());
@@ -313,8 +346,13 @@ struct FailingBootstrap {
 }
 #[async_trait]
 impl Reaction for FailingBootstrap {
-    fn id(&self) -> &str {
-        "failing"
+    fn id(&self) -> &drasi_core_types::ComponentId {
+        static ID: std::sync::LazyLock<drasi_core_types::ComponentId> =
+            std::sync::LazyLock::new(|| {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000359")
+                    .expect("fixture UUID")
+            });
+        &ID
     }
     fn type_name(&self) -> &str {
         "failing-bootstrap"
@@ -322,8 +360,8 @@ impl Reaction for FailingBootstrap {
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
         panic!("desired state must not inspect resolved plugin properties");
     }
-    fn query_ids(&self) -> Vec<String> {
-        vec!["query".into()]
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("query"))]
     }
     fn needs_snapshot_on_fresh_start(&self) -> bool {
         true
@@ -331,7 +369,7 @@ impl Reaction for FailingBootstrap {
     fn default_recovery_policy(&self) -> drasi_lib::ReactionRecoveryPolicy {
         drasi_lib::ReactionRecoveryPolicy::AutoReset
     }
-    async fn initialize(&self, _: drasi_lib::ReactionRuntimeContext) {}
+    async fn bind_runtime_context(&self, _: drasi_lib::ReactionRuntimeContext) {}
     async fn start(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -364,6 +402,7 @@ impl Reaction for FailingBootstrap {
 async fn failed_plugin_bootstrap_cannot_persist_a_staged_checkpoint() {
     let temp = test_root();
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -412,7 +451,13 @@ async fn failed_plugin_bootstrap_cannot_persist_a_staged_checkpoint() {
         .state_store
         .as_ref()
         .expect("state")
-        .get("failing", "checkpoint:query")
+        .get(
+            &drasi_core_types::StorePartition::component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000359")
+                    .expect("fixture UUID")
+            ),
+            &format!("checkpoint:{}", id("query"))
+        )
         .await
         .expect("checkpoint")
         .is_none());
@@ -426,7 +471,13 @@ async fn failed_plugin_bootstrap_cannot_persist_a_staged_checkpoint() {
         .state_store
         .as_ref()
         .expect("state")
-        .get("failing", "checkpoint:query")
+        .get(
+            &drasi_core_types::StorePartition::component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000359")
+                    .expect("fixture UUID")
+            ),
+            &format!("checkpoint:{}", id("query"))
+        )
         .await
         .expect("checkpoint")
         .is_some());
@@ -447,6 +498,7 @@ async fn existing_snapshot_reaction_accepts_empty_and_aggregate_native_snapshots
     ] {
         let temp = test_root();
         let drasi = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -469,8 +521,9 @@ async fn existing_snapshot_reaction_accepts_empty_and_aggregate_native_snapshots
         let services = drasi.computation_plugin_services().expect("services");
         let catalog = QueryResultsCatalog::new(instance_graph_id()).expect("catalogue");
         let (reaction, report) = drasi_reaction_snapshot_test::SnapshotTestReaction::new(
-            "snapshot",
-            vec!["query".into()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bf")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_id(id("query"))],
         );
         let host = ReactionPluginHost::owned(
             Box::new(reaction),
@@ -510,8 +563,13 @@ struct MaterializedReaction {
 }
 #[async_trait]
 impl Reaction for MaterializedReaction {
-    fn id(&self) -> &str {
-        "materialized"
+    fn id(&self) -> &drasi_core_types::ComponentId {
+        static ID: std::sync::LazyLock<drasi_core_types::ComponentId> =
+            std::sync::LazyLock::new(|| {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000035a")
+                    .expect("fixture UUID")
+            });
+        &ID
     }
     fn type_name(&self) -> &str {
         "materialized-fixture"
@@ -519,8 +577,8 @@ impl Reaction for MaterializedReaction {
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
         panic!("never reconstruct desired configuration from resolved properties");
     }
-    fn query_ids(&self) -> Vec<String> {
-        vec!["query".into()]
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("query"))]
     }
     fn is_durable(&self) -> bool {
         // These fixtures deliberately recover from volatile-query incarnations.
@@ -533,7 +591,7 @@ impl Reaction for MaterializedReaction {
     fn default_recovery_policy(&self) -> drasi_lib::ReactionRecoveryPolicy {
         drasi_lib::ReactionRecoveryPolicy::AutoReset
     }
-    async fn initialize(&self, _: drasi_lib::ReactionRuntimeContext) {}
+    async fn bind_runtime_context(&self, _: drasi_lib::ReactionRuntimeContext) {}
     async fn start(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -672,6 +730,7 @@ async fn persisted_reaction_checkpoint_is_reset_for_a_new_volatile_query_incarna
         )
         .expect("reaction");
         let mut adapter = ReactionPluginAdapter::new(id("sink"), host.clone()).expect("adapter");
+        adapter.initialize().await.expect("initialize reaction");
         adapter.start().await.expect("recover destination");
         assert_eq!(
             *destination.rows.lock().expect("rows"),
@@ -709,13 +768,20 @@ async fn a_gap_after_a_sequence_zero_checkpoint_discards_prior_materialized_stat
     )
     .expect("host");
     let mut adapter = ReactionPluginAdapter::new(id("sink"), host.clone()).expect("adapter");
+    adapter.initialize().await.expect("initialize reaction");
     adapter.start().await.expect("initial snapshot");
     adapter.stop().await.expect("pause reaction");
     let bytes = services
         .state_store
         .as_ref()
         .expect("state")
-        .get("materialized", "checkpoint:query")
+        .get(
+            &drasi_core_types::StorePartition::component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000035a")
+                    .expect("fixture UUID"),
+            ),
+            &format!("checkpoint:{}", id("query")),
+        )
         .await
         .expect("checkpoint")
         .expect("saved checkpoint");

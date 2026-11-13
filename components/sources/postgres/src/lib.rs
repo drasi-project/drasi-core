@@ -164,7 +164,8 @@
 //! use std::sync::Arc;
 //!
 //! # fn main() -> anyhow::Result<()> {
-//! let source = PostgresReplicationSource::builder("pg-source")
+//! let source_id = drasi_lib::ComponentId::generate();
+//! let source = PostgresReplicationSource::builder(source_id)
 //!     .with_host("db.example.com")
 //!     .with_database("production")
 //!     .with_user("replication_user")
@@ -515,7 +516,8 @@ impl PostgresReplicationSource {
     /// use drasi_source_postgres::PostgresReplicationSource;
     ///
     /// # fn main() -> anyhow::Result<()> {
-    /// let source = PostgresReplicationSource::builder("pg-source")
+    /// let source_id = drasi_lib::ComponentId::generate();
+    /// let source = PostgresReplicationSource::builder(source_id)
     ///     .with_host("db.example.com")
     ///     .with_database("production")
     ///     .with_user("replication_user")
@@ -525,7 +527,7 @@ impl PostgresReplicationSource {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn builder(id: impl Into<String>) -> PostgresSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> PostgresSourceBuilder {
         PostgresSourceBuilder::new(id)
     }
 
@@ -566,12 +568,13 @@ impl PostgresReplicationSource {
     ///     table_keys: vec![],
     /// };
     ///
-    /// let source = PostgresReplicationSource::new("my-pg-source", config)?;
+    /// let source_id = drasi_lib::ComponentId::generate();
+    /// let source = PostgresReplicationSource::new(source_id, config)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(id: impl Into<String>, config: PostgresSourceConfig) -> Result<Self> {
-        let id = id.into();
+    pub fn new(id: drasi_lib::ComponentId, config: PostgresSourceConfig) -> Result<Self> {
+        let id = id.clone();
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -587,12 +590,12 @@ impl PostgresReplicationSource {
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
     pub fn with_dispatch(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         config: PostgresSourceConfig,
         dispatch_mode: Option<DispatchMode>,
         dispatch_buffer_capacity: Option<usize>,
     ) -> Result<Self> {
-        let id = id.into();
+        let id = id.clone();
         let mut params = SourceBaseParams::new(id);
         if let Some(mode) = dispatch_mode {
             params = params.with_dispatch_mode(mode);
@@ -877,7 +880,7 @@ impl PostgresReplicationSource {
 
 #[async_trait]
 impl Source for PostgresReplicationSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -1081,8 +1084,8 @@ impl Source for PostgresReplicationSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         // Source positions are uniformly 16-byte big-endian
         // `[ commit_lsn (8) | offset (8) ]` (CDC events and the
         // `[snapshot_lsn | u64::MAX]` bootstrap boundary), so byte-lexicographic
@@ -1092,7 +1095,7 @@ impl Source for PostgresReplicationSource {
             .await;
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_lib::ComponentId) {
         self.base.remove_position_handle(query_id).await;
     }
 
@@ -1121,7 +1124,8 @@ impl Source for PostgresReplicationSource {
 /// use drasi_source_postgres::PostgresReplicationSource;
 ///
 /// # fn main() -> anyhow::Result<()> {
-/// let source = PostgresReplicationSource::builder("pg-source")
+/// let source_id = drasi_lib::ComponentId::generate();
+/// let source = PostgresReplicationSource::builder(source_id)
 ///     .with_host("db.example.com")
 ///     .with_database("production")
 ///     .with_user("replication_user")
@@ -1133,7 +1137,7 @@ impl Source for PostgresReplicationSource {
 /// # }
 /// ```
 pub struct PostgresSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     host: String,
     port: u16,
     database: String,
@@ -1152,9 +1156,9 @@ pub struct PostgresSourceBuilder {
 
 impl PostgresSourceBuilder {
     /// Create a new PostgreSQL source builder with the given ID and default values
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             host: "localhost".to_string(),
             port: 5432,
             database: String::new(),
@@ -1308,7 +1312,7 @@ impl PostgresSourceBuilder {
             table_keys: self.table_keys,
         };
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -1339,7 +1343,7 @@ mod tests {
             BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
         };
         use drasi_lib::channels::BootstrapEventSender;
-        use drasi_lib::component_graph::{wait_for_status, ComponentUpdate};
+        use drasi_lib::component_graph::{wait_for_status_by_id, ComponentUpdate};
         use drasi_lib::config::SourceSubscriptionSettings;
         use drasi_lib::DrasiLib;
         use std::time::Duration;
@@ -1377,22 +1381,39 @@ mod tests {
         #[tokio::test]
         async fn stop_cleans_up_after_replication_failure() {
             let (port, server) = rejecting_server().await;
-            let source = PostgresSourceBuilder::new("failed-source")
-                .with_host("127.0.0.1")
-                .with_port(port)
-                .with_ssl_mode(SslMode::Disable)
-                .with_database("test")
-                .with_user("test")
-                .with_bootstrap_provider(InvalidBoundaryBootstrap)
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006a")
+                    .expect("fixture UUID"),
+            )
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_ssl_mode(SslMode::Disable)
+            .with_database("test")
+            .with_user("test")
+            .with_bootstrap_provider(InvalidBoundaryBootstrap)
+            .build()
+            .unwrap();
+
+            let (update_tx, _update_rx) = tokio::sync::mpsc::channel(32);
+            source
+                .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
+                    "postgres-error-lifecycle",
+                    source.id().clone(),
+                    None,
+                    update_tx,
+                    None,
+                ))
+                .await;
 
             for _ in 0..2 {
                 source.start().await.unwrap();
                 let mut subscription = source
                     .subscribe(SourceSubscriptionSettings {
-                        source_id: source.id().to_string(),
-                        query_id: "test-query".to_string(),
+                        source_id: source.id().clone(),
+                        query_id: drasi_core::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000050",
+                        )
+                        .expect("fixture UUID"),
                         enable_bootstrap: true,
                         nodes: Default::default(),
                         relations: Default::default(),
@@ -1430,14 +1451,17 @@ mod tests {
         #[tokio::test]
         async fn direct_start_failure_reports_error_and_can_stop() {
             let (port, server) = rejecting_server().await;
-            let source = PostgresSourceBuilder::new("failed-start")
-                .with_host("127.0.0.1")
-                .with_port(port)
-                .with_ssl_mode(SslMode::Disable)
-                .with_database("test")
-                .with_user("test")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000097")
+                    .expect("fixture UUID"),
+            )
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_ssl_mode(SslMode::Disable)
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
 
             for _ in 0..2 {
                 let error = tokio::time::timeout(Duration::from_secs(3), source.start())
@@ -1466,14 +1490,17 @@ mod tests {
                 connected_tx.send(()).unwrap();
                 std::future::pending::<()>().await;
             });
-            let source = PostgresSourceBuilder::new("cancelled-start")
-                .with_host("127.0.0.1")
-                .with_port(port)
-                .with_ssl_mode(SslMode::Disable)
-                .with_database("test")
-                .with_user("test")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000098")
+                    .expect("fixture UUID"),
+            )
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_ssl_mode(SslMode::Disable)
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
 
             let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
                 tokio::join!(source.start(), async {
@@ -1506,8 +1533,9 @@ mod tests {
         #[tokio::test]
         async fn managed_lifecycle_cleans_failed_source() {
             let (port, server) = rejecting_server().await;
-            for action in ["stop", "stop_all", "remove", "update"] {
-                let source = PostgresSourceBuilder::new("managed-source")
+            for action in ["stop", "stop_all", "remove"] {
+                let source_id = drasi_lib::config::ComponentId::generate();
+                let source = PostgresSourceBuilder::new(source_id.clone())
                     .with_host("127.0.0.1")
                     .with_port(port)
                     .with_ssl_mode(SslMode::Disable)
@@ -1517,6 +1545,7 @@ mod tests {
                     .build()
                     .unwrap();
                 let core = DrasiLib::builder()
+                    .with_allow_external_component_ids(true)
                     .with_query_factory(
                         drasi_lib::computation::v1::FactoryRegistry::standard()
                             .get(
@@ -1529,7 +1558,11 @@ mod tests {
                             .expect("reference query factory")
                             .clone(),
                     )
-                    .with_source(source)
+                    .with_source(
+                        drasi_core::ComponentName::try_new("managed-source")
+                            .expect("fixture component name"),
+                        source,
+                    )
                     .build()
                     .await
                     .unwrap();
@@ -1537,7 +1570,7 @@ mod tests {
                 let graph = core.component_graph();
                 let runtime = core
                     .source_manager()
-                    .get_source_instance("managed-source")
+                    .get_source_instance_by_id(&source_id)
                     .await
                     .unwrap();
                 let source = runtime
@@ -1546,8 +1579,11 @@ mod tests {
                     .unwrap();
                 let mut subscription = source
                     .subscribe(SourceSubscriptionSettings {
-                        source_id: source.id().into(),
-                        query_id: "test-query".into(),
+                        source_id: source.id().clone(),
+                        query_id: drasi_core::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000050",
+                        )
+                        .expect("fixture UUID"),
                         enable_bootstrap: true,
                         nodes: Default::default(),
                         relations: Default::default(),
@@ -1557,7 +1593,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                wait_for_status(
+                wait_for_status_by_id(
                     &graph,
                     source.id(),
                     &[ComponentStatus::Error],
@@ -1575,21 +1611,9 @@ mod tests {
                     .abort_handle();
 
                 match action {
-                    "stop" => core.stop_source(source.id()).await.unwrap(),
+                    "stop" => core.stop_source_by_id(&source_id).await.unwrap(),
                     "stop_all" => core.stop().await.unwrap(),
-                    "remove" => core.remove_source(source.id(), false).await.unwrap(),
-                    "update" => {
-                        core.update_source(
-                            source.id(),
-                            PostgresSourceBuilder::new(source.id())
-                                .with_database("test")
-                                .with_user("test")
-                                .build()
-                                .unwrap(),
-                        )
-                        .await
-                        .unwrap();
-                    }
+                    "remove" => core.remove_source_by_id(&source_id, false).await.unwrap(),
                     _ => unreachable!(),
                 }
 
@@ -1606,9 +1630,9 @@ mod tests {
                         .is_err()
                 );
                 if action == "remove" {
-                    assert!(!graph.snapshot().await.unwrap().contains(source.id()));
+                    assert!(!graph.snapshot().await.unwrap().contains_by_id(source.id()));
                 } else {
-                    wait_for_status(
+                    wait_for_status_by_id(
                         &graph,
                         source.id(),
                         &[ComponentStatus::Stopped],
@@ -1617,7 +1641,7 @@ mod tests {
                     .await
                     .unwrap();
                     assert!(
-                        core.stop_source(source.id()).await.is_err(),
+                        core.stop_source_by_id(&source_id).await.is_err(),
                         "managed repeated stop is rejected"
                     );
                 }
@@ -1633,11 +1657,14 @@ mod tests {
         #[tokio::test]
         async fn stop_joins_and_cleans_starting_and_running_sources() {
             for status in [ComponentStatus::Starting, ComponentStatus::Running] {
-                let source = PostgresSourceBuilder::new("stopping-source")
-                    .with_database("test")
-                    .with_user("test")
-                    .build()
-                    .unwrap();
+                let source = PostgresSourceBuilder::new(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006b")
+                        .expect("fixture UUID"),
+                )
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
                 source.base.set_status(status, None).await;
                 let task = tokio::spawn(std::future::pending::<()>());
                 let abort_handle = task.abort_handle();
@@ -1669,11 +1696,14 @@ mod tests {
 
         #[tokio::test]
         async fn stop_reports_unexpected_task_failure_after_cleanup() {
-            let source = PostgresSourceBuilder::new("panicked-source")
-                .with_database("test")
-                .with_user("test")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006c")
+                    .expect("fixture UUID"),
+            )
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
             source.base.set_status(ComponentStatus::Running, None).await;
             let failed = tokio::spawn(async { panic!("simulated replication task panic") });
             while !failed.is_finished() {
@@ -1723,11 +1753,14 @@ mod tests {
 
         #[tokio::test]
         async fn rewind_reports_unexpected_task_failure() {
-            let source = PostgresSourceBuilder::new("panicked-rewind")
-                .with_database("test")
-                .with_user("test")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000099")
+                    .expect("fixture UUID"),
+            )
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
             source.base.set_status(ComponentStatus::Running, None).await;
             let failed = tokio::spawn(async { panic!("simulated replication task panic") });
             while !failed.is_finished() {
@@ -1800,24 +1833,34 @@ mod tests {
 
         #[test]
         fn test_builder_with_valid_config() {
-            let source = PostgresSourceBuilder::new("test-source")
-                .with_database("testdb")
-                .with_user("testuser")
-                .build();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+            )
+            .with_database("testdb")
+            .with_user("testuser")
+            .build();
             assert!(source.is_ok());
         }
 
         #[test]
         fn test_builder_with_custom_config() {
-            let source = PostgresSourceBuilder::new("pg-source")
-                .with_host("192.168.1.100")
-                .with_port(5433)
-                .with_database("production")
-                .with_user("admin")
-                .with_password("secret")
-                .build()
-                .unwrap();
-            assert_eq!(source.id(), "pg-source");
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009a")
+                    .expect("fixture UUID"),
+            )
+            .with_host("192.168.1.100")
+            .with_port(5433)
+            .with_database("production")
+            .with_user("admin")
+            .with_password("secret")
+            .build()
+            .unwrap();
+            assert_eq!(
+                source.id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009a")
+                    .expect("fixture UUID")
+            );
         }
 
         #[test]
@@ -1835,13 +1878,18 @@ mod tests {
                 table_keys: Vec::new(),
             };
             let source = PostgresReplicationSource::with_dispatch(
-                "dispatch-source",
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009b")
+                    .expect("fixture UUID"),
                 config,
                 Some(DispatchMode::Channel),
                 Some(2000),
             );
             assert!(source.is_ok());
-            assert_eq!(source.unwrap().id(), "dispatch-source");
+            assert_eq!(
+                source.unwrap().id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009b")
+                    .expect("fixture UUID")
+            );
         }
     }
 
@@ -1850,35 +1898,48 @@ mod tests {
 
         #[test]
         fn test_id_returns_correct_value() {
-            let source = PostgresSourceBuilder::new("my-pg-source")
-                .with_database("db")
-                .with_user("user")
-                .build()
-                .unwrap();
-            assert_eq!(source.id(), "my-pg-source");
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009c")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .build()
+            .unwrap();
+            assert_eq!(
+                source.id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009c")
+                    .expect("fixture UUID")
+            );
         }
 
         #[test]
         fn test_type_name_returns_postgres() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_database("db")
-                .with_user("user")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .build()
+            .unwrap();
             assert_eq!(source.type_name(), "postgres");
         }
 
         #[test]
         fn test_properties_contains_connection_info() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_host("db.example.com")
-                .with_port(5433)
-                .with_database("mydb")
-                .with_user("app_user")
-                .with_password("secret")
-                .with_tables(vec!["users".to_string()])
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("db.example.com")
+            .with_port(5433)
+            .with_database("mydb")
+            .with_user("app_user")
+            .with_password("secret")
+            .with_tables(vec!["users".to_string()])
+            .build()
+            .unwrap();
             let props = source.properties();
 
             assert_eq!(
@@ -1901,12 +1962,15 @@ mod tests {
 
         #[test]
         fn test_properties_includes_password() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_database("db")
-                .with_user("user")
-                .with_password("super_secret_password")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .with_password("super_secret_password")
+            .build()
+            .unwrap();
             let props = source.properties();
 
             // Password must be preserved for config persistence roundtrip
@@ -1920,12 +1984,15 @@ mod tests {
 
         #[test]
         fn test_properties_includes_tables() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_database("db")
-                .with_user("user")
-                .with_tables(vec!["users".to_string(), "orders".to_string()])
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .with_tables(vec!["users".to_string(), "orders".to_string()])
+            .build()
+            .unwrap();
             let props = source.properties();
 
             let tables = props.get("tables").unwrap().as_array().unwrap();
@@ -1936,12 +2003,15 @@ mod tests {
 
         #[test]
         fn test_describe_schema_falls_back_to_configured_tables() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_database("db")
-                .with_user("user")
-                .with_tables(vec!["public.users".to_string(), "orders".to_string()])
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .with_tables(vec!["public.users".to_string(), "orders".to_string()])
+            .build()
+            .unwrap();
 
             let schema = source
                 .describe_schema()
@@ -2099,7 +2169,12 @@ mod tests {
 
             let descriptor = PostgresSourceDescriptor;
             let source = descriptor
-                .create_source("pg-secret-test", &config_json, true)
+                .create_source(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009d")
+                        .expect("fixture UUID"),
+                    &config_json,
+                    true,
+                )
                 .await
                 .expect("descriptor should create source");
 
@@ -2143,11 +2218,14 @@ mod tests {
 
         #[tokio::test]
         async fn test_initial_status_is_stopped() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_database("db")
-                .with_user("user")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .build()
+            .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
         }
 
@@ -2155,17 +2233,20 @@ mod tests {
         fn test_builder_fallback_produces_camel_case() {
             use drasi_lib::sources::Source;
 
-            let source = PostgresSourceBuilder::new("pg-fallback")
-                .with_host("myhost.example.com")
-                .with_port(5433)
-                .with_database("mydb")
-                .with_user("admin")
-                .with_password("secret123")
-                .with_ssl_mode(SslMode::Require)
-                .with_slot_name("custom_slot")
-                .with_publication_name("custom_pub")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009e")
+                    .expect("fixture UUID"),
+            )
+            .with_host("myhost.example.com")
+            .with_port(5433)
+            .with_database("mydb")
+            .with_user("admin")
+            .with_password("secret123")
+            .with_ssl_mode(SslMode::Require)
+            .with_slot_name("custom_slot")
+            .with_publication_name("custom_pub")
+            .build()
+            .unwrap();
 
             let props = source.properties();
 
@@ -2209,11 +2290,14 @@ mod tests {
 
         #[tokio::test]
         async fn test_pause_replication_for_restart_aborts_existing_task() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_database("db")
-                .with_user("user")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .build()
+            .unwrap();
 
             source.base.set_status(ComponentStatus::Running, None).await;
 
@@ -2231,11 +2315,14 @@ mod tests {
         #[tokio::test]
         async fn stop_joins_replication_even_when_starting_or_failed() {
             for status in [ComponentStatus::Starting, ComponentStatus::Error] {
-                let source = PostgresSourceBuilder::new("cleanup")
-                    .with_database("db")
-                    .with_user("user")
-                    .build()
-                    .unwrap();
+                let source = PostgresSourceBuilder::new(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009f")
+                        .expect("fixture UUID"),
+                )
+                .with_database("db")
+                .with_user("user")
+                .build()
+                .unwrap();
                 source.base.set_status(status, None).await;
                 let (started, ready) = oneshot::channel();
                 let task = tokio::spawn(async move {
@@ -2254,11 +2341,14 @@ mod tests {
 
         #[tokio::test]
         async fn replication_cannot_overwrite_an_unjoined_worker() {
-            let source = PostgresSourceBuilder::new("ownership")
-                .with_database("db")
-                .with_user("user")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a0")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .build()
+            .unwrap();
             let task = tokio::spawn(std::future::pending::<()>());
             let worker = task.abort_handle();
             *source.base.task_handle.write().await = Some(task);
@@ -2274,11 +2364,14 @@ mod tests {
 
         #[test]
         fn test_supports_replay_returns_true() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_database("db")
-                .with_user("user")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .build()
+            .unwrap();
             assert!(source.supports_replay());
         }
     }
@@ -2290,18 +2383,23 @@ mod tests {
 
         #[tokio::test]
         async fn test_malformed_resume_from_rejected() {
-            let source = PostgresSourceBuilder::new("test-source")
-                .with_database("testdb")
-                .with_user("testuser")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+            )
+            .with_database("testdb")
+            .with_user("testuser")
+            .build()
+            .unwrap();
 
             // 8 bytes — a bare LSN is no longer a valid position (only the
             // 16-byte `[commit_lsn | offset]` encoding is accepted).
             let bad_position = bytes::Bytes::from(vec![0u8; 8]);
             let settings = SourceSubscriptionSettings {
-                source_id: "test-source".to_string(),
-                query_id: "q-bad-position".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+                query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a1")
+                    .expect("fixture UUID"),
                 enable_bootstrap: false,
                 nodes: HashSet::new(),
                 relations: HashSet::new(),
@@ -2325,7 +2423,12 @@ mod tests {
 
         #[test]
         fn test_postgres_builder_defaults() {
-            let source = PostgresSourceBuilder::new("test").build().unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .build()
+            .unwrap();
             assert_eq!(source.config.host, "localhost");
             assert_eq!(source.config.port, 5432);
             assert_eq!(source.config.slot_name, "drasi_slot");
@@ -2334,15 +2437,18 @@ mod tests {
 
         #[test]
         fn test_postgres_builder_custom_values() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_host("db.example.com")
-                .with_port(5433)
-                .with_database("production")
-                .with_user("app_user")
-                .with_password("secret")
-                .with_tables(vec!["users".to_string(), "orders".to_string()])
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("db.example.com")
+            .with_port(5433)
+            .with_database("production")
+            .with_user("app_user")
+            .with_password("secret")
+            .with_tables(vec!["users".to_string(), "orders".to_string()])
+            .build()
+            .unwrap();
 
             assert_eq!(source.config.host, "db.example.com");
             assert_eq!(source.config.port, 5433);
@@ -2356,12 +2462,15 @@ mod tests {
 
         #[test]
         fn test_builder_add_table() {
-            let source = PostgresSourceBuilder::new("test")
-                .add_table("table1")
-                .add_table("table2")
-                .add_table("table3")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .add_table("table1")
+            .add_table("table2")
+            .add_table("table3")
+            .build()
+            .unwrap();
 
             assert_eq!(source.config.tables.len(), 3);
             assert_eq!(source.config.tables[0], "table1");
@@ -2371,11 +2480,14 @@ mod tests {
 
         #[test]
         fn test_builder_slot_and_publication() {
-            let source = PostgresSourceBuilder::new("test")
-                .with_slot_name("custom_slot")
-                .with_publication_name("custom_pub")
-                .build()
-                .unwrap();
+            let source = PostgresSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_slot_name("custom_slot")
+            .with_publication_name("custom_pub")
+            .build()
+            .unwrap();
 
             assert_eq!(source.config.slot_name, "custom_slot");
             assert_eq!(source.config.publication_name, "custom_pub");
@@ -2383,13 +2495,20 @@ mod tests {
 
         #[test]
         fn test_builder_id() {
-            let source = PostgresReplicationSource::builder("my-pg-source")
-                .with_database("db")
-                .with_user("user")
-                .build()
-                .unwrap();
+            let source = PostgresReplicationSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009c")
+                    .expect("fixture UUID"),
+            )
+            .with_database("db")
+            .with_user("user")
+            .build()
+            .unwrap();
 
-            assert_eq!(source.base.id, "my-pg-source");
+            assert_eq!(
+                source.base.id,
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009c")
+                    .expect("fixture UUID")
+            );
         }
     }
 

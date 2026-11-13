@@ -89,7 +89,7 @@ struct ObservedApplication {
 
 #[async_trait]
 impl Source for ObservedApplication {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.inner.id()
     }
 
@@ -115,8 +115,8 @@ impl Source for ObservedApplication {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.inner.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.inner.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -157,7 +157,7 @@ impl Source for ObservedApplication {
         result
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_core::ComponentId) {
         self.inner.remove_position_handle(query_id).await;
     }
 
@@ -210,6 +210,7 @@ impl BootstrapProvider for SnapshotProvider {
 }
 
 struct Input {
+    name: String,
     handle: ApplicationSourceHandle,
     observations: Arc<Observations>,
     snapshot: Arc<Mutex<Snapshot>>,
@@ -218,11 +219,13 @@ struct Input {
 struct Fixture {
     core: DrasiLib,
     wal: Arc<RedbWalProvider>,
-    inputs: BTreeMap<String, Input>,
+    inputs: BTreeMap<drasi_core::ComponentId, Input>,
     directory: tempfile::TempDir,
 }
 
-fn application(id: &str) -> Result<(ApplicationSource, ApplicationSourceHandle)> {
+fn application(
+    id: drasi_core::ComponentId,
+) -> Result<(ApplicationSource, ApplicationSourceHandle)> {
     ApplicationSource::new(
         id,
         ApplicationSourceConfig {
@@ -240,7 +243,7 @@ impl Fixture {
     async fn new(
         policy: RecoveryPolicy,
         dispatch_mode: DispatchMode,
-        sources: &[&str],
+        sources: &[(&str, drasi_core::ComponentId)],
         bootstrap: bool,
     ) -> Result<Self> {
         let root = "target/computation-source-recovery";
@@ -260,14 +263,16 @@ impl Fixture {
                     false,
                 )),
             );
-        let mut query = Query::cypher(QUERY)
-            .query("MATCH (p:Person) RETURN p.name AS name")
-            .enable_bootstrap(bootstrap)
-            .with_storage_backend(StorageBackendRef::Named("rocks".into()))
-            .with_recovery_policy(policy);
+        let mut query = Query::cypher(
+            drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+        )
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .enable_bootstrap(bootstrap)
+        .with_storage_backend(StorageBackendRef::Named("rocks".into()))
+        .with_recovery_policy(policy);
         let mut inputs = BTreeMap::new();
-        for id in sources {
-            let (source, handle) = application(id)?;
+        for (name, id) in sources {
+            let (source, handle) = application(id.clone())?;
             let observations = Arc::new(Observations::default());
             let snapshot = Arc::new(Mutex::new(Snapshot::default()));
             if bootstrap {
@@ -278,22 +283,26 @@ impl Fixture {
                     }))
                     .await;
             }
-            builder = builder.with_source(ObservedApplication {
-                inner: source,
-                observations: observations.clone(),
-                dispatch_mode,
-            });
-            query = query.from_input(*id);
+            builder = builder.with_source(
+                drasi_core::ComponentName::try_new(*name)?,
+                ObservedApplication {
+                    inner: source,
+                    observations: observations.clone(),
+                    dispatch_mode,
+                },
+            );
+            query = query.from_input_by_name(drasi_core::ComponentName::try_new(*name)?);
             inputs.insert(
-                (*id).to_owned(),
+                id.clone(),
                 Input {
+                    name: (*name).to_owned(),
                     handle,
                     observations,
                     snapshot,
                 },
             );
         }
-        let core = builder.with_query(query.build()).build().await?;
+        let core = builder.with_query(query.build()?).build().await?;
         core.start().await?;
         wait_running(&core).await?;
         Ok(Self {
@@ -304,20 +313,23 @@ impl Fixture {
         })
     }
 
-    async fn send(&self, source: &str, id: &str) -> Result<u64> {
+    async fn send(&self, source: &drasi_core::ComponentId, id: &str) -> Result<u64> {
+        let input = &self.inputs[source];
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(source, id),
+                    reference: ElementReference::new(&input.name, id),
                     labels: vec![Arc::from("Person")].into(),
                     effective_from: chrono::Utc::now().timestamp_millis() as u64,
                 },
                 properties: ElementPropertyMap::from(serde_json::json!({"name": id})),
             },
         };
-        let input = &self.inputs[source];
         input.handle.send(change.clone()).await?;
-        let position = self.wal.head_sequence(source).await?;
+        let position = self
+            .wal
+            .head_sequence(&drasi_core::interface::StorageScope::default(), source)
+            .await?;
         let mut snapshot = input.snapshot.lock().unwrap();
         snapshot.changes.push(change);
         snapshot.position = position;
@@ -325,7 +337,12 @@ impl Fixture {
     }
 
     fn observations(&self, source: &str) -> &Observations {
-        &self.inputs[source].observations
+        &self
+            .inputs
+            .values()
+            .find(|input| input.name == source)
+            .expect("fixture source")
+            .observations
     }
 
     async fn wait_confirmed(&self, source: &str, sequence: u64) -> Result<()> {
@@ -340,14 +357,23 @@ impl Fixture {
     }
 
     async fn restart(&self) -> Result<()> {
-        timeout(DEADLINE, self.core.start_query(QUERY))
-            .await
-            .context("query restart timed out")??;
+        timeout(
+            DEADLINE,
+            self.core.start_query_by_name(
+                &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+            ),
+        )
+        .await
+        .context("query restart timed out")??;
         wait_running(&self.core).await
     }
 
     async fn stop_query(&self) -> Result<()> {
-        self.core.stop_query(QUERY).await?;
+        self.core
+            .stop_query_by_name(
+                &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+            )
+            .await?;
         wait_status(&self.core, ComponentStatus::Stopped).await
     }
 
@@ -370,7 +396,12 @@ async fn wait_running(core: &DrasiLib) -> Result<()> {
 async fn wait_status(core: &DrasiLib, expected: ComponentStatus) -> Result<()> {
     timeout(DEADLINE, async {
         loop {
-            match core.get_query_status(QUERY).await? {
+            match core
+                .get_query_status_by_name(
+                    &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+                )
+                .await?
+            {
                 status if status == expected => return Ok(()),
                 ComponentStatus::Error => anyhow::bail!("query failed while starting"),
                 _ => sleep(Duration::from_millis(10)).await,
@@ -387,7 +418,9 @@ async fn rows(core: &DrasiLib, expected: &[&str]) -> Result<SnapshotResponse> {
     timeout(DEADLINE, async {
         let query = core
             .query_manager()
-            .get_query_instance(QUERY)
+            .get_query_instance_by_name(
+                &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+            )
             .await
             .map_err(anyhow::Error::msg)?;
         loop {
@@ -413,7 +446,16 @@ async fn ordinary_runtime_replays_uncheckpointed_wal_without_reset_in_both_dispa
 ) -> Result<()> {
     for dispatch in [DispatchMode::Channel, DispatchMode::Broadcast] {
         for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
-            let fixture = Fixture::new(policy, dispatch, &["people"], false).await?;
+            let fixture = Fixture::new(
+                policy,
+                dispatch,
+                &[(
+                    "people",
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")?,
+                )],
+                false,
+            )
+            .await?;
             let before = rows(&fixture.core, &[]).await?;
             assert_eq!(
                 fixture.observations("people").confirmed(),
@@ -421,7 +463,13 @@ async fn ordinary_runtime_replays_uncheckpointed_wal_without_reset_in_both_dispa
                 "{policy:?}/{dispatch:?}"
             );
             fixture.stop_query().await?;
-            fixture.send("people", "missed").await?;
+            fixture
+                .send(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                    "missed",
+                )
+                .await?;
             assert_ne!(fixture.observations("people").confirmed(), Some(1));
             fixture.restart().await?;
 
@@ -435,7 +483,13 @@ async fn ordinary_runtime_replays_uncheckpointed_wal_without_reset_in_both_dispa
             assert!(!resumed.settings.enable_bootstrap);
             fixture.wait_confirmed("people", 1).await?;
 
-            fixture.send("people", "live").await?;
+            fixture
+                .send(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                    "live",
+                )
+                .await?;
             let live = rows(&fixture.core, &["missed", "live"]).await?;
             assert_eq!(live.as_of_sequence, recovered.as_of_sequence + 1);
             fixture.wait_confirmed("people", 2).await?;
@@ -461,15 +515,47 @@ async fn ordinary_runtime_replays_uncheckpointed_wal_without_reset_in_both_dispa
 async fn ordinary_multisource_recovery_keeps_committed_rows_when_only_one_checkpoint_is_missing(
 ) -> Result<()> {
     for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
-        let fixture =
-            Fixture::new(policy, DispatchMode::Channel, &["active", "quiet"], false).await?;
-        fixture.send("active", "committed").await?;
+        let fixture = Fixture::new(
+            policy,
+            DispatchMode::Channel,
+            &[
+                (
+                    "active",
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000428")?,
+                ),
+                (
+                    "quiet",
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002f2")?,
+                ),
+            ],
+            false,
+        )
+        .await?;
+        fixture
+            .send(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000428")
+                    .expect("fixture UUID"),
+                "committed",
+            )
+            .await?;
         let before = rows(&fixture.core, &["committed"]).await?;
         fixture.wait_confirmed("active", 1).await?;
         assert_eq!(fixture.observations("quiet").confirmed(), Some(u64::MAX));
         fixture.stop_query().await?;
-        fixture.send("active", "active-missed").await?;
-        fixture.send("quiet", "quiet-missed").await?;
+        fixture
+            .send(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000428")
+                    .expect("fixture UUID"),
+                "active-missed",
+            )
+            .await?;
+        fixture
+            .send(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002f2")
+                    .expect("fixture UUID"),
+                "quiet-missed",
+            )
+            .await?;
         fixture.restart().await?;
 
         let recovered = rows(
@@ -500,18 +586,58 @@ async fn real_retention_gaps_remain_strict_or_rebootstrap_under_the_requested_po
 {
     for dispatch in [DispatchMode::Channel, DispatchMode::Broadcast] {
         for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
-            let fixture = Fixture::new(policy, dispatch, &["people"], true).await?;
-            fixture.send("people", "committed").await?;
+            let fixture = Fixture::new(
+                policy,
+                dispatch,
+                &[(
+                    "people",
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")?,
+                )],
+                true,
+            )
+            .await?;
+            fixture
+                .send(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                    "committed",
+                )
+                .await?;
             let before = rows(&fixture.core, &["committed"]).await?;
             fixture.wait_confirmed("people", 1).await?;
             fixture.stop_query().await?;
-            fixture.send("people", "pruned").await?;
-            fixture.send("people", "retained").await?;
-            fixture.wal.prune_up_to("people", 2).await?;
+            fixture
+                .send(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                    "pruned",
+                )
+                .await?;
+            fixture
+                .send(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                    "retained",
+                )
+                .await?;
+            fixture
+                .wal
+                .prune_up_to(
+                    &drasi_core::interface::StorageScope::default(),
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                    2,
+                )
+                .await?;
 
-            let restarted = timeout(DEADLINE, fixture.core.start_query(QUERY))
-                .await
-                .context("gap recovery timed out")?;
+            let restarted = timeout(
+                DEADLINE,
+                fixture.core.start_query_by_name(
+                    &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+                ),
+            )
+            .await
+            .context("gap recovery timed out")?;
             if policy == RecoveryPolicy::Strict {
                 assert!(restarted.is_err(), "{policy:?}/{dispatch:?}");
                 wait_status(&fixture.core, ComponentStatus::Error).await?;
@@ -539,7 +665,13 @@ async fn real_retention_gaps_remain_strict_or_rebootstrap_under_the_requested_po
                         .load(Ordering::Acquire),
                     2
                 );
-                fixture.send("people", "after-reset").await?;
+                fixture
+                    .send(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                            .expect("fixture UUID"),
+                        "after-reset",
+                    )
+                    .await?;
                 rows(
                     &fixture.core,
                     &["committed", "pruned", "retained", "after-reset"],
@@ -567,7 +699,10 @@ async fn real_retention_gaps_remain_strict_or_rebootstrap_under_the_requested_po
 
 #[tokio::test]
 async fn broadcast_replay_still_requires_explicit_loss_permission() -> Result<()> {
-    let (source, _input) = application("broadcast")?;
+    let (source, _input) = application(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003d4")
+            .expect("fixture UUID"),
+    )?;
     let host = SourcePluginHost::owned(
         Box::new(ObservedApplication {
             inner: source,
@@ -582,7 +717,8 @@ async fn broadcast_replay_still_requires_explicit_loss_permission() -> Result<()
         SourceSubscriptionOptions::default(),
         stream.clone(),
         None,
-        "broadcast-query",
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000131")
+            .expect("fixture UUID"),
     )
     .is_err());
     LegacySourceSubscription::new(
@@ -593,7 +729,8 @@ async fn broadcast_replay_still_requires_explicit_loss_permission() -> Result<()
         },
         stream,
         None,
-        "broadcast-query",
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000131")
+            .expect("fixture UUID"),
     )?;
     Ok(())
 }

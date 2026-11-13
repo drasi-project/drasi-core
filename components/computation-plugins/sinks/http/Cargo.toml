@@ -17,7 +17,7 @@ delivery-receiver = ["dep:drasi-lib"]
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "1.0.0"
+abi-version = "3.0.0"
 kind = "sink-http"
 
 [dependencies]

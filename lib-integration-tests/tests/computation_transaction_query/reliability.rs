@@ -8,20 +8,23 @@ async fn joined_query(
     root: &Path,
     progress: Arc<QuerySourceProgress>,
 ) -> Result<ContinuousQueryTransformer> {
-    let config = drasi_lib::Query::cypher("query")
+    let query_id = ComponentId::try_new("cb395b4e-0cc9-5f81-82f5-b8aa1f76909b")?;
+    // Inputs below arrive directly as streams, not named graph components.
+    let config = drasi_lib::Query::cypher(drasi_core::ComponentName::try_new("query").expect("fixture component name"))
         .query("MATCH (o:Order)-[:CUSTOMER]->(c:Customer) RETURN c.region AS region, sum(o.amount) AS total")
-        .from_input("orders").from_input("customers")
         .with_joins(vec![QueryJoinConfig {
             id: "CUSTOMER".into(),
             keys: vec![
                 QueryJoinKeyConfig { label: "Order".into(), property: "customerId".into() },
                 QueryJoinKeyConfig { label: "Customer".into(), property: "id".into() },
             ],
-        }]).build();
+        }])
+        .build()?
+        .with_assigned_id(query_id.clone());
     let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "mixed-source".into(),
-            id: ComponentId::try_new("query")?,
+            id: query_id,
             query: config.query.clone(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -29,7 +32,7 @@ async fn joined_query(
         },
         provider(root),
         QueryOptions::default(),
-        QueryExecutionSettings::from_legacy_config(&config),
+        QueryExecutionSettings::from_configuration(&config)?,
         None,
     )
     .await?
@@ -104,7 +107,7 @@ async fn mixed_source_recovery() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let progress = Arc::new(QuerySourceProgress::new(
         "mixed-source",
-        ComponentId::try_new("query")?,
+        ComponentId::try_new("cb395b4e-0cc9-5f81-82f5-b8aa1f76909b")?,
     )?);
     let mut query = joined_query(directory.path(), progress.clone()).await?;
     let mut orders = BTreeMap::new();

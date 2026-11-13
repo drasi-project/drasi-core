@@ -33,6 +33,7 @@ use drasi_lib::context::{ComponentResource, ComponentResourceObserver, PluginOri
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::schema::SourceSchema;
 use drasi_lib::sources::Source;
+use drasi_lib::ComponentId;
 use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext};
 use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
 use drasi_plugin_sdk::ffi::{
@@ -42,6 +43,7 @@ use drasi_plugin_sdk::ffi::{
 use libloading::Library;
 
 use super::change_receiver::{BootstrapReceiverProxy, ChangeReceiverProxy};
+use super::retained_call::{CallKind, RetainedCall};
 use crate::state_store_bridge::StateStoreVtableBuilder;
 
 pub(crate) fn read_plugin_version(library: &Library) -> Option<String> {
@@ -135,17 +137,20 @@ extern "C" fn host_executor(future_ptr: *mut c_void) -> *mut c_void {
 ///
 /// The host creates this proxy when the plugin factory produces a `SourceVtable`.
 /// All trait method calls dispatch through the vtable function pointers.
+///
+/// Lifecycle waits are cancellation-safe: the proxy retains the blocking call,
+/// plugin allocation and library until the callback has actually completed.
+/// A timeout cannot force-cancel a synchronous ordinary callback. Keep this
+/// proxy and retry cleanup; successful `dispose` is required before final release.
 pub struct SourceProxy {
     vtable: SourceVtable,
-    _library: Arc<Library>,
-    cached_id: String,
+    calls: RetainedCall,
+    cached_id: ComponentId,
     cached_type_name: String,
-    /// Keeps the per-instance callback context alive for the lifetime of this proxy.
-    _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
     /// Per-source identity provider set programmatically via
     /// [`Source::set_identity_provider`]. When present, it takes precedence over
     /// any instance-wide provider supplied via
-    /// [`SourceRuntimeContext::identity_provider`] during [`Source::initialize`].
+    /// [`SourceRuntimeContext::identity_provider`] during [`Source::bind_runtime_context`].
     identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
     resources: tokio::sync::Mutex<SourceResourceInventory>,
     resource_report_failed: AtomicBool,
@@ -215,9 +220,12 @@ impl SourceResourceInventory {
                     context.source_id
                 );
                 log::error!("{message}");
-                ComponentStatusHandle::new_wired(&context.source_id, context.update_tx.clone())
-                    .set_status(ComponentStatus::Error, Some(message))
-                    .await;
+                ComponentStatusHandle::new_wired(
+                    context.source_id.clone(),
+                    context.update_tx.clone(),
+                )
+                .set_status(ComponentStatus::Error, Some(message))
+                .await;
             }
         }
     }
@@ -242,21 +250,43 @@ unsafe impl Send for SourceProxy {}
 unsafe impl Sync for SourceProxy {}
 
 impl SourceProxy {
-    pub fn new(vtable: SourceVtable, library: Arc<Library>) -> Self {
-        let cached_id = unsafe { (vtable.id_fn)(vtable.state as *const c_void).to_string() };
+    #[cfg(test)]
+    pub(super) fn set_call_wait_timeout(&mut self, timeout: std::time::Duration) {
+        self.calls.set_wait_timeout(timeout);
+    }
+
+    pub fn new(vtable: SourceVtable, library: Arc<Library>) -> anyhow::Result<Self> {
+        let cached_id = match ComponentId::try_new(unsafe {
+            (vtable.id_fn)(vtable.state as *const c_void).to_string()
+        }) {
+            Ok(id) => id,
+            Err(error) => {
+                super::drop_worker::execute_drop_fn(
+                    vtable.drop_fn,
+                    drasi_plugin_sdk::ffi::SendMutPtr(vtable.state),
+                );
+                return Err(anyhow::Error::new(error).context("invalid source UUID from plugin"));
+            }
+        };
         let cached_type_name =
             unsafe { (vtable.type_name_fn)(vtable.state as *const c_void).to_string() };
-        Self {
+        let calls = RetainedCall::new(
+            vtable.state,
+            vtable.drop_fn,
+            library,
+            cached_id.clone(),
+            None,
+        );
+        Ok(Self {
             vtable,
-            _library: library,
+            calls,
             cached_id,
             cached_type_name,
-            _callback_ctx: std::sync::Mutex::new(None),
             identity_provider: std::sync::Mutex::new(None),
             resources: tokio::sync::Mutex::new(SourceResourceInventory::default()),
             resource_report_failed: AtomicBool::new(false),
             plugin_origin: None,
-        }
+        })
     }
 
     fn with_plugin_origin(mut self, origin: Option<PluginOrigin>) -> Self {
@@ -267,7 +297,7 @@ impl SourceProxy {
 
 #[async_trait]
 impl Source for SourceProxy {
-    fn id(&self) -> &str {
+    fn id(&self) -> &ComponentId {
         &self.cached_id
     }
 
@@ -321,22 +351,41 @@ impl Source for SourceProxy {
         }
     }
 
+    async fn initialize(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.resource_report_failed.load(Ordering::Acquire),
+            "Source '{}' resource observation failed",
+            self.cached_id
+        );
+        self.calls
+            .call(CallKind::Initialize, self.vtable.initialize_fn)
+            .await
+    }
+
     async fn start(&self) -> anyhow::Result<()> {
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let start_fn = self.vtable.start_fn;
-        let result = std::thread::spawn(move || (start_fn)(state.as_ptr()))
-            .join()
-            .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+        self.calls.call(CallKind::Start, self.vtable.start_fn).await
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let stop_fn = self.vtable.stop_fn;
-        let result = std::thread::spawn(move || (stop_fn)(state.as_ptr()))
-            .join()
-            .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+        self.calls.call(CallKind::Stop, self.vtable.stop_fn).await
+    }
+
+    async fn dispose(&self) -> anyhow::Result<()> {
+        self.calls
+            .call(CallKind::Dispose, self.vtable.dispose_fn)
+            .await
+    }
+
+    async fn pause_processing(&self) -> anyhow::Result<()> {
+        self.calls
+            .call(CallKind::PauseProcessing, self.vtable.pause_processing_fn)
+            .await
+    }
+
+    async fn resume_processing(&self) -> anyhow::Result<()> {
+        self.calls
+            .call(CallKind::ResumeProcessing, self.vtable.resume_processing_fn)
+            .await
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -363,8 +412,8 @@ impl Source for SourceProxy {
         let nodes_json = serde_json::to_string(&settings.nodes)?;
         let relations_json = serde_json::to_string(&settings.relations)?;
 
-        let source_id_ffi = FfiStr::from_str(&settings.source_id);
-        let query_id_ffi = FfiStr::from_str(&settings.query_id);
+        let source_id_ffi = FfiStr::from_str(settings.source_id.as_str());
+        let query_id_ffi = FfiStr::from_str(settings.query_id.as_str());
         let nodes_ffi = FfiStr::from_str(&nodes_json);
         let relations_ffi = FfiStr::from_str(&relations_json);
         let enable_bootstrap = settings.enable_bootstrap;
@@ -554,6 +603,13 @@ impl Source for SourceProxy {
             Some(host_rx)
         };
 
+        let query_id = ComponentId::try_new(query_id).context("invalid subscription query UUID")?;
+        let source_id =
+            ComponentId::try_new(source_id).context("invalid subscription source UUID")?;
+        anyhow::ensure!(
+            query_id == settings.query_id && source_id == settings.source_id,
+            "plugin subscription returned another query or source"
+        );
         Ok(SubscriptionResponse {
             query_id,
             source_id,
@@ -572,12 +628,12 @@ impl Source for SourceProxy {
         (self.vtable.supports_replay_fn)(self.vtable.state)
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &ComponentId) {
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let remove_fn = self.vtable.remove_position_handle_fn;
-        let qid = query_id.to_string();
+        let qid = query_id.clone();
         let result = std::thread::spawn(move || {
-            let ffi_qid = drasi_plugin_sdk::ffi::FfiStr::from_str(&qid);
+            let ffi_qid = drasi_plugin_sdk::ffi::FfiStr::from_str(qid.as_str());
             (remove_fn)(state.as_ptr(), ffi_qid)
         })
         .join()
@@ -596,16 +652,16 @@ impl Source for SourceProxy {
         }
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let deprovision_fn = self.vtable.deprovision_fn;
-        let result = std::thread::spawn(move || (deprovision_fn)(state.as_ptr()))
-            .join()
-            .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.calls
+            .call(
+                CallKind::DeleteOwnedResources,
+                self.vtable.delete_owned_resources_fn,
+            )
+            .await
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         let identity_provider = crate::proxies::identity_resolution::resolve_identity_provider(
             &self.identity_provider,
             context.identity_provider.clone(),
@@ -618,94 +674,109 @@ impl Source for SourceProxy {
             .report(&self.resource_report_failed, self.plugin_origin.as_ref())
             .await;
 
-        let state_store_vtable = context
-            .state_store
-            .as_ref()
-            .map(|ss| StateStoreVtableBuilder::build(ss.clone()));
+        let update_tx = context.update_tx.clone();
+        let runtime_handle = tokio::runtime::Handle::current();
+        let bind_fn = self.vtable.bind_runtime_context_fn;
+        let result = self
+            .calls
+            .run(CallKind::BindRuntimeContext, move |owner| {
+                let instance_id_str = context.instance_id.clone();
+                let component_id_str = context.source_id.clone();
 
-        let wal_provider_vtable = context
-            .wal_provider
-            .as_ref()
-            .map(|wp| crate::wal_provider_bridge::WalProviderVtableBuilder::build(wp.clone()));
+                let instance_id_ffi = FfiStr::from_str(&instance_id_str);
+                let component_id_ffi = FfiStr::from_str(component_id_str.as_str());
 
-        let instance_id_str = context.instance_id.clone();
-        let component_id_str = context.source_id.clone();
+                // Create per-instance callback context that routes logs to the
+                // ComponentLogRegistry and lifecycle events through the SourceManager's
+                // event channel (same path as static sources).
+                let per_instance_ctx = Arc::new(crate::callbacks::InstanceCallbackContext {
+                    instance_id: instance_id_str.clone(),
+                    runtime_handle,
+                    log_registry: drasi_lib::observability::get_or_init_global_registry(),
+                    update_tx: context.update_tx.clone(),
+                });
 
-        let instance_id_ffi = FfiStr::from_str(&instance_id_str);
-        let component_id_ffi = FfiStr::from_str(&component_id_str);
+                // Keep the existing process-pinned callback reference: an ordinary
+                // plugin may emit late log/status callbacks after its lifecycle call.
+                let mut callback_context = owner.callback_context.lock().map_err(|error| {
+                    anyhow::anyhow!("Source callback context lock poisoned: {error}")
+                })?;
+                let ctx_ptr = Arc::into_raw(per_instance_ctx.clone()) as *mut c_void;
+                *callback_context = Some(per_instance_ctx);
+                drop(callback_context);
 
-        // Ownership of this allocation transfers to the plugin. ABI 0.17
-        // `FfiStateStoreProxy` frees the vtable and its state on `Drop`; ABI 0.16
-        // plugins retain it (see `FfiRuntimeContext::state_store`). The host must
-        // not free it.
-        let ss_ptr = state_store_vtable
-            .map(|v| Box::into_raw(Box::new(v)) as *const _)
-            .unwrap_or(std::ptr::null());
+                // Transfer services only after fallible host-side preparation.
+                // State-store layout and ownership remain unchanged from ABI 0.17.
+                let ss_ptr = context
+                    .state_store
+                    .as_ref()
+                    .map(|store| {
+                        Box::into_raw(Box::new(StateStoreVtableBuilder::build(store.clone())))
+                            as *const _
+                    })
+                    .unwrap_or(std::ptr::null());
+                let wp_ptr = context
+                    .wal_provider
+                    .as_ref()
+                    .map(|provider| {
+                        Box::into_raw(Box::new(
+                            crate::wal_provider_bridge::WalProviderVtableBuilder::build(
+                                provider.clone(),
+                            ),
+                        )) as *const _
+                    })
+                    .unwrap_or(std::ptr::null());
 
-        let wp_ptr = wal_provider_vtable
-            .map(|v| Box::into_raw(Box::new(v)) as *const _)
-            .unwrap_or(std::ptr::null());
+                let identity_vtable = identity_provider
+                    .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
-        // Create per-instance callback context that routes logs to the
-        // ComponentLogRegistry and lifecycle events through the SourceManager's
-        // event channel (same path as static sources).
-        let per_instance_ctx = Arc::new(crate::callbacks::InstanceCallbackContext {
-            instance_id: instance_id_str.clone(),
-            runtime_handle: tokio::runtime::Handle::current(),
-            log_registry: drasi_lib::observability::get_or_init_global_registry(),
-            update_tx: context.update_tx.clone(),
-        });
+                let ip_ptr: *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable =
+                    identity_vtable
+                        .map(|v| Box::into_raw(Box::new(v)))
+                        .unwrap_or(std::ptr::null_mut());
 
-        // Bug C fix: hand the plugin a strong reference (Arc::into_raw bumps
-        // the refcount) so log/lifecycle callbacks emitted late by the plugin
-        // (e.g. from inside stop_fn or from internal tasks shutting down) do
-        // not deref freed memory. The matching `mem::forget` happens in Drop
-        // and intentionally leaks one strong ref per instance — acceptable
-        // because the cdylib itself is intentionally process-leaked (see
-        // host-sdk/src/loader.rs).
-        let ctx_for_plugin = per_instance_ctx.clone();
-        let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut c_void;
+                let ffi_ctx = FfiRuntimeContext {
+                    instance_id: instance_id_ffi,
+                    component_id: component_id_ffi,
+                    resolved_query_ids_json: FfiStr::from_str("[]"),
+                    state_store: ss_ptr,
+                    identity_provider: ip_ptr as *const _,
+                    log_callback: Some(crate::callbacks::instance_log_callback),
+                    log_ctx: ctx_ptr,
+                    lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
+                    lifecycle_ctx: ctx_ptr,
+                    snapshot_fetcher: std::ptr::null(),
+                    wal_provider: wp_ptr,
+                };
 
-        // Store the Arc so it stays alive as long as this proxy
-        if let Ok(mut guard) = self._callback_ctx.lock() {
-            *guard = Some(per_instance_ctx);
-        }
+                let result = bind_fn(owner.state.as_ptr(), &ffi_ctx as *const FfiRuntimeContext);
 
-        let identity_vtable =
-            identity_provider.map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
-
-        let ip_ptr: *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable = identity_vtable
-            .map(|v| Box::into_raw(Box::new(v)))
-            .unwrap_or(std::ptr::null_mut());
-
-        let ffi_ctx = FfiRuntimeContext {
-            instance_id: instance_id_ffi,
-            component_id: component_id_ffi,
-            state_store: ss_ptr,
-            identity_provider: ip_ptr as *const _,
-            log_callback: Some(crate::callbacks::instance_log_callback),
-            log_ctx: ctx_ptr,
-            lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
-            lifecycle_ctx: ctx_ptr,
-            snapshot_fetcher: std::ptr::null(),
-            wal_provider: wp_ptr,
-        };
-
-        (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);
-
-        // Reclaim the identity-provider vtable struct we allocated for `ip_ptr`. This is a
-        // transient pointer: the plugin SDK (>= 0.10.0) copies the vtable fields by value in
-        // `FfiIdentityProviderProxy::new` during `initialize_fn` and never retains `ip_ptr`,
-        // so it is safe to free the struct here. Plugins built against SDK < 0.10.0 retained
-        // the raw pointer; they are rejected by the loader's explicit ABI allowlist
-        // (see `validate_plugin_metadata` in `host-sdk/src/loader.rs`), which prevents a
-        // use-after-free. This frees only the `IdentityProviderVtable` struct (no `Drop`
-        // impl) — the underlying state remains owned by the plugin proxy and is released via
-        // `drop_fn` when that proxy is dropped.
-        if !ip_ptr.is_null() {
-            unsafe {
-                drop(Box::from_raw(ip_ptr));
-            }
+                // Reclaim the identity-provider vtable struct we allocated for `ip_ptr`. This is a
+                // transient pointer: the plugin SDK (>= 0.10.0) copies the vtable fields by value in
+                // `FfiIdentityProviderProxy::new` during binding and never retains `ip_ptr`,
+                // so it is safe to free the struct here. Plugins built against SDK < 0.10.0 retained
+                // the raw pointer; they are rejected by the loader's explicit ABI allowlist
+                // (see `validate_plugin_metadata` in `host-sdk/src/loader.rs`), which prevents a
+                // use-after-free. This frees only the `IdentityProviderVtable` struct (no `Drop`
+                // impl) — the underlying state remains owned by the plugin proxy and is released via
+                // `drop_fn` when that proxy is dropped.
+                if !ip_ptr.is_null() {
+                    unsafe {
+                        drop(Box::from_raw(ip_ptr));
+                    }
+                }
+                unsafe { result.into_result() }.map_err(anyhow::Error::msg)
+            })
+            .await;
+        if let Err(error) = result {
+            let message = format!(
+                "Source '{}' context binding failed: {error:#}",
+                self.cached_id
+            );
+            log::error!("{message}");
+            ComponentStatusHandle::new_wired(self.cached_id.clone(), update_tx)
+                .set_status(ComponentStatus::Error, Some(message))
+                .await;
         }
     }
 
@@ -727,16 +798,16 @@ impl Source for SourceProxy {
     }
 
     /// Stash a per-instance identity provider that will take precedence over
-    /// the runtime-context provider during [`Source::initialize`].
+    /// the runtime-context provider during [`Source::bind_runtime_context`].
     ///
     /// # Timing constraint (FFI sources only)
     ///
     /// For `SourceProxy`, the provider must be set **before** the source is
     /// added to `DrasiLib` (i.e. before the lifecycle manager calls
-    /// `initialize`). There is no FFI hook for late identity-provider
+    /// `bind_runtime_context`). There is no FFI hook for late identity-provider
     /// injection — the plugin only receives the provider through
-    /// `FfiRuntimeContext` during `initialize_fn`. Calls made after
-    /// `initialize` have no effect on the running plugin.
+    /// `FfiRuntimeContext` during `bind_runtime_context_fn`. Calls made after
+    /// binding have no effect on the running plugin.
     async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
         // See doc comment above for the timing constraint.
         match self.identity_provider.lock() {
@@ -745,27 +816,6 @@ impl Source for SourceProxy {
                 "Source '{}': identity_provider mutex is poisoned; provider not set",
                 self.cached_id
             ),
-        }
-    }
-}
-
-impl Drop for SourceProxy {
-    fn drop(&mut self) {
-        // Run plugin drop on the shared worker thread to avoid TLS destructor
-        // races on macOS arm64 (see drop_worker module for details).
-        let drop_fn = self.vtable.drop_fn;
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        super::drop_worker::execute_drop_fn(drop_fn, state);
-
-        // Bug C fix: leak the per-instance callback context Arc unconditionally.
-        // The strong reference handed to the plugin via `Arc::into_raw` in
-        // initialize() is never reclaimed — late log/lifecycle callbacks
-        // emitted by the plugin (during stop_fn or from internal tasks) must
-        // still find a valid pointer. Matches the pattern in ReactionProxy.
-        if let Ok(mut guard) = self._callback_ctx.lock() {
-            if let Some(ctx) = guard.take() {
-                std::mem::forget(ctx);
-            }
         }
     }
 }
@@ -842,12 +892,12 @@ impl SourcePluginDescriptor for SourcePluginProxy {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Source>> {
         let config_str = serde_json::to_string(config_json)?;
-        let id_ffi = FfiStr::from_str(id);
+        let id_ffi = FfiStr::from_str(id.as_str());
         let config_ffi = FfiStr::from_str(&config_str);
 
         let state = self.vtable.state;
@@ -868,10 +918,9 @@ impl SourcePluginDescriptor for SourcePluginProxy {
 
         let vtable = unsafe { *Box::from_raw(vtable_ptr) };
         Ok(Box::new(
-            SourceProxy::new(vtable, self.library.clone()).with_plugin_origin(known_plugin_origin(
-                &self.plugin_id,
-                self.plugin_version.as_deref(),
-            )),
+            SourceProxy::new(vtable, self.library.clone())?.with_plugin_origin(
+                known_plugin_origin(&self.plugin_id, self.plugin_version.as_deref()),
+            ),
         ))
     }
 }
@@ -932,9 +981,21 @@ pub(super) mod resource_observer_tests {
             _event_tx: BootstrapEventSender,
             settings: Option<&SourceSubscriptionSettings>,
         ) -> anyhow::Result<BootstrapResult> {
-            assert_eq!(request.query_id, "query");
-            assert_eq!(context.source_id, "source");
-            assert_eq!(settings.unwrap().source_id, "source");
+            assert_eq!(
+                request.query_id,
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            );
+            assert_eq!(
+                context.source_id,
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            );
+            assert_eq!(
+                settings.unwrap().source_id,
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            );
             Ok(BootstrapResult {
                 event_count: self.calls.fetch_add(1, Ordering::AcqRel) + 1,
                 source_position: None,
@@ -962,7 +1023,14 @@ pub(super) mod resource_observer_tests {
 
         let observer = Arc::new(RecordingObserver::default());
         let (update_tx, _rx) = mpsc::channel(8);
-        let mut context = SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+        let mut context = SourceRuntimeContext::new(
+            "instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            None,
+            update_tx,
+            None,
+        );
         context.resource_observer = Some(observer.clone());
         inventory.set_context(&context, None);
         inventory.report(&AtomicBool::new(false), None).await;
@@ -976,8 +1044,14 @@ pub(super) mod resource_observer_tests {
             };
             assert!(Arc::ptr_eq(reported, &weak.upgrade().unwrap()));
             let settings = SourceSubscriptionSettings {
-                source_id: "source".into(),
-                query_id: "query".into(),
+                source_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000004d",
+                )
+                .expect("fixture UUID"),
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000002e",
+                )
+                .expect("fixture UUID"),
                 enable_bootstrap: true,
                 nodes: Default::default(),
                 relations: Default::default(),
@@ -990,12 +1064,21 @@ pub(super) mod resource_observer_tests {
                 let result = provider
                     .bootstrap(
                         BootstrapRequest {
-                            query_id: "query".into(),
+                            query_id: drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000002e",
+                            )
+                            .expect("fixture UUID"),
                             node_labels: vec![],
                             relation_labels: vec![],
                             request_id: "request".into(),
                         },
-                        &BootstrapContext::new_minimal("instance".into(), "source".into()),
+                        &BootstrapContext::new_minimal(
+                            "instance".into(),
+                            drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                        ),
                         tx,
                         Some(&settings),
                     )
@@ -1016,8 +1099,14 @@ pub(super) mod resource_observer_tests {
     async fn legacy_inventory_retains_no_context_or_strong_bootstrap_reference() {
         let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
         let (update_tx, mut rx) = mpsc::channel(8);
-        let context =
-            SourceRuntimeContext::new("instance", "source", Some(store.clone()), update_tx, None);
+        let context = SourceRuntimeContext::new(
+            "instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            Some(store.clone()),
+            update_tx,
+            None,
+        );
         let mut inventory = SourceResourceInventory::default();
         inventory.set_context(&context, None);
         assert!(inventory.context.is_none());
@@ -1051,7 +1140,8 @@ pub(super) mod resource_observer_tests {
         let (update_tx, _rx) = mpsc::channel(8);
         let mut context = SourceRuntimeContext::new(
             "instance",
-            "source",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             Some(store.clone()),
             update_tx,
             Some(Arc::new(PasswordIdentityProvider::new("default", "test"))),
@@ -1096,7 +1186,14 @@ pub(super) mod resource_observer_tests {
         let observer = Arc::new(RecordingObserver::default());
         observer.fail.store(true, Ordering::Release);
         let (update_tx, mut rx) = mpsc::channel(8);
-        let mut context = SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+        let mut context = SourceRuntimeContext::new(
+            "instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            None,
+            update_tx,
+            None,
+        );
         context.resource_observer = Some(observer.clone());
         let mut inventory = SourceResourceInventory::default();
         inventory.set_context(&context, None);
@@ -1108,7 +1205,11 @@ pub(super) mod resource_observer_tests {
             status,
             message,
         } = rx.try_recv().unwrap();
-        assert_eq!(component_id, "source");
+        assert_eq!(
+            component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")
+        );
         assert_eq!(status, ComponentStatus::Error);
         assert!(message.unwrap().contains("inventory rejected"));
 
@@ -1161,11 +1262,11 @@ pub(super) mod resource_observer_tests {
 
     type ResumeRequests = Arc<std::sync::Mutex<Vec<Option<u64>>>>;
 
-    struct OriginSource(String, Option<ResumeRequests>);
+    struct OriginSource(drasi_core_types::ComponentId, Option<ResumeRequests>);
 
     #[async_trait]
     impl Source for OriginSource {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             &self.0
         }
         fn type_name(&self) -> &str {
@@ -1174,7 +1275,7 @@ pub(super) mod resource_observer_tests {
         fn properties(&self) -> HashMap<String, serde_json::Value> {
             HashMap::new()
         }
-        async fn initialize(&self, context: SourceRuntimeContext) {
+        async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
             assert!(context.resource_observer.is_none());
         }
         async fn start(&self) -> anyhow::Result<()> {
@@ -1218,11 +1319,11 @@ pub(super) mod resource_observer_tests {
         }
         async fn create_source(
             &self,
-            id: &str,
+            id: &drasi_core_types::ComponentId,
             _config: &serde_json::Value,
             _auto_start: bool,
         ) -> anyhow::Result<Box<dyn Source>> {
-            Ok(Box::new(OriginSource(id.into(), None)))
+            Ok(Box::new(OriginSource(id.clone(), None)))
         }
     }
 
@@ -1262,7 +1363,14 @@ pub(super) mod resource_observer_tests {
                 let factory = origin_factory(id, version);
                 assert_eq!(factory.config_version(), "99.0.0");
                 let source = factory
-                    .create_source("source", &serde_json::json!({}), false)
+                    .create_source(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                        &serde_json::json!({}),
+                        false,
+                    )
                     .await
                     .unwrap();
                 let expected = if !id.is_empty() && version == Some("1.2.3") {
@@ -1277,17 +1385,25 @@ pub(super) mod resource_observer_tests {
                 assert_eq!(proxy.plugin_origin, expected);
                 let observer = Arc::new(RecordingObserver::default());
                 let (update_tx, mut rx) = mpsc::channel(8);
-                let mut context =
-                    SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+                let mut context = SourceRuntimeContext::new(
+                    "instance",
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    None,
+                    update_tx,
+                    None,
+                );
                 if observed {
                     context.resource_observer = Some(observer.clone());
                 }
-                source.initialize(context).await;
+                source.bind_runtime_context(context).await;
+                source.initialize().await.unwrap();
                 let expected_origins: Vec<_> = expected.filter(|_| observed).into_iter().collect();
                 assert_eq!(*observer.origins.lock().await, expected_origins);
                 assert_eq!(observer.reports.lock().await.len(), usize::from(observed));
                 assert_eq!(source.status().await, ComponentStatus::Stopped);
                 assert!(rx.try_recv().is_err());
+                source.dispose().await.unwrap();
             }
         }
     }
@@ -1296,7 +1412,11 @@ pub(super) mod resource_observer_tests {
     async fn resume_from_zero_survives_both_source_ffi_builders() {
         for boxed in [false, true] {
             let requests: ResumeRequests = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let source = OriginSource("source".into(), Some(requests.clone()));
+            let source = OriginSource(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                Some(requests.clone()),
+            );
             let vtable = if boxed {
                 drasi_plugin_sdk::ffi::build_source_vtable_from_boxed(
                     Box::new(source),
@@ -1312,13 +1432,19 @@ pub(super) mod resource_observer_tests {
                     test_runtime,
                 )
             };
-            let proxy = SourceProxy::new(vtable, test_library());
+            let proxy = SourceProxy::new(vtable, test_library()).expect("source proxy");
             let expected = [None, Some(0), Some(1), Some(42), Some(u64::MAX)];
             for resume_sequence in expected {
                 let result = proxy
                     .subscribe(SourceSubscriptionSettings {
-                        source_id: "source".into(),
-                        query_id: "query".into(),
+                        source_id: drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                        query_id: drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002e",
+                        )
+                        .expect("fixture UUID"),
                         enable_bootstrap: false,
                         nodes: Default::default(),
                         relations: Default::default(),
@@ -1330,43 +1456,69 @@ pub(super) mod resource_observer_tests {
                 assert!(result.is_err(), "the fixture records without delivering");
             }
             assert_eq!(*requests.lock().unwrap(), expected, "boxed={boxed}");
+            proxy.dispose().await.unwrap();
         }
     }
 
     #[tokio::test]
     async fn directly_constructed_source_has_no_inferred_origin() {
         let vtable = drasi_plugin_sdk::ffi::build_source_vtable(
-            OriginSource("source".into(), None),
+            OriginSource(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                None,
+            ),
             test_executor,
             |_, _, _| {},
             test_runtime,
         );
-        let source = SourceProxy::new(vtable, test_library());
+        let source = SourceProxy::new(vtable, test_library()).expect("source proxy");
         assert!(source.plugin_origin.is_none());
         let observer = Arc::new(RecordingObserver::default());
         let (update_tx, _rx) = mpsc::channel(8);
-        let mut context = SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+        let mut context = SourceRuntimeContext::new(
+            "instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            None,
+            update_tx,
+            None,
+        );
         context.resource_observer = Some(observer.clone());
-        source.initialize(context).await;
+        source.bind_runtime_context(context).await;
+        source.initialize().await.unwrap();
         assert!(observer.origins.lock().await.is_empty());
         assert_eq!(observer.reports.lock().await.len(), 1);
+        source.dispose().await.unwrap();
     }
 
     #[tokio::test]
     async fn origin_failure_preserves_provider_reporting_and_error_status() {
         for reject_inventory in [false, true] {
             let source = origin_factory("explicit-source-plugin", Some("1.2.3"))
-                .create_source("source", &serde_json::json!({}), false)
+                .create_source(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &serde_json::json!({}),
+                    false,
+                )
                 .await
                 .unwrap();
             let observer = Arc::new(RecordingObserver::default());
             observer.fail_plugin.store(true, Ordering::Release);
             observer.fail.store(reject_inventory, Ordering::Release);
             let (update_tx, mut rx) = mpsc::channel(8);
-            let mut context =
-                SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+            let mut context = SourceRuntimeContext::new(
+                "instance",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                None,
+                update_tx,
+                None,
+            );
             context.resource_observer = Some(observer.clone());
-            source.initialize(context).await;
+            source.bind_runtime_context(context).await;
+            assert!(source.initialize().await.is_err());
             assert_eq!(observer.origins.lock().await.len(), 1);
             assert_eq!(observer.reports.lock().await.len(), 1);
             assert_eq!(source.status().await, ComponentStatus::Error);
@@ -1377,6 +1529,7 @@ pub(super) mod resource_observer_tests {
             let message = message.unwrap();
             assert!(message.contains("origin rejected"));
             assert_eq!(message.contains("inventory rejected"), reject_inventory);
+            source.dispose().await.unwrap();
         }
     }
 }

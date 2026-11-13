@@ -26,8 +26,8 @@ pub use reaction::SqsReaction;
 
 /// Builder for SQS reactions.
 pub struct SqsReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     queue_url: String,
     region: Option<String>,
     endpoint_url: Option<String>,
@@ -42,9 +42,9 @@ pub struct SqsReactionBuilder {
 }
 
 impl SqsReactionBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             queue_url: String::new(),
             region: None,
@@ -60,13 +60,42 @@ impl SqsReactionBuilder {
         }
     }
 
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
         self
     }
 
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
+    }
+
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
+        self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
     }
 
@@ -236,12 +265,19 @@ mod tests {
 
     #[test]
     fn test_sqs_builder_defaults() {
-        let reaction = SqsReaction::builder("test")
-            .with_queue_url("https://example.com/queue")
-            .build()
-            .expect("builder should succeed");
+        let reaction = SqsReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_queue_url("https://example.com/queue")
+        .build()
+        .expect("builder should succeed");
 
-        assert_eq!(reaction.id(), "test");
+        assert_eq!(
+            reaction.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID")
+        );
         assert!(reaction.auto_start());
         let props = reaction.properties();
         assert_eq!(
@@ -258,18 +294,28 @@ mod tests {
 
     #[test]
     fn test_sqs_builder_custom_values() {
-        let reaction = SqsReaction::builder("test")
-            .with_queue_url("https://example.com/queue.fifo")
-            .with_region("us-east-1")
-            .with_endpoint_url("http://localhost:9324") // DevSkim: ignore DS137138
-            .with_fifo_queue(true)
-            .with_message_group_id_template("{{query_id}}")
-            .with_query("query-a")
-            .with_auto_start(false)
-            .build()
-            .expect("builder should succeed");
+        let reaction = SqsReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_queue_url("https://example.com/queue.fifo")
+        .with_region("us-east-1")
+        .with_endpoint_url("http://localhost:9324") // DevSkim: ignore DS137138
+        .with_fifo_queue(true)
+        .with_message_group_id_template("{{query_id}}")
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query-a").expect("fixture component name"),
+        )
+        .with_auto_start(false)
+        .build()
+        .expect("builder should succeed");
 
-        assert_eq!(reaction.query_ids(), vec!["query-a"]);
+        assert_eq!(
+            reaction.query_inputs(),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query-a").expect("fixture component name")
+            )]
+        );
         assert!(!reaction.auto_start());
         let props = reaction.properties();
         assert_eq!(
@@ -290,7 +336,12 @@ mod tests {
 
     #[test]
     fn test_builder_requires_queue_url() {
-        let err = match SqsReaction::builder("test").build() {
+        let err = match SqsReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .build()
+        {
             Ok(_) => panic!("queue_url is required"),
             Err(err) => err,
         };

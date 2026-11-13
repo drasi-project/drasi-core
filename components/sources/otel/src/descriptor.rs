@@ -153,7 +153,7 @@ impl SourcePluginDescriptor for OtelSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -186,7 +186,7 @@ impl SourcePluginDescriptor for OtelSourceDescriptor {
             durability: dto.durability.clone(),
         };
 
-        let mut source = OtelSourceBuilder::new(id)
+        let mut source = OtelSourceBuilder::new(id.clone())
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
@@ -207,10 +207,19 @@ mod tests {
             "metricAllowlist": ["latency_p99_ms"]
         });
         let source = OtelSourceDescriptor
-            .create_source("otel", &json, false)
+            .create_source(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                    .expect("fixture UUID"),
+                &json,
+                false,
+            )
             .await
             .unwrap();
-        assert_eq!(source.id(), "otel");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID")
+        );
         assert_eq!(source.type_name(), "otel");
     }
 
@@ -218,7 +227,12 @@ mod tests {
     async fn create_source_rejects_unknown_field() {
         let json = serde_json::json!({ "notAField": true });
         assert!(OtelSourceDescriptor
-            .create_source("otel", &json, false)
+            .create_source(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                    .expect("fixture UUID"),
+                &json,
+                false
+            )
             .await
             .is_err());
     }

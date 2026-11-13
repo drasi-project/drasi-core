@@ -237,6 +237,7 @@ pub use descriptor::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, IndexBackendPluginDescriptor,
     ReactionPluginDescriptor, SourcePluginDescriptor,
 };
+pub use drasi_lib::{ComponentId, ComponentName};
 pub use mapper::{DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
@@ -717,7 +718,7 @@ macro_rules! export_plugin {
 
         /// Emit a lifecycle event to the host.
         pub fn __emit_lifecycle(
-            component_id: &str,
+            component_id: &$crate::ComponentId,
             event_type: $crate::ffi::FfiLifecycleEventType,
             message: &str,
         ) {
@@ -727,7 +728,7 @@ macro_rules! export_plugin {
                     unsafe { ::std::mem::transmute(ptr) };
                 let ctx = __LIFECYCLE_CTX.load(::std::sync::atomic::Ordering::Acquire);
                 let event = $crate::ffi::FfiLifecycleEvent {
-                    component_id: $crate::ffi::FfiStr::from_str(component_id),
+                    component_id: $crate::ffi::FfiStr::from_str(component_id.as_str()),
                     component_type: $crate::ffi::FfiStr::from_str("plugin"),
                     event_type,
                     message: $crate::ffi::FfiStr::from_str(message),

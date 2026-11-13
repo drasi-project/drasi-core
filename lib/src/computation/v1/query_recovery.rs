@@ -32,7 +32,7 @@ impl ContinuousQueryTransformer {
     /// never a partially cleared query. Completion leaves a baseline reset
     /// marker that carries the generation even for checkpoint stores whose
     /// `write_output_generation` is a no-op.
-    pub(super) async fn deprovision_state(&mut self) -> anyhow::Result<()> {
+    pub(super) async fn delete_owned_state(&mut self) -> anyhow::Result<()> {
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.stop().await?;
         }
@@ -43,7 +43,8 @@ impl ContinuousQueryTransformer {
         let previous = self.read_reset_marker().await?;
         let generation = self.next_output_generation(previous.as_ref()).await?;
         if !self.provider.is_volatile() {
-            let id = self.definition.id.as_str();
+            let id = &self.definition.id;
+            let output = self.output_key();
             let resources = query.resources();
             let marker = |in_progress| {
                 serde_json::to_vec(&ResetMarker {
@@ -61,7 +62,7 @@ impl ContinuousQueryTransformer {
                     .await?;
             }
             if let Some(store) = resources.checkpoint_store() {
-                store.write_output_generation(id, generation).await?;
+                store.write_output_generation(&output, generation).await?;
             }
             let baseline = marker(false)?;
             query
@@ -90,10 +91,10 @@ impl ContinuousQueryTransformer {
                         store.clear_checkpoints().await.map_err(|error| {
                             crate::indexes::operation_error(id, "clear checkpoints", error)
                         })?;
-                        store.stage_result_sequence(id, 0).await?;
+                        store.stage_result_sequence(&output, 0).await?;
                     }
                     if let Some(outbox) = resources.outbox_writer() {
-                        outbox.clear(id).await?;
+                        outbox.clear(&output).await?;
                         outbox.append(&self.reset_key(), 1, &baseline).await?;
                     }
                     if let Some(live) = resources.live_results_writer() {
@@ -124,7 +125,7 @@ impl ContinuousQueryTransformer {
     async fn next_output_generation(&self, marker: Option<&ResetMarker>) -> anyhow::Result<u64> {
         let persisted = match self.query()?.resources().checkpoint_store() {
             Some(store) => store
-                .read_output_generation(self.definition.id.as_str())
+                .read_output_generation(&self.output_key())
                 .await?
                 .unwrap_or(0),
             None => 0,
@@ -132,8 +133,8 @@ impl ContinuousQueryTransformer {
         ResetMarker::next_generation(self.results.snapshot()?.generation, persisted, marker)
     }
 
-    fn reset_key(&self) -> String {
-        super::query_reset_key(self.definition.id.as_str())
+    fn reset_key(&self) -> drasi_core::interface::OutputPartition {
+        super::query_reset_key(&self.definition.id)
     }
 
     pub(super) async fn read_reset_marker(&self) -> anyhow::Result<Option<ResetMarker>> {
@@ -258,7 +259,7 @@ impl ContinuousQueryTransformer {
                 .resources()
                 .outbox_writer()
                 .ok_or_else(|| anyhow::anyhow!("persistent reset requires an output store"))?;
-            for (sequence, bytes) in outbox.read_from(self.definition.id.as_str(), 0).await? {
+            for (sequence, bytes) in outbox.read_from(&self.output_key(), 0).await? {
                 let identity = self
                     .codec
                     .decode(&bytes)
@@ -286,7 +287,9 @@ impl ContinuousQueryTransformer {
         let mut delivery_sequence = self.delivery_sequence.load(Ordering::Acquire);
         if let Some(checkpoint) = resources.checkpoint_store() {
             if let Some(saved) = checkpoint
-                .read_checkpoint(delivery::DELIVERY_SEQUENCE)
+                .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                    delivery::DELIVERY_SEQUENCE.to_owned(),
+                ))
                 .await?
             {
                 delivery_sequence = delivery_sequence.max(saved.sequence);
@@ -320,18 +323,23 @@ impl ContinuousQueryTransformer {
         if let Some(checkpoint) = resources.checkpoint_store() {
             highwater = highwater.max(
                 checkpoint
-                    .read_result_sequence(self.definition.id.as_str())
+                    .read_result_sequence(&self.output_key())
                     .await?
                     .unwrap_or(0),
             );
-            if let Some(pending) = checkpoint.read_checkpoint(PENDING_OUTPUT).await? {
+            if let Some(pending) = checkpoint
+                .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                    PENDING_OUTPUT.to_owned(),
+                ))
+                .await?
+            {
                 highwater = highwater.max(pending.sequence);
             }
         }
         if let Some(outbox) = resources.outbox_writer() {
             highwater = highwater.max(
                 outbox
-                    .read_latest_sequence(self.definition.id.as_str())
+                    .read_latest_sequence(&self.output_key())
                     .await?
                     .unwrap_or(0),
             );
@@ -348,7 +356,7 @@ impl ContinuousQueryTransformer {
         }
         if let Some(checkpoint) = resources.checkpoint_store() {
             checkpoint
-                .write_output_generation(self.definition.id.as_str(), generation)
+                .write_output_generation(&self.output_key(), generation)
                 .await?;
         }
         let config = self.definition.configuration_bytes(&self.execution)?;
@@ -356,51 +364,81 @@ impl ContinuousQueryTransformer {
         query
             .resource_transaction(|| async {
                 crate::indexes::check_clear(
-                    self.definition.id.as_str(),
+                    &self.definition.id,
                     "clear element index",
                     resources.indexes().element_index.clear().await,
                 )?;
                 crate::indexes::check_clear(
-                    self.definition.id.as_str(),
+                    &self.definition.id,
                     "clear archive index",
                     resources.indexes().archive_index.clear().await,
                 )?;
                 crate::indexes::check_clear(
-                    self.definition.id.as_str(),
+                    &self.definition.id,
                     "clear result index",
                     resources.indexes().result_index.clear().await,
                 )?;
                 crate::indexes::check_clear(
-                    self.definition.id.as_str(),
+                    &self.definition.id,
                     "clear future queue",
                     query.future_queue().clear().await,
                 )?;
                 if let Some(outbox) = resources.outbox_writer() {
-                    outbox.clear(self.definition.id.as_str()).await?;
+                    outbox.clear(&self.output_key()).await?;
                 }
                 if let Some(live) = resources.live_results_writer() {
-                    live.clear(self.definition.id.as_str()).await?;
+                    live.clear(&self.definition.id).await?;
                 }
                 if let Some(checkpoint) = resources.checkpoint_store() {
                     checkpoint.clear_checkpoints().await?;
                     if let Some(state) = &bootstrap_state {
                         checkpoint
-                            .stage_checkpoint(BOOTSTRAP_STATE, 1, Some(state))
+                            .stage_checkpoint(
+                                &drasi_core::interface::CheckpointKey::Metadata(
+                                    BOOTSTRAP_STATE.to_owned(),
+                                ),
+                                1,
+                                Some(state),
+                            )
                             .await?;
                     }
                     checkpoint
-                        .stage_checkpoint(QUERY_CONFIGURATION, 1, Some(&config))
+                        .stage_checkpoint(
+                            &drasi_core::interface::CheckpointKey::Metadata(
+                                QUERY_CONFIGURATION.to_owned(),
+                            ),
+                            1,
+                            Some(&config),
+                        )
                         .await?;
-                    checkpoint.stage_checkpoint(BOOTSTRAP, 0, None).await?;
                     checkpoint
-                        .stage_result_sequence(self.definition.id.as_str(), highwater)
+                        .stage_checkpoint(
+                            &drasi_core::interface::CheckpointKey::Metadata(BOOTSTRAP.to_owned()),
+                            0,
+                            None,
+                        )
+                        .await?;
+                    checkpoint
+                        .stage_result_sequence(&self.output_key(), highwater)
                         .await?;
                     if self.delivery_tracking {
                         checkpoint
-                            .stage_checkpoint(delivery::DELIVERED, highwater, None)
+                            .stage_checkpoint(
+                                &drasi_core::interface::CheckpointKey::Metadata(
+                                    delivery::DELIVERED.to_owned(),
+                                ),
+                                highwater,
+                                None,
+                            )
                             .await?;
                         checkpoint
-                            .stage_checkpoint(delivery::DELIVERY_SEQUENCE, delivery_sequence, None)
+                            .stage_checkpoint(
+                                &drasi_core::interface::CheckpointKey::Metadata(
+                                    delivery::DELIVERY_SEQUENCE.to_owned(),
+                                ),
+                                delivery_sequence,
+                                None,
+                            )
                             .await?;
                     }
                 }
@@ -439,7 +477,9 @@ impl ContinuousQueryTransformer {
         let query = self.query()?;
         if let Some(checkpoint) = query.resources().checkpoint_store() {
             if checkpoint
-                .read_checkpoint(BOOTSTRAP)
+                .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                    BOOTSTRAP.to_owned(),
+                ))
                 .await?
                 .is_some_and(|marker| marker.sequence == 1)
                 && !requested_snapshot
@@ -449,7 +489,13 @@ impl ContinuousQueryTransformer {
             }
             query
                 .resource_transaction(|| async {
-                    checkpoint.stage_checkpoint(BOOTSTRAP, 0, None).await
+                    checkpoint
+                        .stage_checkpoint(
+                            &drasi_core::interface::CheckpointKey::Metadata(BOOTSTRAP.to_owned()),
+                            0,
+                            None,
+                        )
+                        .await
                 })
                 .await?;
         }
@@ -473,7 +519,7 @@ impl ContinuousQueryTransformer {
                 input.system().ordering(),
             );
             if let Some(origin) = provider.input_origin(input.system().stream())? {
-                changes = changes.with_input_scope(origin.component.as_str());
+                changes = changes.with_input_scope(origin.component.clone());
             }
             let prepared = Mutex::new(None);
             let hook =
@@ -489,8 +535,8 @@ impl ContinuousQueryTransformer {
                             &self.projector,
                             &results,
                             QueryOutputMetadata {
-                                query_id: self.definition.id.to_string(),
-                                source_id: None,
+                                query_id: self.definition.id.clone(),
+                                input_origin: None,
                                 timestamp: Utc::now(),
                                 metadata: HashMap::new(),
                                 profiling: None,
@@ -561,7 +607,7 @@ impl ContinuousQueryTransformer {
             .into_iter()
             .map(|watermark| {
                 (
-                    progress_key(watermark.stream.as_str(), watermark.source_id.as_deref()),
+                    progress_key(&watermark.stream, watermark.source_id.as_ref()),
                     watermark.sequence,
                     watermark.position,
                     watermark.producer,
@@ -597,14 +643,26 @@ impl ContinuousQueryTransformer {
                             .stage_checkpoint(key, *sequence, position.as_ref())
                             .await?;
                     }
-                    checkpoint.stage_checkpoint(BOOTSTRAP, 1, None).await?;
+                    checkpoint
+                        .stage_checkpoint(
+                            &drasi_core::interface::CheckpointKey::Metadata(BOOTSTRAP.to_owned()),
+                            1,
+                            None,
+                        )
+                        .await?;
                     if let Some(state) = &completion_state {
                         checkpoint
-                            .stage_checkpoint(BOOTSTRAP_STATE, 1, Some(state))
+                            .stage_checkpoint(
+                                &drasi_core::interface::CheckpointKey::Metadata(
+                                    BOOTSTRAP_STATE.to_owned(),
+                                ),
+                                1,
+                                Some(state),
+                            )
                             .await?;
                     }
                     checkpoint
-                        .stage_result_sequence(self.definition.id.as_str(), sequence)
+                        .stage_result_sequence(&self.output_key(), sequence)
                         .await?;
                     if reset.is_some() {
                         query

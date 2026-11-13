@@ -19,6 +19,7 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_core::{
     computation::ComputationIndexProvider,
+    interface::OutputPartition,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
 use drasi_index_garnet::{computation::GarnetComputationProvider, GarnetIndexProvider};
@@ -73,7 +74,7 @@ impl ComputationBootstrapProvider for Bootstrap {
 fn definition(graph: &str, changed: bool) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: graph.into(),
-        id: ComponentId::try_new("query").expect("id"),
+        id: ComponentId::try_new("70a753ff-f396-5582-91b3-1c2f5948550c").expect("id"),
         query: if changed {
             "MATCH (n:Item) RETURN n.name AS name, n.active AS active"
         } else {
@@ -143,6 +144,7 @@ async fn exercise(provider: Arc<dyn ComputationIndexProvider>, graph: &str) -> R
 }
 
 #[tokio::test]
+#[ignore = "requires a Docker-compatible Redis container runtime"]
 async fn garnet_native_and_standard_adapters_recover_primary_output_and_separate_reset_markers(
 ) -> Result<()> {
     let redis = shared_tests::redis_helpers::setup_redis().await;
@@ -163,6 +165,7 @@ async fn garnet_native_and_standard_adapters_recover_primary_output_and_separate
 }
 
 #[tokio::test]
+#[ignore = "requires a Docker-compatible Redis container runtime"]
 async fn native_query_rejects_unqualified_garnet_without_touching_storage() -> Result<()> {
     let redis = shared_tests::redis_helpers::setup_redis().await;
     let result = async {
@@ -178,8 +181,10 @@ async fn native_query_rejects_unqualified_garnet_without_touching_storage() -> R
                     == "drasi.experimental/indexed-query"
             })
             .context("indexed native query")?;
+        let query_id = ComponentId::try_new("70a753ff-f396-5582-91b3-1c2f5948550c")?;
+        let output = OutputPartition::Component(query_id.clone());
         let mut query = factory.create_component_with_processing(
-            ComponentId::try_new("query")?,
+            query_id.clone(),
             serde_json::json!({"query":"MATCH (n:Item) RETURN n.name AS name"}),
             drasi_computation_plugin_sdk::Scope {
                 instance_id: "native-garnet-capabilities".into(),
@@ -188,6 +193,7 @@ async fn native_query_rejects_unqualified_garnet_without_touching_storage() -> R
             },
             provider.clone(),
         )?;
+        query.initialize().await?;
         let error = query
             .start()
             .await
@@ -196,24 +202,22 @@ async fn native_query_rejects_unqualified_garnet_without_touching_storage() -> R
         query.stop().await?;
         drop(query);
         let indexes = provider
-            .create_indexes("native-garnet-capabilities", "query")
+            .create_indexes("native-garnet-capabilities", &query_id)
             .await?;
-        ensure!(indexes
-            .checkpoint_store()
-            .context("Garnet checkpoints")?
-            .read_result_sequence("query")
-            .await?
-            .is_none());
+        let checkpoint = indexes.checkpoint_store().context("Garnet checkpoints")?;
+        ensure!(checkpoint.read_all_checkpoints().await?.is_empty());
+        ensure!(checkpoint.read_output_generation(&output).await?.is_none());
+        ensure!(checkpoint.read_result_sequence(&output).await?.is_none());
         ensure!(indexes
             .live_results_writer()
             .context("Garnet live rows")?
-            .read_snapshot("query")
+            .read_snapshot(&query_id)
             .await?
             .is_empty());
         ensure!(indexes
             .outbox_writer()
             .context("Garnet outbox")?
-            .read_from("query", 0)
+            .read_from(&output, 0)
             .await?
             .is_empty());
         Ok(())

@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use drasi_core::query::QueryBuilder;
 
+pub mod fixture_attribution;
 pub mod index;
 pub mod mock_source;
 pub mod recovery_test_helpers;

@@ -34,7 +34,7 @@ use drasi_lib::sources::base::SourceBase;
 
 pub struct ReplicationStream {
     config: PostgresSourceConfig,
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     connection: Option<ReplicationConnection>,
     decoder: PgOutputDecoder,
     #[allow(dead_code)]
@@ -60,7 +60,7 @@ struct RelationMapping {
 impl ReplicationStream {
     pub(crate) fn new(
         config: PostgresSourceConfig,
-        source_id: String,
+        source_id: drasi_lib::ComponentId,
         status_handle: ComponentStatusHandle,
         base: SourceBase,
         replay_state: Arc<ReplayState>,
@@ -525,7 +525,7 @@ impl ReplicationStream {
         // Create the element
         let element = Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new(&self.source_id, &element_id),
+                reference: ElementReference::new(self.source_id.as_str(), &element_id),
                 labels: Arc::from([Arc::from(mapping.label.as_str())]),
                 effective_from: Utc::now().timestamp_millis() as u64,
             },
@@ -574,7 +574,7 @@ impl ReplicationStream {
 
         let after_element = Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new(&self.source_id, &element_id),
+                reference: ElementReference::new(self.source_id.as_str(), &element_id),
                 labels: Arc::from([Arc::from(mapping.label.as_str())]),
                 effective_from: Utc::now().timestamp_millis() as u64,
             },
@@ -603,7 +603,7 @@ impl ReplicationStream {
 
         Ok(Some(SourceChange::Delete {
             metadata: ElementMetadata {
-                reference: ElementReference::new(&self.source_id, &element_id),
+                reference: ElementReference::new(self.source_id.as_str(), &element_id),
                 labels: Arc::from([Arc::from(mapping.label.as_str())]),
                 effective_from: Utc::now().timestamp_millis() as u64,
             },

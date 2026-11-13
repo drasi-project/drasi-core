@@ -25,9 +25,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn log_restarts_join_the_previous_processor() -> anyhow::Result<()> {
-        let reaction = LogReaction::builder("log-restart")
-            .with_query("q1")
-            .build()?;
+        let reaction = LogReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000018f")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()?;
         reaction.stop().await?;
         for sequence in 1..=3 {
             reaction.start().await?;
@@ -38,7 +43,8 @@ mod tests {
                 .is::<WorkerAlreadyOwned>());
             reaction
                 .enqueue_query_result(drasi_lib::channels::QueryResult::new(
-                    "q1".into(),
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
                     sequence,
                     chrono::Utc::now(),
                     vec![drasi_lib::channels::ResultDiff::Add {
@@ -64,7 +70,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_log_start_and_worker_cleanup_block_replacement() -> anyhow::Result<()> {
-        let reaction = LogReaction::builder("log-cleanup").build()?;
+        let reaction = LogReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000190")
+                .expect("fixture UUID"),
+        )
+        .build()?;
         let shutdown = reaction.base.shutdown_tx.write().await;
         assert!(
             tokio::time::timeout(Duration::from_millis(20), reaction.start())
@@ -136,7 +146,15 @@ mod tests {
     async fn test_log_reaction_creation() {
         let config = LogReactionConfig::default();
 
-        let reaction = LogReaction::new("test-log", vec!["query1".to_string()], config).unwrap();
+        let reaction = LogReaction::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000191")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+            )],
+            config,
+        )
+        .unwrap();
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
 
@@ -162,8 +180,15 @@ mod tests {
             default_template: Some(default_template),
         };
 
-        let reaction =
-            LogReaction::new("test-log-templates", vec!["query1".to_string()], config).unwrap();
+        let reaction = LogReaction::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000192")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+            )],
+            config,
+        )
+        .unwrap();
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
 
@@ -203,15 +228,34 @@ mod tests {
         };
 
         let reaction = LogReaction::new(
-            "test-log-per-query",
-            vec!["sensor-query".to_string(), "other-query".to_string()],
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000193")
+                .expect("fixture UUID"),
+            vec![
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("sensor-query")
+                        .expect("fixture component name"),
+                ),
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("other-query")
+                        .expect("fixture component name"),
+                ),
+            ],
             config,
         )
         .unwrap();
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
         assert_eq!(
-            reaction.query_ids(),
-            vec!["sensor-query".to_string(), "other-query".to_string()]
+            reaction.query_inputs(),
+            vec![
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("sensor-query")
+                        .expect("fixture component name")
+                ),
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("other-query")
+                        .expect("fixture component name")
+                )
+            ]
         );
     }
 
@@ -232,29 +276,61 @@ mod tests {
             }),
         };
 
-        let reaction = LogReaction::builder("test-log-builder")
-            .with_query("query1")
-            .with_default_template(default_template)
-            .build()
-            .unwrap();
+        let reaction = LogReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000194")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_default_template(default_template)
+        .build()
+        .unwrap();
 
-        assert_eq!(reaction.id(), "test-log-builder");
-        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+        assert_eq!(
+            reaction.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000194")
+                .expect("fixture UUID")
+        );
+        assert_eq!(
+            reaction.query_inputs(),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+            )]
+        );
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
 
     #[tokio::test]
     async fn test_log_reaction_builder_no_templates() {
-        let reaction = LogReaction::builder("test-log-no-templates")
-            .with_query("query1")
-            .with_query("query2")
-            .build()
-            .unwrap();
+        let reaction = LogReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000195")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query2").expect("fixture component name"),
+        )
+        .build()
+        .unwrap();
 
-        assert_eq!(reaction.id(), "test-log-no-templates");
         assert_eq!(
-            reaction.query_ids(),
-            vec!["query1".to_string(), "query2".to_string()]
+            reaction.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000195")
+                .expect("fixture UUID")
+        );
+        assert_eq!(
+            reaction.query_inputs(),
+            vec![
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+                ),
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("query2").expect("fixture component name")
+                )
+            ]
         );
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
@@ -289,18 +365,38 @@ mod tests {
             deleted: None,
         };
 
-        let reaction = LogReaction::builder("test-per-query-templates")
-            .with_query("sensor-query")
-            .with_query("user-query")
-            .with_default_template(default_template)
-            .with_route("sensor-query", sensor_config)
-            .build()
-            .unwrap();
+        let reaction = LogReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000196")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("sensor-query").expect("fixture component name"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("user-query").expect("fixture component name"),
+        )
+        .with_default_template(default_template)
+        .with_route("sensor-query", sensor_config)
+        .build()
+        .unwrap();
 
-        assert_eq!(reaction.id(), "test-per-query-templates");
         assert_eq!(
-            reaction.query_ids(),
-            vec!["sensor-query".to_string(), "user-query".to_string()]
+            reaction.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000196")
+                .expect("fixture UUID")
+        );
+        assert_eq!(
+            reaction.query_inputs(),
+            vec![
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("sensor-query")
+                        .expect("fixture component name")
+                ),
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("user-query")
+                        .expect("fixture component name")
+                )
+            ]
         );
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
     }
@@ -358,7 +454,14 @@ mod tests {
             default_template: Some(default_template),
         };
 
-        let result = LogReaction::new("test-invalid-template", vec!["query1".to_string()], config);
+        let result = LogReaction::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000197")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+            )],
+            config,
+        );
         assert!(result.is_err());
         let err = result.err().expect("expected error");
         assert!(err.to_string().contains("Invalid"));
@@ -385,8 +488,16 @@ mod tests {
         };
 
         let result = LogReaction::new(
-            "test-invalid-route",
-            vec!["query1".to_string(), "query2".to_string()],
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000198")
+                .expect("fixture UUID"),
+            vec![
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+                ),
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("query2").expect("fixture component name"),
+                ),
+            ],
             config,
         );
         assert!(result.is_err());
@@ -418,8 +529,12 @@ mod tests {
 
         // Should match "source.sensor-data" with route "sensor-data"
         let result = LogReaction::new(
-            "test-dotted-route",
-            vec!["source.sensor-data".to_string()],
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000199")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("source.sensor-data")
+                    .expect("fixture component name"),
+            )],
             config,
         );
         assert!(result.is_ok());
@@ -436,10 +551,15 @@ mod tests {
             deleted: None,
         };
 
-        let result = LogReaction::builder("test-builder-invalid")
-            .with_query("query1")
-            .with_default_template(invalid_template)
-            .build();
+        let result = LogReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000019a")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_default_template(invalid_template)
+        .build();
 
         assert!(result.is_err());
         let err = result.err().expect("expected error");
@@ -457,10 +577,15 @@ mod tests {
             deleted: None,
         };
 
-        let result = LogReaction::builder("test-builder-route-validation")
-            .with_query("query1")
-            .with_route("unsubscribed-query", sensor_config)
-            .build();
+        let result = LogReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000019b")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_route("unsubscribed-query", sensor_config)
+        .build();
 
         assert!(result.is_err());
         let err = result.err().expect("expected error");
@@ -494,7 +619,14 @@ mod tests {
             default_template: Some(complex_template),
         };
 
-        let result = LogReaction::new("test-complex-template", vec!["query1".to_string()], config);
+        let result = LogReaction::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000019c")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+            )],
+            config,
+        );
         assert!(result.is_ok());
     }
 
@@ -514,14 +646,27 @@ mod tests {
             default_template: Some(empty_template),
         };
 
-        let result = LogReaction::new("test-empty-template", vec!["query1".to_string()], config);
+        let result = LogReaction::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000019d")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+            )],
+            config,
+        );
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_recovery_trait_defaults() {
         let config = LogReactionConfig::default();
-        let reaction = LogReaction::new("test-log", vec![], config).unwrap();
+        let reaction = LogReaction::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000191")
+                .expect("fixture UUID"),
+            vec![],
+            config,
+        )
+        .unwrap();
 
         assert!(!reaction.is_durable());
         assert!(!reaction.needs_snapshot_on_fresh_start());

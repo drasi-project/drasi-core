@@ -9,8 +9,10 @@ use drasi_core_types::interface::SourceCheckpoint;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use tokio::sync::watch;
 
+const COMPONENT_NAMESPACE: &str = "d02c756d-aa75-5d47-811f-edc9b57a01c7";
+
 fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).unwrap()
+    ComponentId::derive_owned(&ComponentId::try_new(COMPONENT_NAMESPACE).unwrap(), name).unwrap()
 }
 fn stream() -> StreamId {
     StreamId::try_new("changes").unwrap()
@@ -41,7 +43,7 @@ fn state(position: Option<RowPosition>) -> Arc<SourceProgressSnapshot> {
             .into_iter()
             .map(|position| {
                 (
-                    SourceProgressKey::Source("source".into()),
+                    SourceProgressKey::Source(id("source").clone()),
                     SourceCheckpoint::new(
                         position.sequence,
                         Some(serde_json::to_vec(&position).unwrap().into()),
@@ -395,7 +397,7 @@ fn transaction_snapshot(
                 .into_iter()
                 .map(|position| {
                     (
-                        SourceProgressKey::Source("source".into()),
+                        SourceProgressKey::Source(id("source").clone()),
                         SourceCheckpoint::new(
                             position.sequence,
                             Some(serde_json::to_vec(&position).unwrap().into()),
@@ -425,7 +427,7 @@ fn transaction_binding_is_constructor_safe_and_has_no_single_owner_or_row_option
     assert_eq!(binding.expected, members());
     assert_eq!(
         binding.policy.key(),
-        &SourceProgressKey::Source("source".into())
+        &SourceProgressKey::Source(id("source").clone())
     );
     assert!(Arc::ptr_eq(&binding.policy, &binding.policy.clone()));
     let metadata = crate::PostgresSharedTransactionsFactory.metadata();

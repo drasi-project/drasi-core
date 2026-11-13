@@ -121,7 +121,8 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
         let mw_config =
             queries::create_parse_json_middleware(mw_name1, "target_prop", None, None, None, None);
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test_source", &queries::source_pipeline(mw_name1));
+        builder =
+            builder.with_namespace_pipeline("test_source", &queries::source_pipeline(mw_name1));
         builder.build().await
     };
 
@@ -168,7 +169,8 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test_source", &queries::source_pipeline(mw_name2));
+        builder =
+            builder.with_namespace_pipeline("test_source", &queries::source_pipeline(mw_name2));
         builder.build().await
     };
 
@@ -322,7 +324,8 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test_source", &queries::source_pipeline(mw_name6));
+        builder =
+            builder.with_namespace_pipeline("test_source", &queries::source_pipeline(mw_name6));
         builder.build().await
     };
     let insert6 = create_node_insert_change(
@@ -364,7 +367,8 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test_source", &queries::source_pipeline(mw_name7));
+        builder =
+            builder.with_namespace_pipeline("test_source", &queries::source_pipeline(mw_name7));
         builder.build().await
     };
     let insert7 = create_node_insert_change(
@@ -430,7 +434,8 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test_source", &queries::source_pipeline(mw_name10));
+        builder =
+            builder.with_namespace_pipeline("test_source", &queries::source_pipeline(mw_name10));
         builder.build().await
     };
     let large_json_str = r#"{"key": "this is way too long"}"#;
@@ -473,7 +478,8 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test_source", &queries::source_pipeline(mw_name11));
+        builder =
+            builder.with_namespace_pipeline("test_source", &queries::source_pipeline(mw_name11));
         builder.build().await
     };
     let insert11 = create_node_insert_change(
@@ -504,7 +510,8 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
             Some(2),
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test_source", &queries::source_pipeline(mw_name12));
+        builder =
+            builder.with_namespace_pipeline("test_source", &queries::source_pipeline(mw_name12));
         builder.build().await
     };
     let deep_json_str = r#"{"a": {"b": {"c": "too deep"}}}"#;
@@ -547,7 +554,8 @@ pub async fn parse_json_test(config: &(impl QueryTestConfig + Send)) {
             Some(2),
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test_source", &queries::source_pipeline(mw_name13));
+        builder =
+            builder.with_namespace_pipeline("test_source", &queries::source_pipeline(mw_name13));
         builder.build().await
     };
     let insert13 = create_node_insert_change(

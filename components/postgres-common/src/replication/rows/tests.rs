@@ -6,9 +6,10 @@ use drasi_core_types::interface::SourceCheckpoint;
 use std::sync::Arc;
 
 const BINDING: [u8; 32] = [9; 32];
+const COMPONENT_NAMESPACE: &str = "d02c756d-aa75-5d47-811f-edc9b57a01c7";
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).unwrap()
+    ComponentId::derive_owned(&ComponentId::try_new(COMPONENT_NAMESPACE).unwrap(), value).unwrap()
 }
 
 fn row(commit: u64, previous: u64, offset: usize, count: usize, sequence: u64) -> RowPosition {
@@ -35,7 +36,7 @@ fn state(position: &RowPosition) -> Arc<SourceProgressSnapshot> {
         recovered: true,
         persistent: false,
         checkpoints: BTreeMap::from([(
-            SourceProgressKey::Source("source".into()),
+            SourceProgressKey::Source(id("source").clone()),
             SourceCheckpoint::new(
                 position.sequence,
                 Some(serde_json::to_vec(position).unwrap().into()),
@@ -312,21 +313,21 @@ fn failed_rebound_and_corrupt_members_error_even_while_another_member_is_pending
                 position.binding = [4; 32];
                 state
                     .checkpoints
-                    .get_mut(&SourceProgressKey::Source("source".into()))
+                    .get_mut(&SourceProgressKey::Source(id("source").clone()))
                     .unwrap()
                     .source_position = Some(serde_json::to_vec(&position)?.into());
             }
             "sequence" => {
                 state
                     .checkpoints
-                    .get_mut(&SourceProgressKey::Source("source".into()))
+                    .get_mut(&SourceProgressKey::Source(id("source").clone()))
                     .unwrap()
                     .sequence = 2
             }
             "position" => {
                 state
                     .checkpoints
-                    .get_mut(&SourceProgressKey::Source("source".into()))
+                    .get_mut(&SourceProgressKey::Source(id("source").clone()))
                     .unwrap()
                     .source_position = None
             }

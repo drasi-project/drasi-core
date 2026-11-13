@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Standalone CW-81 contract, not the mixed SQLite/query/non-query CW-82 profile.
-//! Build `cargo build -p drasi-host-sdk --example native_scheduling` first.
+//! Run `make build-test-plugins` before this target.
 
 use std::{
     num::NonZeroUsize,
@@ -47,6 +47,18 @@ const GRAPH: &str = "native-scheduling";
 const COMPONENT: &str = "delay";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+fn component_id() -> Result<ComponentId> {
+    Ok(ComponentId::try_new(
+        "00000000-0000-0000-0000-000000000341",
+    )?)
+}
+
+fn source_id() -> Result<ComponentId> {
+    Ok(ComponentId::try_new(
+        "57be22f8-5a72-549d-8da6-d8b5342bf0bb",
+    )?)
+}
+
 struct Clock(AtomicU64);
 impl Clock {
     fn new(now: u64) -> Arc<Self> {
@@ -68,14 +80,17 @@ fn library() -> Result<PathBuf> {
         .parent()
         .and_then(Path::parent)
         .context("test target directory")?;
-    let library = debug.join("examples").join(format!(
+    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| debug.join("plugins"));
+    let library = directory.join("examples").join(format!(
         "{}native_scheduling{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX,
     ));
     anyhow::ensure!(
         library.is_file(),
-        "missing scheduling fixture {}; build the native_scheduling example first",
+        "missing scheduling fixture {}; first run make build-test-plugins",
         library.display()
     );
     Ok(library)
@@ -106,15 +121,15 @@ fn provider(path: &Path) -> Result<Arc<dyn ComputationIndexProvider>> {
     )))
 }
 
-fn create(
+async fn create(
     loaded: bool,
     provider: Arc<dyn ComputationIndexProvider>,
     clock: Arc<Clock>,
     fail_input: bool,
     fail_due: bool,
 ) -> Result<NativeComponentProxy> {
-    factory(loaded)?.create_component_with_processing_resource(
-        ComponentId::try_new(COMPONENT)?,
+    let mut component = factory(loaded)?.create_component_with_processing_resource(
+        component_id()?,
         json!({"delay_ms":1000, "fail_input":fail_input, "fail_due":fail_due}),
         drasi_computation_plugin_sdk::Scope {
             instance_id: GRAPH.into(),
@@ -122,14 +137,16 @@ fn create(
             generation: 1,
         },
         &NativeProcessingResource::new(provider).with_scheduling_clock(clock),
-    )
+    )?;
+    component.initialize().await?;
+    Ok(component)
 }
 
 fn input(key: &str, action: &str, value: u64, sequence: u64) -> Result<InputEnvelope> {
     let producer: GraphProducerIdentity = serde_json::from_value(json!({
         "construction_scope": GRAPH,
         "graph_id": GRAPH,
-        "component_id": "source",
+        "component_id": source_id()?,
         "stream": "source/out",
         "incarnation": "9218f3c7-6d3b-4c54-9af7-10e4b46d36ae",
         "persistent": true,
@@ -196,10 +213,7 @@ fn assert_output(
     let progress = GraphProducerProgress::from_envelope(&output.envelope)?
         .context("logical output identity")?;
     assert_eq!(progress.sequence(), sequence);
-    assert_eq!(
-        progress.identity().component_id(),
-        &ComponentId::try_new(COMPONENT)?
-    );
+    assert_eq!(progress.identity().component_id(), &component_id()?);
     assert!(progress.identity().persistent());
     Ok(())
 }
@@ -213,23 +227,32 @@ struct Stored {
 }
 
 async fn stored(path: &Path) -> Result<Stored> {
-    let owner =
-        ComputationTransaction::try_new(provider(path)?.create_indexes(GRAPH, COMPONENT).await?)?;
+    let owner = ComputationTransaction::try_new(
+        provider(path)?
+            .create_indexes(GRAPH, &component_id()?)
+            .await?,
+    )?;
     let resources = owner.resources();
     let checkpoints = resources.checkpoint_store().context("actual checkpoints")?;
     let completed = checkpoints
-        .read_checkpoint(fixture::COMPLETED)
+        .read_checkpoint(&drasi_core_types::CheckpointKey::Metadata(
+            fixture::COMPLETED.to_owned(),
+        ))
         .await?
         .map_or(0, |value| value.sequence);
     let state = Stored {
         completed,
         next_due: resources.indexes().future_queue.peek_due_time().await?,
-        head: checkpoints.read_result_sequence(COMPONENT).await?,
+        head: checkpoints
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                component_id()?
+            ))
+            .await?,
         outputs: resources
             .outbox_writer()
             .context("actual outbox")?
             .read_page(
-                COMPONENT,
+                &drasi_core_types::OutputPartition::Component(component_id()?),
                 0,
                 OutboxPageLimits {
                     max_records: NonZeroUsize::new(4).context("page count")?,
@@ -260,7 +283,8 @@ async fn lifecycle(loaded: bool) -> Result<()> {
         clock.clone(),
         false,
         false,
-    )?;
+    )
+    .await?;
     component.start().await?;
     assert!(component.continue_transform().await?.is_empty());
     let original = input("one", "request", 7, 1)?;
@@ -320,7 +344,8 @@ async fn failed_operations(loaded: bool) -> Result<()> {
         clock.clone(),
         true,
         false,
-    )?;
+    )
+    .await?;
     component.start().await?;
     component.continue_transform().await?;
     assert!(component.transform(original.clone()).await.is_err());
@@ -337,7 +362,8 @@ async fn failed_operations(loaded: bool) -> Result<()> {
         clock.clone(),
         false,
         true,
-    )?;
+    )
+    .await?;
     component.start().await?;
     component.continue_transform().await?;
     component.transform(original.clone()).await?;
@@ -351,7 +377,7 @@ async fn failed_operations(loaded: bool) -> Result<()> {
     assert_eq!(state.head, Some(0));
     assert!(state.outputs.is_empty());
 
-    let mut component = create(loaded, provider(directory.path())?, clock, false, false)?;
+    let mut component = create(loaded, provider(directory.path())?, clock, false, false).await?;
     component.start().await?;
     component.continue_transform().await?;
     let output = component.on_wakeup().await?;
@@ -423,7 +449,7 @@ async fn commit_boundary(loaded: bool) -> Result<()> {
         inner: provider(directory.path())?,
         signals: signals.clone(),
     });
-    let mut component = create(loaded, provider, clock.clone(), false, false)?;
+    let mut component = create(loaded, provider, clock.clone(), false, false).await?;
     component.start().await?;
     component.continue_transform().await?;
     let wakeup = component.wakeup_source().context("scheduled wakeup")?;
@@ -463,7 +489,7 @@ impl ComputationIndexProvider for ObservedProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> std::result::Result<ComputationIndexes, IndexError> {
         let original = self.inner.create_indexes(graph, component).await?;
         let build = || -> Result<ComputationIndexes> {
@@ -582,9 +608,9 @@ async fn automatic_graph(loaded: bool) -> Result<()> {
         signals: signals.clone(),
     });
     let factory = factory(loaded)?;
-    let component = ComponentId::try_new(COMPONENT)?;
-    let source = ComponentId::try_new("source")?;
-    let sink = ComponentId::try_new("sink")?;
+    let component = component_id()?;
+    let source = source_id()?;
+    let sink = ComponentId::try_new("77fd3d1b-022b-54ad-a596-b4777ca8597d")?;
     let resource = ResourceId::try_new("processing")?;
     let mut specification = factory.specification(component.clone(), json!({"delay_ms":1000}))?;
     specification
@@ -608,21 +634,27 @@ async fn automatic_graph(loaded: bool) -> Result<()> {
                 ),
             ),
         )?
-        .source(Box::new(Source {
-            descriptor: ComponentDescriptor::try_new(
-                source.clone(),
-                vec![port("out", PortDirection::Output)?],
-            )?,
-            envelope: Some(original.envelope.clone()),
-        }))
-        .component(specification, factory)
-        .sink(Box::new(Capture {
-            descriptor: ComponentDescriptor::try_new(
-                sink.clone(),
-                vec![port("in", PortDirection::Input)?],
-            )?,
-            outputs,
-        }))
+        .source(
+            ComponentName::try_new("source")?,
+            Box::new(Source {
+                descriptor: ComponentDescriptor::try_new(
+                    source.clone(),
+                    vec![port("out", PortDirection::Output)?],
+                )?,
+                envelope: Some(original.envelope.clone()),
+            }),
+        )
+        .component(ComponentName::try_new(COMPONENT)?, specification, factory)
+        .sink(
+            ComponentName::try_new("sink")?,
+            Box::new(Capture {
+                descriptor: ComponentDescriptor::try_new(
+                    sink.clone(),
+                    vec![port("in", PortDirection::Input)?],
+                )?,
+                outputs,
+            }),
+        )
         .connect(
             EdgeDefinition::new(
                 Endpoint::new(source.clone(), PortId::try_new("out")?),

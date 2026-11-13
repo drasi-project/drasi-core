@@ -245,7 +245,7 @@ impl ElementArchiveIndex for GarnetElementIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         self.connection
-            .clear(format!("archive:{{{}}}:*", self.query_id))
+            .clear(format!("archive:{{{}}}:*", self.storage_key))
             .await
     }
 }

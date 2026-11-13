@@ -23,7 +23,7 @@ use crate::{
         ComponentGeneration, ComponentId, ComputationInspection, ComputationInspector, GraphError,
         PublicationObserver, QueryPublicationMode,
     },
-    error::{DrasiError, Result},
+    error::{DrasiError, OperationSubject, Result},
 };
 
 /// Actual query output frontier after currently eligible scheduled work.
@@ -169,7 +169,7 @@ impl QueryTestControl {
         .map_err(|_| {
             DrasiError::operation_failed(
                 "query",
-                "test-control",
+                OperationSubject::Control("query test"),
                 "drain",
                 "timed out waiting for the native query output frontier",
             )
@@ -251,12 +251,15 @@ fn stopped() -> DrasiError {
 
 fn unavailable(state: &ControlState) -> DrasiError {
     match &state.failure {
-        Some(cause) => {
-            DrasiError::operation_failed("query", "test-control", "drain", format!("{cause:#}"))
-                .with_cause(GraphError::Reported {
-                    cause: cause.clone(),
-                })
-        }
+        Some(cause) => DrasiError::operation_failed(
+            "query",
+            OperationSubject::Control("query test"),
+            "drain",
+            format!("{cause:#}"),
+        )
+        .with_cause(GraphError::Reported {
+            cause: cause.clone(),
+        }),
         None => stopped(),
     }
 }

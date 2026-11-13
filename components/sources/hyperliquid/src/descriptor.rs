@@ -136,7 +136,7 @@ impl SourcePluginDescriptor for HyperliquidSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -167,7 +167,7 @@ impl SourcePluginDescriptor for HyperliquidSourceDescriptor {
             }
         };
 
-        let mut builder = HyperliquidSourceBuilder::new(id)
+        let mut builder = HyperliquidSourceBuilder::new(id.clone())
             .with_network(network)
             .with_auto_start(auto_start)
             .with_funding_poll_interval_secs(

@@ -164,8 +164,8 @@ impl ReactionPluginDescriptor for RabbitMQReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
@@ -188,8 +188,8 @@ impl ReactionPluginDescriptor for RabbitMQReactionDescriptor {
             None => defaults.exchange_type,
         };
 
-        let mut builder = RabbitMQReactionBuilder::new(id)
-            .with_queries(query_ids)
+        let mut builder = RabbitMQReactionBuilder::new(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start)
             .with_connection_string(connection_string)
             .with_exchange(exchange_name, exchange_type);

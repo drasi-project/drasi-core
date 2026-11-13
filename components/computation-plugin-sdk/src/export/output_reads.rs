@@ -17,12 +17,12 @@ use crate::output_reads::{
 use drasi_computation_contracts::{
     encode_bounded_messagepack, BinaryEnvelopeCodecError, ComponentDescriptor, OutputCursor,
     OutputPortReaders, OutputReadError, OutputReaders, OutputReplay, OutputSnapshot, PortId,
-    QueryViewProvider, ReplayProvider, SchemaDescriptor, SnapshotProvider,
+    QueryDescription, QueryViewProvider, ReplayProvider, SchemaDescriptor, SnapshotProvider,
 };
 use serde::Serialize;
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{atomic::AtomicUsize, Mutex},
     time::Duration,
 };
@@ -63,12 +63,13 @@ pub(super) struct ReadBinding {
     pub(super) descriptor: ComponentDescriptor,
     pub(super) codec: Arc<BinaryEnvelopeCodec>,
     pub(super) readers: OutputReaders,
+    query_descriptions: Mutex<BTreeMap<PortId, QueryDescription>>,
     query_observations: bool,
     query_recovery_views: bool,
     lifecycle: Mutex<Lifecycle>,
     inflight: AtomicUsize,
     changed: tokio::sync::watch::Sender<()>,
-    quiescence: Option<tokio::sync::watch::Sender<()>>,
+    quiescence: tokio::sync::watch::Sender<()>,
     pub(super) damaged: Arc<transport::PanicState>,
     /// Weak registry so stop/release can end live leases promptly.
     pub(super) leases: Mutex<Vec<std::sync::Weak<super::output_follow::Lease>>>,
@@ -86,6 +87,39 @@ pub(super) fn capture(
     codec: Arc<BinaryEnvelopeCodec>,
     damaged: Arc<transport::PanicState>,
 ) -> anyhow::Result<Option<Arc<ReadBinding>>> {
+    validate_registrations(metadata, descriptor, &readers)?;
+    let capabilities = &metadata.capabilities;
+    if !capabilities.declares_output_reads() && !capabilities.declares_output_follows() {
+        return Ok(None);
+    }
+    let queries = describe_queries(&readers);
+    Ok(Some(Arc::new(ReadBinding {
+        descriptor: descriptor.clone(),
+        codec,
+        readers,
+        query_descriptions: Mutex::new(queries),
+        query_observations: capabilities.query_observations,
+        query_recovery_views: capabilities.query_recovery_views,
+        lifecycle: Mutex::new(Lifecycle {
+            generation: 0,
+            phase: Phase::Inactive,
+        }),
+        inflight: AtomicUsize::new(0),
+        changed: tokio::sync::watch::channel(()).0,
+        quiescence: tokio::sync::watch::channel(()).0,
+        damaged,
+        leases: Mutex::new(Vec::new()),
+        lease_count: AtomicUsize::new(0),
+        transfers: Mutex::new(Vec::new()),
+        transfer_count: AtomicUsize::new(0),
+    })))
+}
+
+fn validate_registrations(
+    metadata: &FactoryMetadata,
+    descriptor: &ComponentDescriptor,
+    readers: &OutputReaders,
+) -> anyhow::Result<()> {
     readers.validate(descriptor)?;
     fn declared(ports: &[PortId]) -> BTreeSet<PortId> {
         ports.iter().cloned().collect()
@@ -128,58 +162,114 @@ pub(super) fn capture(
     }
     anyhow::ensure!(
         declared(&capabilities.output_snapshots)
-            == actual(&readers, |port| port.snapshot().is_some()),
+            == actual(readers, |port| port.snapshot().is_some()),
         "native output snapshot providers do not match the declared output_snapshots"
     );
     anyhow::ensure!(
-        declared(&capabilities.output_replays) == actual(&readers, |port| port.replay().is_some()),
+        declared(&capabilities.output_replays) == actual(readers, |port| port.replay().is_some()),
         "native output replay providers do not match the declared output_replays"
     );
     anyhow::ensure!(
         declared(&capabilities.output_follows)
-            == actual(&readers, |port| port.snapshot_follow().is_some()),
+            == actual(readers, |port| port.snapshot_follow().is_some()),
         "native output snapshot-follow providers do not match the declared output_follows"
     );
     anyhow::ensure!(
-        declared(&capabilities.output_queries) == actual(&readers, |port| port.query().is_some()),
+        declared(&capabilities.output_queries) == actual(readers, |port| port.query().is_some()),
         "native query readers do not match the declared output_queries"
     );
-    if !capabilities.declares_output_reads() && !capabilities.declares_output_follows() {
-        return Ok(None);
+    Ok(())
+}
+
+fn describe_queries(readers: &OutputReaders) -> BTreeMap<PortId, QueryDescription> {
+    readers
+        .ports()
+        .iter()
+        .filter_map(|(port, readers)| {
+            readers
+                .query()
+                .map(|reader| (port.clone(), reader.description()))
+        })
+        .collect()
+}
+
+/// Prepare new descriptions without publishing a partial or invalid update.
+/// The existing binding and provider Arcs remain the owners of all read handles.
+pub(super) fn updated_queries(
+    metadata: &FactoryMetadata,
+    descriptor: &ComponentDescriptor,
+    current: Option<&ReadBinding>,
+    readers: OutputReaders,
+) -> anyhow::Result<BTreeMap<PortId, QueryDescription>> {
+    validate_registrations(metadata, descriptor, &readers)?;
+    let Some(current) = current else {
+        anyhow::ensure!(
+            readers.is_empty(),
+            "native update introduced output readers"
+        );
+        return Ok(BTreeMap::new());
+    };
+    fn same<T: ?Sized>(before: Option<&Arc<T>>, after: Option<&Arc<T>>) -> bool {
+        match (before, after) {
+            (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+            (None, None) => true,
+            _ => false,
+        }
     }
-    Ok(Some(Arc::new(ReadBinding {
-        descriptor: descriptor.clone(),
-        codec,
-        readers,
-        query_observations: capabilities.query_observations,
-        query_recovery_views: capabilities.query_recovery_views,
-        lifecycle: Mutex::new(Lifecycle {
-            generation: 0,
-            phase: Phase::Inactive,
-        }),
-        inflight: AtomicUsize::new(0),
-        changed: tokio::sync::watch::channel(()).0,
-        quiescence: capabilities
-            .deprovision
-            .then(|| tokio::sync::watch::channel(()).0),
-        damaged,
-        leases: Mutex::new(Vec::new()),
-        lease_count: AtomicUsize::new(0),
-        transfers: Mutex::new(Vec::new()),
-        transfer_count: AtomicUsize::new(0),
-    })))
+    anyhow::ensure!(
+        current.readers.ports().len() == readers.ports().len(),
+        "native update changed output reader registrations"
+    );
+    for (port, before) in current.readers.ports() {
+        let after = readers
+            .ports()
+            .get(port)
+            .context("native update removed an output reader")?;
+        anyhow::ensure!(
+            same(before.snapshot(), after.snapshot())
+                && same(before.replay(), after.replay())
+                && same(before.snapshot_follow(), after.snapshot_follow())
+                && same(before.query(), after.query()),
+            "native retained update replaced the registered output reader for {port}"
+        );
+    }
+    Ok(describe_queries(&current.readers))
 }
 
 impl ReadBinding {
+    pub(super) fn query_descriptions(&self) -> Result<BTreeMap<PortId, QueryDescription>, Failure> {
+        Ok(self
+            .query_descriptions
+            .lock()
+            .map_err(|_| Failure::protocol("native query description lock is poisoned"))?
+            .clone())
+    }
+
+    pub(super) fn query_description(&self, port: &PortId) -> Result<QueryDescription, Failure> {
+        self.query_descriptions
+            .lock()
+            .map_err(|_| Failure::protocol("native query description lock is poisoned"))?
+            .get(port)
+            .cloned()
+            .ok_or_else(|| Failure::protocol("missing native query description"))
+    }
+
+    pub(super) fn publish_queries(
+        &self,
+        queries: BTreeMap<PortId, QueryDescription>,
+    ) -> Result<(), Failure> {
+        *self
+            .query_descriptions
+            .lock()
+            .map_err(|_| Failure::protocol("native query description lock is poisoned"))? = queries;
+        Ok(())
+    }
+
     pub(super) async fn wait_quiescent(&self) -> anyhow::Result<()> {
-        let mut changed = self
-            .quiescence
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("native output reads do not support deprovision"))?
-            .subscribe();
-        while self.inflight.load(Ordering::Acquire) != 0 {
-            changed.changed().await?;
-        }
+        // Deactivation closes every provider-owned lease/transfer and advances
+        // the generation before STOP runs. Retained ABI operation handles are
+        // then read-only observations of retirement; their caller-controlled
+        // lifetime must not block component cleanup.
         Ok(())
     }
 
@@ -415,6 +505,7 @@ impl ReadBinding {
             state: Box::into_raw(Box::new(Arc::new(HandleState {
                 binding: self.clone(),
                 provider,
+                port: port.clone(),
                 schema,
             })))
             .cast(),
@@ -460,9 +551,7 @@ impl ReadGuard {
 impl Drop for ReadGuard {
     fn drop(&mut self) {
         self.binding.inflight.fetch_sub(1, Ordering::AcqRel);
-        if let Some(quiescence) = &self.binding.quiescence {
-            quiescence.send_modify(|_| ());
-        }
+        self.binding.quiescence.send_modify(|_| ());
     }
 }
 
@@ -584,6 +673,7 @@ pub(super) enum CapturedRead {
 struct HandleState {
     binding: Arc<ReadBinding>,
     provider: Provider,
+    port: PortId,
     schema: SchemaDescriptor,
 }
 
@@ -753,13 +843,14 @@ impl HandleState {
         use abi::output_reads::operation::*;
         match (&self.provider, code) {
             (Provider::Query(provider), QUERY_OBSERVATION | QUERY_RECOVERY_OBSERVATION) => {
+                let description = self.binding.query_description(&self.port)?;
                 let result = if code == QUERY_RECOVERY_OBSERVATION {
                     provider.query_recovery_observation().await
                 } else {
                     provider.query_observation().await
                 }
                 .and_then(|observation| {
-                    observation.validate(self.binding.descriptor.id(), &provider.description())?;
+                    observation.validate(self.binding.descriptor.id(), &description)?;
                     crate::output_reads::WireQueryObservation::new(&observation)
                 });
                 finish(Outcome::from_result(result))
@@ -1051,9 +1142,11 @@ pub(super) fn test_binding() -> Arc<ReadBinding> {
         GraphChangeCodec::schema().descriptor().clone(),
         PipeRequirements::default(),
     )];
-    let descriptor =
-        ComponentDescriptor::try_new(ComponentId::try_new("component").unwrap(), ports.clone())
-            .unwrap();
+    let descriptor = ComponentDescriptor::try_new(
+        ComponentId::try_new("49a5d640-ec80-4c62-9cdb-1baab036e8be").unwrap(),
+        ports.clone(),
+    )
+    .unwrap();
     let metadata = FactoryMetadata {
         implementation: ImplementationIdentity::try_new("test/binding", "1").unwrap(),
         role: ComponentRole::Source,

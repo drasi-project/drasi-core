@@ -41,7 +41,7 @@ struct BootstrapTestSource {
 }
 
 impl BootstrapTestSource {
-    fn new(id: &str, provider: HttpBootstrapProvider) -> anyhow::Result<Self> {
+    fn new(id: drasi_lib::ComponentId, provider: HttpBootstrapProvider) -> anyhow::Result<Self> {
         let params = SourceBaseParams::new(id).with_bootstrap_provider(provider);
         let base = Arc::new(SourceBase::new(params)?);
         Ok(Self { base })
@@ -50,7 +50,7 @@ impl BootstrapTestSource {
 
 #[async_trait]
 impl Source for BootstrapTestSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -90,7 +90,7 @@ impl Source for BootstrapTestSource {
             .await
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -98,8 +98,8 @@ impl Source for BootstrapTestSource {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     fn dispatch_mode(&self) -> DispatchMode {
@@ -121,8 +121,8 @@ async fn start_server(app: Router) -> String {
     format!("http://127.0.0.1:{}", addr.port()) // DevSkim: ignore DS137138
 }
 
-async fn wait_running(core: &DrasiLib, id: &str) {
-    let component = core.computation_component(id).expect("component");
+async fn wait_running(core: &DrasiLib, id: &drasi_core::ComponentName) {
+    let component = core.component_by_name(id).expect("component");
     timeout(Duration::from_secs(5), component.wait_started())
         .await
         .expect("readiness timeout")
@@ -186,9 +186,7 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
         retry_delay_ms: 100,
         max_pages: None,
     };
-
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let source = BootstrapTestSource::new("http-src", provider).unwrap();
 
     // Build DrasiLib with source + query
     let drasi = DrasiLib::builder()
@@ -204,13 +202,22 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("http-src").expect("fixture component name"),
+            true,
+            move |id| BootstrapTestSource::new(id.clone(), provider),
+        )
         .with_query(
-            Query::cypher("user-query")
-                .query("MATCH (u:User) RETURN u.name AS name, u.age AS age")
-                .from_input("http-src")
-                .enable_bootstrap(true)
-                .build(),
+            Query::cypher(
+                drasi_core::ComponentName::try_new("user-query").expect("fixture component name"),
+            )
+            .query("MATCH (u:User) RETURN u.name AS name, u.age AS age")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("http-src").expect("fixture component name"),
+            )
+            .enable_bootstrap(true)
+            .build()
+            .expect("valid friends query"),
         )
         .build()
         .await
@@ -219,13 +226,27 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
     drasi.start().await.unwrap();
 
     // Wait for components to be running
-    wait_running(&drasi, "http-src").await;
-    wait_running(&drasi, "user-query").await;
+    wait_running(
+        &drasi,
+        &drasi_core::ComponentName::try_new("http-src").expect("fixture component name"),
+    )
+    .await;
+    wait_running(
+        &drasi,
+        &drasi_core::ComponentName::try_new("user-query").expect("fixture component name"),
+    )
+    .await;
 
     // Query results should contain the 3 bootstrapped users
     let results = timeout(Duration::from_secs(10), async {
         loop {
-            match drasi.get_query_results("user-query").await {
+            match drasi
+                .get_query_results_by_name(
+                    &drasi_core::ComponentName::try_new("user-query")
+                        .expect("fixture component name"),
+                )
+                .await
+            {
                 Ok(results) if results.len() == 3 => return results,
                 _ => tokio::time::sleep(Duration::from_millis(100)).await,
             }
@@ -320,9 +341,7 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
         retry_delay_ms: 100,
         max_pages: None,
     };
-
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let source = BootstrapTestSource::new("product-src", provider).unwrap();
 
     let drasi = DrasiLib::builder()
         .with_query_factory(
@@ -337,13 +356,23 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("product-src").expect("fixture component name"),
+            true,
+            move |id| BootstrapTestSource::new(id.clone(), provider),
+        )
         .with_query(
-            Query::cypher("product-query")
-                .query("MATCH (p:Product) RETURN p.title AS title")
-                .from_input("product-src")
-                .enable_bootstrap(true)
-                .build(),
+            Query::cypher(
+                drasi_core::ComponentName::try_new("product-query")
+                    .expect("fixture component name"),
+            )
+            .query("MATCH (p:Product) RETURN p.title AS title")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("product-src").expect("fixture component name"),
+            )
+            .enable_bootstrap(true)
+            .build()
+            .expect("valid user query"),
         )
         .build()
         .await
@@ -351,13 +380,27 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
 
     drasi.start().await.unwrap();
 
-    wait_running(&drasi, "product-src").await;
-    wait_running(&drasi, "product-query").await;
+    wait_running(
+        &drasi,
+        &drasi_core::ComponentName::try_new("product-src").expect("fixture component name"),
+    )
+    .await;
+    wait_running(
+        &drasi,
+        &drasi_core::ComponentName::try_new("product-query").expect("fixture component name"),
+    )
+    .await;
 
     // All 15 products should be queryable
     let results = timeout(Duration::from_secs(10), async {
         loop {
-            match drasi.get_query_results("product-query").await {
+            match drasi
+                .get_query_results_by_name(
+                    &drasi_core::ComponentName::try_new("product-query")
+                        .expect("fixture component name"),
+                )
+                .await
+            {
                 Ok(results) if results.len() == 15 => return results,
                 _ => tokio::time::sleep(Duration::from_millis(100)).await,
             }
@@ -464,9 +507,7 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
         retry_delay_ms: 100,
         max_pages: None,
     };
-
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let source = BootstrapTestSource::new("social-src", provider).unwrap();
 
     let drasi = DrasiLib::builder()
         .with_query_factory(
@@ -481,16 +522,26 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("social-src").expect("fixture component name"),
+            true,
+            move |id| BootstrapTestSource::new(id.clone(), provider),
+        )
         .with_query(
-            Query::cypher("friends-query")
-                .query(
-                    "MATCH (a:User)-[:KNOWS]->(b:User) \
+            Query::cypher(
+                drasi_core::ComponentName::try_new("friends-query")
+                    .expect("fixture component name"),
+            )
+            .query(
+                "MATCH (a:User)-[:KNOWS]->(b:User) \
                      RETURN a.name AS person, b.name AS friend",
-                )
-                .from_input("social-src")
-                .enable_bootstrap(true)
-                .build(),
+            )
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("social-src").expect("fixture component name"),
+            )
+            .enable_bootstrap(true)
+            .build()
+            .expect("valid product query"),
         )
         .build()
         .await
@@ -498,13 +549,27 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
 
     drasi.start().await.unwrap();
 
-    wait_running(&drasi, "social-src").await;
-    wait_running(&drasi, "friends-query").await;
+    wait_running(
+        &drasi,
+        &drasi_core::ComponentName::try_new("social-src").expect("fixture component name"),
+    )
+    .await;
+    wait_running(
+        &drasi,
+        &drasi_core::ComponentName::try_new("friends-query").expect("fixture component name"),
+    )
+    .await;
 
     // The traversal query should find Alice -> Bob
     let results = timeout(Duration::from_secs(10), async {
         loop {
-            match drasi.get_query_results("friends-query").await {
+            match drasi
+                .get_query_results_by_name(
+                    &drasi_core::ComponentName::try_new("friends-query")
+                        .expect("fixture component name"),
+                )
+                .await
+            {
                 Ok(results) if !results.is_empty() => return results,
                 _ => tokio::time::sleep(Duration::from_millis(100)).await,
             }

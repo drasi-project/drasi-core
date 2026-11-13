@@ -3,7 +3,81 @@
 
 use super::*;
 use anyhow::Context;
+use std::collections::BTreeMap;
 use std::time::Duration;
+
+struct IdenticalRecipeFactory {
+    inner: TransactionTransformerFactory,
+    descriptor: FactoryDescriptor,
+    initial: ComponentSpecification,
+}
+
+impl IdenticalRecipeFactory {
+    fn new(mut initial: ComponentSpecification) -> TestResult<Self> {
+        let inner = TransactionTransformerFactory::default();
+        let mut descriptor = inner.descriptor().clone();
+        descriptor.implementation =
+            ImplementationIdentity::try_new("test/identical-transaction-reconstruction", "1")?;
+        initial.implementation = descriptor.implementation.clone();
+        inner.validate(&initial)?;
+        Ok(Self {
+            inner,
+            descriptor,
+            initial,
+        })
+    }
+}
+
+#[async_trait]
+impl ComponentFactory for IdenticalRecipeFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+
+    fn validate(&self, specification: &ComponentSpecification) -> TestResult<()> {
+        self.inner.validate(specification)
+    }
+
+    fn validate_scope(
+        &self,
+        graph_id: &str,
+        specification: &ComponentSpecification,
+        declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> TestResult<()> {
+        self.inner
+            .validate_scope(graph_id, specification, declarations, resources)
+    }
+
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> TestResult<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current == &self.initial && proposed == &self.initial,
+            "fixture only supports reconstruction of its exact initial recipe"
+        );
+        self.inner.validate(current)?;
+        self.inner.validate(proposed)?;
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
+
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        if context.specification.as_ref() != &self.initial {
+            return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                "fixture construction requires its exact initial recipe"
+            )));
+        }
+        self.inner.create(context).await
+    }
+}
 
 struct Source {
     descriptor: ComponentDescriptor,
@@ -31,7 +105,7 @@ impl EnvelopeSource for Source {
         self.transport += 1;
         let change = GraphChangeCodec::decode_changes(&original)?.remove(0);
         let event = drasi_lib::channels::SourceEventWrapper::new(
-            "source".into(),
+            id("source"),
             drasi_lib::channels::SourceEvent::Change(change),
             chrono::DateTime::from_timestamp_millis(1000).unwrap(),
             original.system().sequence(),
@@ -77,14 +151,55 @@ async fn draining_replacement() -> TestResult<()> {
         let mut codec = EnvelopeCodec::new(size(64 * 1024 * 1024));
         codec.register_schema(GraphChangeCodec::schema())?;
         let store = Arc::new(IndexedEnvelopeStore::try_new(
-            provider.create_indexes("transactions", "delivery").await?,
+            provider
+                .create_indexes("transactions", &id("delivery"))
+                .await?,
             Arc::new(codec),
             "transaction-delivery",
             size(4),
             RetentionPolicy::Backpressure,
         )?);
         let spec = definition().specification(&registry, transformers.clone(), indexes.clone())?;
-        let factory = Arc::new(TransactionTransformerFactory::default());
+        assert!(TransactionTransformerFactory::default()
+            .plan_update(&spec, &spec)
+            .is_err());
+        let factory = Arc::new(IdenticalRecipeFactory::new(spec)?);
+        let spec = factory.initial.clone();
+        assert_eq!(
+            factory.plan_update(&spec, &spec)?,
+            ComponentUpdatePlan {
+                mode: ComponentUpdateMode::Recreate,
+                data: ComponentUpdateData::Preserve,
+            }
+        );
+        let mut changed_configuration = spec.clone();
+        let mut changed_definition = definition();
+        changed_definition.steps[0].configuration = json!({"add": 3});
+        changed_configuration.configuration.insert(
+            "transaction".into(),
+            ConfigurationValue::Literal(serde_json::to_value(changed_definition)?),
+        );
+        let mut changed_dependencies = spec.clone();
+        changed_dependencies
+            .dependencies
+            .insert("indexes".into(), vec![delivery.clone()]);
+        let mut changed_implementation = spec.clone();
+        changed_implementation.implementation = TransactionTransformerFactory::default()
+            .descriptor()
+            .implementation
+            .clone();
+        let mut changed_descriptor = spec.clone();
+        changed_descriptor.descriptor = descriptor(id("sequence"), true);
+        for changed in [
+            changed_configuration,
+            changed_dependencies,
+            changed_implementation,
+            changed_descriptor,
+        ] {
+            assert!(factory.plan_update(&spec, &changed).is_err());
+            assert!(factory.plan_update(&changed, &spec).is_err());
+            assert!(factory.plan_update(&changed, &changed).is_err());
+        }
         let output = Arc::new(Mutex::new(Vec::new()));
         let (send, receive) = tokio::sync::mpsc::channel(4);
         let mut graph = ComputationGraph::builder("transactions")
@@ -127,7 +242,7 @@ async fn draining_replacement() -> TestResult<()> {
                     Arc::new(RetainedStoreResource(store.clone())),
                 ),
             )?
-            .source(Box::new(Source {
+            .fixture_source(Box::new(Source {
                 descriptor: ComponentDescriptor::try_new(
                     id("source"),
                     vec![PortDescriptor::new(
@@ -140,8 +255,8 @@ async fn draining_replacement() -> TestResult<()> {
                 input: receive,
                 transport: 0,
             }))
-            .component(spec, factory.clone())
-            .sink(Box::new(Collector {
+            .component(fixture_support::component_name(), spec, factory.clone())
+            .fixture_sink(Box::new(Collector {
                 descriptor: ComponentDescriptor::try_new(
                     id("collector"),
                     vec![PortDescriptor::new(

@@ -100,8 +100,14 @@ fn shared_budget_tracks_multiple_query_databases() {
         RocksDbMemoryBudget::new(64 * 1024 * 1024, 32 * 1024 * 1024, false).expect("budget");
     let options = RocksIndexOptions::new(true, false, budget.clone());
 
-    let first = open_unified_db(dir.path().to_str().expect("utf-8 path"), "first", &options)
-        .expect("open first database");
+    let first = open_unified_db(
+        dir.path().to_str().expect("utf-8 path"),
+        &drasi_core_types::StorageScope::default(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c3")
+            .expect("fixture UUID"),
+        &options,
+    )
+    .expect("open first database");
     let first_cf = first.cf_handle("elements").expect("elements CF");
     let cache_before_first = budget.block_cache().get_usage();
     for index in 0..2000_u32 {
@@ -113,8 +119,14 @@ fn shared_budget_tracks_multiple_query_databases() {
     assert!(first_usage > 0);
     assert!(budget.block_cache().get_usage() > cache_before_first);
 
-    let second = open_unified_db(dir.path().to_str().expect("utf-8 path"), "second", &options)
-        .expect("open second database");
+    let second = open_unified_db(
+        dir.path().to_str().expect("utf-8 path"),
+        &drasi_core_types::StorageScope::default(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000300")
+            .expect("fixture UUID"),
+        &options,
+    )
+    .expect("open second database");
     let second_cf = second.cf_handle("elements").expect("elements CF");
     let cache_before_second = budget.block_cache().get_usage();
     for index in 0..2000_u32 {
@@ -134,7 +146,9 @@ fn memtable_writes_charge_the_shared_cache() {
     let options = RocksIndexOptions::new(false, false, budget.clone());
     let db = open_unified_db(
         dir.path().to_str().expect("utf-8 path"),
-        "memtable-charge",
+        &drasi_core_types::StorageScope::default(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003b1")
+            .expect("fixture UUID"),
         &options,
     )
     .expect("open database");
@@ -154,13 +168,19 @@ fn all_column_families_use_the_shared_cache() {
     let dir = tempfile::tempdir().expect("tempdir");
     let budget =
         RocksDbMemoryBudget::new(64 * 1024 * 1024, 32 * 1024 * 1024, false).expect("budget");
-    let cache = budget.block_cache().clone();
+    let mut cache = budget.block_cache().clone();
     let options = RocksIndexOptions::new(true, false, budget);
-    let query_id = "cache-test";
-    let query_path = dir.path().join(query_id);
+    let query_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003ce")
+        .expect("fixture UUID");
+    let query_path = dir.path().join(query_id.as_str());
 
-    let schema_db = open_unified_db(dir.path().to_str().expect("utf-8 path"), query_id, &options)
-        .expect("open database");
+    let schema_db = open_unified_db(
+        dir.path().to_str().expect("utf-8 path"),
+        &drasi_core_types::StorageScope::default(),
+        &query_id,
+        &options,
+    )
+    .expect("open database");
     drop(schema_db);
 
     let seed_db =
@@ -179,14 +199,21 @@ fn all_column_families_use_the_shared_cache() {
     }
     drop(seed_db);
 
-    let db = open_unified_db(dir.path().to_str().expect("utf-8 path"), query_id, &options)
-        .expect("reopen database");
+    let db = open_unified_db(
+        dir.path().to_str().expect("utf-8 path"),
+        &drasi_core_types::StorageScope::default(),
+        &query_id,
+        &options,
+    )
+    .expect("reopen database");
     for (index, cf_name) in std::iter::once(rocksdb::DEFAULT_COLUMN_FAMILY_NAME)
         .chain(NON_DEFAULT_CFS.iter().copied())
         .enumerate()
     {
         let cf = db.cf_handle(cf_name).expect("reopened CF");
         let key = format!("key-{index}");
+        cache.set_capacity(0);
+        cache.set_capacity(64 * 1024 * 1024);
         let usage_before = cache.get_usage();
         assert!(db
             .get_cf(&cf, key.as_bytes())
@@ -206,9 +233,15 @@ async fn clear_paths_preserve_column_family_options() {
         RocksDbMemoryBudget::new(64 * 1024 * 1024, 4 * 1024 * 1024, false).expect("budget");
     let mut cache = budget.block_cache().clone();
     let options = RocksIndexOptions::new(true, false, budget.clone());
-    let query_id = "clear-test";
-    let db = open_unified_db(dir.path().to_str().expect("utf-8 path"), query_id, &options)
-        .expect("open database");
+    let query_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003b0")
+        .expect("fixture UUID");
+    let db = open_unified_db(
+        dir.path().to_str().expect("utf-8 path"),
+        &drasi_core_types::StorageScope::default(),
+        &query_id,
+        &options,
+    )
+    .expect("open database");
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
 
     let element_index =
@@ -248,7 +281,7 @@ async fn clear_paths_preserve_column_family_options() {
     drop(future_queue);
     drop(db);
 
-    let query_path = dir.path().join(query_id);
+    let query_path = dir.path().join(query_id.as_str());
     let flush_db = DB::open_cf(&Options::default(), &query_path, NON_DEFAULT_CFS)
         .expect("open flush database");
     for cf_name in
@@ -259,8 +292,13 @@ async fn clear_paths_preserve_column_family_options() {
     }
     drop(flush_db);
 
-    let db = open_unified_db(dir.path().to_str().expect("utf-8 path"), query_id, &options)
-        .expect("reopen database");
+    let db = open_unified_db(
+        dir.path().to_str().expect("utf-8 path"),
+        &drasi_core_types::StorageScope::default(),
+        &query_id,
+        &options,
+    )
+    .expect("reopen database");
 
     let sections = parse_options_file(&query_path);
     for cf_name in RECREATED_CFS {

@@ -23,8 +23,8 @@
 //! component runtime. Select `native-tls` (default) or `rustls` for connections.
 
 pub mod config;
-pub mod decoder;
 pub mod connection;
+pub mod decoder;
 pub mod error;
 pub mod keys;
 pub mod lsn;

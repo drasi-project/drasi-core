@@ -54,19 +54,31 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
         .with_source_config(config.clone())
         .build()?;
 
-    let source = KubernetesSource::builder("k8s-source")
-        .with_config(config)
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = KubernetesSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004b")
+            .expect("fixture UUID"),
+    )
+    .with_config(config)
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (c:ConfigMap) RETURN c.name AS name, c.data.color AS color")
-        .from_input("k8s-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    let query =
+        Query::cypher(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+            .query("MATCH (c:ConfigMap) RETURN c.name AS name, c.data.color AS color")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("k8s-source").expect("fixture component name"),
+            )
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build()
+            .expect("valid query configuration");
 
-    let (reaction, reaction_handle) = ApplicationReaction::builder("r1").with_query("q1").build();
+    let (reaction, reaction_handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -83,9 +95,15 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
                     .clone(),
             )
             .with_id("k8s-source-it")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("k8s-source").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("r1").expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
@@ -114,7 +132,12 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
 
     cms.create(&PostParams::default(), &cm).await?;
 
-    wait_for_query_row(&core, "q1", |rows| row_has(rows, cm_name, Some("red"))).await?;
+    wait_for_query_row(
+        &core,
+        &drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        |rows| row_has(rows, cm_name, Some("red")),
+    )
+    .await?;
     wait_for_subscription_data(&mut subscription, "ADD", cm_name, Some("red")).await?;
 
     cms.patch(
@@ -126,12 +149,22 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
     )
     .await?;
 
-    wait_for_query_row(&core, "q1", |rows| row_has(rows, cm_name, Some("blue"))).await?;
+    wait_for_query_row(
+        &core,
+        &drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        |rows| row_has(rows, cm_name, Some("blue")),
+    )
+    .await?;
     wait_for_subscription_data(&mut subscription, "UPDATE", cm_name, Some("blue")).await?;
 
     cms.delete(cm_name, &DeleteParams::default()).await?;
     wait_for_subscription_data(&mut subscription, "DELETE", cm_name, None).await?;
-    wait_for_query_row(&core, "q1", |rows| !row_has(rows, cm_name, None)).await?;
+    wait_for_query_row(
+        &core,
+        &drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        |rows| !row_has(rows, cm_name, None),
+    )
+    .await?;
 
     core.stop().await?;
     Ok(())
@@ -181,19 +214,31 @@ async fn test_kubernetes_bootstrap_paginates_existing_configmaps() -> Result<()>
         .with_list_page_size(2)
         .build()?;
 
-    let source = KubernetesSource::builder("k8s-source")
-        .with_config(config)
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = KubernetesSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004b")
+            .expect("fixture UUID"),
+    )
+    .with_config(config)
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
-    let query = Query::cypher("q1")
-        .query("MATCH (c:ConfigMap) RETURN c.name AS name")
-        .from_input("k8s-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    let query =
+        Query::cypher(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+            .query("MATCH (c:ConfigMap) RETURN c.name AS name")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("k8s-source").expect("fixture component name"),
+            )
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build()
+            .expect("valid query configuration");
 
-    let (reaction, _reaction_handle) = ApplicationReaction::builder("r1").with_query("q1").build();
+    let (reaction, _reaction_handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -210,21 +255,33 @@ async fn test_kubernetes_bootstrap_paginates_existing_configmaps() -> Result<()>
                     .clone(),
             )
             .with_id("k8s-bootstrap-page-it")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("k8s-source").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("r1").expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
 
     core.start().await?;
 
-    wait_for_query_row(&core, "q1", |rows| {
-        names.iter().all(|name| row_has(rows, name, None))
-    })
+    wait_for_query_row(
+        &core,
+        &drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        |rows| names.iter().all(|name| row_has(rows, name, None)),
+    )
     .await?;
 
-    let rows = core.get_query_results("q1").await?;
+    let rows = core
+        .get_query_results_by_name(
+            &drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .await?;
     let bootstrapped: Vec<&str> = names
         .iter()
         .copied()
@@ -240,13 +297,17 @@ async fn test_kubernetes_bootstrap_paginates_existing_configmaps() -> Result<()>
     Ok(())
 }
 
-async fn wait_for_query_row<F>(core: &Arc<DrasiLib>, query_id: &str, predicate: F) -> Result<()>
+async fn wait_for_query_row<F>(
+    core: &Arc<DrasiLib>,
+    query_id: &drasi_core::ComponentName,
+    predicate: F,
+) -> Result<()>
 where
     F: Fn(&[Value]) -> bool,
 {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let rows = core.get_query_results(query_id).await?;
+        let rows = core.get_query_results_by_name(query_id).await?;
         if predicate(&rows) {
             return Ok(());
         }

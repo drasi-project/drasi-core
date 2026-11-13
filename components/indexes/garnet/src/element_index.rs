@@ -22,6 +22,7 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 use bit_set::BitSet;
 use drasi_core::hashing::SpookyHasher;
+use drasi_core::{interface::StorageScope, ComponentId};
 use drasi_core::{
     interface::{
         index_joins_by_label, ElementIndex, ElementStream, IndexError, IndexJoin, IndexJoinsByLabel,
@@ -47,13 +48,13 @@ mod archive_index;
 /// Redis element index store
 ///
 /// Redis key structure (hash-tagged for cluster compatibility):
-/// ei:{<query_id>}:{source_id}:{element_id} -> StoredElement              # Element
-/// ei:{<query_id>}:$in:{source_id}:{element_id}:{slot} -> [element_ref]   # Inverted index to inbound elements
-/// ei:{<query_id>}:$out:{source_id}:{element_id}:{slot} -> [element_ref]  # Inverted index to outbound elements
-/// ei:{<query_id>}:$partial:{join_label}:{field_value}:{node_label}:{property} -> [element_ref] # Partial join index to track source joins
+/// ei:{<storage_key>}:{source_id}:{element_id} -> StoredElement              # Element
+/// ei:{<storage_key>}:$in:{source_id}:{element_id}:{slot} -> [element_ref]   # Inverted index to inbound elements
+/// ei:{<storage_key>}:$out:{source_id}:{element_id}:{slot} -> [element_ref]  # Inverted index to outbound elements
+/// ei:{<storage_key>}:$partial:{join_label}:{field_value}:{node_label}:{property} -> [element_ref] # Partial join index to track source joins
 #[allow(clippy::type_complexity)]
 pub struct GarnetElementIndex {
-    query_id: Arc<str>,
+    storage_key: Arc<str>,
     key_formatter: Arc<KeyFormatter>,
     connection: MultiplexedConnection,
     join_spec_by_label: Arc<RwLock<IndexJoinsByLabel>>,
@@ -64,14 +65,16 @@ pub struct GarnetElementIndex {
 impl GarnetElementIndex {
     /// Create a new GarnetElementIndex from a shared connection.
     pub fn new(
-        query_id: &str,
+        scope: &StorageScope,
+        component_id: &ComponentId,
         connection: MultiplexedConnection,
         archive_enabled: bool,
         session_state: Arc<GarnetSessionState>,
     ) -> Self {
+        let storage_key: Arc<str> = scope.component_key(component_id).into();
         GarnetElementIndex {
-            key_formatter: Arc::new(KeyFormatter::new(Arc::from(query_id))),
-            query_id: Arc::from(query_id),
+            key_formatter: Arc::new(KeyFormatter::new(storage_key.clone())),
+            storage_key,
             connection,
             join_spec_by_label: Arc::new(RwLock::new(HashMap::new())),
             archive_enabled,
@@ -823,7 +826,7 @@ impl GarnetElementIndex {
 #[async_trait]
 impl ElementIndex for GarnetElementIndex {
     async fn get_slot_elements(&self, slot: usize) -> Result<ElementStream, IndexError> {
-        let prefix = format!("ei:{{{}}}:", self.query_id);
+        let prefix = format!("ei:{{{}}}:", self.storage_key);
         let pattern = format!(
             "{}*",
             prefix
@@ -968,7 +971,7 @@ impl ElementIndex for GarnetElementIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         self.connection
-            .clear(format!("ei:{{{}}}:*", self.query_id))
+            .clear(format!("ei:{{{}}}:*", self.storage_key))
             .await
     }
 
@@ -989,19 +992,19 @@ fn slots_to_bitset(slots: &Vec<usize>) -> BitSet {
 }
 
 struct KeyFormatter {
-    query_id: Arc<str>,
+    storage_key: Arc<str>,
 }
 
 impl KeyFormatter {
-    fn new(query_id: Arc<str>) -> Self {
-        KeyFormatter { query_id }
+    fn new(storage_key: Arc<str>) -> Self {
+        KeyFormatter { storage_key }
     }
 
     fn get_element_key(&self, element_ref: &ElementReference) -> String {
         format!(
             "ei:{{{}}}:{}:{}",
-            self.query_id.as_ref(),
-            element_ref.source_id.as_ref(),
+            self.storage_key.as_ref(),
+            element_ref.namespace.as_ref(),
             element_ref.element_id.as_ref()
         )
     }
@@ -1009,21 +1012,21 @@ impl KeyFormatter {
     fn get_stored_element_key(&self, element_ref: &StoredElementReference) -> String {
         format!(
             "ei:{{{}}}:{}:{}",
-            self.query_id.as_ref(),
+            self.storage_key.as_ref(),
             element_ref.source_id,
             element_ref.element_id
         )
     }
 
     fn get_element_key_from_ref_string(&self, element_ref: &str) -> String {
-        format!("ei:{{{}}}:{}", self.query_id.as_ref(), element_ref)
+        format!("ei:{{{}}}:{}", self.storage_key.as_ref(), element_ref)
     }
 
     fn get_inbound_key(&self, element_ref: &ElementReference, slot: usize) -> String {
         format!(
             "ei:{{{}}}:$in:{}:{}:{}",
-            self.query_id.as_ref(),
-            element_ref.source_id.as_ref(),
+            self.storage_key.as_ref(),
+            element_ref.namespace.as_ref(),
             element_ref.element_id.as_ref(),
             slot
         )
@@ -1032,8 +1035,8 @@ impl KeyFormatter {
     fn get_outbound_key(&self, element_ref: &ElementReference, slot: usize) -> String {
         format!(
             "ei:{{{}}}:$out:{}:{}:{}",
-            self.query_id.as_ref(),
-            element_ref.source_id.as_ref(),
+            self.storage_key.as_ref(),
+            element_ref.namespace.as_ref(),
             element_ref.element_id.as_ref(),
             slot
         )
@@ -1042,7 +1045,7 @@ impl KeyFormatter {
     fn get_stored_inbound_key(&self, element_ref: &StoredElementReference, slot: usize) -> String {
         format!(
             "ei:{{{}}}:$in:{}:{}:{}",
-            self.query_id.as_ref(),
+            self.storage_key.as_ref(),
             element_ref.source_id,
             element_ref.element_id,
             slot
@@ -1052,7 +1055,7 @@ impl KeyFormatter {
     fn get_stored_outbound_key(&self, element_ref: &StoredElementReference, slot: usize) -> String {
         format!(
             "ei:{{{}}}:$out:{}:{}:{}",
-            self.query_id.as_ref(),
+            self.storage_key.as_ref(),
             element_ref.source_id,
             element_ref.element_id,
             slot
@@ -1075,7 +1078,7 @@ impl KeyFormatter {
         let value_hash = hasher.finish128();
         format!(
             "ei:{{{}}}:$partial:{}:{}{}:{}:{}",
-            self.query_id.as_ref(),
+            self.storage_key.as_ref(),
             join_label,
             value_hash.0,
             value_hash.1,
@@ -1087,8 +1090,8 @@ impl KeyFormatter {
     fn get_archive_key(&self, element_ref: &ElementReference) -> String {
         format!(
             "archive:{{{}}}:{}:{}",
-            self.query_id.as_ref(),
-            element_ref.source_id.as_ref(),
+            self.storage_key.as_ref(),
+            element_ref.namespace.as_ref(),
             element_ref.element_id.as_ref()
         )
     }
@@ -1096,7 +1099,7 @@ impl KeyFormatter {
     fn get_stored_archive_key(&self, element_ref: &StoredElementReference) -> String {
         format!(
             "archive:{{{}}}:{}:{}",
-            self.query_id.as_ref(),
+            self.storage_key.as_ref(),
             &element_ref.source_id,
             &element_ref.element_id
         )

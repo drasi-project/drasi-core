@@ -77,13 +77,13 @@ impl std::fmt::Debug for DashboardReaction {
 
 impl DashboardReaction {
     /// Create a builder for DashboardReaction.
-    pub fn builder(id: impl Into<String>) -> DashboardReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> DashboardReactionBuilder {
         DashboardReactionBuilder::new(id)
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: DashboardReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -148,7 +148,7 @@ async fn asset_handler(Path(path): Path<String>) -> Response {
 
 #[async_trait]
 impl Reaction for DashboardReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -163,7 +163,7 @@ impl Reaction for DashboardReaction {
         self.base.properties_or_serialize(&dto)
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -171,11 +171,12 @@ impl Reaction for DashboardReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
+        let query_ids = self.base.query_ids().await?;
         let _lifecycle = self.lifecycle.lock().await;
         if self.server_handle.read().await.is_some()
             || self.heartbeat_task.read().await.is_some()
@@ -272,7 +273,7 @@ impl Reaction for DashboardReaction {
         // per-query row limit to bound peak memory on large result sets.
         if let Some(fetcher) = snapshot_fetcher.as_ref() {
             let cap = self.snapshot_store.max_rows_per_query();
-            for query_id in &self.base.queries {
+            for query_id in &query_ids {
                 match fetcher.fetch_snapshot(query_id).await {
                     Ok(stream) => {
                         let rows = stream.collect_keyed_vec_capped(cap).await;
@@ -355,14 +356,13 @@ impl Reaction for DashboardReaction {
 
         let api_state = ApiState::new(
             self.base.id.clone(),
-            self.base.queries.clone(),
+            query_ids.clone(),
             self.base.state_store().await,
             self.snapshot_store.clone(),
             snapshot_fetcher,
         );
         let websocket_hub = self.websocket_hub.clone();
         let websocket_snapshots = self.snapshot_store.clone();
-        let query_ids = self.base.queries.clone();
         let server_status_handle = self.base.status_handle();
         // Reset the shutdown flag for this run (supports stop/start cycles) and
         // derive receivers for the server and per-connection WebSocket handlers.
@@ -470,8 +470,8 @@ impl Reaction for DashboardReaction {
         self.base.enqueue_query_result(result).await
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        self.base.deprovision_common().await
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.base.delete_owned_resources_common().await
     }
 }
 
@@ -483,12 +483,35 @@ mod lifecycle_tests {
     use std::sync::Arc;
     use tokio::sync::Notify;
 
+    async fn initialize_dashboard(
+        dashboard: &DashboardReaction,
+        query_ids: Vec<drasi_lib::ComponentId>,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<drasi_lib::channels::ComponentUpdate>> {
+        let (update_tx, updates) = tokio::sync::mpsc::channel(128);
+        dashboard
+            .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+                "dashboard-lifecycle-test",
+                dashboard.id().clone(),
+                query_ids,
+                None,
+                update_tx,
+                None,
+            ))
+            .await;
+        dashboard.initialize().await?;
+        Ok(updates)
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_dashboard_cleanup_retains_workers_and_blocks_restart() -> anyhow::Result<()>
     {
-        let dashboard = DashboardReaction::builder("cancelled")
-            .with_port(0)
-            .build()?;
+        let dashboard = DashboardReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000054")
+                .expect("fixture UUID"),
+        )
+        .with_port(0)
+        .build()?;
+        let _updates = initialize_dashboard(&dashboard, vec![]).await?;
         let release = Arc::new(Notify::new());
         let drain = release.clone();
         spawn_owned_worker(&dashboard.server_handle, async move {
@@ -522,7 +545,13 @@ mod lifecycle_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dashboard_join_preserves_server_errors_and_panics() -> anyhow::Result<()> {
         for panic in [false, true] {
-            let dashboard = DashboardReaction::builder("failed").with_port(0).build()?;
+            let dashboard = DashboardReaction::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                    .expect("fixture UUID"),
+            )
+            .with_port(0)
+            .build()?;
+            let _updates = initialize_dashboard(&dashboard, vec![]).await?;
             spawn_owned_worker(&dashboard.server_handle, async move {
                 assert!(!panic, "injected dashboard server panic");
                 Err(std::io::Error::new(
@@ -554,9 +583,13 @@ mod lifecycle_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_dashboard_connection_drain_blocks_restart_without_a_server_handle(
     ) -> anyhow::Result<()> {
-        let dashboard = DashboardReaction::builder("connection")
-            .with_port(0)
-            .build()?;
+        let dashboard = DashboardReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000089")
+                .expect("fixture UUID"),
+        )
+        .with_port(0)
+        .build()?;
+        let _updates = initialize_dashboard(&dashboard, vec![]).await?;
         let connection = dashboard.shutdown_tx.subscribe();
         {
             let stop = dashboard.stop();
@@ -585,12 +618,24 @@ mod lifecycle_tests {
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = reservation.local_addr()?.port();
         drop(reservation);
-        let dashboard = DashboardReaction::builder("restart")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_query("query")
-            .with_heartbeat_interval_ms(10)
-            .build()?;
+        let dashboard = DashboardReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000055")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .with_heartbeat_interval_ms(10)
+        .build()?;
+        let _updates = initialize_dashboard(
+            &dashboard,
+            vec![drasi_core::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000081",
+            )?],
+        )
+        .await?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(2))

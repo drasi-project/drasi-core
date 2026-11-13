@@ -114,6 +114,8 @@ pub enum StateStoreError {
 /// Result type for state store operations
 pub type StateStoreResult<T> = Result<T, StateStoreError>;
 
+pub use drasi_core_types::StorePartition;
+
 /// Trait defining the interface for state store providers.
 ///
 /// State store providers allow plugins (Sources, BootstrapProviders, and Reactions)
@@ -126,9 +128,9 @@ pub type StateStoreResult<T> = Result<T, StateStoreError>;
 ///
 /// # Partitioning
 ///
-/// The state store uses `store_id` to partition data between different plugins.
-/// Each plugin should use a unique `store_id` (typically the plugin's ID) to
-/// avoid conflicts with other plugins.
+/// The state store uses `StorePartition` to separate logical stores.
+/// Component state uses its actual UUID with `StorePartition::component`;
+/// independently named stores use `StorePartition::named`.
 ///
 /// # Example Implementation
 ///
@@ -137,6 +139,7 @@ pub type StateStoreResult<T> = Result<T, StateStoreError>;
 ///
 /// ```no_run
 /// use drasi_lib::{StateStoreProvider, StateStoreResult};
+/// use drasi_lib::state_store::StorePartition;
 /// use async_trait::async_trait;
 ///
 /// pub struct MyStateStore {
@@ -145,27 +148,27 @@ pub type StateStoreResult<T> = Result<T, StateStoreError>;
 ///
 /// #[async_trait]
 /// impl StateStoreProvider for MyStateStore {
-///     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+///     async fn get(&self, store_id: &StorePartition, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
 ///         todo!("Read from the actual store")
 ///     }
 ///
-///     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+///     async fn set(&self, store_id: &StorePartition, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
 ///         todo!("Write using the declared durability policy")
 ///     }
 ///
-///     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+///     async fn delete(&self, store_id: &StorePartition, key: &str) -> StateStoreResult<bool> {
 ///         todo!("Delete from the actual store")
 ///     }
 ///
 ///     // ... implement other methods
-/// #     async fn contains_key(&self, _: &str, _: &str) -> StateStoreResult<bool> { todo!() }
-/// #     async fn get_many(&self, _: &str, _: &[&str]) -> StateStoreResult<std::collections::HashMap<String, Vec<u8>>> { todo!() }
-/// #     async fn set_many(&self, _: &str, _: &[(&str, &[u8])]) -> StateStoreResult<()> { todo!() }
-/// #     async fn delete_many(&self, _: &str, _: &[&str]) -> StateStoreResult<usize> { todo!() }
-/// #     async fn clear_store(&self, _: &str) -> StateStoreResult<usize> { todo!() }
-/// #     async fn list_keys(&self, _: &str) -> StateStoreResult<Vec<String>> { todo!() }
-/// #     async fn store_exists(&self, _: &str) -> StateStoreResult<bool> { todo!() }
-/// #     async fn key_count(&self, _: &str) -> StateStoreResult<usize> { todo!() }
+/// #     async fn contains_key(&self, _: &StorePartition, _: &str) -> StateStoreResult<bool> { todo!() }
+/// #     async fn get_many(&self, _: &StorePartition, _: &[&str]) -> StateStoreResult<std::collections::HashMap<String, Vec<u8>>> { todo!() }
+/// #     async fn set_many(&self, _: &StorePartition, _: &[(&str, &[u8])]) -> StateStoreResult<()> { todo!() }
+/// #     async fn delete_many(&self, _: &StorePartition, _: &[&str]) -> StateStoreResult<usize> { todo!() }
+/// #     async fn clear_store(&self, _: &StorePartition) -> StateStoreResult<usize> { todo!() }
+/// #     async fn list_keys(&self, _: &StorePartition) -> StateStoreResult<Vec<String>> { todo!() }
+/// #     async fn store_exists(&self, _: &StorePartition) -> StateStoreResult<bool> { todo!() }
+/// #     async fn key_count(&self, _: &StorePartition) -> StateStoreResult<usize> { todo!() }
 /// }
 /// ```
 #[async_trait]
@@ -186,7 +189,8 @@ pub trait StateStoreProvider: Send + Sync {
     /// * `Ok(Some(value))` - The value was found
     /// * `Ok(None)` - The key doesn't exist in the store
     /// * `Err(e)` - An error occurred
-    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>>;
+    async fn get(&self, partition: &StorePartition, key: &str)
+        -> StateStoreResult<Option<Vec<u8>>>;
 
     /// Set a single value by key in a store partition.
     ///
@@ -200,7 +204,12 @@ pub trait StateStoreProvider: Send + Sync {
     /// # Returns
     /// * `Ok(())` - The value was successfully stored
     /// * `Err(e)` - An error occurred
-    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()>;
+    async fn set(
+        &self,
+        partition: &StorePartition,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<()>;
 
     /// Delete a single key from a store partition.
     ///
@@ -212,7 +221,7 @@ pub trait StateStoreProvider: Send + Sync {
     /// * `Ok(true)` - The key existed and was deleted
     /// * `Ok(false)` - The key didn't exist
     /// * `Err(e)` - An error occurred
-    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool>;
+    async fn delete(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool>;
 
     /// Check if a key exists in a store partition without retrieving its value.
     ///
@@ -227,7 +236,7 @@ pub trait StateStoreProvider: Send + Sync {
     /// * `Ok(true)` - The key exists
     /// * `Ok(false)` - The key doesn't exist
     /// * `Err(e)` - An error occurred
-    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool>;
+    async fn contains_key(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool>;
 
     /// Get multiple values by keys from a store partition.
     ///
@@ -240,7 +249,7 @@ pub trait StateStoreProvider: Send + Sync {
     /// are simply not included in the result.
     async fn get_many(
         &self,
-        store_id: &str,
+        partition: &StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>>;
 
@@ -255,7 +264,11 @@ pub trait StateStoreProvider: Send + Sync {
     /// # Returns
     /// * `Ok(())` - All values were successfully stored
     /// * `Err(e)` - An error occurred (some values may have been stored)
-    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()>;
+    async fn set_many(
+        &self,
+        partition: &StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()>;
 
     /// Delete multiple keys from a store partition.
     ///
@@ -266,7 +279,11 @@ pub trait StateStoreProvider: Send + Sync {
     /// # Returns
     /// * `Ok(count)` - The number of keys that were deleted
     /// * `Err(e)` - An error occurred (some keys may have been deleted)
-    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize>;
+    async fn delete_many(
+        &self,
+        partition: &StorePartition,
+        keys: &[&str],
+    ) -> StateStoreResult<usize>;
 
     /// Delete all data for a store partition.
     ///
@@ -276,7 +293,7 @@ pub trait StateStoreProvider: Send + Sync {
     /// # Returns
     /// * `Ok(count)` - The number of keys that were deleted
     /// * `Err(e)` - An error occurred
-    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize>;
+    async fn clear_store(&self, partition: &StorePartition) -> StateStoreResult<usize>;
 
     /// List all keys in a store partition.
     ///
@@ -285,7 +302,7 @@ pub trait StateStoreProvider: Send + Sync {
     ///
     /// # Returns
     /// A vector of all keys in the store partition
-    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>>;
+    async fn list_keys(&self, partition: &StorePartition) -> StateStoreResult<Vec<String>>;
 
     /// Check if a store partition exists and has any data.
     ///
@@ -296,7 +313,7 @@ pub trait StateStoreProvider: Send + Sync {
     /// * `Ok(true)` - The store partition exists and has at least one key
     /// * `Ok(false)` - The store partition doesn't exist or is empty
     /// * `Err(e)` - An error occurred while checking
-    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool>;
+    async fn store_exists(&self, partition: &StorePartition) -> StateStoreResult<bool>;
 
     /// Get the number of keys in a store partition.
     ///
@@ -306,7 +323,7 @@ pub trait StateStoreProvider: Send + Sync {
     /// # Returns
     /// * `Ok(count)` - The number of keys in the store
     /// * `Err(e)` - An error occurred
-    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize>;
+    async fn key_count(&self, partition: &StorePartition) -> StateStoreResult<usize>;
 
     /// Force pending writes to persistent storage.
     ///
@@ -346,15 +363,17 @@ pub trait StateStoreProvider: Send + Sync {
 ///
 /// ```no_run
 /// use drasi_lib::{MemoryStateStoreProvider, StateStoreProvider};
+/// use drasi_lib::state_store::StorePartition;
 ///
 /// # async fn example() -> drasi_lib::StateStoreResult<()> {
 /// let provider = MemoryStateStoreProvider::new();
+/// let partition = StorePartition::named("my-plugin");
 ///
 /// // Store some data
-/// provider.set("my-plugin", "key1", b"value1".to_vec()).await?;
+/// provider.set(&partition, "key1", b"value1".to_vec()).await?;
 ///
 /// // Retrieve data
-/// if let Some(value) = provider.get("my-plugin", "key1").await? {
+/// if let Some(value) = provider.get(&partition, "key1").await? {
 ///     println!("Value: {:?}", value);
 /// }
 /// # Ok(())
@@ -362,7 +381,7 @@ pub trait StateStoreProvider: Send + Sync {
 /// ```
 pub struct MemoryStateStoreProvider {
     /// Data storage: store_id -> (key -> value)
-    stores: Arc<RwLock<HashMap<String, HashMap<String, Vec<u8>>>>>,
+    stores: Arc<RwLock<HashMap<StorePartition, HashMap<String, Vec<u8>>>>>,
 }
 
 impl Default for MemoryStateStoreProvider {
@@ -386,23 +405,28 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         StorageDurability::VOLATILE
     }
 
-    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+    async fn get(&self, store_id: &StorePartition, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
         let stores = self.stores.read().await;
         Ok(stores
             .get(store_id)
             .and_then(|store| store.get(key).cloned()))
     }
 
-    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+    async fn set(
+        &self,
+        store_id: &StorePartition,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<()> {
         let mut stores = self.stores.write().await;
         stores
-            .entry(store_id.to_string())
+            .entry(store_id.clone())
             .or_default()
             .insert(key.to_string(), value);
         Ok(())
     }
 
-    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn delete(&self, store_id: &StorePartition, key: &str) -> StateStoreResult<bool> {
         let mut stores = self.stores.write().await;
         if let Some(store) = stores.get_mut(store_id) {
             let existed = store.remove(key).is_some();
@@ -416,7 +440,7 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         }
     }
 
-    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn contains_key(&self, store_id: &StorePartition, key: &str) -> StateStoreResult<bool> {
         let stores = self.stores.read().await;
         Ok(stores
             .get(store_id)
@@ -425,7 +449,7 @@ impl StateStoreProvider for MemoryStateStoreProvider {
 
     async fn get_many(
         &self,
-        store_id: &str,
+        store_id: &StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
         let stores = self.stores.read().await;
@@ -442,9 +466,13 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         Ok(result)
     }
 
-    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        store_id: &StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()> {
         let mut stores = self.stores.write().await;
-        let store = stores.entry(store_id.to_string()).or_default();
+        let store = stores.entry(store_id.clone()).or_default();
 
         for (key, value) in entries {
             store.insert((*key).to_string(), value.to_vec());
@@ -453,7 +481,11 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         Ok(())
     }
 
-    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+    async fn delete_many(
+        &self,
+        store_id: &StorePartition,
+        keys: &[&str],
+    ) -> StateStoreResult<usize> {
         let mut stores = self.stores.write().await;
         let mut count = 0;
 
@@ -472,7 +504,7 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         Ok(count)
     }
 
-    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn clear_store(&self, store_id: &StorePartition) -> StateStoreResult<usize> {
         let mut stores = self.stores.write().await;
         if let Some(store) = stores.remove(store_id) {
             Ok(store.len())
@@ -481,7 +513,7 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         }
     }
 
-    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+    async fn list_keys(&self, store_id: &StorePartition) -> StateStoreResult<Vec<String>> {
         let stores = self.stores.read().await;
         Ok(stores
             .get(store_id)
@@ -489,12 +521,12 @@ impl StateStoreProvider for MemoryStateStoreProvider {
             .unwrap_or_default())
     }
 
-    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+    async fn store_exists(&self, store_id: &StorePartition) -> StateStoreResult<bool> {
         let stores = self.stores.read().await;
         Ok(stores.get(store_id).is_some_and(|store| !store.is_empty()))
     }
 
-    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn key_count(&self, store_id: &StorePartition) -> StateStoreResult<usize> {
         let stores = self.stores.read().await;
         Ok(stores.get(store_id).map(|store| store.len()).unwrap_or(0))
     }
@@ -510,20 +542,39 @@ mod tests {
 
         // Set a value
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
 
         // Get the value
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value1".to_vec()));
 
         // Get non-existent key
-        let result = provider.get("store1", "nonexistent").await.unwrap();
+        let result = provider
+            .get(
+                &drasi_core_types::StorePartition::named("store1"),
+                "nonexistent",
+            )
+            .await
+            .unwrap();
         assert_eq!(result, None);
 
         // Get from non-existent store
-        let result = provider.get("nonexistent", "key1").await.unwrap();
+        let result = provider
+            .get(
+                &drasi_core_types::StorePartition::named("nonexistent"),
+                "key1",
+            )
+            .await
+            .unwrap();
         assert_eq!(result, None);
     }
 
@@ -533,18 +584,34 @@ mod tests {
 
         // Set and delete
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
-        let deleted = provider.delete("store1", "key1").await.unwrap();
+        let deleted = provider
+            .delete(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert!(deleted);
 
         // Verify deletion
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, None);
 
         // Delete non-existent key
-        let deleted = provider.delete("store1", "nonexistent").await.unwrap();
+        let deleted = provider
+            .delete(
+                &drasi_core_types::StorePartition::named("store1"),
+                "nonexistent",
+            )
+            .await
+            .unwrap();
         assert!(!deleted);
     }
 
@@ -553,19 +620,32 @@ mod tests {
         let provider = MemoryStateStoreProvider::new();
 
         // Key doesn't exist
-        assert!(!provider.contains_key("store1", "key1").await.unwrap());
+        assert!(!provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap());
 
         // Set a value
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
 
         // Key now exists
-        assert!(provider.contains_key("store1", "key1").await.unwrap());
+        assert!(provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap());
 
         // Different key doesn't exist
-        assert!(!provider.contains_key("store1", "key2").await.unwrap());
+        assert!(!provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key2")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -574,17 +654,28 @@ mod tests {
 
         // Set multiple values
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
         // Get multiple (including non-existent key)
         let result = provider
-            .get_many("store1", &["key1", "key2", "nonexistent"])
+            .get_many(
+                &drasi_core_types::StorePartition::named("store1"),
+                &["key1", "key2", "nonexistent"],
+            )
             .await
             .unwrap();
         assert_eq!(result.len(), 2);
@@ -598,14 +689,23 @@ mod tests {
 
         // Set multiple values
         provider
-            .set_many("store1", &[("key1", b"value1"), ("key2", b"value2")])
+            .set_many(
+                &drasi_core_types::StorePartition::named("store1"),
+                &[("key1", b"value1"), ("key2", b"value2")],
+            )
             .await
             .unwrap();
 
         // Verify
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value1".to_vec()));
-        let result = provider.get("store1", "key2").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key2")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value2".to_vec()));
     }
 
@@ -616,7 +716,7 @@ mod tests {
         // Set multiple values
         provider
             .set_many(
-                "store1",
+                &drasi_core_types::StorePartition::named("store1"),
                 &[("key1", b"value1"), ("key2", b"value2"), ("key3", b"value3")],
             )
             .await
@@ -624,15 +724,24 @@ mod tests {
 
         // Delete some
         let count = provider
-            .delete_many("store1", &["key1", "key2", "nonexistent"])
+            .delete_many(
+                &drasi_core_types::StorePartition::named("store1"),
+                &["key1", "key2", "nonexistent"],
+            )
             .await
             .unwrap();
         assert_eq!(count, 2);
 
         // Verify
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, None);
-        let result = provider.get("store1", "key3").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key3")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value3".to_vec()));
     }
 
@@ -642,28 +751,49 @@ mod tests {
 
         // Set values in multiple stores
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store2", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store2"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
 
         // Clear store1
-        let count = provider.clear_store("store1").await.unwrap();
+        let count = provider
+            .clear_store(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap();
         assert_eq!(count, 2);
 
         // Verify store1 is cleared
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, None);
 
         // Verify store2 is intact
-        let result = provider.get("store2", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store2"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value1".to_vec()));
     }
 
@@ -673,21 +803,35 @@ mod tests {
 
         // Set values
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
         // List keys
-        let mut keys = provider.list_keys("store1").await.unwrap();
+        let mut keys = provider
+            .list_keys(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap();
         keys.sort();
         assert_eq!(keys, vec!["key1", "key2"]);
 
         // List keys from non-existent store
-        let keys = provider.list_keys("nonexistent").await.unwrap();
+        let keys = provider
+            .list_keys(&drasi_core_types::StorePartition::named("nonexistent"))
+            .await
+            .unwrap();
         assert!(keys.is_empty());
     }
 
@@ -696,18 +840,34 @@ mod tests {
         let provider = MemoryStateStoreProvider::new();
 
         // Non-existent store
-        assert!(!provider.store_exists("store1").await.unwrap());
+        assert!(!provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
 
         // Set a value
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
-        assert!(provider.store_exists("store1").await.unwrap());
+        assert!(provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
 
         // Delete the value (store should be cleaned up)
-        provider.delete("store1", "key1").await.unwrap();
-        assert!(!provider.store_exists("store1").await.unwrap());
+        provider
+            .delete(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
+        assert!(!provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -715,21 +875,47 @@ mod tests {
         let provider = MemoryStateStoreProvider::new();
 
         // Empty store has 0 keys
-        assert_eq!(provider.key_count("store1").await.unwrap(), 0);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            0
+        );
 
         // Set a value
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
-        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            1
+        );
 
         // Set another value
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
-        assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -738,17 +924,31 @@ mod tests {
 
         // Set same key in different stores
         provider
-            .set("store1", "key", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store2", "key", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store2"),
+                "key",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
         // Verify they don't interfere
-        let result1 = provider.get("store1", "key").await.unwrap();
-        let result2 = provider.get("store2", "key").await.unwrap();
+        let result1 = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key")
+            .await
+            .unwrap();
+        let result2 = provider
+            .get(&drasi_core_types::StorePartition::named("store2"), "key")
+            .await
+            .unwrap();
         assert_eq!(result1, Some(b"value1".to_vec()));
         assert_eq!(result2, Some(b"value2".to_vec()));
     }
@@ -762,7 +962,11 @@ mod tests {
 
         // Set some data and sync again
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider.sync().await.unwrap();

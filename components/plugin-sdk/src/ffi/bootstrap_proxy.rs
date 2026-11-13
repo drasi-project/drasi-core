@@ -103,14 +103,14 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
             // Non-blocking: spawns the provider and returns handles.
             let stream_ptr = (vtable_bootstrap_fn)(
                 vtable_state,
-                FfiStr::from_str(&request.query_id),
+                FfiStr::from_str(request.query_id.as_str()),
                 node_ffi.as_ptr(),
                 node_ffi.len(),
                 rel_ffi.as_ptr(),
                 rel_ffi.len(),
                 FfiStr::from_str(&request.request_id),
                 FfiStr::from_str(&context.server_id),
-                FfiStr::from_str(&context.source_id),
+                FfiStr::from_str(context.source_id.as_str()),
                 FfiStr::from_str(&settings_json),
                 FfiStr::from_str(&properties_json),
             );

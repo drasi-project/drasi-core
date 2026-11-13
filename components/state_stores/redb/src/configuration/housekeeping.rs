@@ -36,7 +36,8 @@ pub(super) fn initialize_policy(
         .transpose()?
         .unwrap_or_default();
     anyhow::ensure!(
-        (version == 2) == previous.receipt_batch_capacity.is_some(),
+        (version == UUID_EXPIRING_CONFIGURATION_FORMAT)
+            == previous.receipt_batch_capacity.is_some(),
         "configuration format and receipt expiry policy disagree"
     );
     if previous.receipt_batch_capacity.is_some() {
@@ -48,7 +49,11 @@ pub(super) fn initialize_policy(
         // A format boundary prevents an older binary from reopening expired IDs
         // under the old indefinite-retry contract.
         transaction.open_table(REQUESTS)?.retain(|_, _| false)?;
-        let bytes = seal(owner, &metadata_context("key-check"), &2u32)?;
+        let bytes = seal(
+            owner,
+            &metadata_context("key-check"),
+            &UUID_EXPIRING_CONFIGURATION_FORMAT,
+        )?;
         metadata.insert("key-check", bytes.as_slice())?;
     }
     if previous != owner.options || metadata.get(POLICY)?.is_none() {

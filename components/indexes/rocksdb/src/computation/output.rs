@@ -18,20 +18,21 @@ use async_trait::async_trait;
 use drasi_core::interface::{
     IndexError, LiveResultsWriter, OutboxPageLimits, OutboxWriter, RowMutation,
 };
+use drasi_core_types::{ComponentId, OutputPartition};
 use rocksdb::{Direction, IteratorMode};
 
 use crate::{live_results::LIVE_RESULTS_CF, outbox::OUTBOX_CF, IndexDb, RocksDbSessionState};
 
 use drasi_core::computation::ComputationIoScope as BlockingScope;
 
-fn prefix(query_id: &str) -> Result<Vec<u8>, IndexError> {
-    if query_id.is_empty() || query_id.contains('\0') {
+fn prefix(storage_key: &str) -> Result<Vec<u8>, IndexError> {
+    if storage_key.is_empty() || storage_key.contains('\0') {
         return Err(IndexError::other(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "computation output identity must be nonempty and contain no NUL",
         )));
     }
-    let mut result = query_id.as_bytes().to_vec();
+    let mut result = storage_key.as_bytes().to_vec();
     result.push(0);
     Ok(result)
 }
@@ -92,20 +93,27 @@ impl ComputationOutboxWriter {
 impl OutboxWriter for ComputationOutboxWriter {
     async fn read_page(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         after_sequence: u64,
         limits: OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-        prefix(query_id)?;
-        let query = query_id.to_owned();
+        query_id.validate()?;
+        prefix(&query_id.storage_key())?;
+        let query = query_id.storage_key();
         let db = self.db.clone();
         self.work
             .run(move || crate::outbox::read_page(&db, &query, after_sequence, limits))
             .await
     }
 
-    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
-        let key = key(&prefix(query_id)?, sequence);
+    async fn append(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
+        let key = key(&prefix(&query_id.storage_key())?, sequence);
         let data = data.to_vec();
         let db = self.db.clone();
         let session = self.session.clone();
@@ -123,18 +131,23 @@ impl OutboxWriter for ComputationOutboxWriter {
 
     async fn read_from(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-        let prefix = prefix(query_id)?;
+        query_id.validate()?;
+        let prefix = prefix(&query_id.storage_key())?;
         let db = self.db.clone();
         self.work
             .run(move || rows(&db, OUTBOX_CF, &prefix, Some(after_sequence)))
             .await
     }
 
-    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
-        let prefix = prefix(query_id)?;
+    async fn read_latest_sequence(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
+        let prefix = prefix(&query_id.storage_key())?;
         let db = self.db.clone();
         self.work
             .run(move || {
@@ -151,13 +164,19 @@ impl OutboxWriter for ComputationOutboxWriter {
             .await
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &OutputPartition) -> Result<(), IndexError> {
+        query_id.validate()?;
         self.trim_to_capacity(query_id, 0).await?;
         Ok(())
     }
 
-    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
-        let prefix = prefix(query_id)?;
+    async fn trim_before(
+        &self,
+        query_id: &OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
+        query_id.validate()?;
+        let prefix = prefix(&query_id.storage_key())?;
         let db = self.db.clone();
         let session = self.session.clone();
         self.work
@@ -186,8 +205,13 @@ impl OutboxWriter for ComputationOutboxWriter {
             .await
     }
 
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
-        let prefix = prefix(query_id)?;
+    async fn trim_to_capacity(
+        &self,
+        query_id: &OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
+        query_id.validate()?;
+        let prefix = prefix(&query_id.storage_key())?;
         let db = self.db.clone();
         let session = self.session.clone();
         self.work
@@ -235,10 +259,10 @@ impl ComputationLiveResultsWriter {
 impl LiveResultsWriter for ComputationLiveResultsWriter {
     async fn apply_mutations(
         &self,
-        query_id: &str,
+        query_id: &ComponentId,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
-        let prefix = prefix(query_id)?;
+        let prefix = prefix(query_id.as_str())?;
         let mutations: Vec<_> = mutations
             .iter()
             .map(|mutation| {
@@ -270,8 +294,11 @@ impl LiveResultsWriter for ComputationLiveResultsWriter {
             .await
     }
 
-    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-        let prefix = prefix(query_id)?;
+    async fn read_snapshot(
+        &self,
+        query_id: &ComponentId,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let prefix = prefix(query_id.as_str())?;
         let db = self.db.clone();
         self.work
             .run(move || rows(&db, LIVE_RESULTS_CF, &prefix, None))
@@ -280,11 +307,11 @@ impl LiveResultsWriter for ComputationLiveResultsWriter {
 
     async fn read_page(
         &self,
-        query_id: &str,
+        query_id: &ComponentId,
         after_signature: Option<u64>,
         limits: OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-        prefix(query_id)?;
+        prefix(query_id.as_str())?;
         let query = query_id.to_owned();
         let db = self.db.clone();
         self.work
@@ -292,7 +319,7 @@ impl LiveResultsWriter for ComputationLiveResultsWriter {
                 crate::outbox::read_keyed_page(
                     &db,
                     LIVE_RESULTS_CF,
-                    &query,
+                    query.as_str(),
                     after_signature,
                     limits,
                 )
@@ -300,8 +327,8 @@ impl LiveResultsWriter for ComputationLiveResultsWriter {
             .await
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
-        let prefix = prefix(query_id)?;
+    async fn clear(&self, query_id: &ComponentId) -> Result<(), IndexError> {
+        let prefix = prefix(query_id.as_str())?;
         let db = self.db.clone();
         let session = self.session.clone();
         self.work
@@ -316,8 +343,8 @@ impl LiveResultsWriter for ComputationLiveResultsWriter {
             .await
     }
 
-    async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
-        let prefix = prefix(query_id)?;
+    async fn row_count(&self, query_id: &ComponentId) -> Result<usize, IndexError> {
+        let prefix = prefix(query_id.as_str())?;
         let db = self.db.clone();
         self.work
             .run(move || {

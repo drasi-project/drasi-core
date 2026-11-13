@@ -291,7 +291,7 @@ impl NativeBootstrapProvider for PostgresSnapshot {
                 !progress.bootstrap_complete
                     && !progress
                         .checkpoints
-                        .contains_key(&SourceProgressKey::Source(self.source.to_string())),
+                        .contains_key(&SourceProgressKey::Source(self.source.clone())),
                 "PostgreSQL handover ownership state is missing"
             );
         }
@@ -347,7 +347,7 @@ impl NativeBootstrapProvider for PostgresSnapshot {
         Ok(vec![BootstrapWatermark {
             producer: None,
             stream: self.stream.clone(),
-            source_id: Some(self.source.to_string()),
+            source_id: Some(self.source.clone()),
             sequence,
             position: Some(Bytes::from(position)),
         }])

@@ -39,7 +39,7 @@ use drasi_lib::sources::manager::convert_json_to_element_properties;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SubscriptionRequest {
-    query_id: String,
+    query_id: drasi_lib::ComponentId,
     query_node_id: String,
     node_labels: Vec<String>,
     rel_labels: Vec<String>,
@@ -404,7 +404,10 @@ fn matches_labels(element_labels: &[String], requested_labels: &[String]) -> boo
 ///
 /// Converts platform SDK format to drasi-core format. Determines if element is
 /// a Node or Relation based on presence of start_id/end_id fields.
-fn transform_element(source_id: &str, bootstrap_elem: BootstrapElement) -> Result<Element> {
+fn transform_element(
+    source_id: &drasi_lib::ComponentId,
+    bootstrap_elem: BootstrapElement,
+) -> Result<Element> {
     // Convert properties from JSON Map to ElementPropertyMap
     let properties = convert_json_to_element_properties(&bootstrap_elem.properties);
 
@@ -419,12 +422,12 @@ fn transform_element(source_id: &str, bootstrap_elem: BootstrapElement) -> Resul
     // Check if this is a relation (has start_id and end_id)
     if let (Some(start_id), Some(end_id)) = (&bootstrap_elem.start_id, &bootstrap_elem.end_id) {
         // Create start and end element references
-        let in_node = ElementReference::new(source_id, start_id);
-        let out_node = ElementReference::new(source_id, end_id);
+        let in_node = ElementReference::new(source_id.as_str(), start_id);
+        let out_node = ElementReference::new(source_id.as_str(), end_id);
 
         Ok(Element::Relation {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, &bootstrap_elem.id),
+                reference: ElementReference::new(source_id.as_str(), &bootstrap_elem.id),
                 labels,
                 effective_from: 0,
             },
@@ -436,7 +439,7 @@ fn transform_element(source_id: &str, bootstrap_elem: BootstrapElement) -> Resul
         // This is a node
         Ok(Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, &bootstrap_elem.id),
+                reference: ElementReference::new(source_id.as_str(), &bootstrap_elem.id),
                 labels,
                 effective_from: 0,
             },
@@ -518,7 +521,12 @@ mod tests {
             end_id: None,
         };
 
-        let element = transform_element("test-source", bootstrap_elem).unwrap();
+        let element = transform_element(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            bootstrap_elem,
+        )
+        .unwrap();
 
         match element {
             Element::Node { metadata, .. } => {
@@ -544,7 +552,12 @@ mod tests {
             end_id: Some("2".to_string()),
         };
 
-        let element = transform_element("test-source", bootstrap_elem).unwrap();
+        let element = transform_element(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            bootstrap_elem,
+        )
+        .unwrap();
 
         match element {
             Element::Relation {
@@ -581,7 +594,12 @@ mod tests {
             end_id: None,
         };
 
-        let element = transform_element("test-source", bootstrap_elem).unwrap();
+        let element = transform_element(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            bootstrap_elem,
+        )
+        .unwrap();
 
         match element {
             Element::Node { metadata, .. } => {
@@ -603,7 +621,12 @@ mod tests {
             end_id: None,
         };
 
-        let element = transform_element("test-source", bootstrap_elem).unwrap();
+        let element = transform_element(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            bootstrap_elem,
+        )
+        .unwrap();
 
         match element {
             Element::Node { metadata, .. } => {

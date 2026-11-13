@@ -22,5 +22,7 @@ pub mod models;
 pub mod path_solver;
 pub mod query;
 
+pub use drasi_core_types::{ComponentId, ComponentIdentityError, ComponentName};
+
 #[cfg(feature = "computation")]
 pub mod computation;

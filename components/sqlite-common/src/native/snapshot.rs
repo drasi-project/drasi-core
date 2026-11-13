@@ -318,7 +318,7 @@ impl SqliteSnapshot {
                 !progress.bootstrap_complete
                     && !progress
                         .checkpoints
-                        .contains_key(&SourceProgressKey::Source(self.source.to_string())),
+                        .contains_key(&SourceProgressKey::Source(self.source.clone())),
                 "native SQLite handover ownership state is missing"
             );
         }
@@ -442,7 +442,7 @@ impl SqliteSnapshot {
         Ok(vec![BootstrapWatermark {
             producer: None,
             stream: self.stream.clone(),
-            source_id: Some(self.source.to_string()),
+            source_id: Some(self.source.clone()),
             sequence: 0,
             position: Some(journal::identity(handover.epoch, 0)?),
         }])

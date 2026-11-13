@@ -40,7 +40,7 @@ impl SnapshotBootstrap {
         let mut routes = BTreeSet::new();
         let mut inputs = Vec::with_capacity(configured.len());
         for configured in configured {
-            let endpoint = configured.endpoint()?;
+            let endpoint = configured.endpoint();
             anyhow::ensure!(
                 endpoints.insert(endpoint.clone()),
                 "duplicate bootstrap output {endpoint}"

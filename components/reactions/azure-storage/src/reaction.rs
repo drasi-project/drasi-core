@@ -46,36 +46,30 @@ pub struct AzureStorageReaction {
 }
 
 impl AzureStorageReaction {
-    pub fn builder(id: impl Into<String>) -> AzureStorageReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> AzureStorageReactionBuilder {
         AzureStorageReactionBuilder::new(id)
     }
 
     pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: AzureStorageReactionConfig,
     ) -> Result<Self> {
-        Self::create_internal(id.into(), queries, config, None, true)
+        Self::create_internal(id.clone(), queries, config, None, true)
     }
 
     pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: AzureStorageReactionConfig,
         priority_queue_capacity: usize,
     ) -> Result<Self> {
-        Self::create_internal(
-            id.into(),
-            queries,
-            config,
-            Some(priority_queue_capacity),
-            true,
-        )
+        Self::create_internal(id, queries, config, Some(priority_queue_capacity), true)
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: AzureStorageReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -84,8 +78,8 @@ impl AzureStorageReaction {
     }
 
     fn create_internal(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: AzureStorageReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -106,22 +100,24 @@ impl AzureStorageReaction {
 
     fn resolve_template_spec<'a>(
         config: &'a AzureStorageReactionConfig,
-        query_name: &str,
+        emission: &drasi_lib::channels::QueryResult,
         operation: OperationType,
     ) -> Option<&'a TemplateSpec> {
-        if let Some(spec) = config.get_template_spec(query_name, operation) {
+        if let Some(spec) = config.get_result_template_spec(emission, operation) {
             return Some(spec);
         }
 
-        query_name
-            .rsplit('.')
-            .next()
-            .and_then(|short| config.get_template_spec(short, operation))
+        drasi_lib::reactions::common::input_alias(
+            emission.input_alias.as_deref(),
+            emission.query_name.as_ref(),
+        )
+        .and_then(|alias| alias.rsplit('.').next())
+        .and_then(|short| config.get_template_spec(short, operation))
     }
 
     fn build_context(
         operation_name: &str,
-        query_name: &str,
+        emission: &drasi_lib::channels::QueryResult,
         data: &Value,
     ) -> serde_json::Map<String, Value> {
         let mut context = serde_json::Map::new();
@@ -155,7 +151,12 @@ impl AzureStorageReaction {
 
         context.insert(
             "query_name".to_string(),
-            Value::String(query_name.to_string()),
+            serde_json::json!(emission.query_name),
+        );
+        context.insert("query_id".to_string(), serde_json::json!(emission.query_id));
+        context.insert(
+            "input_alias".to_string(),
+            serde_json::json!(emission.input_alias),
         );
         context.insert(
             "operation".to_string(),
@@ -167,12 +168,12 @@ impl AzureStorageReaction {
     fn render_payload(
         handlebars: &Handlebars<'_>,
         config: &AzureStorageReactionConfig,
-        query_name: &str,
+        emission: &drasi_lib::channels::QueryResult,
         operation: OperationType,
         context: &Map<String, Value>,
         fallback_data: &Value,
     ) -> Result<String> {
-        let template = Self::resolve_template_spec(config, query_name, operation)
+        let template = Self::resolve_template_spec(config, emission, operation)
             .map(|s| s.template.clone())
             .unwrap_or_default();
 
@@ -217,12 +218,12 @@ impl AzureStorageReaction {
         handlebars: &Handlebars<'_>,
         operation_name: &str,
         operation: OperationType,
-        query_name: &str,
+        emission: &drasi_lib::channels::QueryResult,
         data: &Value,
     ) -> Result<()> {
-        let context = Self::build_context(operation_name, query_name, data);
+        let context = Self::build_context(operation_name, emission, data);
         let payload =
-            Self::render_payload(handlebars, config, query_name, operation, &context, data)?;
+            Self::render_payload(handlebars, config, emission, operation, &context, data)?;
 
         match (service_client, target) {
             (
@@ -269,7 +270,7 @@ impl AzureStorageReaction {
                         .delete_entity(table_name, &partition_key, &row_key)
                         .await?;
                 } else {
-                    let table_data = if Self::resolve_template_spec(config, query_name, operation)
+                    let table_data = if Self::resolve_template_spec(config, emission, operation)
                         .is_some_and(|spec| !spec.template.is_empty())
                     {
                         Self::parse_table_properties(&payload)?
@@ -295,7 +296,7 @@ impl AzureStorageReaction {
 
 #[async_trait]
 impl Reaction for AzureStorageReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -323,7 +324,7 @@ impl Reaction for AzureStorageReaction {
         props
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -331,8 +332,8 @@ impl Reaction for AzureStorageReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -460,7 +461,7 @@ impl Reaction for AzureStorageReaction {
                         &handlebars,
                         operation_name,
                         operation,
-                        &query_result.query_id,
+                        query_result,
                         &data,
                     )
                     .await

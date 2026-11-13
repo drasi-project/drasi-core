@@ -185,8 +185,19 @@ async fn wait_for_log_count(config: &MysqlConfig, expected: i64, timeout_ms: u64
     );
 }
 
-fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
-    QueryResult::new(query_id.to_string(), 0, Utc::now(), diffs, HashMap::new())
+fn make_query_result(query_id: drasi_lib::ComponentId, diffs: Vec<ResultDiff>) -> QueryResult {
+    QueryResult::new(query_id, 0, Utc::now(), diffs, HashMap::new())
+}
+
+fn named_query_result(name: &str) -> QueryResult {
+    let mut result = make_query_result(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        Vec::new(),
+    );
+    result.query_name =
+        Some(drasi_lib::ComponentName::try_new(name).expect("fixture component name"));
+    result
 }
 
 // ============================================================================
@@ -373,11 +384,11 @@ fn test_resolve_prefers_route_over_default() {
         ..Default::default()
     };
     assert_eq!(
-        config.resolve_command_template("user-query", OperationType::Add),
+        config.resolve_command_template(&named_query_result("user-query"), OperationType::Add),
         Some("CALL route_add({{param after.id}})".to_string())
     );
     assert_eq!(
-        config.resolve_command_template("other-query", OperationType::Add),
+        config.resolve_command_template(&named_query_result("other-query"), OperationType::Add),
         Some("CALL default_add({{param after.id}})".to_string())
     );
 }
@@ -398,7 +409,7 @@ fn test_resolve_matches_last_dotted_segment() {
         ..Default::default()
     };
     assert_eq!(
-        config.resolve_command_template("source.my_query", OperationType::Add),
+        config.resolve_command_template(&named_query_result("source.my_query"), OperationType::Add),
         Some("CALL seg_add({{param after.id}})".to_string())
     );
 }
@@ -414,7 +425,7 @@ fn test_resolve_returns_none_when_unconfigured() {
         ..Default::default()
     };
     assert!(config
-        .resolve_command_template("q", OperationType::Delete)
+        .resolve_command_template(&named_query_result("q"), OperationType::Delete)
         .is_none());
 }
 
@@ -435,11 +446,16 @@ async fn test_builder_rejects_unknown_route_key() {
         routes,
         ..Default::default()
     };
-    let result = MySqlStoredProcReaction::builder("test")
-        .with_query("subscribed-query")
-        .with_config(config)
-        .build()
-        .await;
+    let result = MySqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_lib::ComponentName::try_new("subscribed-query").expect("fixture component name"),
+    )
+    .with_config(config)
+    .build()
+    .await;
     let err = result.expect_err("build should fail").to_string();
     assert!(err.contains("route key 'not-subscribed'"));
 }
@@ -461,27 +477,44 @@ async fn test_builder_accepts_route_key_matching_segment() {
         routes,
         ..Default::default()
     };
-    let result = MySqlStoredProcReaction::builder("test")
-        .with_query("source.my_query")
-        .with_config(config)
-        .build()
-        .await;
+    let result = MySqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_lib::ComponentName::try_new("source.my_query").expect("fixture component name"),
+    )
+    .with_config(config)
+    .build()
+    .await;
     assert!(result.is_ok());
 }
 
 #[tokio::test]
 async fn test_reaction_trait_surface() {
-    let reaction = MySqlStoredProcReaction::builder("mysql-sp")
-        .with_connection("localhost", 3306, "testdb", "testuser", "testpass")
-        .with_query("q1")
-        .with_stored_procedure("handle_change")
-        .build()
-        .await
-        .unwrap();
+    let reaction = MySqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000060")
+            .expect("fixture UUID"),
+    )
+    .with_connection("localhost", 3306, "testdb", "testuser", "testpass")
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_stored_procedure("handle_change")
+    .build()
+    .await
+    .unwrap();
 
-    assert_eq!(reaction.id(), "mysql-sp");
+    assert_eq!(
+        reaction.id(),
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000060")
+            .expect("fixture UUID")
+    );
     assert_eq!(reaction.type_name(), "storedproc-mysql");
-    assert_eq!(reaction.query_ids(), vec!["q1".to_string()]);
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_lib::ComponentName::try_new("q1").expect("fixture component name")
+        )]
+    );
     assert!(reaction.auto_start());
     assert!(!reaction.properties().is_empty());
 }
@@ -509,19 +542,24 @@ async fn build_started_reaction(
     config: &MysqlConfig,
     template: QueryConfig,
 ) -> MySqlStoredProcReaction {
-    let reaction = MySqlStoredProcReaction::builder("mysql-e2e")
-        .with_connection(
-            &config.host,
-            config.port,
-            &config.database,
-            &config.user,
-            &config.password,
-        )
-        .with_query("sensor-query")
-        .with_default_template(template)
-        .build()
-        .await
-        .expect("build reaction");
+    let reaction = MySqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000005f")
+            .expect("fixture UUID"),
+    )
+    .with_connection(
+        &config.host,
+        config.port,
+        &config.database,
+        &config.user,
+        &config.password,
+    )
+    .with_query_by_name(
+        drasi_lib::ComponentName::try_new("sensor-query").expect("fixture component name"),
+    )
+    .with_default_template(template)
+    .build()
+    .await
+    .expect("build reaction");
     reaction.start().await.expect("start reaction");
     reaction
 }
@@ -536,7 +574,8 @@ async fn test_e2e_add_binds_parameters() {
     let reaction = build_started_reaction(&config, sensor_default_template()).await;
 
     let qr = make_query_result(
-        "sensor-query",
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+            .expect("fixture UUID"),
         vec![ResultDiff::Add {
             data: json!({"sensor_id": "sensor-1", "temperature": 21.5}),
             row_signature: 0,
@@ -567,7 +606,8 @@ async fn test_e2e_update_binds_before_and_after_independently() {
     let reaction = build_started_reaction(&config, sensor_default_template()).await;
 
     let qr = make_query_result(
-        "sensor-query",
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+            .expect("fixture UUID"),
         vec![ResultDiff::Update {
             data: json!({}),
             before: json!({"sensor_id": "sensor-2", "temperature": 10.0}),
@@ -602,7 +642,8 @@ async fn test_e2e_aggregation_binds_before_and_after() {
     let reaction = build_started_reaction(&config, sensor_default_template()).await;
 
     let qr = make_query_result(
-        "sensor-query",
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+            .expect("fixture UUID"),
         vec![ResultDiff::Aggregation {
             before: Some(json!({"sensor_id": "sensor-agg", "temperature": 1.0})),
             after: json!({"sensor_id": "sensor-agg", "temperature": 2.0}),
@@ -644,7 +685,8 @@ async fn test_e2e_aggregation_without_before_binds_after_only() {
     let reaction = build_started_reaction(&config, template).await;
 
     let qr = make_query_result(
-        "sensor-query",
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+            .expect("fixture UUID"),
         vec![ResultDiff::Aggregation {
             before: None,
             after: json!({"sensor_id": "sensor-agg-none", "temperature": 7.5}),
@@ -673,7 +715,8 @@ async fn test_e2e_delete_uses_before_row() {
     let reaction = build_started_reaction(&config, sensor_default_template()).await;
 
     let qr = make_query_result(
-        "sensor-query",
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+            .expect("fixture UUID"),
         vec![ResultDiff::Delete {
             data: json!({"sensor_id": "sensor-3", "temperature": 5.0}),
             row_signature: 0,
@@ -714,7 +757,8 @@ async fn test_e2e_render_failure_skips_event_and_continues() {
     // This ADD references `after.missing` and should be skipped.
     reaction
         .enqueue_query_result(make_query_result(
-            "sensor-query",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: json!({"sensor_id": "bad", "temperature": 1.0}),
                 row_signature: 0,
@@ -726,7 +770,8 @@ async fn test_e2e_render_failure_skips_event_and_continues() {
     // This DELETE is well-formed and must still be processed.
     reaction
         .enqueue_query_result(make_query_result(
-            "sensor-query",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+                .expect("fixture UUID"),
             vec![ResultDiff::Delete {
                 data: json!({"sensor_id": "good"}),
                 row_signature: 0,
@@ -761,7 +806,8 @@ async fn test_e2e_all_operations_in_sequence() {
 
     reaction
         .enqueue_query_result(make_query_result(
-            "sensor-query",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+                .expect("fixture UUID"),
             vec![
                 ResultDiff::Add {
                     data: json!({"sensor_id": "s", "temperature": 1.0}),

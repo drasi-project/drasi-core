@@ -34,7 +34,7 @@ pub struct SourceState {
 impl SourceState {
     pub fn update_flow(
         &mut self,
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         config: &HereTrafficConfig,
         segments: Vec<TrafficSegmentSnapshot>,
     ) -> Vec<SourceChange> {
@@ -77,7 +77,7 @@ impl SourceState {
 
     pub fn update_incidents(
         &mut self,
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         incidents: Vec<TrafficIncidentSnapshot>,
     ) -> Vec<SourceChange> {
         let mut changes = Vec::new();
@@ -119,7 +119,7 @@ impl SourceState {
 
     pub fn update_relations(
         &mut self,
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         config: &HereTrafficConfig,
     ) -> Vec<SourceChange> {
         let mut changes = Vec::new();

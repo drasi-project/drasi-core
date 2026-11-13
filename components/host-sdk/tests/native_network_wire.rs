@@ -17,6 +17,10 @@ use drasi_lib::computation::v1::*;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 
+const SOURCE_ID: &str = "00000000-0000-0000-0000-000000000123";
+const QUERY_ID: &str = "d9a96907-45aa-59f2-ad22-64ab2d7f3776";
+const OTHER_ID: &str = "00000000-0000-0000-0000-000000000607";
+
 #[test]
 fn http_wire_reuses_legacy_conversion_without_source_objects() -> Result<()> {
     for event in [
@@ -28,14 +32,20 @@ fn http_wire_reuses_legacy_conversion_without_source_objects() -> Result<()> {
         json!({"operation":"delete","id":"n","labels":["Room"],"timestamp":2000000}),
     ] {
         let dto: wire::HttpSourceChange = serde_json::from_value(event)?;
-        let expected = drasi_source_http::convert_http_to_source_change(&dto, "facilities-db")?;
-        assert_eq!(wire::http_change(dto, "facilities-db")?, expected);
+        let expected = drasi_source_http::convert_http_to_source_change(&dto, SOURCE_ID)?;
+        assert_eq!(
+            wire::http_change(
+                dto,
+                &drasi_core_types::ComponentId::try_new(SOURCE_ID).expect("fixture UUID")
+            )?,
+            expected
+        );
     }
     let change = wire::http_change(
         serde_json::from_value(json!({
             "operation":"insert","element":{"type":"node","id":"n","labels":["Room"],"properties":{"i":3,"f":3.5}}
         }))?,
-        "facilities-db",
+        &drasi_core_types::ComponentId::try_new(SOURCE_ID).expect("fixture UUID"),
     )?;
     let SourceChange::Insert {
         element: Element::Node {
@@ -53,7 +63,7 @@ fn http_wire_reuses_legacy_conversion_without_source_objects() -> Result<()> {
         serde_json::from_value(json!({
             "operation":"delete","id":""
         }))?,
-        "facilities-db"
+        &drasi_core_types::ComponentId::try_new(SOURCE_ID).expect("fixture UUID")
     )
     .is_err());
     Ok(())
@@ -61,7 +71,7 @@ fn http_wire_reuses_legacy_conversion_without_source_objects() -> Result<()> {
 
 fn reference(source_id: &str, element_id: &str) -> source::ElementReference {
     source::ElementReference {
-        source_id: source_id.into(),
+        namespace: source_id.into(),
         element_id: element_id.into(),
     }
 }
@@ -78,7 +88,7 @@ fn grpc_wire_preserves_nanoseconds_labels_relation_direction_and_legacy_nested_t
     }));
     let change = source::SourceChange {
         r#type: source::ChangeType::Insert as i32,
-        source_id: "facilities-db".into(),
+        source_id: SOURCE_ID.into(),
         timestamp: None,
         change: Some(source::source_change::Change::Element(source::Element {
             element: Some(source::element::Element::Relation(source::Relation {
@@ -97,20 +107,23 @@ fn grpc_wire_preserves_nanoseconds_labels_relation_direction_and_legacy_nested_t
                 out_node,
                 properties,
             },
-    } = wire::grpc_change(change.clone(), "facilities-db")?
+    } = wire::grpc_change(
+        change.clone(),
+        &drasi_core_types::ComponentId::try_new(SOURCE_ID).expect("fixture UUID"),
+    )?
     else {
         unreachable!()
     };
-    assert_eq!(actual.reference.source_id.as_ref(), "facilities-db");
+    assert_eq!(actual.reference.namespace.as_ref(), "facilities-db");
     assert_eq!(actual.reference.element_id.as_ref(), "relation");
     assert_eq!(actual.effective_from, 1234);
     assert_eq!(
         actual.labels.as_ref(),
         &[Arc::<str>::from("IN"), Arc::<str>::from("REL")]
     );
-    assert_eq!(in_node.source_id.as_ref(), "left-source");
+    assert_eq!(in_node.namespace.as_ref(), "left-source");
     assert_eq!(in_node.element_id.as_ref(), "from");
-    assert_eq!(out_node.source_id.as_ref(), "right-source");
+    assert_eq!(out_node.namespace.as_ref(), "right-source");
     assert_eq!(out_node.element_id.as_ref(), "to");
     assert_eq!(properties.get("integer"), Some(&ElementValue::Integer(42)));
     assert_eq!(
@@ -127,16 +140,50 @@ fn grpc_wire_preserves_nanoseconds_labels_relation_direction_and_legacy_nested_t
     );
     let delete = source::SourceChange {
         r#type: source::ChangeType::Delete as i32,
-        source_id: "facilities-db".into(),
+        source_id: SOURCE_ID.into(),
         timestamp: None,
         change: Some(source::source_change::Change::Metadata(metadata)),
     };
     assert!(
-        matches!(wire::grpc_change(delete, "facilities-db")?, SourceChange::Delete { metadata } if metadata.effective_from == 1234)
+        matches!(wire::grpc_change(delete, &drasi_core_types::ComponentId::try_new(SOURCE_ID).expect("fixture UUID"))?, SourceChange::Delete { metadata } if metadata.effective_from == 1234)
     );
     let mut wrong = change;
-    wrong.source_id = "wrong".into();
-    assert!(wire::grpc_change(wrong, "facilities-db").is_err());
+    wrong.source_id = OTHER_ID.into();
+    let error = wire::grpc_change(
+        wrong,
+        &drasi_core_types::ComponentId::try_new(SOURCE_ID).expect("fixture UUID"),
+    )
+    .expect_err("a valid but foreign source UUID must fail routing");
+    assert!(
+        error.to_string().contains("event source ID does not match"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn grpc_wire_rejects_foreign_source_uuid_before_payload_conversion() -> Result<()> {
+    let change = source::SourceChange {
+        r#type: source::ChangeType::Insert as i32,
+        source_id: OTHER_ID.into(),
+        timestamp: None,
+        change: Some(source::source_change::Change::Element(source::Element {
+            element: Some(source::element::Element::Node(source::Node {
+                metadata: Some(source::ElementMetadata {
+                    reference: Some(reference("facilities-db", "room")),
+                    labels: vec!["Room".into()],
+                    effective_from: 1234567890,
+                }),
+                properties: None,
+            })),
+        })),
+    };
+    let error = wire::grpc_change(change, &ComponentId::try_new(SOURCE_ID)?)
+        .expect_err("foreign UUID must be rejected independently of payload namespaces");
+    assert!(
+        error.to_string().contains("event source ID does not match"),
+        "{error:#}"
+    );
     Ok(())
 }
 
@@ -190,13 +237,15 @@ fn input() -> Result<InputEnvelope> {
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new("q")?,
+            &ComponentId::try_new(QUERY_ID)?,
             SystemMetadata::new(StreamId::try_new("q/out")?, 42),
             &ResultNodeProjector::try_new("test/native-network-wire/q/out", None)?,
             &results,
             QueryOutputMetadata {
-                query_id: "q".into(),
-                source_id: Some("facilities-db".into()),
+                query_id: drasi_core_types::ComponentId::try_new(QUERY_ID).expect("fixture UUID"),
+                input_origin: Some(drasi_computation_contracts::QueryInputOrigin::Source(
+                    drasi_core_types::ComponentId::try_new(SOURCE_ID).expect("fixture UUID"),
+                )),
                 timestamp: chrono::Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap(),
                 metadata: HashMap::from([("origin".into(), json!({"value":1}))]),
                 profiling: None,
@@ -287,7 +336,7 @@ fn bodies(input: &InputEnvelope, bindings: &SinkOutputs) -> Result<Vec<Value>> {
 #[test]
 fn query_output_is_ordinary_graph_data_without_query_annotations() -> Result<()> {
     let input = input()?;
-    let q = outputs(&[("q", "q", "out", "q/out")])?;
+    let q = outputs(&[("q", QUERY_ID, "out", "q/out")])?;
     let results = bodies(&input, &q)?;
     assert_eq!(results.len(), 5, "Noop produces no outbound change");
     // Query output is ordinary graph data: no annotation changes the projection.
@@ -303,7 +352,7 @@ fn query_output_is_ordinary_graph_data_without_query_annotations() -> Result<()>
     for body in &results {
         assert_eq!(
             body["output"],
-            json!({"alias":"q","component":"q","port":"out"})
+            json!({"alias":"q","component":QUERY_ID,"port":"out"})
         );
         assert!(body.get("producer").is_none());
         assert_eq!(body["sequence"], 42);
@@ -342,7 +391,7 @@ fn query_output_is_ordinary_graph_data_without_query_annotations() -> Result<()>
     assert_eq!(results[4]["before"], json!({"value":2}));
     assert_eq!(results[0]["after"]["value"], 3);
 
-    let other = outputs(&[("other", "other", "out", "other/out")])?;
+    let other = outputs(&[("other", OTHER_ID, "out", "other/out")])?;
     assert!(wire::notifications(&input, &other).is_err());
     let mut wrong_port = input.clone();
     wrong_port.port = PortId::try_new("wrong")?;
@@ -371,12 +420,12 @@ fn source_changes_reach_network_projection_with_full_patch_and_removal_semantics
             },
         },
     ])?;
-    let facilities = outputs(&[("facilities-db", "facilities-db", "out", "facilities-db/out")])?;
+    let facilities = outputs(&[("facilities-db", SOURCE_ID, "out", "facilities-db/out")])?;
     let bodies_ = bodies(&input, &facilities)?;
     assert_eq!(bodies_.len(), 4);
     // No query identity is invented: the output is the configured binding.
     assert!(bodies_.iter().all(|body| body["output"]
-        == json!({"alias":"facilities-db","component":"facilities-db","port":"out"})
+        == json!({"alias":"facilities-db","component":SOURCE_ID,"port":"out"})
         && body["sequence"] == 7));
     let operations: Vec<_> = bodies_
         .iter()
@@ -397,18 +446,18 @@ fn source_changes_reach_network_projection_with_full_patch_and_removal_semantics
     // Configured bindings alone identify the data; several outputs, including
     // two ports of one component, share one sink and stay distinguishable.
     let shared = outputs(&[
-        ("facilities-db", "facilities-db", "out", "facilities-db/out"),
+        ("facilities-db", SOURCE_ID, "out", "facilities-db/out"),
         (
             "facilities-errors",
-            "facilities-db",
+            SOURCE_ID,
             "errors",
             "facilities-db/errors",
         ),
-        ("q", "q", "out", "q/out"),
+        ("q", QUERY_ID, "out", "q/out"),
     ])?;
     assert_eq!(
         bodies(&input, &shared)?[0]["output"],
-        json!({"alias":"facilities-db","component":"facilities-db","port":"out"})
+        json!({"alias":"facilities-db","component":SOURCE_ID,"port":"out"})
     );
     let errors = source_input_on(
         "facilities-db/errors",
@@ -418,7 +467,7 @@ fn source_changes_reach_network_projection_with_full_patch_and_removal_semantics
     )?;
     assert_eq!(
         bodies(&errors, &shared)?[0]["output"],
-        json!({"alias":"facilities-errors","component":"facilities-db","port":"errors"})
+        json!({"alias":"facilities-errors","component":SOURCE_ID,"port":"errors"})
     );
     Ok(())
 }
@@ -432,7 +481,7 @@ fn untimed_identity_only_deletion_is_accepted_without_invented_metadata() -> Res
     };
     let input = source_input_untimed(&[SourceChange::Delete { metadata }])?;
     assert!(input.envelope.system().timestamp().is_none());
-    let facilities = outputs(&[("facilities-db", "facilities-db", "out", "facilities-db/out")])?;
+    let facilities = outputs(&[("facilities-db", SOURCE_ID, "out", "facilities-db/out")])?;
     let body = &bodies(&input, &facilities)?[0];
     assert_eq!(body["operation"], "DELETE");
     assert_eq!(body["sequence"], 7);
@@ -452,11 +501,11 @@ fn untimed_identity_only_deletion_is_accepted_without_invented_metadata() -> Res
 #[test]
 fn native_sse_sends_truthful_changes_for_every_producer_kind() -> Result<()> {
     let input = input()?;
-    let queries = outputs(&[("q", "q", "out", "q/out")])?;
+    let queries = outputs(&[("q", QUERY_ID, "out", "q/out")])?;
     let payload = drasi_computation_sink_sse::sse_payload(&input, &queries)?;
     assert_eq!(
         payload["output"],
-        json!({"alias":"q","component":"q","port":"out"})
+        json!({"alias":"q","component":QUERY_ID,"port":"out"})
     );
     assert_eq!(payload["sequence"], 42);
     assert!(payload.get("queryId").is_none() && payload.get("results").is_none());
@@ -493,9 +542,9 @@ fn native_sse_sends_truthful_changes_for_every_producer_kind() -> Result<()> {
             },
         },
     ])?;
-    let sources = outputs(&[("facilities-db", "facilities-db", "out", "facilities-db/out")])?;
+    let sources = outputs(&[("facilities-db", SOURCE_ID, "out", "facilities-db/out")])?;
     let payload = drasi_computation_sink_sse::sse_payload(&source, &sources)?;
-    assert_eq!(payload["output"]["component"], "facilities-db");
+    assert_eq!(payload["output"]["component"], SOURCE_ID);
     let changes = payload["changes"].as_array().context("changes")?;
     assert_eq!(changes[0]["after"]["name"], "one");
     assert_eq!(changes[1]["operation"], "PATCH");
@@ -507,7 +556,7 @@ fn native_sse_sends_truthful_changes_for_every_producer_kind() -> Result<()> {
     );
     assert!(changes[2].get("before").is_none());
 
-    let wrong_query = outputs(&[("other", "other", "out", "other/out")])?;
+    let wrong_query = outputs(&[("other", OTHER_ID, "out", "other/out")])?;
     assert!(drasi_computation_sink_sse::sse_payload(&input, &wrong_query).is_err());
     let mut wrong_port = input.clone();
     wrong_port.port = PortId::try_new("wrong")?;
@@ -516,10 +565,10 @@ fn native_sse_sends_truthful_changes_for_every_producer_kind() -> Result<()> {
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::progress_envelope(
             &ResultNodeProjector::try_new("test/native-network-wire/q/out", None)?,
-            "q",
+            &drasi_core_types::ComponentId::try_new(QUERY_ID).expect("fixture UUID"),
             42,
             1,
-            &ComponentId::try_new("q")?,
+            &ComponentId::try_new(QUERY_ID)?,
             SystemMetadata::new(StreamId::try_new("q/out")?, 43),
         )?,
     };
@@ -556,7 +605,7 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
         assert!(HttpSourceConfig::from_value(config).is_err());
     }
     let http = HttpSinkConfig::parse(
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost:9001/reaction"}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"url":"http://localhost:9001/reaction"}),
     )?;
     assert_eq!(
         http.outputs
@@ -567,35 +616,35 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
     );
     assert!(!http.headers.contains_key("x-drasi-component"));
     assert!(HttpSinkConfig::parse(
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost","outputTemplates":{}})
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"url":"http://localhost","outputTemplates":{}})
     )
     .is_ok());
     for config in [
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost","outputTemplates":{"defaultTemplte":{}}}),
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost","headers":{"x-drasi-component":"other"}}),
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"url":"http://localhost","headers":{"x-bad":"line\nbreak"}}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"url":"http://localhost","outputTemplates":{"defaultTemplte":{}}}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"url":"http://localhost","headers":{"x-drasi-component":"other"}}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"url":"http://localhost","headers":{"x-bad":"line\nbreak"}}),
     ] {
         assert!(HttpSinkConfig::parse(config).is_err());
     }
-    let grpc = GrpcSinkConfig::parse(json!({"outputs":{"q":{"component":"q","port":"out"}}}))?;
+    let grpc = GrpcSinkConfig::parse(json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}}}))?;
     assert!(grpc.metadata.is_empty());
     assert_eq!(grpc.max_retries, 5);
     assert_eq!(
         GrpcSinkConfig::parse(
-            json!({"outputs":{"q":{"component":"q","port":"out"}},"batchSize":2})
+            json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"batchSize":2})
         )?
         .batch_size,
         2
     );
     assert!(GrpcSinkConfig::parse(
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"batching":{"mode":"adaptive"}})
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"batching":{"mode":"adaptive"}})
     )
     .is_ok());
     for config in [
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"batchSize":0}),
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"batching":{"mode":"adaptive","adaptiveMinBatchSize":0}}),
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"metadata":{"x-drasi-port":"wrong"}}),
-        json!({"outputs":{"q":{"component":"q","port":"out"}},"connectionRetryAttempts":0}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"batchSize":0}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"batching":{"mode":"adaptive","adaptiveMinBatchSize":0}}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"metadata":{"x-drasi-port":"wrong"}}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"connectionRetryAttempts":0}),
     ] {
         assert!(GrpcSinkConfig::parse(config).is_err());
     }

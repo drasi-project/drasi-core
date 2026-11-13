@@ -791,7 +791,7 @@ rules:
   output. Envelope logical event/due time remains separate from transport
   counters and local wait clocks. Ordinary result metadata is projected at
   the result API boundary, not duplicated throughout native execution.
-- **One wire.** Native/binary envelope wire is version 1 and ABI layout 1.0. All
+- **One wire.** Native/binary envelope wire is version 2 and ABI layout 2.0. All
   matching hosts and libraries must be rebuilt; there is no reader or migration
   for an earlier wire or for query-row records, so a mismatch is a build error to
   fix rather than data to convert.
@@ -2050,7 +2050,8 @@ custom schemas and several subscribers keep working.
 
 The separate `drasi_computation_plugin_consumer_progress_v1` symbol adds
 producer consumer-progress inspection and an optional retained position
-comparator. Base ABI `1.0.0`, wire `1` and recovery-v1 are unchanged.
+comparator. Current libraries use base ABI `2.0.0`, wire `2` and the separate
+recovery-v1 interface.
 Opt-in source/transformer factories require one `consumer_progress` Checkpoint
 dependency containing the actual `Arc<ConsumerProgressSet>`; it cannot coexist
 with single-owner progress or admission on that producer.
@@ -2155,13 +2156,13 @@ recovery snapshot envelopes.
 
 See the [SDK read and binding contracts](../../components/computation-plugin-sdk/README.md#optional-per-output-snapshot-replay-follow-and-query-readers)
 and [in-process reader model](#reading-state-without-running-another-query).
-All services use the current base ABI 1.0 and envelope wire v1; optional
+All services use the current base ABI 2.0 and envelope wire v2; optional
 negotiation does not imply every loaded library implements every service.
 
 ### Activation credentials preserve per-start identity behavior
 
-`activation_credentials_v1` is an optional extension over the frozen base
-ABI `1.0.0` and envelope wire `1`. An opted-in factory describes its hostname/
+`activation_credentials_v1` is an optional extension over native
+ABI `2.0.0` and envelope wire `2`. An opted-in factory describes its hostname/
 port context without I/O. The Host binds an actual `NativeIdentityResource`
 under `identity`; it keeps ordinary identity-provider traits and provider
 construction outside the native library.
@@ -2592,11 +2593,11 @@ their data until final scope cleanup. Never prune unknown/shared/demo volumes to
 make a test pass. Disk exhaustion and database readiness failures remain failed
 environment evidence until the complete gate reruns successfully.
 
-Before a cross-cutting change is considered qualified, consult
-[`run-runtime-parity.sh`](../tests/run-runtime-parity.sh) and its
-[contract inventory](../tests/runtime_parity/computation-contracts.tsv).
-They cover default/no-default builds, additional capabilities, separately built
-plugins and backend profiles. An ignored process-crash worker does not count
+Before a cross-cutting change is considered qualified, run `make test` and the
+affected feature/service commands from the
+[testing guide](../../docs/contributing/contributing-code/contributing-code-tests/).
+The ordinary CI workflows cover the workspace, explicit feature configurations,
+separately built plugins and discovered container tests. An ignored process-crash worker does not count
 as coverage without its passing parent crash driver. Keep assertions about
 ordering, exact output and retained obligations; "the graph did not panic" is
 not a sufficient oracle.
@@ -2616,16 +2617,17 @@ For the actual mutual-TLS macOS/Linux-VM profile, use the
 Do not count an unprepared ignored network case as acceptance or substitute an
 injected loopback error for the required real receipt fault.
 
-Use [the qualification ledger](../tests/runtime_parity/requirements.tsv) and
+Use the [remaining work](computation-graph-remaining-work.md) and
 [current limitations](componentgraph-vs-computationgraph.md#performance-and-qualification-boundaries)
 when making release claims. Framework support, one backend test and
 production-duration operational evidence are different levels of confidence.
 
 ### Current qualification is evidence for named scopes
 
-Recorded local validation for the current functionality includes strict Core
+Historical local validation before the current identity/lifecycle changes included strict Core
 lint, all 35 runtime profiles (8,625 successful repeated execution records), and
 the separate workspace run (4,922 passed, zero failed, 233 existing ignores).
+Those historical results do not certify the current source.
 Repeated profile executions are not unique-test counts; many ignored workers
 are executed through their parent/profile paths.
 

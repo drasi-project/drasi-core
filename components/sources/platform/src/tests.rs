@@ -36,27 +36,37 @@ mod construction {
 
     #[test]
     fn test_builder_with_valid_config() {
-        let source = PlatformSourceBuilder::new("test-source")
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test-stream")
-            .build();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://localhost:6379")
+        .with_stream_key("test-stream")
+        .build();
 
         assert!(source.is_ok());
     }
 
     #[test]
     fn test_builder_with_custom_config() {
-        let source = PlatformSourceBuilder::new("custom-source")
-            .with_redis_url("redis://127.0.0.1:6380")
-            .with_stream_key("custom-stream")
-            .with_consumer_group("custom-group")
-            .with_consumer_name("consumer-1")
-            .with_batch_size(50)
-            .with_block_ms(10000)
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000171")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://127.0.0.1:6380")
+        .with_stream_key("custom-stream")
+        .with_consumer_group("custom-group")
+        .with_consumer_name("consumer-1")
+        .with_batch_size(50)
+        .with_block_ms(10000)
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "custom-source");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000171")
+                .expect("fixture UUID")
+        );
     }
 }
 
@@ -70,34 +80,47 @@ mod properties {
 
     #[test]
     fn test_id_returns_correct_value() {
-        let source = PlatformSourceBuilder::new("my-platform-source")
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test-stream")
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000172")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://localhost:6379")
+        .with_stream_key("test-stream")
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "my-platform-source");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000172")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_type_name_returns_platform() {
-        let source = PlatformSourceBuilder::new("test")
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test-stream")
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://localhost:6379")
+        .with_stream_key("test-stream")
+        .build()
+        .unwrap();
 
         assert_eq!(source.type_name(), "platform");
     }
 
     #[test]
     fn test_properties_contains_redis_url_and_stream_key() {
-        let source = PlatformSourceBuilder::new("test")
-            .with_redis_url("redis://192.168.1.1:6379")
-            .with_stream_key("my-stream")
-            .with_consumer_group("my-group")
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://192.168.1.1:6379")
+        .with_stream_key("my-stream")
+        .with_consumer_group("my-group")
+        .build()
+        .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -118,12 +141,15 @@ mod properties {
 
     #[test]
     fn test_properties_includes_batch_size() {
-        let source = PlatformSourceBuilder::new("test")
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test-stream")
-            .with_batch_size(200)
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://localhost:6379")
+        .with_stream_key("test-stream")
+        .with_batch_size(200)
+        .build()
+        .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -144,11 +170,14 @@ mod lifecycle {
 
     #[tokio::test]
     async fn test_initial_status_is_stopped() {
-        let source = PlatformSourceBuilder::new("test")
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test-stream")
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://localhost:6379")
+        .with_stream_key("test-stream")
+        .build()
+        .unwrap();
 
         assert_eq!(source.status().await, ComponentStatus::Stopped);
     }
@@ -163,11 +192,14 @@ mod builder {
 
     #[test]
     fn test_builder_defaults() {
-        let source = PlatformSourceBuilder::new("test")
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test-stream")
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://localhost:6379")
+        .with_stream_key("test-stream")
+        .build()
+        .unwrap();
 
         assert_eq!(source.config.redis_url, "redis://localhost:6379");
         assert_eq!(source.config.stream_key, "test-stream");
@@ -179,15 +211,18 @@ mod builder {
 
     #[test]
     fn test_builder_with_all_options() {
-        let source = PlatformSourceBuilder::new("test")
-            .with_redis_url("redis://custom:6379")
-            .with_stream_key("custom-stream")
-            .with_consumer_group("custom-group")
-            .with_consumer_name("consumer-1")
-            .with_batch_size(50)
-            .with_block_ms(10000)
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://custom:6379")
+        .with_stream_key("custom-stream")
+        .with_consumer_group("custom-group")
+        .with_consumer_name("consumer-1")
+        .with_batch_size(50)
+        .with_block_ms(10000)
+        .build()
+        .unwrap();
 
         assert_eq!(source.config.redis_url, "redis://custom:6379");
         assert_eq!(source.config.stream_key, "custom-stream");
@@ -199,25 +234,35 @@ mod builder {
 
     #[test]
     fn test_builder_chaining() {
-        let source = PlatformSourceBuilder::new("test")
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("stream1")
-            .with_stream_key("stream2") // Override
-            .build()
-            .unwrap();
+        let source = PlatformSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://localhost:6379")
+        .with_stream_key("stream1")
+        .with_stream_key("stream2") // Override
+        .build()
+        .unwrap();
 
         assert_eq!(source.config.stream_key, "stream2");
     }
 
     #[test]
     fn test_builder_id() {
-        let source = PlatformSource::builder("my-platform-source")
-            .with_redis_url("redis://localhost:6379")
-            .with_stream_key("test-stream")
-            .build()
-            .unwrap();
+        let source = PlatformSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000172")
+                .expect("fixture UUID"),
+        )
+        .with_redis_url("redis://localhost:6379")
+        .with_stream_key("test-stream")
+        .build()
+        .unwrap();
 
-        assert_eq!(source.base.id, "my-platform-source");
+        assert_eq!(
+            source.base.id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000172")
+                .expect("fixture UUID")
+        );
     }
 }
 
@@ -363,6 +408,8 @@ mod event_transformation {
 
     #[test]
     fn test_transform_platform_insert_node() {
+        let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+            .expect("fixture UUID");
         let cloud_event = json!({
             "data": [{
                 "op": "i",
@@ -384,7 +431,7 @@ mod event_transformation {
             "type": "com.dapr.event.sent"
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(cloud_event, &source_id).unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -394,7 +441,7 @@ mod event_transformation {
                     properties,
                 } => {
                     assert_eq!(metadata.reference.element_id.as_ref(), "node1");
-                    assert_eq!(metadata.reference.source_id.as_ref(), "test_source");
+                    assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                     assert_eq!(metadata.labels.len(), 1);
                     assert_eq!(metadata.labels[0].as_ref(), "Person");
                     assert_eq!(metadata.effective_from, 1234567890);
@@ -427,7 +474,12 @@ mod event_transformation {
             }]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -445,6 +497,8 @@ mod event_transformation {
 
     #[test]
     fn test_transform_platform_delete_node() {
+        let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+            .expect("fixture UUID");
         let cloud_event = json!({
             "data": [{
                 "op": "d",
@@ -463,13 +517,13 @@ mod event_transformation {
             }]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(cloud_event, &source_id).unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
             SourceChange::Delete { metadata } => {
                 assert_eq!(metadata.reference.element_id.as_ref(), "node1");
-                assert_eq!(metadata.reference.source_id.as_ref(), "test_source");
+                assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                 assert_eq!(metadata.labels.len(), 1);
                 assert_eq!(metadata.effective_from, 1234567892);
             }
@@ -479,6 +533,8 @@ mod event_transformation {
 
     #[test]
     fn test_transform_platform_insert_relation() {
+        let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+            .expect("fixture UUID");
         let cloud_event = json!({
             "data": [{
                 "op": "i",
@@ -499,7 +555,7 @@ mod event_transformation {
             }]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(cloud_event, &source_id).unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -511,12 +567,13 @@ mod event_transformation {
                     in_node,
                 } => {
                     assert_eq!(metadata.reference.element_id.as_ref(), "rel1");
+                    assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                     assert_eq!(metadata.labels.len(), 1);
                     assert_eq!(metadata.labels[0].as_ref(), "KNOWS");
                     assert_eq!(in_node.element_id.as_ref(), "node1");
                     assert_eq!(out_node.element_id.as_ref(), "node2");
-                    assert_eq!(out_node.source_id.as_ref(), "test_source");
-                    assert_eq!(in_node.source_id.as_ref(), "test_source");
+                    assert_eq!(out_node.namespace.as_ref(), source_id.as_str());
+                    assert_eq!(in_node.namespace.as_ref(), source_id.as_str());
                     assert!(properties.get("since").is_some());
                 }
                 _ => panic!("Expected Relation element"),
@@ -546,7 +603,12 @@ mod event_transformation {
             }]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -590,7 +652,12 @@ mod event_transformation {
             }]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -629,7 +696,12 @@ mod event_transformation {
             }]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -668,7 +740,12 @@ mod event_transformation {
             }]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -720,7 +797,12 @@ mod event_transformation {
             ]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert_eq!(results.len(), 2);
 
         match &results[0].source_change {
@@ -746,6 +828,8 @@ mod event_transformation {
 
     #[test]
     fn test_transform_real_world_dapr_event() {
+        let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000173")
+            .expect("fixture UUID");
         let cloud_event = json!({
             "data": [{
                 "op": "u",
@@ -779,7 +863,7 @@ mod event_transformation {
             "type": "com.dapr.event.sent"
         });
 
-        let results = transform_platform_event(cloud_event, "hello-world-source").unwrap();
+        let results = transform_platform_event(cloud_event, &source_id).unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -789,7 +873,7 @@ mod event_transformation {
                     properties,
                 } => {
                     assert_eq!(metadata.reference.element_id.as_ref(), "public:Message:4");
-                    assert_eq!(metadata.reference.source_id.as_ref(), "hello-world-source");
+                    assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                     assert_eq!(metadata.labels.len(), 1);
                     assert_eq!(metadata.labels[0].as_ref(), "Message");
                     assert_eq!(metadata.effective_from, 1759503489836);
@@ -822,7 +906,12 @@ mod event_transformation {
             }]
         });
 
-        let results = transform_platform_event(cloud_event, "test_source").unwrap();
+        let results = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
 
         match &results[0].source_change {
@@ -862,7 +951,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -888,7 +981,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -915,7 +1012,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -941,7 +1042,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -967,7 +1072,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -994,7 +1103,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1020,7 +1133,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1048,7 +1165,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1076,7 +1197,11 @@ mod error_handling {
             }]
         });
 
-        let result = transform_platform_event(cloud_event, "test_source");
+        let result = transform_platform_event(
+            cloud_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1167,7 +1292,7 @@ mod message_type_detection {
                 "op": "i",
                 "payload": {
                     "after": {
-                        "queryId": "query1",
+                        "queryId": "00000000-0000-0000-0000-000000000052",
                         "queryNodeId": "default"
                     },
                     "source": {
@@ -1274,7 +1399,7 @@ mod control_events {
                 "op": "i",
                 "payload": {
                     "after": {
-                        "queryId": "query1",
+                        "queryId": "00000000-0000-0000-0000-000000000052",
                         "queryNodeId": "default",
                         "nodeLabels": ["Person", "Employee"],
                         "relLabels": ["KNOWS", "WORKS_FOR"]
@@ -1294,13 +1419,17 @@ mod control_events {
         match &results[0] {
             SourceControl::Subscription {
                 query_id,
-                query_node_id,
+                query_instance_id,
                 node_labels,
                 rel_labels,
                 operation,
             } => {
-                assert_eq!(query_id, "query1");
-                assert_eq!(query_node_id, "default");
+                assert_eq!(
+                    query_id,
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000052")
+                        .expect("fixture UUID")
+                );
+                assert_eq!(query_instance_id, "default");
                 assert_eq!(node_labels.len(), 2);
                 assert!(node_labels.contains(&"Person".to_string()));
                 assert!(node_labels.contains(&"Employee".to_string()));
@@ -1320,7 +1449,7 @@ mod control_events {
                 "op": "u",
                 "payload": {
                     "after": {
-                        "queryId": "query1",
+                        "queryId": "00000000-0000-0000-0000-000000000052",
                         "queryNodeId": "default",
                         "nodeLabels": ["Person"],
                         "relLabels": []
@@ -1352,7 +1481,7 @@ mod control_events {
                 "op": "d",
                 "payload": {
                     "before": {
-                        "queryId": "query1",
+                        "queryId": "00000000-0000-0000-0000-000000000052",
                         "queryNodeId": "default",
                         "nodeLabels": [],
                         "relLabels": []
@@ -1384,7 +1513,7 @@ mod control_events {
                 "op": "i",
                 "payload": {
                     "after": {
-                        "queryId": "query1",
+                        "queryId": "00000000-0000-0000-0000-000000000052",
                         "queryNodeId": "default",
                         "nodeLabels": [],
                         "relLabels": []
@@ -1421,7 +1550,7 @@ mod control_events {
                 "op": "i",
                 "payload": {
                     "after": {
-                        "queryId": "query1",
+                        "queryId": "00000000-0000-0000-0000-000000000052",
                         "queryNodeId": "default"
                     },
                     "source": {
@@ -1480,7 +1609,7 @@ mod control_events {
                     "op": "i",
                     "payload": {
                         "after": {
-                            "queryId": "query1",
+                            "queryId": "00000000-0000-0000-0000-000000000052",
                             "queryNodeId": "default",
                             "nodeLabels": ["Person"],
                             "relLabels": []
@@ -1496,7 +1625,7 @@ mod control_events {
                     "op": "i",
                     "payload": {
                         "after": {
-                            "queryId": "query2",
+                            "queryId": "00000000-0000-0000-0000-0000000000e5",
                             "queryNodeId": "default",
                             "nodeLabels": ["Product"],
                             "relLabels": []
@@ -1516,14 +1645,22 @@ mod control_events {
 
         match &results[0] {
             SourceControl::Subscription { query_id, .. } => {
-                assert_eq!(query_id, "query1");
+                assert_eq!(
+                    query_id,
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000052")
+                        .expect("fixture UUID")
+                );
             }
             other => panic!("unexpected control: {other:?}"),
         }
 
         match &results[1] {
             SourceControl::Subscription { query_id, .. } => {
-                assert_eq!(query_id, "query2");
+                assert_eq!(
+                    query_id,
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e5")
+                        .expect("fixture UUID")
+                );
             }
             other => panic!("unexpected control: {other:?}"),
         }

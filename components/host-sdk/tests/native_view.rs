@@ -23,6 +23,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 const PACKAGE: &str = "drasi-computation-transformer-view";
 const FACTORY: &str = "drasi.standard/view";
+const VIEW_ID: &str = "f178dc35-4d59-52b1-bf05-c7168dd497a1";
 
 fn load() -> Result<Arc<NativePlugin>> {
     let directory = match std::env::var_os("DRASI_NATIVE_PLUGIN_DIR") {
@@ -32,7 +33,7 @@ fn load() -> Result<Arc<NativePlugin>> {
             .context("test executable directory")?
             .parent()
             .context("native library directory")?
-            .to_owned(),
+            .join("plugins"),
     };
     let library = directory.join(format!(
         "{}{}{}",
@@ -42,7 +43,7 @@ fn load() -> Result<Arc<NativePlugin>> {
     ));
     anyhow::ensure!(
         library.is_file(),
-        "missing {}; first run cargo build -p {PACKAGE} --features dynamic-plugin (or set DRASI_NATIVE_PLUGIN_DIR)",
+        "missing {}; first run make build-test-plugins (or set DRASI_NATIVE_PLUGIN_DIR)",
         library.display()
     );
     computation::load(&library).with_context(|| format!("load {}", library.display()))
@@ -100,9 +101,12 @@ fn snapshot_provider(view: &NativeComponentProxy) -> Result<Arc<dyn SnapshotProv
 
 fn assert_snapshot(snapshot: &OutputSnapshot, expected: &[Element], sequence: u64) -> Result<()> {
     assert_eq!(snapshot.schema(), GraphChangeCodec::schema().descriptor());
-    assert_eq!(snapshot.dataset(), "view");
+    assert_eq!(snapshot.dataset(), VIEW_ID);
     assert_eq!(snapshot.cursor().sequence(), sequence);
-    assert_eq!(snapshot.cursor().producer().component_id().as_str(), "view");
+    assert_eq!(
+        snapshot.cursor().producer().component_id().as_str(),
+        VIEW_ID
+    );
     assert_eq!(snapshot.cursor().producer().stream().as_str(), "view/out");
     assert!(!snapshot.cursor().producer().persistent());
     let expected = expected
@@ -149,7 +153,7 @@ async fn loaded_view_case() -> Result<()> {
     let capabilities = &factory.metadata().capabilities;
     assert_eq!(capabilities.output_snapshots, vec![PortId::try_new("out")?]);
     assert_eq!(capabilities.output_progress, Some(OutputProgress::Origin));
-    assert!(capabilities.deprovision);
+    assert!(capabilities.delete_owned_resources);
     assert!(!capabilities.transactional);
     assert!(!capabilities.durable_output);
     assert!(capabilities.output_replays.is_empty());
@@ -176,7 +180,7 @@ async fn loaded_view_case() -> Result<()> {
     });
     let mut view = native_inputs::create(
         factory,
-        ComponentId::try_new("view")?,
+        ComponentId::try_new(VIEW_ID)?,
         configuration.clone(),
     )?;
     assert_eq!(view.configuration()?, configuration);
@@ -185,6 +189,7 @@ async fn loaded_view_case() -> Result<()> {
         snapshots.snapshot().await,
         Err(OutputReadError::NotReady(_))
     ));
+    view.initialize().await?;
     view.start().await?;
     assert_snapshot(&snapshots.snapshot().await?, &[], 0)?;
 
@@ -310,15 +315,15 @@ async fn loaded_view_case() -> Result<()> {
     .await?;
     let retained = snapshots.snapshot().await?;
     assert_eq!(retained.records().len(), 2);
-    assert!(view.deprovision().await.is_err());
+    assert!(view.delete_owned_resources().await.is_err());
     assert_eq!(snapshots.snapshot().await?.cursor(), retained.cursor());
     view.stop().await?;
     assert!(matches!(
         snapshots.snapshot().await,
         Err(OutputReadError::NotReady(_))
     ));
-    view.deprovision().await?;
-    view.deprovision().await?;
+    view.delete_owned_resources().await?;
+    view.delete_owned_resources().await?;
     assert!(matches!(
         snapshots.snapshot().await,
         Err(OutputReadError::Retired)
@@ -333,20 +338,23 @@ async fn loaded_view_case() -> Result<()> {
         )?)
         .await
         .is_err());
+    view.dispose().await?;
     drop(view);
     assert!(matches!(
         snapshots.snapshot().await,
         Err(OutputReadError::Retired)
     ));
 
-    let mut fresh = native_inputs::create(factory, ComponentId::try_new("view")?, configuration)?;
+    let mut fresh = native_inputs::create(factory, ComponentId::try_new(VIEW_ID)?, configuration)?;
     let fresh_snapshots = snapshot_provider(&fresh)?;
+    fresh.initialize().await?;
     fresh.start().await?;
     let cold = fresh_snapshots.snapshot().await?;
     assert_snapshot(&cold, &[], 0)?;
     assert_ne!(cold.cursor().epoch(), first_cursor.epoch());
     fresh.stop().await?;
-    fresh.deprovision().await?;
+    fresh.delete_owned_resources().await?;
+    fresh.dispose().await?;
     Ok(())
 }
 

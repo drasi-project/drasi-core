@@ -30,6 +30,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, OutboxWriter};
+use drasi_core::{
+    interface::{OutputPartition, StorageScope},
+    ComponentId,
+};
 use redis::aio::MultiplexedConnection;
 use redis::{cmd, AsyncCommands};
 
@@ -48,19 +52,16 @@ pub struct GarnetOutboxWriter {
 }
 
 impl GarnetOutboxWriter {
-    pub fn new(query_id: &str, connection: MultiplexedConnection) -> Self {
+    pub fn new(
+        scope: &StorageScope,
+        component_id: &ComponentId,
+        connection: MultiplexedConnection,
+    ) -> Self {
         Self {
-            scope: OutputScope::new(query_id),
+            scope: OutputScope::new(scope, component_id),
             connection,
             session_state: None,
         }
-    }
-
-    /// Bind the primary logical query ID to the constructor's storage scope.
-    /// Other IDs use isolated namespaces without changing the primary keys.
-    pub fn with_query_id(mut self, query_id: &str) -> Self {
-        self.scope.bind_query_id(query_id);
-        self
     }
 
     /// Attach shared session state so `append` stages into the active session
@@ -73,13 +74,13 @@ impl GarnetOutboxWriter {
     }
 
     /// Redis key for the outbox sorted set (hash-tagged for cluster).
-    fn outbox_key(&self, query_id: &str) -> String {
+    fn outbox_key(&self, query_id: &OutputPartition) -> String {
         self.scope.key("outbox", query_id)
     }
 
     /// Redis key for storing outbox entry data in a hash (score → data mapping).
     /// The sorted set stores sequence numbers; the hash stores the actual data.
-    fn data_key(&self, query_id: &str) -> String {
+    fn data_key(&self, query_id: &OutputPartition) -> String {
         self.scope.key("outbox_data", query_id)
     }
 
@@ -194,7 +195,13 @@ fn merge_sequences(committed: Vec<u64>, overlay: Option<&SortedSetDeltas>) -> Ve
 
 #[async_trait]
 impl OutboxWriter for GarnetOutboxWriter {
-    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
         let outbox_key = self.outbox_key(query_id);
         let data_key = self.data_key(query_id);
         let seq_str = sequence.to_string();
@@ -225,9 +232,10 @@ impl OutboxWriter for GarnetOutboxWriter {
 
     async fn read_from(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        query_id.validate()?;
         if after_sequence == u64::MAX {
             return Ok(Vec::new());
         }
@@ -264,7 +272,11 @@ impl OutboxWriter for GarnetOutboxWriter {
         Ok(entries)
     }
 
-    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
         let mut con = self.connection.clone();
         let outbox_key = self.outbox_key(query_id);
 
@@ -292,7 +304,8 @@ impl OutboxWriter for GarnetOutboxWriter {
         }
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &OutputPartition) -> Result<(), IndexError> {
+        query_id.validate()?;
         let outbox_key = self.outbox_key(query_id);
         let data_key = self.data_key(query_id);
 
@@ -319,7 +332,12 @@ impl OutboxWriter for GarnetOutboxWriter {
         Ok(())
     }
 
-    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        query_id: &OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
+        query_id.validate()?;
         let require_session = self.has_active_session()?;
         let outbox_key = self.outbox_key(query_id);
         let data_key = self.data_key(query_id);
@@ -341,7 +359,12 @@ impl OutboxWriter for GarnetOutboxWriter {
         Ok(removed)
     }
 
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        query_id: &OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
+        query_id.validate()?;
         let require_session = self.has_active_session()?;
         let outbox_key = self.outbox_key(query_id);
         let data_key = self.data_key(query_id);

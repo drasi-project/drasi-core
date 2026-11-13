@@ -43,8 +43,8 @@ pub trait BootstrapBackend: Send + Sync {
 /// In-process backend: wraps a query instance and state store.
 struct InProcessBackend {
     query: Arc<dyn Query>,
-    reaction_id: String,
-    query_id: String,
+    reaction_id: crate::ComponentId,
+    query_id: crate::ComponentId,
     state_store: Option<Arc<dyn StateStoreProvider>>,
 }
 
@@ -104,7 +104,7 @@ impl BootstrapBackend for InProcessBackend {
 /// Future versions may enforce this constraint with lifetime parameters.
 pub struct BootstrapContext {
     /// The query ID this bootstrap is for.
-    pub query_id: String,
+    pub query_id: crate::ComponentId,
     /// `true` when the reaction previously had a checkpoint that is being
     /// discarded (e.g., `AutoReset` recovery or config-hash mismatch).
     /// `false` on a fresh start when no prior checkpoint existed.
@@ -116,10 +116,10 @@ pub struct BootstrapContext {
 impl BootstrapContext {
     /// Create a new `BootstrapContext` backed by an in-process query.
     pub fn new(
-        query_id: String,
+        query_id: crate::ComponentId,
         is_reset: bool,
         query: Arc<dyn Query>,
-        reaction_id: String,
+        reaction_id: crate::ComponentId,
         state_store: Option<Arc<dyn StateStoreProvider>>,
     ) -> Self {
         let backend = InProcessBackend {
@@ -140,7 +140,7 @@ impl BootstrapContext {
     /// This is used by the FFI layer to provide callback-based implementations.
     #[doc(hidden)]
     pub fn from_backend(
-        query_id: String,
+        query_id: crate::ComponentId,
         is_reset: bool,
         backend: Box<dyn BootstrapBackend>,
     ) -> Self {

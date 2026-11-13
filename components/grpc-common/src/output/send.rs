@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use drasi_computation_contracts::ComponentId;
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
 use tonic::transport::Channel;
@@ -42,7 +43,7 @@ use crate::reaction::{
 pub async fn send_batch_with_retry(
     client: &mut ReactionServiceClient<Channel>,
     batch: Vec<ProtoQueryResultItem>,
-    query_id: &str,
+    query_id: &ComponentId,
     metadata: &HashMap<String, String>,
     max_retries: u32,
     endpoint: &str,
@@ -65,7 +66,7 @@ pub async fn send_batch_with_retry(
 pub async fn send_batch_with_retry_with_limit(
     client: &mut ReactionServiceClient<Channel>,
     batch: Vec<ProtoQueryResultItem>,
-    query_id: &str,
+    query_id: &ComponentId,
     metadata: &HashMap<String, String>,
     max_retries: u32,
     endpoint: &str,

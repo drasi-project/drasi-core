@@ -60,7 +60,7 @@ use std::collections::HashMap;
 /// ```ignore
 /// // This example shows how to use ApplicationReactionHandle with DrasiLib
 /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// // Create a subscription with default options
 /// let mut subscription = handle.subscribe_with_options(
@@ -80,7 +80,7 @@ use std::collections::HashMap;
 ///
 /// ```ignore
 /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// // Get as async stream
 /// if let Some(mut stream) = handle.as_stream().await {
@@ -94,7 +94,7 @@ use std::collections::HashMap;
 ///
 /// ```ignore
 /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// // Process results with a callback (spawns background task)
 /// handle.subscribe(|result| {
@@ -109,7 +109,7 @@ use std::collections::HashMap;
 ///
 /// ```ignore
 /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// // Only receive results from specific queries
 /// handle.subscribe_filtered(
@@ -124,7 +124,7 @@ use std::collections::HashMap;
 ///
 /// ```ignore
 /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// // Configure subscription behavior
 /// let options = SubscriptionOptions::default()
@@ -144,7 +144,7 @@ use std::collections::HashMap;
 #[derive(Clone)]
 pub struct ApplicationReactionHandle {
     rx: Arc<RwLock<Option<mpsc::Receiver<QueryResult>>>>,
-    reaction_id: String,
+    reaction_id: drasi_lib::ComponentId,
 }
 
 impl ApplicationReactionHandle {
@@ -195,7 +195,7 @@ impl ApplicationReactionHandle {
     ///
     /// ```ignore
     /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-    /// core.add_reaction(reaction).await?;
+    /// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
     ///
     /// handle.subscribe(|result| {
     ///     println!("Received {} results from query {}",
@@ -242,7 +242,7 @@ impl ApplicationReactionHandle {
     ///
     /// ```ignore
     /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-    /// core.add_reaction(reaction).await?;
+    /// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
     ///
     /// // Only process results from "users" query
     /// handle.subscribe_filtered(
@@ -254,7 +254,7 @@ impl ApplicationReactionHandle {
     /// ```
     pub async fn subscribe_filtered<F>(
         &self,
-        query_filter: Vec<String>,
+        query_filter: Vec<drasi_lib::ComponentId>,
         mut callback: F,
     ) -> Result<()>
     where
@@ -294,7 +294,7 @@ impl ApplicationReactionHandle {
     ///
     /// ```ignore
     /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-    /// core.add_reaction(reaction).await?;
+    /// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
     ///
     /// if let Some(mut stream) = handle.as_stream().await {
     ///     while let Some(result) = stream.next().await {
@@ -335,7 +335,7 @@ impl ApplicationReactionHandle {
     ///
     /// ```ignore
     /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-    /// core.add_reaction(reaction).await?;
+    /// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
     ///
     /// // Configure subscription
     /// let options = SubscriptionOptions::default()
@@ -374,7 +374,7 @@ impl ApplicationReactionHandle {
     /// let (_reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
     /// assert_eq!(handle.reaction_id(), "results");
     /// ```
-    pub fn reaction_id(&self) -> &str {
+    pub fn reaction_id(&self) -> &drasi_lib::ComponentId {
         &self.reaction_id
     }
 }
@@ -388,7 +388,7 @@ impl ApplicationReactionHandle {
 ///
 /// ```ignore
 /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// if let Some(mut stream) = handle.as_stream().await {
 ///     while let Some(result) = stream.next().await {
@@ -456,7 +456,7 @@ pub struct ApplicationReaction {
 
 impl ApplicationReaction {
     /// Create a builder for ApplicationReaction
-    pub fn builder(id: impl Into<String>) -> ApplicationReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> ApplicationReactionBuilder {
         ApplicationReactionBuilder::new(id)
     }
 
@@ -464,14 +464,17 @@ impl ApplicationReaction {
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
-    pub fn new(id: impl Into<String>, queries: Vec<String>) -> (Self, ApplicationReactionHandle) {
-        Self::create_internal(id.into(), queries, None, true)
+    pub fn new(
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
+    ) -> (Self, ApplicationReactionHandle) {
+        Self::create_internal(id.clone(), queries, None, true)
     }
 
     /// Create from builder (internal method)
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> (Self, ApplicationReactionHandle) {
@@ -480,8 +483,8 @@ impl ApplicationReaction {
 
     /// Internal constructor
     fn create_internal(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> (Self, ApplicationReactionHandle) {
@@ -507,7 +510,7 @@ impl ApplicationReaction {
 
 #[async_trait]
 impl Reaction for ApplicationReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -519,7 +522,7 @@ impl Reaction for ApplicationReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -527,11 +530,12 @@ impl Reaction for ApplicationReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
+        let query_filter = self.base.query_ids().await?;
         log_component_start("Reaction", &self.base.id);
 
         // Transition to Starting
@@ -557,7 +561,6 @@ impl Reaction for ApplicationReaction {
         let priority_queue = self.base.priority_queue.clone();
         let reaction_name = self.base.id.clone();
         let app_tx = self.app_tx.clone();
-        let query_filter = self.base.queries.clone();
 
         let processing_task = tokio::spawn(async move {
             info!("ApplicationReaction '{reaction_name}' result processor started");

@@ -53,7 +53,7 @@ impl SourceTimeMergeTransformer {
             return Ok(());
         };
         let saved = Saved {
-            version: 1,
+            version: 2,
             definition: self.definition.clone(),
             schema: self.schema.descriptor().clone(),
             sources: self.state.sources.clone(),
@@ -93,7 +93,11 @@ impl SourceTimeMergeTransformer {
                     .resources()
                     .checkpoint_store()
                     .expect("validated checkpoint")
-                    .stage_checkpoint(CHECKPOINT, 1, Some(&bytes))
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(CHECKPOINT.to_owned()),
+                        1,
+                        Some(&bytes),
+                    )
                     .await?;
                 Ok(())
             })
@@ -115,7 +119,9 @@ impl SourceTimeMergeTransformer {
             let saved = transaction
                 .run(async { Ok(store.read_all_checkpoints().await?) })
                 .await?;
-            if let Some(checkpoint) = saved.get(CHECKPOINT) {
+            if let Some(checkpoint) = saved.get(&drasi_core::interface::CheckpointKey::Metadata(
+                CHECKPOINT.to_owned(),
+            )) {
                 anyhow::ensure!(
                     saved.len() == 1 && checkpoint.sequence == 1,
                     "invalid merge checkpoint ownership"
@@ -133,21 +139,30 @@ impl SourceTimeMergeTransformer {
                     saved.is_empty()
                         && store.read_config_hash().await?.is_none()
                         && store
-                            .read_result_sequence(self.definition.id.as_str())
+                            .read_result_sequence(
+                                &drasi_core::interface::OutputPartition::Component(
+                                    self.definition.id.clone()
+                                )
+                            )
                             .await?
                             .is_none()
                         && transaction
                             .resources()
                             .outbox_writer()
                             .expect("atomic outbox")
-                            .read_from(self.definition.id.as_str(), 0)
+                            .read_from(
+                                &drasi_core::interface::OutputPartition::Component(
+                                    self.definition.id.clone()
+                                ),
+                                0
+                            )
                             .await?
                             .is_empty()
                         && transaction
                             .resources()
                             .live_results_writer()
                             .expect("atomic projection")
-                            .read_snapshot(self.definition.id.as_str())
+                            .read_snapshot(&self.definition.id)
                             .await?
                             .is_empty(),
                     "time merge refuses nonempty unowned storage"
@@ -165,7 +180,7 @@ impl SourceTimeMergeTransformer {
 
     fn restore(&mut self, saved: Saved) -> anyhow::Result<()> {
         anyhow::ensure!(
-            saved.version == 1
+            saved.version == 2
                 && saved.definition == self.definition
                 && saved.schema == *self.schema.descriptor()
                 && saved.sources.len() == self.definition.sources.len(),
@@ -214,16 +229,14 @@ impl SourceTimeMergeTransformer {
                         && source
                             .progress_key
                             .as_ref()
-                            .is_some_and(|key| !key.is_empty())
+                            .is_some_and(|key| key.is_progress())
                 },
                 "invalid merge source receipt"
             );
-            anyhow::ensure!(
-                source.progress_key.as_ref().map_or(0, String::len)
-                    + serde_json::to_vec(&source.producer)?.len()
-                    <= MAX_SOURCE_IDENTITY_BYTES,
-                "oversized merge source receipt"
-            );
+            drasi_computation_contracts::encode_bounded_messagepack(
+                &(&source.progress_key, &source.producer),
+                MAX_SOURCE_IDENTITY_BYTES,
+            )?;
             if let Some(identity) = &source.producer {
                 identity.validate()?;
                 anyhow::ensure!(

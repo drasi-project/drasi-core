@@ -109,11 +109,11 @@ jobs:
         run: |
           set -euo pipefail
           make build-test-plugins
-          export DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug"
-          export DRASI_INSTANCE_HOST_FIXTURE="$PWD/target/debug/examples/libinstance_host_fixture.so"
+          export DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug/plugins"
+          export DRASI_INSTANCE_HOST_FIXTURE="$DRASI_NATIVE_PLUGIN_DIR/examples/libinstance_host_fixture.so"
           test -s "$DRASI_INSTANCE_HOST_FIXTURE"
           cargo llvm-cov clean --profraw-only
-          cargo llvm-cov --workspace \
+          cargo llvm-cov --locked --workspace \
             --exclude drasi-host-sdk \
             --exclude drasi-source-postgres --exclude drasi-source-http --exclude drasi-source-grpc \
             --exclude drasi-source-platform --exclude drasi-source-application --exclude drasi-source-mock \
@@ -137,9 +137,9 @@ jobs:
             --exclude xtask --exclude query-perf --exclude query-example \
             --features drasi-lib/computation-rocksdb-tests,lib-integration-tests/computation-middleware-tests,lib-integration-tests/garnet-tests \
             --no-report -- --test-threads=1
-          cargo llvm-cov --no-report -p drasi-index-rocksdb \
+          cargo llvm-cov --locked --no-report -p drasi-index-rocksdb \
             --features computation --test computation_result_transactions --test outbox_live_results_tests
-          cargo llvm-cov --no-report -p drasi-index-garnet \
+          cargo llvm-cov --locked --no-report -p drasi-index-garnet \
             --features computation --test computation_resources --test outbox_live_results_tests \
             -- --include-ignored --test-threads=1
           cargo llvm-cov report --lcov --output-path core-lcov.info
@@ -233,14 +233,15 @@ jobs:
             native_package_args+=(-p "$package")
           done <<< "$native_packages"
           make build-test-plugins
-          export DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug"
-          export DRASI_NATIVE_RECOVERY_PLUGIN="$PWD/target/debug/examples/libnative_recovery.so"
+          export DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug/plugins"
+          export DRASI_NATIVE_RECOVERY_PLUGIN="$DRASI_NATIVE_PLUGIN_DIR/examples/libnative_recovery.so"
+          export DRASI_HOST_TEST_PLUGINS_DIR="$DRASI_NATIVE_PLUGIN_DIR"
           test -s "$DRASI_NATIVE_RECOVERY_PLUGIN"
           while IFS= read -r package; do
             test -s "$DRASI_NATIVE_PLUGIN_DIR/lib${package//-/_}.so"
           done <<< "$native_packages"
           cargo llvm-cov clean --profraw-only
-          cargo llvm-cov \
+          cargo llvm-cov --locked \
             -p drasi-source-postgres \
             -p drasi-source-http \
             -p drasi-source-grpc \
@@ -256,8 +257,8 @@ jobs:
             -p drasi-plugin-sdk \
             "${native_package_args[@]}" \
             --no-report
-          cargo llvm-cov --no-report \
-            -p drasi-host-sdk --lib --test native_network_loopback --test native_network_wire
+          cargo llvm-cov --locked --no-report -p drasi-host-sdk \
+            --features test-support,registry,fetcher,watcher -- --test-threads=1
           cargo llvm-cov report --lcov --output-path plugins-lcov.info
           test -s plugins-lcov.info
           grep -Eq '^SF:.*components/computation-plugins/' plugins-lcov.info

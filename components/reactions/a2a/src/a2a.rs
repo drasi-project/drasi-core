@@ -36,12 +36,16 @@ pub struct A2AReaction {
 }
 
 impl A2AReaction {
-    pub fn builder(id: impl Into<String>) -> A2AReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> A2AReactionBuilder {
         A2AReactionBuilder::new(id)
     }
 
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: A2AReactionConfig) -> Self {
-        let params = ReactionBaseParams::new(id.into(), queries);
+    pub fn new(
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
+        config: A2AReactionConfig,
+    ) -> Self {
+        let params = ReactionBaseParams::new(id.clone(), queries);
         Self {
             base: ReactionBase::new(params),
             config,
@@ -49,8 +53,8 @@ impl A2AReaction {
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: A2AReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -72,7 +76,7 @@ impl A2AReaction {
 
 #[async_trait]
 impl Reaction for A2AReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -85,7 +89,7 @@ impl Reaction for A2AReaction {
         self.base.properties_or_serialize(&dto)
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -93,8 +97,8 @@ impl Reaction for A2AReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -104,7 +108,10 @@ impl Reaction for A2AReaction {
             self.base.id, self.config.endpoint
         );
 
-        if let Err(error) = self.config.validate(&self.base.queries, None) {
+        if let Err(error) = self.config.validate(
+            &drasi_lib::reactions::common::input_aliases(&self.base.queries),
+            None,
+        ) {
             error!("[{}] Invalid A2A reaction config: {error:#}", self.base.id);
             self.base
                 .set_status(
@@ -194,7 +201,7 @@ impl Reaction for A2AReaction {
         ReactionRecoveryPolicy::Strict
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        self.base.deprovision_common().await
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.base.delete_owned_resources_common().await
     }
 }

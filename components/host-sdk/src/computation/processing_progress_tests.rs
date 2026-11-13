@@ -6,13 +6,58 @@ use anyhow::Context;
 use drasi_computation_contracts::{SourceProgressKey, SourceProgressView};
 use std::time::Duration;
 
+#[test]
+fn native_progress_graceful_suspension_revokes_views_without_failure() -> anyhow::Result<()> {
+    let binding = ProcessingBinding::new(
+        Arc::new(InMemoryComputationProvider),
+        "graceful-stop".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
+    )
+    .with_committed_input_progress(Some(PortId::try_new("in")?))?;
+    let reader = binding.progress_owner().context("progress owner")?;
+    let view = binding
+        .committed_input_progress()?
+        .context("progress view")?;
+    let cleanup = binding.cleanup_call()?.context("cleanup guard")?;
+    binding.suspend_progress()?;
+    assert!(view.snapshot().is_err());
+    assert!(!reader.snapshot().ready && !reader.snapshot().admitting);
+    assert!(reader.snapshot().failure.is_none());
+    cleanup.complete();
+    assert!(reader.snapshot().failure.is_none());
+    Ok(())
+}
+
+#[test]
+fn native_progress_cancelled_cleanup_fences_the_suspended_owner() -> anyhow::Result<()> {
+    let binding = ProcessingBinding::new(
+        Arc::new(InMemoryComputationProvider),
+        "cancelled-stop".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
+    )
+    .with_committed_input_progress(Some(PortId::try_new("in")?))?;
+    let reader = binding.progress_owner().context("progress owner")?;
+    let cleanup = binding.cleanup_call()?.context("cleanup guard")?;
+    binding.suspend_progress()?;
+    drop(cleanup);
+    assert!(reader.snapshot().failure.is_some());
+    let retry = binding.cleanup_call()?.context("cleanup retry guard")?;
+    binding.suspend_progress()?;
+    retry.complete();
+    assert!(
+        reader.snapshot().failure.is_some(),
+        "only confirmed resource cleanup may reset failed progress"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn native_volatile_processing_preserves_actual_indexes_without_claiming_atomicity(
 ) -> anyhow::Result<()> {
     let mut binding = ProcessingBinding::new(
         Arc::new(InMemoryComputationProvider),
         "volatile".into(),
-        "processor".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
     )
     .with_volatile_processing(true)
     .with_committed_input_progress(Some(PortId::try_new("in")?))?;
@@ -94,7 +139,7 @@ async fn native_indexed_processing_progress_requires_prepared_input_to_be_staged
     let mut binding = ProcessingBinding::new(
         super::super::consumer_tests::provider(directory.path())?,
         "native-consumer".into(),
-        "processor".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
     )
     .with_committed_input_progress(Some(PortId::try_new("in")?))?;
     binding.open().await?;
@@ -156,7 +201,7 @@ async fn native_indexed_processing_bootstrap_reset_is_atomic_and_preserves_inten
     let mut binding = ProcessingBinding::new(
         super::super::consumer_tests::provider(directory.path())?,
         "native-consumer".into(),
-        "processor".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
     )
     .with_committed_input_progress(Some(PortId::try_new("in")?))?;
     binding.open().await?;
@@ -285,7 +330,7 @@ async fn native_indexed_processing_bootstrap_state_uses_its_actual_atomic_owner(
     let mut binding = ProcessingBinding::new(
         super::super::consumer_tests::provider(directory.path())?,
         "native-consumer".into(),
-        "processor".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
     )
     .with_committed_input_progress(Some(PortId::try_new("in")?))?;
     let state = binding.bootstrap_state();
@@ -379,7 +424,7 @@ async fn publication_case() -> anyhow::Result<()> {
     let mut binding = ProcessingBinding::new(
         super::super::consumer_tests::provider(directory.path())?,
         "native-consumer".into(),
-        "processor".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
     )
     .with_committed_input_progress(Some(PortId::try_new("in")?))?;
     let view = binding
@@ -563,7 +608,7 @@ async fn native_indexed_processing_progress_rejects_reserved_writes_and_oversize
         let mut binding = ProcessingBinding::new(
             super::super::consumer_tests::provider(directory.path())?,
             "native-consumer".into(),
-            "processor".into(),
+            ComponentId::try_new(super::PROCESSOR)?,
         )
         .with_committed_input_progress(Some(PortId::try_new("in")?))?;
         binding.open().await?;

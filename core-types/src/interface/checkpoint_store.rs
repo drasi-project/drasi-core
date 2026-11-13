@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::{IndexError, SourceCheckpoint};
+use super::{CheckpointKey, IndexError, OutputPartition, SourceCheckpoint};
 
 /// Atomic checkpoint persistence for source sequence tracking and config hashing.
 ///
@@ -70,7 +70,7 @@ pub trait CheckpointStore: Send + Sync {
     /// For volatile backends (in-memory), applies immediately.
     async fn stage_checkpoint(
         &self,
-        source_id: &str,
+        key: &CheckpointKey,
         sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError>;
@@ -81,14 +81,16 @@ pub trait CheckpointStore: Send + Sync {
     /// Reads committed state directly; does not require an active session.
     async fn read_checkpoint(
         &self,
-        source_id: &str,
+        key: &CheckpointKey,
     ) -> Result<Option<SourceCheckpoint>, IndexError>;
 
     /// Read all committed source checkpoints, keyed by source id.
     ///
     /// Returns an empty map if no checkpoints have been written.
     /// Reads committed state directly; does not require an active session.
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError>;
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError>;
 
     /// Delete all source checkpoints and the config hash.
     ///
@@ -127,7 +129,11 @@ pub trait CheckpointStore: Send + Sync {
     /// immediate apply. A default that called
     /// [`write_result_sequence`](Self::write_result_sequence) would silently
     /// commit outside the outer transaction.
-    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError>;
+    async fn stage_result_sequence(
+        &self,
+        output: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError>;
 
     /// Write the last persisted result sequence for a query.
     ///
@@ -140,7 +146,7 @@ pub trait CheckpointStore: Send + Sync {
     /// Default: no-op (volatile backends that don't track result sequences).
     async fn write_result_sequence(
         &self,
-        _query_id: &str,
+        _output: &OutputPartition,
         _sequence: u64,
     ) -> Result<(), IndexError> {
         Ok(())
@@ -152,7 +158,10 @@ pub trait CheckpointStore: Send + Sync {
     /// Used during crash recovery to determine the outbox replay point.
     ///
     /// Default: returns `None` (volatile backends).
-    async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(
+        &self,
+        _output: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         Ok(None)
     }
 
@@ -162,7 +171,7 @@ pub trait CheckpointStore: Send + Sync {
     /// sequence 1 from a previous generation. Default: no-op.
     async fn write_output_generation(
         &self,
-        _query_id: &str,
+        _output: &OutputPartition,
         _generation: u64,
     ) -> Result<(), IndexError> {
         Ok(())
@@ -171,7 +180,10 @@ pub trait CheckpointStore: Send + Sync {
     /// Read the persisted output generation.
     ///
     /// Returns `None` if none has been written (treated as generation 0).
-    async fn read_output_generation(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_output_generation(
+        &self,
+        _output: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         Ok(None)
     }
 }

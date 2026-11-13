@@ -121,6 +121,20 @@ fn readings(envelope: &Envelope) -> anyhow::Result<Vec<(u8, u16)>> {
         .collect()
 }
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
+fn named_component_id(name: &str) -> ComponentId {
+    component_id(match name {
+        "source" => 1,
+        "double" => 2,
+        "add-one" => 3,
+        "sink" => 4,
+        other => panic!("missing explicit example component ID for {other}"),
+    })
+}
+
 fn descriptor(id: &str, inputs: &[&str], outputs: &[&str]) -> Result<ComponentDescriptor> {
     let mut ports = Vec::new();
     for (names, direction) in [(inputs, PortDirection::Input), (outputs, PortDirection::Output)] {
@@ -133,12 +147,12 @@ fn descriptor(id: &str, inputs: &[&str], outputs: &[&str]) -> Result<ComponentDe
             ));
         }
     }
-    ComponentDescriptor::try_new(ComponentId::try_new(id)?, ports)
+    ComponentDescriptor::try_new(named_component_id(id), ports)
 }
 
 fn endpoint(component: &str, port: &str) -> Result<Endpoint> {
     Ok(Endpoint::new(
-        ComponentId::try_new(component)?,
+        named_component_id(component),
         PortId::try_new(port)?,
     ))
 }
@@ -316,16 +330,28 @@ async fn run_pipeline(with_transforms: bool) -> anyhow::Result<()> {
     let inputs = vec![2, 4, 6];
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut builder = ComputationGraph::builder(if with_transforms { "chain" } else { "direct" })
-        .source(Box::new(FiniteReadings::new(inputs.clone())?))
-        .sink(Box::new(CollectReadings {
-            descriptor: descriptor("sink", &["in"], &[])?,
-            values: values.clone(),
-        }))
+        .source(
+            ComponentName::try_new("source")?,
+            Box::new(FiniteReadings::new(inputs.clone())?),
+        )
+        .sink(
+            ComponentName::try_new("sink")?,
+            Box::new(CollectReadings {
+                descriptor: descriptor("sink", &["in"], &[])?,
+                values: values.clone(),
+            }),
+        )
         .bind_stream(endpoint("source", "out")?, StreamId::try_new("source/out")?);
     let edges = if with_transforms {
         builder = builder
-            .transformer(Box::new(Arithmetic::new("double", 2, 0)?))
-            .transformer(Box::new(Arithmetic::new("add-one", 1, 1)?))
+            .transformer(
+                ComponentName::try_new("double")?,
+                Box::new(Arithmetic::new("double", 2, 0)?),
+            )
+            .transformer(
+                ComponentName::try_new("add-one")?,
+                Box::new(Arithmetic::new("add-one", 1, 1)?),
+            )
             .bind_stream(endpoint("double", "out")?, StreamId::try_new("double/out")?)
             .bind_stream(
                 endpoint("add-one", "out")?,
@@ -370,11 +396,17 @@ async fn main() -> anyhow::Result<()> {
 async fn run_lifecycle() -> anyhow::Result<()> {
     let values = Arc::new(Mutex::new(Vec::new()));
     let mut graph = ComputationGraph::builder("lifecycle")
-        .source(Box::new(FiniteReadings::new(vec![2, 4])?))
-        .sink(Box::new(CollectReadings {
-            descriptor: descriptor("sink", &["in"], &[])?,
-            values: values.clone(),
-        }))
+        .source(
+            ComponentName::try_new("source")?,
+            Box::new(FiniteReadings::new(vec![2, 4])?),
+        )
+        .sink(
+            ComponentName::try_new("sink")?,
+            Box::new(CollectReadings {
+                descriptor: descriptor("sink", &["in"], &[])?,
+                values: values.clone(),
+            }),
+        )
         .bind_stream(endpoint("source", "out")?, StreamId::try_new("source/out")?)
         .connect(
             EdgeDefinition::new(endpoint("source", "out")?, endpoint("sink", "in")?),
@@ -396,15 +428,10 @@ async fn run_lifecycle() -> anyhow::Result<()> {
         let preview = control
             .preview(
                 GraphRevision(1),
-                vec![DesiredMutation::Restart(GraphSelection::Exact(vec![ComponentId::try_new(
-                    "source",
-                )?]))],
+                vec![DesiredMutation::Restart(GraphSelection::Exact(vec![component_id(77)]))],
             )
             .await?;
-        ensure!(
-            preview.restarted().len() == 1
-                && preview.resumed().contains(&ComponentId::try_new("sink")?)
-        );
+        ensure!(preview.restarted().len() == 1 && preview.resumed().contains(&component_id(101)));
         let restarted = control
             .reconcile(preview, TopologyBindings::default())
             .await?;

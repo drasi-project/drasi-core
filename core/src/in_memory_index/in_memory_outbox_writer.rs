@@ -22,14 +22,14 @@ use std::collections::{BTreeMap, HashMap};
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::interface::{IndexError, OutboxPageLimits, OutboxWriter};
+use crate::interface::{IndexError, OutboxPageLimits, OutboxWriter, OutputPartition};
 
 /// In-memory outbox writer for testing and volatile use.
 ///
 /// Entries are stored in a `BTreeMap` keyed by sequence number, giving
 /// efficient ordered access for `read_from` and `trim_to_capacity`.
 pub struct InMemoryOutboxWriter {
-    data: RwLock<HashMap<String, BTreeMap<u64, Vec<u8>>>>,
+    data: RwLock<HashMap<OutputPartition, BTreeMap<u64, Vec<u8>>>>,
 }
 
 impl Default for InMemoryOutboxWriter {
@@ -48,10 +48,16 @@ impl InMemoryOutboxWriter {
 
 #[async_trait]
 impl OutboxWriter for InMemoryOutboxWriter {
-    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
         let mut store = self.data.write().await;
         store
-            .entry(query_id.to_string())
+            .entry(query_id.clone())
             .or_default()
             .insert(sequence, data.to_vec());
         Ok(())
@@ -59,9 +65,10 @@ impl OutboxWriter for InMemoryOutboxWriter {
 
     async fn read_from(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        query_id.validate()?;
         let store = self.data.read().await;
         let entries = match store.get(query_id) {
             Some(map) => map
@@ -76,7 +83,11 @@ impl OutboxWriter for InMemoryOutboxWriter {
         Ok(entries)
     }
 
-    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
         let store = self.data.read().await;
         Ok(store
             .get(query_id)
@@ -85,10 +96,11 @@ impl OutboxWriter for InMemoryOutboxWriter {
 
     async fn read_page(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         after_sequence: u64,
         limits: OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        query_id.validate()?;
         let store = self.data.read().await;
         let mut entries = Vec::new();
         let mut bytes = 0;
@@ -107,13 +119,19 @@ impl OutboxWriter for InMemoryOutboxWriter {
         Ok(entries)
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &OutputPartition) -> Result<(), IndexError> {
+        query_id.validate()?;
         let mut store = self.data.write().await;
         store.remove(query_id);
         Ok(())
     }
 
-    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        query_id: &OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
+        query_id.validate()?;
         let mut store = self.data.write().await;
         let map = match store.get_mut(query_id) {
             Some(map) => map,
@@ -127,7 +145,12 @@ impl OutboxWriter for InMemoryOutboxWriter {
         Ok(removed)
     }
 
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        query_id: &OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
+        query_id.validate()?;
         let mut store = self.data.write().await;
         let map = match store.get_mut(query_id) {
             Some(map) => map,
@@ -166,7 +189,19 @@ mod tests {
             (6, b""),
             (u64::MAX, b"z"),
         ] {
-            writer.append("q", position, bytes).await.unwrap();
+            writer
+                .append(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000081",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    position,
+                    bytes,
+                )
+                .await
+                .unwrap();
         }
         for (after, expected) in [
             (0, vec![1, 2]),
@@ -176,7 +211,19 @@ mod tests {
             (6, vec![u64::MAX]),
             (u64::MAX, vec![]),
         ] {
-            let page = writer.read_page("q", after, limits).await.unwrap();
+            let page = writer
+                .read_page(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000081",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    after,
+                    limits,
+                )
+                .await
+                .unwrap();
             limits.validate_page(&page).unwrap();
             assert_eq!(
                 page.iter()
@@ -186,7 +233,14 @@ mod tests {
             );
         }
         assert!(writer
-            .read_page("missing", 0, limits)
+            .read_page(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002e2")
+                        .expect("fixture UUID")
+                ),
+                0,
+                limits
+            )
             .await
             .unwrap()
             .is_empty());
@@ -197,7 +251,18 @@ mod tests {
             .validate_page(&[(1, vec![0; 3]), (2, vec![0; 2])])
             .is_err());
         assert!(matches!(
-            LegacyOutbox(writer).read_page("q", 0, limits).await,
+            LegacyOutbox(writer)
+                .read_page(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000081"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0,
+                    limits
+                )
+                .await,
             Err(IndexError::NotSupported)
         ));
     }
@@ -205,17 +270,65 @@ mod tests {
     #[tokio::test]
     async fn test_append_and_read() {
         let writer = InMemoryOutboxWriter::new();
-        writer.append("q1", 1, b"hello").await.unwrap();
-        writer.append("q1", 2, b"world").await.unwrap();
-        writer.append("q1", 5, b"skip").await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"hello",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                2,
+                b"world",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                b"skip",
+            )
+            .await
+            .unwrap();
 
-        let entries = writer.read_from("q1", 0).await.unwrap();
+        let entries = writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0], (1, b"hello".to_vec()));
         assert_eq!(entries[1], (2, b"world".to_vec()));
         assert_eq!(entries[2], (5, b"skip".to_vec()));
 
-        let entries = writer.read_from("q1", 2).await.unwrap();
+        let entries = writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                2,
+            )
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], (5, b"skip".to_vec()));
     }
@@ -223,19 +336,82 @@ mod tests {
     #[tokio::test]
     async fn test_read_latest_sequence() {
         let writer = InMemoryOutboxWriter::new();
-        assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), None);
+        assert_eq!(
+            writer
+                .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ))
+                .await
+                .unwrap(),
+            None
+        );
 
-        writer.append("q1", 10, b"data").await.unwrap();
-        writer.append("q1", 20, b"data").await.unwrap();
-        assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), Some(20));
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                10,
+                b"data",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                20,
+                b"data",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            writer
+                .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ))
+                .await
+                .unwrap(),
+            Some(20)
+        );
     }
 
     #[tokio::test]
     async fn test_clear() {
         let writer = InMemoryOutboxWriter::new();
-        writer.append("q1", 1, b"data").await.unwrap();
-        writer.clear("q1").await.unwrap();
-        let entries = writer.read_from("q1", 0).await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"data",
+            )
+            .await
+            .unwrap();
+        writer
+            .clear(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
+        let entries = writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap();
         assert!(entries.is_empty());
     }
 
@@ -243,12 +419,42 @@ mod tests {
     async fn test_trim_to_capacity() {
         let writer = InMemoryOutboxWriter::new();
         for i in 1..=10 {
-            writer.append("q1", i, b"data").await.unwrap();
+            writer
+                .append(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    i,
+                    b"data",
+                )
+                .await
+                .unwrap();
         }
-        let removed = writer.trim_to_capacity("q1", 3).await.unwrap();
+        let removed = writer
+            .trim_to_capacity(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                3,
+            )
+            .await
+            .unwrap();
         assert_eq!(removed, 7);
 
-        let entries = writer.read_from("q1", 0).await.unwrap();
+        let entries = writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 3);
         // Should keep the latest 3: 8, 9, 10
         assert_eq!(entries[0].0, 8);
@@ -259,8 +465,27 @@ mod tests {
     #[tokio::test]
     async fn test_trim_no_op_when_under_capacity() {
         let writer = InMemoryOutboxWriter::new();
-        writer.append("q1", 1, b"data").await.unwrap();
-        let removed = writer.trim_to_capacity("q1", 5).await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"data",
+            )
+            .await
+            .unwrap();
+        let removed = writer
+            .trim_to_capacity(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                5,
+            )
+            .await
+            .unwrap();
         assert_eq!(removed, 0);
     }
 
@@ -268,12 +493,42 @@ mod tests {
     async fn test_trim_before() {
         let writer = InMemoryOutboxWriter::new();
         for i in 1..=5 {
-            writer.append("q1", i, b"data").await.unwrap();
+            writer
+                .append(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    i,
+                    b"data",
+                )
+                .await
+                .unwrap();
         }
-        let removed = writer.trim_before("q1", 4).await.unwrap();
+        let removed = writer
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                4,
+            )
+            .await
+            .unwrap();
         assert_eq!(removed, 3);
 
-        let entries = writer.read_from("q1", 0).await.unwrap();
+        let entries = writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             entries.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
             vec![4, 5]
@@ -283,10 +538,44 @@ mod tests {
     #[tokio::test]
     async fn test_trim_before_no_op() {
         let writer = InMemoryOutboxWriter::new();
-        writer.append("q1", 5, b"data").await.unwrap();
-        let removed = writer.trim_before("q1", 5).await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                b"data",
+            )
+            .await
+            .unwrap();
+        let removed = writer
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                5,
+            )
+            .await
+            .unwrap();
         assert_eq!(removed, 0);
-        assert_eq!(writer.read_from("q1", 0).await.unwrap().len(), 1);
+        assert_eq!(
+            writer
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     struct LegacyOutbox(InMemoryOutboxWriter);
@@ -295,7 +584,7 @@ mod tests {
     impl OutboxWriter for LegacyOutbox {
         async fn append(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
             sequence: u64,
             data: &[u8],
         ) -> Result<(), IndexError> {
@@ -304,23 +593,29 @@ mod tests {
 
         async fn read_from(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
             after_sequence: u64,
         ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
             self.0.read_from(query_id, after_sequence).await
         }
 
-        async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        async fn read_latest_sequence(
+            &self,
+            query_id: &drasi_core_types::OutputPartition,
+        ) -> Result<Option<u64>, IndexError> {
             self.0.read_latest_sequence(query_id).await
         }
 
-        async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+        async fn clear(
+            &self,
+            query_id: &drasi_core_types::OutputPartition,
+        ) -> Result<(), IndexError> {
             self.0.clear(query_id).await
         }
 
         async fn trim_to_capacity(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
             capacity: usize,
         ) -> Result<usize, IndexError> {
             self.0.trim_to_capacity(query_id, capacity).await
@@ -330,11 +625,51 @@ mod tests {
     #[tokio::test]
     async fn test_append_and_trim_keeps_tail() {
         let writer = InMemoryOutboxWriter::new();
-        writer.append("q1", 1, b"a").await.unwrap();
-        writer.append("q1", 2, b"b").await.unwrap();
-        let removed = writer.append_and_trim("q1", 3, b"c", 2).await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"a",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                2,
+                b"b",
+            )
+            .await
+            .unwrap();
+        let removed = writer
+            .append_and_trim(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                3,
+                b"c",
+                2,
+            )
+            .await
+            .unwrap();
         assert_eq!(removed, 1);
-        let entries = writer.read_from("q1", 0).await.unwrap();
+        let entries = writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             entries.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
             vec![2, 3]
@@ -344,13 +679,68 @@ mod tests {
     #[tokio::test]
     async fn default_trim_before_on_gapped_outbox_keeps_sequence_window() {
         let writer = LegacyOutbox(InMemoryOutboxWriter::new());
-        writer.append("q1", 1, b"a").await.unwrap();
-        writer.append("q1", 2, b"b").await.unwrap();
-        writer.append("q1", 3, b"c").await.unwrap();
-        writer.append("q1", 5, b"e").await.unwrap();
-        writer.trim_before("q1", 4).await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"a",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                2,
+                b"b",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                3,
+                b"c",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                b"e",
+            )
+            .await
+            .unwrap();
+        writer
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                4,
+            )
+            .await
+            .unwrap();
         let seqs: Vec<u64> = writer
-            .read_from("q1", 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
             .await
             .unwrap()
             .into_iter()
@@ -367,11 +757,41 @@ mod tests {
     async fn test_default_trim_before_uses_trim_to_capacity() {
         let writer = LegacyOutbox(InMemoryOutboxWriter::new());
         for i in 1..=10 {
-            writer.append("q1", i, b"data").await.unwrap();
+            writer
+                .append(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    i,
+                    b"data",
+                )
+                .await
+                .unwrap();
         }
-        let removed = writer.trim_before("q1", 8).await.unwrap();
+        let removed = writer
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                8,
+            )
+            .await
+            .unwrap();
         assert_eq!(removed, 7);
-        let entries = writer.read_from("q1", 0).await.unwrap();
+        let entries = writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             entries.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
             vec![8, 9, 10]
@@ -381,11 +801,62 @@ mod tests {
     #[tokio::test]
     async fn test_isolation_between_queries() {
         let writer = InMemoryOutboxWriter::new();
-        writer.append("q1", 1, b"a").await.unwrap();
-        writer.append("q2", 1, b"b").await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"a",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"b",
+            )
+            .await
+            .unwrap();
 
-        writer.clear("q1").await.unwrap();
-        assert!(writer.read_from("q1", 0).await.unwrap().is_empty());
-        assert_eq!(writer.read_from("q2", 0).await.unwrap().len(), 1);
+        writer
+            .clear(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
+        assert!(writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            writer
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002c"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

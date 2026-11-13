@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::sync::{
@@ -25,6 +29,26 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use computation_support::*;
 use drasi_lib::computation::v1::*;
+
+fn named_component(name: &str) -> ComponentId {
+    fixture_support::component_id(match name {
+        "source" => 77,
+        "left" => 2,
+        "right" => 3,
+        "left-sink" => 4,
+        "right-sink" => 5,
+        "child-a" => 6,
+        "child-b" => 7,
+        "left-one" => 8,
+        "left-two" => 9,
+        "right-one" => 10,
+        "right-two" => 11,
+        "child-a-sink" => 12,
+        "child-b-sink" => 13,
+        "transform" => 429,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
 
 macro_rules! both_tokio_flavors {
     ($name:ident, $scenario:ident) => {
@@ -50,37 +74,75 @@ async fn complete(graph: &mut ComputationGraph) {
     assert_eq!(graph.state(), GraphState::Completed);
 }
 
-fn contributors(envelope: &Envelope) -> Vec<String> {
-    envelope
+fn assert_contributors(envelope: &Envelope, expected: &[(ComponentId, &str)]) {
+    let actual = envelope
         .context()
         .entries()
         .map(|entry| {
             assert_eq!(entry.key(), "visited");
-            assert_eq!(
-                entry.value(),
-                ContextValue::String(Arc::from(entry.contributor()))
-            );
-            entry.contributor().to_owned()
+            (entry.contributor().clone(), entry.value().clone())
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let expected = expected
+        .iter()
+        .map(|(id, value)| (id.clone(), ContextValue::String(Arc::from(*value))))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
 }
 
 async fn direct_scenario() {
-    let inputs = [root("source", 0, &[2, 3]), root("source", 4, &[5]), root("source", 9, &[8, 13])];
+    let inputs = [
+        root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            0,
+            &[2, 3],
+        ),
+        root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            4,
+            &[5],
+        ),
+        root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            9,
+            &[8, 13],
+        ),
+    ];
     let received = Received::default();
     let mut graph = ComputationGraph::builder("native-direct")
-        .source(Box::new(FiniteSource::new(
-            "source",
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             inputs.iter().cloned().map(output).collect(),
         )))
-        .sink(Box::new(CollectSink::new(
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             received.clone(),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -106,7 +168,7 @@ async fn direct_scenario() {
         );
         assert!(Arc::ptr_eq(actual.envelope.changes(), expected.changes()));
         assert!(Arc::ptr_eq(actual.envelope.system(), expected.system()));
-        assert_eq!(contributors(&actual.envelope), ["source"]);
+        assert_contributors(&actual.envelope, &[(component(77), "source")]);
         assert!(actual.envelope.lineage().is_none());
     }
 }
@@ -114,45 +176,101 @@ async fn direct_scenario() {
 both_tokio_flavors!(direct, direct_scenario);
 
 async fn annotation_history_scenario() {
-    let original = root("source", 1, &[2, 4]);
+    let original = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        1,
+        &[2, 4],
+    );
     let left = Received::default();
     let right = Received::default();
-    let transform = NativeTransform::new("double", |input| {
-        let values: Vec<_> = values(&input.envelope)
-            .into_iter()
-            .map(|value| value * 2)
-            .collect();
-        Ok(vec![output(derived(
-            &input.envelope,
-            "double",
-            1,
-            changes("double", 1, &values),
-        ))])
-    });
+    let transform = NativeTransform::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+            .expect("fixture UUID"),
+        |input| {
+            let values: Vec<_> = values(&input.envelope)
+                .into_iter()
+                .map(|value| value * 2)
+                .collect();
+            Ok(vec![output(derived(
+                &input.envelope,
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+                "double",
+                1,
+                changes("double", 1, &values),
+            ))])
+        },
+    );
     let mut graph = ComputationGraph::builder("annotation-history")
-        .source(Box::new(FiniteSource::new(
-            "source",
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             vec![output(original.clone())],
         )))
-        .transformer(Box::new(transform))
-        .sink(Box::new(
-            CollectSink::new("left", &["in"], left.clone()).with_annotation(),
+        .fixture_transformer(Box::new(transform))
+        .fixture_sink(Box::new(
+            CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000002e7")
+                    .expect("fixture UUID"),
+                "left",
+                &["in"],
+                left.clone(),
+            )
+            .with_annotation(),
         ))
-        .sink(Box::new(
-            CollectSink::new("right", &["in"], right.clone()).with_annotation(),
+        .fixture_sink(Box::new(
+            CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001d1")
+                    .expect("fixture UUID"),
+                "right",
+                &["in"],
+                right.clone(),
+            )
+            .with_annotation(),
         ))
-        .bind_stream(endpoint("source", "out"), stream("source"))
-        .bind_stream(endpoint("double", "out"), stream("double"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("double"),
+        )
         .connect(
-            edge("source", "double"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("double", "left"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002e7")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("double", "right"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001d1")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -169,9 +287,15 @@ async fn annotation_history_scenario() {
     assert_eq!(values(right), [4, 8]);
     assert!(Arc::ptr_eq(left.event(), right.event()));
     assert!(!Arc::ptr_eq(left.event(), original.event()));
-    assert_eq!(contributors(left), ["left", "double", "source"]);
-    assert_eq!(contributors(right), ["right", "double", "source"]);
-    assert_eq!(contributors(&original), ["source"]);
+    assert_contributors(
+        left,
+        &[(component(743), "left"), (component(426), "double"), (component(77), "source")],
+    );
+    assert_contributors(
+        right,
+        &[(component(465), "right"), (component(426), "double"), (component(77), "source")],
+    );
+    assert_contributors(&original, &[(component(77), "source")]);
     assert_eq!(
         left.event()
             .lineage()
@@ -184,61 +308,127 @@ async fn annotation_history_scenario() {
 both_tokio_flavors!(annotation_history, annotation_history_scenario);
 
 async fn chain_scenario() {
-    let inputs = [root("source", 20, &[2, 4]), root("source", 30, &[6])];
+    let inputs = [
+        root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            20,
+            &[2, 4],
+        ),
+        root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            30,
+            &[6],
+        ),
+    ];
     let mut double_sequence = 0;
-    let double = NativeTransform::new("double", move |input| {
-        double_sequence += 1;
-        let readings: Vec<_> = values(&input.envelope)
-            .into_iter()
-            .map(|value| value * 2)
-            .collect();
-        Ok(vec![output(derived(
-            &input.envelope,
-            "double",
-            double_sequence,
-            changes("double", double_sequence, &readings),
-        ))])
-    });
+    let double = NativeTransform::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+            .expect("fixture UUID"),
+        move |input| {
+            double_sequence += 1;
+            let readings: Vec<_> = values(&input.envelope)
+                .into_iter()
+                .map(|value| value * 2)
+                .collect();
+            Ok(vec![output(derived(
+                &input.envelope,
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+                "double",
+                double_sequence,
+                changes("double", double_sequence, &readings),
+            ))])
+        },
+    );
     let mut add_sequence = 100;
-    let add = NativeTransform::new("add", move |input| {
-        add_sequence += 1;
-        let readings: Vec<_> = values(&input.envelope)
-            .into_iter()
-            .map(|value| value + 1)
-            .collect();
-        Ok(vec![output(derived(
-            &input.envelope,
-            "add",
-            add_sequence,
-            changes("add", add_sequence, &readings),
-        ))])
-    });
+    let add = NativeTransform::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ab")
+            .expect("fixture UUID"),
+        move |input| {
+            add_sequence += 1;
+            let readings: Vec<_> = values(&input.envelope)
+                .into_iter()
+                .map(|value| value + 1)
+                .collect();
+            Ok(vec![output(derived(
+                &input.envelope,
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001ab")
+                    .expect("fixture UUID"),
+                "add",
+                add_sequence,
+                changes("add", add_sequence, &readings),
+            ))])
+        },
+    );
     let received = Received::default();
     let mut graph = ComputationGraph::builder("native-chain")
-        .source(Box::new(FiniteSource::new(
-            "source",
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             inputs.iter().cloned().map(output).collect(),
         )))
-        .transformer(Box::new(double))
-        .transformer(Box::new(add))
-        .sink(Box::new(CollectSink::new(
+        .fixture_transformer(Box::new(double))
+        .fixture_transformer(Box::new(add))
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             received.clone(),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
-        .bind_stream(endpoint("double", "out"), stream("double"))
-        .bind_stream(endpoint("add", "out"), stream("add"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("double"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ab")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("add"),
+        )
         .connect(
-            edge("source", "double"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("double", "add"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001aa")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ab")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("add", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ab")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -254,7 +444,10 @@ async fn chain_scenario() {
         let ordinal = u64::try_from(index).expect("index");
         assert_eq!(envelope.system().stream(), &stream("add"));
         assert_eq!(envelope.system().sequence(), 101 + ordinal);
-        assert_eq!(contributors(envelope), ["add", "double", "source"]);
+        assert_contributors(
+            envelope,
+            &[(component(427), "add"), (component(426), "double"), (component(77), "source")],
+        );
         let parent = envelope.lineage().expect("double lineage");
         assert_eq!(
             parent.envelope_id(),
@@ -266,7 +459,7 @@ async fn chain_scenario() {
         assert_eq!(ancestor.envelope_id(), source.id());
         assert!(Arc::ptr_eq(ancestor.system(), source.system()));
         assert!(ancestor.parent().is_none());
-        assert_eq!(contributors(source), ["source"]);
+        assert_contributors(source, &[(component(77), "source")]);
     }
 }
 
@@ -279,6 +472,8 @@ async fn cardinality_scenario() {
             .enumerate()
             .map(|(index, count)| {
                 output(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
                     "source",
                     u64::try_from(index).expect("index"),
                     &[*count],
@@ -286,37 +481,75 @@ async fn cardinality_scenario() {
             })
             .collect();
         let mut sequence = 0;
-        let transform = NativeTransform::new("expand", move |input| {
-            let count = values(&input.envelope)[0];
-            Ok((0..count)
-                .map(|value| {
-                    sequence += 1;
-                    output(derived(
-                        &input.envelope,
-                        "expand",
-                        sequence,
-                        changes("expand", sequence, &[value + 10]),
-                    ))
-                })
-                .collect())
-        });
+        let transform = NativeTransform::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ac")
+                .expect("fixture UUID"),
+            move |input| {
+                let count = values(&input.envelope)[0];
+                Ok((0..count)
+                    .map(|value| {
+                        sequence += 1;
+                        output(derived(
+                            &input.envelope,
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-0000000001ac",
+                            )
+                            .expect("fixture UUID"),
+                            "expand",
+                            sequence,
+                            changes("expand", sequence, &[value + 10]),
+                        ))
+                    })
+                    .collect())
+            },
+        );
         let received = Received::default();
         let mut graph = ComputationGraph::builder("cardinality")
-            .source(Box::new(FiniteSource::new("source", source_outputs)))
-            .transformer(Box::new(transform))
-            .sink(Box::new(CollectSink::new(
+            .fixture_source(Box::new(FiniteSource::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                source_outputs,
+            )))
+            .fixture_transformer(Box::new(transform))
+            .fixture_sink(Box::new(CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
                 "sink",
                 &["in"],
                 received.clone(),
             )))
-            .bind_stream(endpoint("source", "out"), stream("source"))
-            .bind_stream(endpoint("expand", "out"), stream("expand"))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            )
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ac")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("expand"),
+            )
             .connect(
-                edge("source", "expand"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ac")
+                        .expect("fixture UUID"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                edge("expand", "sink"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ac")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()
@@ -345,7 +578,10 @@ async fn cardinality_scenario() {
                     .sequence(),
                 u64::try_from(source_index).expect("source index")
             );
-            assert_eq!(contributors(&actual.envelope), ["expand", "source"]);
+            assert_contributors(
+                &actual.envelope,
+                &[(component(428), "expand"), (component(77), "source")],
+            );
         }
     }
 }
@@ -353,37 +589,67 @@ async fn cardinality_scenario() {
 both_tokio_flavors!(zero_one_many_outputs, cardinality_scenario);
 
 async fn fanout_scenario() {
-    let original = root("source", 42, &[7, 11]);
+    let original = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        42,
+        &[7, 11],
+    );
     let left = Received::default();
     let right = Received::default();
     let mut builder = ComputationGraph::builder("fanout")
-        .source(Box::new(FiniteSource::new(
-            "source",
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             vec![output(original.clone())],
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"));
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        );
     for (branch, sink, received) in
         [("left", "left-sink", left.clone()), ("right", "right-sink", right.clone())]
     {
+        let branch_id = named_component(branch);
+        let sink_id = named_component(sink);
+        let emitted_branch_id = branch_id.clone();
         let mut sequence = 0;
         builder = builder
-            .transformer(Box::new(NativeTransform::new(branch, move |input| {
-                sequence += 1;
-                Ok(vec![output(derived(
-                    &input.envelope,
-                    branch,
-                    sequence,
-                    input.envelope.changes().clone(),
-                ))])
-            })))
-            .sink(Box::new(CollectSink::new(sink, &["in"], received)))
-            .bind_stream(endpoint(branch, "out"), stream(branch))
+            .fixture_transformer(Box::new(NativeTransform::new(
+                branch_id.clone(),
+                move |input| {
+                    sequence += 1;
+                    Ok(vec![output(derived(
+                        &input.envelope,
+                        &emitted_branch_id,
+                        branch,
+                        sequence,
+                        input.envelope.changes().clone(),
+                    ))])
+                },
+            )))
+            .fixture_sink(Box::new(CollectSink::new(
+                sink_id.clone(),
+                sink,
+                &["in"],
+                received,
+            )))
+            .bind_stream(endpoint(&branch_id, "out"), stream(branch))
             .connect(
-                edge("source", branch),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &branch_id,
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                edge(branch, sink),
+                edge(&branch_id, &sink_id),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             );
     }
@@ -399,9 +665,15 @@ async fn fanout_scenario() {
     assert!(Arc::ptr_eq(left.changes(), original.changes()));
     assert_eq!(values(left), [7, 11]);
     assert_eq!(values(right), [7, 11]);
-    assert_eq!(contributors(left), ["left", "source"]);
-    assert_eq!(contributors(right), ["right", "source"]);
-    assert_eq!(contributors(&original), ["source"]);
+    assert_contributors(
+        left,
+        &[(named_component("left"), "left"), (component(77), "source")],
+    );
+    assert_contributors(
+        right,
+        &[(named_component("right"), "right"), (component(77), "source")],
+    );
+    assert_contributors(&original, &[(component(77), "source")]);
     assert_ne!(left.id(), right.id());
     assert_ne!(left.system().stream(), right.system().stream());
     for branch in [left, right] {
@@ -417,13 +689,29 @@ both_tokio_flavors!(fanout_branch_isolation, fanout_scenario);
 async fn mixed_multilevel_fanout_scenario() {
     const INPUTS: u16 = 32;
     let mut builder = ComputationGraph::builder("mixed-multilevel-fanout")
-        .source(Box::new(FiniteSource::new(
-            "source",
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             (1..=INPUTS)
-                .map(|value| output(root("source", u64::from(value), &[value])))
+                .map(|value| {
+                    output(root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        u64::from(value),
+                        &[value],
+                    ))
+                })
                 .collect(),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"));
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        );
     let mut calls = Vec::new();
     for (producer, transform, factor) in [
         ("source", "left", 2),
@@ -431,27 +719,34 @@ async fn mixed_multilevel_fanout_scenario() {
         ("left", "child-a", 5),
         ("left", "child-b", 7),
     ] {
+        let producer_id = named_component(producer);
+        let transform_id = named_component(transform);
+        let emitted_transform_id = transform_id.clone();
         let count = Arc::new(AtomicUsize::new(0));
         calls.push(count.clone());
         let mut sequence = 0;
         builder = builder
-            .transformer(Box::new(NativeTransform::new(transform, move |input| {
-                count.fetch_add(1, Ordering::SeqCst);
-                sequence += 1;
-                let readings: Vec<_> = values(&input.envelope)
-                    .into_iter()
-                    .map(|value| value * factor)
-                    .collect();
-                Ok(vec![output(derived(
-                    &input.envelope,
-                    transform,
-                    sequence,
-                    changes(transform, sequence, &readings),
-                ))])
-            })))
-            .bind_stream(endpoint(transform, "out"), stream(transform))
+            .fixture_transformer(Box::new(NativeTransform::new(
+                transform_id.clone(),
+                move |input| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    sequence += 1;
+                    let readings: Vec<_> = values(&input.envelope)
+                        .into_iter()
+                        .map(|value| value * factor)
+                        .collect();
+                    Ok(vec![output(derived(
+                        &input.envelope,
+                        &emitted_transform_id,
+                        transform,
+                        sequence,
+                        changes(transform, sequence, &readings),
+                    ))])
+                },
+            )))
+            .bind_stream(endpoint(&transform_id, "out"), stream(transform))
             .connect(
-                edge(producer, transform),
+                edge(&producer_id, &transform_id),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             );
     }
@@ -464,12 +759,19 @@ async fn mixed_multilevel_fanout_scenario() {
         ("child-a", "child-a-sink", 10),
         ("child-b", "child-b-sink", 14),
     ] {
+        let producer_id = named_component(producer);
+        let sink_id = named_component(sink);
         let received = Received::default();
         observations.push((producer, sink, factor, received.clone()));
         builder = builder
-            .sink(Box::new(CollectSink::new(sink, &["in"], received)))
+            .fixture_sink(Box::new(CollectSink::new(
+                sink_id.clone(),
+                sink,
+                &["in"],
+                received,
+            )))
             .connect(
-                edge(producer, sink),
+                edge(&producer_id, &sink_id),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             );
     }
@@ -508,17 +810,22 @@ async fn fanin_scenario() {
         } else {
             &["in"]
         };
-        let mut builder = ComputationGraph::builder("fanin").sink(Box::new(CollectSink::new(
-            "sink",
-            inputs,
-            received.clone(),
-        )));
+        let mut builder =
+            ComputationGraph::builder("fanin").fixture_sink(Box::new(CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                "sink",
+                inputs,
+                received.clone(),
+            )));
         for (producer, base) in [("left", 10), ("right", 20)] {
+            let producer_id = named_component(producer);
             let outputs = [(0, 30), (2, 30), (7, 10), (8, 20)]
                 .into_iter()
                 .enumerate()
                 .map(|(index, (sequence, seconds))| {
                     let root = root(
+                        &producer_id,
                         producer,
                         sequence,
                         &[base + u16::try_from(index).expect("index")],
@@ -531,18 +838,24 @@ async fn fanin_scenario() {
                                 DateTime::<Utc>::from_timestamp(seconds, 0).expect("timestamp"),
                             ),
                         )
-                        .append_context(annotation(producer))
+                        .append_context(annotation(&producer_id, producer))
                         .expect("source context"),
                     )
                 })
                 .collect();
             builder = builder
-                .source(Box::new(FiniteSource::new(producer, outputs)))
-                .bind_stream(endpoint(producer, "out"), stream(producer))
+                .fixture_source(Box::new(FiniteSource::new(producer_id.clone(), outputs)))
+                .bind_stream(endpoint(&producer_id, "out"), stream(producer))
                 .connect(
                     EdgeDefinition::new(
-                        endpoint(producer, "out"),
-                        endpoint("sink", if separate_ports { producer } else { "in" }),
+                        endpoint(&producer_id, "out"),
+                        endpoint(
+                            &drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-000000000065",
+                            )
+                            .expect("fixture UUID"),
+                            if separate_ports { producer } else { "in" },
+                        ),
                     ),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 );
@@ -588,7 +901,7 @@ async fn fanin_scenario() {
                     event.port,
                     port(if separate_ports { producer } else { "in" })
                 );
-                assert_eq!(contributors(&event.envelope), [producer]);
+                assert_contributors(&event.envelope, &[(named_component(producer), producer)]);
             }
         }
     }
@@ -659,7 +972,7 @@ fn assert_fault(error: &GraphError, producer: &str, fault: Fault) {
             },
             fault,
         ) => {
-            assert_eq!(actual, &component(producer));
+            assert_eq!(actual, &named_component(producer));
             let expected = match fault {
                 Fault::UnknownPort => "unknown output port",
                 Fault::InputPort => "emission targets an input port",
@@ -686,7 +999,13 @@ async fn invalid_source_scenario() {
         Fault::EqualSequence,
         Fault::RegressingSequence,
     ] {
-        let input = root("source", 10, &[1]);
+        let input = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            10,
+            &[1],
+        );
         let mut outputs = Vec::new();
         let needs_prefix = matches!(fault, Fault::EqualSequence | Fault::RegressingSequence);
         if needs_prefix {
@@ -696,11 +1015,33 @@ async fn invalid_source_scenario() {
         let sends = Arc::new(AtomicUsize::new(0));
         let received = Received::default();
         let mut graph = ComputationGraph::builder("invalid-source")
-            .source(Box::new(FiniteSource::new("source", outputs)))
-            .sink(Box::new(CollectSink::new("sink", &["in"], received)))
-            .bind_stream(endpoint("source", "out"), stream("source"))
+            .fixture_source(Box::new(FiniteSource::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                outputs,
+            )))
+            .fixture_sink(Box::new(CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                "sink",
+                &["in"],
+                received,
+            )))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            )
             .connect(
-                edge("source", "sink"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                ),
                 Box::new(AuditedBoundedPipe {
                     sends: sends.clone(),
                 }),
@@ -712,10 +1053,10 @@ async fn invalid_source_scenario() {
         let (result, ()) = tokio::join!(run, async {
             let mut observed = control.subscribe_observed();
             observed
-                .wait_for(|state| state.components[&component("source")].failure.is_some())
+                .wait_for(|state| state.components[&component(77)].failure.is_some())
                 .await
                 .unwrap();
-            let failed = control.observed().components[&component("source")]
+            let failed = control.observed().components[&component(77)]
                 .failure
                 .clone()
                 .unwrap();
@@ -745,44 +1086,85 @@ async fn invalid_transform_scenario() {
         Fault::RegressingSequence,
         Fault::DuplicateIdentity,
     ] {
-        let transform = NativeTransform::new("transform", move |input| {
-            Ok(vec![
-                output(derived(
-                    &input.envelope,
-                    "transform",
-                    10,
-                    changes("transform", 10, &[1]),
-                )),
-                invalid_emission("transform", fault, &input.envelope),
-                output(derived(
-                    &input.envelope,
-                    "transform",
-                    12,
-                    changes("transform", 12, &[3]),
-                )),
-            ])
-        });
+        let transform = NativeTransform::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                .expect("fixture UUID"),
+            move |input| {
+                Ok(vec![
+                    output(derived(
+                        &input.envelope,
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                            .expect("fixture UUID"),
+                        "transform",
+                        10,
+                        changes("transform", 10, &[1]),
+                    )),
+                    invalid_emission("transform", fault, &input.envelope),
+                    output(derived(
+                        &input.envelope,
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                            .expect("fixture UUID"),
+                        "transform",
+                        12,
+                        changes("transform", 12, &[3]),
+                    )),
+                ])
+            },
+        );
         let sends = Arc::new(AtomicUsize::new(0));
         let received = Received::default();
         let mut graph = ComputationGraph::builder("invalid-transform-batch")
-            .source(Box::new(FiniteSource::new(
-                "source",
-                vec![output(root("source", 1, &[7]))],
+            .fixture_source(Box::new(FiniteSource::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                vec![output(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[7],
+                ))],
             )))
-            .transformer(Box::new(transform))
-            .sink(Box::new(CollectSink::new(
+            .fixture_transformer(Box::new(transform))
+            .fixture_sink(Box::new(CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
                 "sink",
                 &["in"],
                 received.clone(),
             )))
-            .bind_stream(endpoint("source", "out"), stream("source"))
-            .bind_stream(endpoint("transform", "out"), stream("transform"))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            )
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("transform"),
+            )
             .connect(
-                edge("source", "transform"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                        .expect("fixture UUID"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                edge("transform", "sink"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                ),
                 Box::new(AuditedBoundedPipe {
                     sends: sends.clone(),
                 }),
@@ -794,10 +1176,10 @@ async fn invalid_transform_scenario() {
         let (result, ()) = tokio::join!(run, async {
             let mut observed = control.subscribe_observed();
             observed
-                .wait_for(|state| state.components[&component("transform")].failure.is_some())
+                .wait_for(|state| state.components[&component(429)].failure.is_some())
                 .await
                 .unwrap();
-            let failed = control.observed().components[&component("transform")]
+            let failed = control.observed().components[&component(429)]
                 .failure
                 .clone()
                 .unwrap();

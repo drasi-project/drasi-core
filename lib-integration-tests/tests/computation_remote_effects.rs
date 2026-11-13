@@ -39,6 +39,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 const QUERY: &str = "members";
+const QUERY_ID: &str = "00000000-0000-0000-0000-000000000346";
 const REACTION: &str = "deliver";
 const SOURCE: &str = "source";
 const DEADLINE: Duration = Duration::from_secs(15);
@@ -309,6 +310,8 @@ struct Pipeline {
     core: DrasiLib,
     source: ApplicationSourceHandle,
     checkpoints: Arc<RedbStateStoreProvider>,
+    query_id: drasi_core::ComponentId,
+    reaction_id: drasi_core::ComponentId,
 }
 
 async fn pipeline(root: &Path, endpoint: &str, transport: Transport) -> Result<Pipeline> {
@@ -322,7 +325,8 @@ async fn configured_pipeline(
     direct: bool,
 ) -> Result<Pipeline> {
     let (source, handle) = ApplicationSource::new(
-        SOURCE,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: Some(DurabilityConfig {
@@ -333,13 +337,20 @@ async fn configured_pipeline(
         },
     )?;
     let checkpoints = Arc::new(RedbStateStoreProvider::new(root.join("checkpoints.redb"))?);
-    let query = Query::cypher(QUERY)
-        .query("MATCH (g:Group)-[:HAS]->(p:Person) WHERE g.active = true RETURN p.name AS name")
-        .from_input(SOURCE)
-        .enable_bootstrap(false)
-        .with_outbox_capacity(16)
-        .with_storage_backend(StorageBackendRef::Named("rocks".into()))
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+    )
+    .query("MATCH (g:Group)-[:HAS]->(p:Person) WHERE g.active = true RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .enable_bootstrap(false)
+    .with_outbox_capacity(16)
+    .with_storage_backend(StorageBackendRef::Named("rocks".into()))
+    .build()
+    .expect("valid query configuration")
+    .with_assigned_id(drasi_core::ComponentId::try_new(QUERY_ID)?)
+    .into_authoring();
     let builder = lib_integration_tests::query_builder()
         .with_id("remote-effects")
         .with_index_provider(
@@ -361,57 +372,106 @@ async fn configured_pipeline(
     let core = if direct {
         let core = builder.build().await?;
         core.start().await?;
-        core.add_source(source).await?;
-        tokio::time::timeout(DEADLINE, core.computation_component(SOURCE)?.wait_started())
-            .await??;
+        core.add_source(
+            drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+            source,
+        )
+        .await?;
+        tokio::time::timeout(
+            DEADLINE,
+            core.component_by_name(
+                &drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+            )?
+            .wait_started(),
+        )
+        .await??;
         core.add_query(query).await?;
         core
     } else {
         builder
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
             .build()
             .await?
     };
     match transport {
         Transport::Http | Transport::HttpBatch => {
-            let mut reaction = HttpReaction::builder(REACTION)
-                .from_query(QUERY)
-                .with_base_url(endpoint)
-                .with_timeout_ms(1000)
-                .with_recovery_policy(ReactionRecoveryPolicy::Strict);
+            let mut reaction = HttpReaction::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000345")
+                    .expect("fixture UUID"),
+            )
+            .from_query_by_name(
+                drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+            )
+            .with_base_url(endpoint)
+            .with_timeout_ms(1000)
+            .with_recovery_policy(ReactionRecoveryPolicy::Strict);
             if matches!(transport, Transport::HttpBatch) {
                 reaction = reaction
                     .with_adaptive(adaptive)
                     .with_batch_endpoint("/batch");
             }
-            core.add_reaction(reaction.build()?).await?;
+            core.add_reaction(
+                drasi_core::ComponentName::try_new("deliver").expect("fixture component name"),
+                reaction.build()?,
+            )
+            .await?;
         }
         Transport::Grpc | Transport::GrpcAdaptive => {
-            let mut reaction = GrpcReaction::builder(REACTION)
-                .from_query(QUERY)
-                .with_endpoint(endpoint)
-                .with_timeout_ms(1000)
-                .with_max_retries(0)
-                .with_connection_retry_attempts(1)
-                .with_fixed_batching(3, 100)
-                .with_recovery_policy(ReactionRecoveryPolicy::Strict);
+            let mut reaction = GrpcReaction::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000345")
+                    .expect("fixture UUID"),
+            )
+            .from_query_by_name(
+                drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+            )
+            .with_endpoint(endpoint)
+            .with_timeout_ms(1000)
+            .with_max_retries(0)
+            .with_connection_retry_attempts(1)
+            .with_fixed_batching(3, 100)
+            .with_recovery_policy(ReactionRecoveryPolicy::Strict);
             if matches!(transport, Transport::GrpcAdaptive) {
                 reaction = reaction.with_adaptive_batching(adaptive);
             }
-            core.add_reaction(reaction.build()?).await?;
+            core.add_reaction(
+                drasi_core::ComponentName::try_new("deliver").expect("fixture component name"),
+                reaction.build()?,
+            )
+            .await?;
         }
     }
     if !direct {
         core.start().await?;
     }
-    tokio::time::timeout(DEADLINE, core.computation_component(QUERY)?.wait_started()).await??;
     tokio::time::timeout(
         DEADLINE,
-        core.computation_component(REACTION)?.wait_started(),
+        core.component_by_name(
+            &drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+        )?
+        .wait_started(),
+    )
+    .await??;
+    tokio::time::timeout(
+        DEADLINE,
+        core.component_by_name(
+            &drasi_core::ComponentName::try_new("deliver").expect("fixture component name"),
+        )?
+        .wait_started(),
     )
     .await??;
     Ok(Pipeline {
+        query_id: core
+            .component_by_name(&drasi_core::ComponentName::try_new(QUERY)?)?
+            .id()
+            .clone(),
+        reaction_id: core
+            .component_by_name(&drasi_core::ComponentName::try_new(REACTION)?)?
+            .id()
+            .clone(),
         core,
         source: handle,
         checkpoints,
@@ -457,7 +517,10 @@ async fn seed(source: &ApplicationSourceHandle) -> Result<()> {
 async fn checkpoint(pipeline: &Pipeline) -> Result<Option<ReactionCheckpoint>> {
     pipeline
         .checkpoints
-        .get(REACTION, &format!("checkpoint:{QUERY}"))
+        .get(
+            &drasi_core::interface::StorePartition::component(pipeline.reaction_id.clone()),
+            &format!("checkpoint:{}", pipeline.query_id),
+        )
         .await?
         .map(|bytes| bincode::deserialize(&bytes).map_err(Into::into))
         .transpose()
@@ -473,7 +536,14 @@ async fn wait_failed(pipeline: &Pipeline) -> Result<()> {
                 progress == 0,
                 "checkpoint skipped unfinished remote effects: {progress}"
             );
-            if pipeline.core.get_reaction_status(REACTION).await? == ComponentStatus::Error {
+            if pipeline
+                .core
+                .get_reaction_status_by_name(
+                    &drasi_core::ComponentName::try_new("deliver").expect("fixture component name"),
+                )
+                .await?
+                == ComponentStatus::Error
+            {
                 break;
             }
             tokio::task::yield_now().await;
@@ -497,7 +567,14 @@ async fn wait_sequence(pipeline: &Pipeline, expected: u64) -> Result<()> {
                 break;
             }
             anyhow::ensure!(
-                pipeline.core.get_reaction_status(REACTION).await? != ComponentStatus::Error,
+                pipeline
+                    .core
+                    .get_reaction_status_by_name(
+                        &drasi_core::ComponentName::try_new("deliver")
+                            .expect("fixture component name")
+                    )
+                    .await?
+                    != ComponentStatus::Error,
                 "reaction failed during recovery"
             );
             tokio::task::yield_now().await;
@@ -508,9 +585,13 @@ async fn wait_sequence(pipeline: &Pipeline, expected: u64) -> Result<()> {
 }
 
 async fn expected_effects(core: &DrasiLib, transport: Transport) -> Result<Vec<Effect>> {
+    let query_id = core
+        .component_by_name(&drasi_core::ComponentName::try_new(QUERY)?)?
+        .id()
+        .clone();
     let query = core
         .query_manager()
-        .get_query_instance(QUERY)
+        .get_query_instance_by_id(&query_id)
         .await
         .map_err(anyhow::Error::msg)?;
     let outbox = query.fetch_outbox(0).await?;
@@ -533,7 +614,7 @@ async fn expected_effects(core: &DrasiLib, transport: Transport) -> Result<Vec<E
             anyhow::bail!("expected ADD: {diff:?}");
         };
         expected.push(Effect {
-            query: QUERY.into(),
+            query: query_id.to_string(),
             sequence: 1,
             row: data.clone(),
             signature: matches!(transport, Transport::Grpc | Transport::GrpcAdaptive)
@@ -754,9 +835,19 @@ async fn direct_lifecycle(transport: Transport) -> Result<()> {
     wait_complete(&first).await?;
     let original = expected_effects(&first.core, transport).await?;
 
-    first.core.stop_source(SOURCE).await?;
+    first
+        .core
+        .stop_source_by_name(
+            &drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+        )
+        .await?;
     assert_eq!(
-        first.core.get_source_status(SOURCE).await?,
+        first
+            .core
+            .get_source_status_by_name(
+                &drasi_core::ComponentName::try_new("source").expect("fixture component name")
+            )
+            .await?,
         ComponentStatus::Stopped
     );
     append_member(&first, "while-source-stopped").await?;
@@ -767,15 +858,30 @@ async fn direct_lifecycle(transport: Transport) -> Result<()> {
             .sequence,
         1
     );
-    first.core.start_source(SOURCE).await?;
+    first
+        .core
+        .start_source_by_name(
+            &drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+        )
+        .await?;
     tokio::time::timeout(
         DEADLINE,
-        first.core.computation_component(SOURCE)?.wait_started(),
+        first
+            .core
+            .component_by_name(
+                &drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+            )?
+            .wait_started(),
     )
     .await??;
     wait_sequence(&first, 2).await?;
 
-    first.core.stop_query(QUERY).await?;
+    first
+        .core
+        .stop_query_by_name(
+            &drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+        )
+        .await?;
     append_member(&first, "while-query-stopped").await?;
     assert_eq!(
         checkpoint(&first)
@@ -784,15 +890,27 @@ async fn direct_lifecycle(transport: Transport) -> Result<()> {
             .sequence,
         2
     );
-    first.core.start_query(QUERY).await?;
+    first
+        .core
+        .start_query_by_name(
+            &drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+        )
+        .await?;
     wait_sequence(&first, 3).await?;
 
-    first.core.stop_reaction(REACTION).await?;
+    first
+        .core
+        .stop_reaction_by_name(
+            &drasi_core::ComponentName::try_new("deliver").expect("fixture component name"),
+        )
+        .await?;
     append_member(&first, "while-reaction-stopped").await?;
     let query = first
         .core
         .query_manager()
-        .get_query_instance(QUERY)
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     tokio::time::timeout(DEADLINE, async {
@@ -809,7 +927,12 @@ async fn direct_lifecycle(transport: Transport) -> Result<()> {
             .sequence,
         3
     );
-    first.core.start_reaction(REACTION).await?;
+    first
+        .core
+        .start_reaction_by_name(
+            &drasi_core::ComponentName::try_new("deliver").expect("fixture component name"),
+        )
+        .await?;
     wait_sequence(&first, 4).await?;
     drop(query);
 
@@ -868,7 +991,9 @@ async fn capture_fixture(pipeline: &Pipeline, recorder: &Recorder) -> Result<Dur
     let query = pipeline
         .core
         .query_manager()
-        .get_query_instance(QUERY)
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
@@ -882,7 +1007,9 @@ async fn capture_fixture(pipeline: &Pipeline, recorder: &Recorder) -> Result<Dur
     Ok(DurableFixture {
         query_graph: pipeline
             .core
-            .inspect_query_computation(QUERY)
+            .inspect_query_computation_by_name(
+                &drasi_core::ComponentName::try_new(QUERY).expect("fixture component name"),
+            )
             .await?
             .snapshot()
             .desired
@@ -945,12 +1072,19 @@ async fn durable_reconstruction() -> Result<()> {
     let before = capture_fixture(&first, &server.recorder).await?;
     let output_name = format!("pending-output-{}", before.sequence + 1);
     let input_name = format!("pending-input-{}", before.sequence + 2);
-    first.core.stop_reaction(REACTION).await?;
+    first
+        .core
+        .stop_reaction_by_name(
+            &drasi_core::ComponentName::try_new("deliver").expect("fixture component name"),
+        )
+        .await?;
     append_member(&first, &output_name).await?;
     let query = first
         .core
         .query_manager()
-        .get_query_instance(QUERY)
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     tokio::time::timeout(DEADLINE, async {
@@ -962,7 +1096,12 @@ async fn durable_reconstruction() -> Result<()> {
     .await??;
     assert_eq!(checkpoint(&first).await?, Some(before.checkpoint.clone()));
     drop(query);
-    first.core.stop_query(QUERY).await?;
+    first
+        .core
+        .stop_query_by_name(
+            &drasi_core::ComponentName::try_new("members").expect("fixture component name"),
+        )
+        .await?;
     append_member(&first, &input_name).await?;
     assert_eq!(server.recorder.effects()?, before.effects);
     first.core.shutdown().await?;
@@ -986,7 +1125,7 @@ async fn durable_reconstruction() -> Result<()> {
     );
     for (offset, name) in [&output_name, &input_name].into_iter().enumerate() {
         let effect = &after.effects[before.effects.len() + offset];
-        assert_eq!(effect.query, QUERY);
+        assert_eq!(effect.query, restored.query_id.to_string());
         assert_eq!(effect.sequence, before.sequence + offset as u64 + 1);
         assert_eq!(effect.row, json!({"name": name}));
     }

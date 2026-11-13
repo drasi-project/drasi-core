@@ -226,7 +226,10 @@ mod tests {
     fn test_transform_add_results() {
         let timestamp = chrono::DateTime::from_timestamp_millis(1609459200000).unwrap();
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp,
             results: vec![
@@ -247,7 +250,11 @@ mod tests {
 
         match result {
             ResultEvent::Change(change) => {
-                assert_eq!(change.query_id, "test-query");
+                assert_eq!(
+                    change.query_id,
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                        .expect("fixture UUID")
+                );
                 assert_eq!(change.sequence, 1);
                 assert_eq!(change.source_time_ms, 1609459200000);
                 assert_eq!(change.added_results.len(), 2);
@@ -264,7 +271,10 @@ mod tests {
     fn test_transform_update_results() {
         let timestamp = chrono::DateTime::from_timestamp_millis(1609459200000).unwrap();
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp,
             results: vec![ResultDiff::Update {
@@ -300,7 +310,10 @@ mod tests {
     #[test]
     fn test_transform_update_with_grouping_keys() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Update {
@@ -331,7 +344,10 @@ mod tests {
     #[test]
     fn test_transform_delete_results() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Delete {
@@ -356,7 +372,10 @@ mod tests {
     #[test]
     fn test_transform_mixed_results() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![
@@ -400,7 +419,10 @@ mod tests {
         metadata.insert("source_id".to_string(), json!("test-source")); // Will be filtered out
 
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
@@ -429,7 +451,10 @@ mod tests {
     #[test]
     fn test_transform_invalid_add_data_field() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
@@ -451,7 +476,10 @@ mod tests {
     #[test]
     fn test_transform_invalid_update_before_field() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Update {
@@ -476,7 +504,10 @@ mod tests {
     #[test]
     fn test_transform_invalid_update_after_field() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Update {
@@ -501,7 +532,10 @@ mod tests {
     #[test]
     fn test_transform_unknown_type_skipped() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![
@@ -534,7 +568,10 @@ mod tests {
     #[test]
     fn test_transform_empty_metadata_filtered() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
@@ -683,7 +720,10 @@ mod tests {
         };
 
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
@@ -745,7 +785,10 @@ mod tests {
         };
 
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {

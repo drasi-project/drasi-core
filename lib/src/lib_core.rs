@@ -73,15 +73,16 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// let core = DrasiLib::builder()
 ///     .with_id("my-server")
-///     .with_source(my_source)  // Pre-built source instance
+///     .with_allow_external_component_ids(true)
+///     .with_source(drasi_lib::ComponentName::try_new("events")?, my_source)  // Pre-built source instance
 ///     .with_query(
-///         Query::cypher("my-query")
+///         Query::cypher(drasi_lib::ComponentName::try_new("my-query")?)
 ///             .query("MATCH (n:Person) RETURN n.name, n.age")
-///             .from_input("events")
+///             .from_input_by_name(drasi_lib::ComponentName::try_new("events")?)
 ///             .auto_start(true)
-///             .build()
+///             .build()?
 ///     )
-///     .with_reaction(my_reaction)  // Pre-built reaction instance
+///     .with_reaction(drasi_lib::ComponentName::try_new("notifications")?, my_reaction)  // Pre-built reaction instance
 ///     .build()
 ///     .await?;
 ///
@@ -107,29 +108,30 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// # async fn example(new_source_instance: impl drasi_lib::Source + 'static) -> Result<(), Box<dyn std::error::Error>> {
 /// let core = DrasiLib::builder()
 ///     .with_id("dynamic-server")
+///     .with_allow_external_component_ids(true)
 ///     .build()
 ///     .await?;
 ///
 /// core.start().await?;
 ///
 /// // Add components at runtime
-/// core.add_source(new_source_instance).await?;
+/// core.add_source(drasi_lib::ComponentName::try_new("new-source")?, new_source_instance).await?;
 ///
 /// core.add_query(
-///     Query::cypher("new-query")
+///     Query::cypher(drasi_lib::ComponentName::try_new("new-query")?)
 ///         .query("MATCH (n) RETURN n")
-///         .from_input("new-source")
+///         .from_input_by_name(drasi_lib::ComponentName::try_new("new-source")?)
 ///         .auto_start(true)
-///         .build()
+///         .build()?
 /// ).await?;
 ///
 /// // Start/stop individual components
-/// core.stop_query("new-query").await?;
-/// core.start_query("new-query").await?;
+/// core.stop_query_by_name(&drasi_lib::ComponentName::try_new("new-query")?).await?;
+/// core.start_query_by_name(&drasi_lib::ComponentName::try_new("new-query")?).await?;
 ///
 /// // Remove components
-/// core.remove_query("new-query").await?;
-/// core.remove_source("new-source", false).await?;
+/// core.remove_query_by_name(&drasi_lib::ComponentName::try_new("new-query")?).await?;
+/// core.remove_source_by_name(&drasi_lib::ComponentName::try_new("new-source")?, false).await?;
 /// # core.shutdown().await?;
 /// # Ok(())
 /// # }
@@ -170,8 +172,6 @@ pub struct DrasiLib {
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
     // Component log registry for live log streaming
     pub(crate) log_registry: Arc<ComponentLogRegistry>,
-    // Events are emitted at the authoritative computation publication boundary.
-    pub(crate) component_event_broadcast_tx: ComponentEventBroadcastSender,
     pub(crate) instance_graph: Arc<crate::computation::instance::InstanceGraph>,
     pub(crate) computation_runtime: Arc<crate::computation::runtime::Runtime>,
     pub(crate) management: Arc<std::sync::OnceLock<crate::management::Management>>,
@@ -190,7 +190,6 @@ impl Clone for DrasiLib {
             inspection: self.inspection.clone(),
             middleware_registry: Arc::clone(&self.middleware_registry),
             log_registry: Arc::clone(&self.log_registry),
-            component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
             instance_graph: self.instance_graph.clone(),
             computation_runtime: self.computation_runtime.clone(),
             management: self.management.clone(),
@@ -199,6 +198,11 @@ impl Clone for DrasiLib {
 }
 
 impl DrasiLib {
+    /// Read the immutable creation-time component identity policy.
+    pub fn allow_external_component_ids(&self) -> bool {
+        self.config.allow_external_component_ids
+    }
+
     // ============================================================================
     // Construction and Initialization
     // ============================================================================
@@ -206,17 +210,10 @@ impl DrasiLib {
     /// Subscribe to all component events (status changes, additions, removals).
     ///
     /// Returns a broadcast receiver that gets a copy of every `ComponentEvent` across
-    /// all sources, queries, and reactions. Used by the component graph source to
-    /// detect component lifecycle changes in real-time.
+    /// all sources, queries, and reactions, emitted directly from authoritative
+    /// ComputationGraph publications.
     pub fn subscribe_all_component_events(&self) -> ComponentEventBroadcastReceiver {
-        self.component_event_broadcast_tx.subscribe()
-    }
-
-    /// Internal constructor - creates uninitialized server
-    /// Use `builder()` instead
-    #[cfg(test)]
-    pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
-        Self::new_with_wal(config, None)
+        self.computation_runtime.event_sender().subscribe()
     }
 
     pub(crate) fn new_with_wal(
@@ -292,7 +289,6 @@ impl DrasiLib {
             log_registry.clone(),
             wal,
         );
-        let component_event_broadcast_tx = computation_runtime.event_sender();
         let source_manager = Arc::new(crate::sources::SourceManager::new(
             computation_runtime.clone(),
         ));
@@ -319,7 +315,6 @@ impl DrasiLib {
             inspection,
             middleware_registry,
             log_registry,
-            component_event_broadcast_tx,
             instance_graph,
             computation_runtime,
             management: Arc::new(std::sync::OnceLock::new()),
@@ -328,7 +323,16 @@ impl DrasiLib {
 
     /// Internal initialization - performs one-time setup
     /// This is called internally by builder and config loaders
+    #[cfg(test)]
     pub(crate) async fn initialize(&mut self) -> Result<()> {
+        self.initialize_with_management(crate::management::ManagementOptions::default())
+            .await
+    }
+
+    pub(crate) async fn initialize_with_management(
+        &mut self,
+        options: crate::management::ManagementOptions,
+    ) -> Result<()> {
         let already_initialized = self.state_guard.is_initialized();
         if already_initialized {
             info!("Server already initialized, skipping initialization");
@@ -340,6 +344,26 @@ impl DrasiLib {
         self.computation_runtime
             .initialize(&self.instance_graph)
             .await?;
+
+        let management = crate::management::Management::open(
+            self.config.id.clone(),
+            self.instance_graph.clone(),
+            self.running.clone(),
+            self.is_shutdown.clone(),
+            self.computation_runtime.clone(),
+            options,
+        )
+        .await?;
+        self.management.set(management).map_err(|_| {
+            DrasiError::invalid_state("configuration ownership already initialized")
+        })?;
+        self.computation_runtime
+            .attach_configuration_owner(Arc::downgrade(&self.management))?;
+        self.instance_graph
+            .get()
+            .await?
+            .control()
+            .protect_configuration();
 
         self.state_guard.mark_initialized();
         info!("drasi-lib initialized successfully");
@@ -522,13 +546,18 @@ impl DrasiLib {
                 .map_err(|cause| {
                     DrasiError::Internal(crate::error::PartialStartError { cause }.into())
                 })?;
-            let observed = self.computation_control()?.observed();
+            let publication = self.computation_control()?.registry_snapshot();
+            let observed = &publication.observed;
             if !report.converged()
                 && (report.error.is_some()
-                    || observed
-                        .components
-                        .values()
-                        .any(|node| node.failure.is_some())
+                    || observed.components.iter().any(|(id, node)| {
+                        node.failure.is_some()
+                            && publication
+                                .desired
+                                .lifecycle_policies
+                                .get(id)
+                                .is_some_and(|policy| policy.auto_start)
+                    })
                     || observed
                         .resources
                         .values()
@@ -922,12 +951,12 @@ impl DrasiLib {
     /// let core = DrasiLib::builder()
     ///     .with_id("my-server")
     ///     .with_query(
-    ///         Query::cypher("my-query")
+    ///         Query::cypher(drasi_lib::ComponentName::try_new("my-query")?)
     ///             .query("MATCH (n) RETURN n")
-    ///             .from_input("events")
-    ///             .build()
+    ///             .from_input_by_name(drasi_lib::ComponentName::try_new("events")?)
+    ///             .build()?
     ///     )
-    ///     // Use .with_source(source_instance) and .with_reaction(reaction_instance)
+    ///     // Use .with_source(crate::Source::id(&source_instance).to_owned(), source_instance) and .with_reaction(crate::Reaction::id(&reaction_instance).to_owned(), reaction_instance)
     ///     // for pre-built source and reaction instances
     ///     .build()
     ///     .await?;
@@ -1293,6 +1322,9 @@ mod tests {
     mod snapshot_tests {
         use super::*;
         use crate::builder::Query;
+        use crate::test_helpers::creation::{
+            BuilderFixtures, CoreFixtures, ReactionFixture, SourceFixture,
+        };
 
         use crate::config::snapshot::ConfigurationSnapshot;
         use crate::reactions::Reaction;
@@ -1303,7 +1335,7 @@ mod tests {
         // -- Mock source with properties --
 
         struct PropertiedSource {
-            id: String,
+            id: drasi_core_types::ComponentId,
             status_handle: crate::component_graph::ComponentStatusHandle,
             dispatchers: Arc<
                 RwLock<
@@ -1319,9 +1351,13 @@ mod tests {
         }
 
         impl PropertiedSource {
-            fn new(id: &str) -> Self {
+            fn fixture(name: drasi_core_types::ComponentName) -> SourceFixture<Self> {
+                SourceFixture::new(name, false, |id| Ok(Self::new(id.clone())))
+            }
+
+            fn new(id: drasi_core_types::ComponentId) -> Self {
                 Self {
-                    id: id.to_string(),
+                    id: id.clone(),
                     status_handle: crate::component_graph::ComponentStatusHandle::new(id),
                     dispatchers: Arc::new(RwLock::new(Vec::new())),
                 }
@@ -1330,7 +1366,7 @@ mod tests {
 
         #[async_trait]
         impl crate::sources::Source for PropertiedSource {
-            fn id(&self) -> &str {
+            fn id(&self) -> &drasi_core_types::ComponentId {
                 &self.id
             }
             fn type_name(&self) -> &str {
@@ -1402,7 +1438,7 @@ mod tests {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
-            async fn initialize(&self, ctx: crate::context::SourceRuntimeContext) {
+            async fn bind_runtime_context(&self, ctx: crate::context::SourceRuntimeContext) {
                 self.status_handle.wire(ctx.update_tx.clone()).await;
             }
         }
@@ -1410,15 +1446,46 @@ mod tests {
         // -- Mock reaction with properties --
 
         struct PropertiedReaction {
-            id: String,
-            queries: Vec<String>,
+            id: drasi_core_types::ComponentId,
+            queries: Vec<drasi_computation_contracts::ComponentReference>,
             status_handle: crate::component_graph::ComponentStatusHandle,
         }
 
         impl PropertiedReaction {
-            fn new(id: &str, queries: Vec<String>) -> Self {
+            fn fixture(
+                name: drasi_core_types::ComponentName,
+                queries: Vec<String>,
+            ) -> ReactionFixture<Self> {
+                ReactionFixture::new(
+                    name,
+                    queries
+                        .into_iter()
+                        .map(|name| {
+                            crate::config::ComponentReference::by_name(
+                                drasi_core_types::ComponentName::try_new(name)
+                                    .expect("fixture component name"),
+                            )
+                        })
+                        .collect(),
+                    false,
+                    |id, inputs| {
+                        Ok(Self::new(
+                            id,
+                            inputs
+                                .into_iter()
+                                .map(crate::config::ComponentReference::by_id)
+                                .collect(),
+                        ))
+                    },
+                )
+            }
+
+            fn new(
+                id: drasi_core_types::ComponentId,
+                queries: Vec<drasi_computation_contracts::ComponentReference>,
+            ) -> Self {
                 Self {
-                    id: id.to_string(),
+                    id: id.clone(),
                     queries,
                     status_handle: crate::component_graph::ComponentStatusHandle::new(id),
                 }
@@ -1427,7 +1494,7 @@ mod tests {
 
         #[async_trait]
         impl Reaction for PropertiedReaction {
-            fn id(&self) -> &str {
+            fn id(&self) -> &drasi_core_types::ComponentId {
                 &self.id
             }
             fn type_name(&self) -> &str {
@@ -1442,13 +1509,13 @@ mod tests {
                 props.insert("timeout_ms".to_string(), serde_json::json!(5000));
                 props
             }
-            fn query_ids(&self) -> Vec<String> {
+            fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
                 self.queries.clone()
             }
             fn auto_start(&self) -> bool {
                 false
             }
-            async fn initialize(&self, ctx: crate::context::ReactionRuntimeContext) {
+            async fn bind_runtime_context(&self, ctx: crate::context::ReactionRuntimeContext) {
                 self.status_handle.wire(ctx.update_tx.clone()).await;
             }
             async fn start(&self) -> anyhow::Result<()> {
@@ -1495,7 +1562,10 @@ mod tests {
         // -- Test helpers --
 
         async fn build_core_with_components() -> DrasiLib {
-            let source = PropertiedSource::new("pg-source");
+            let source = PropertiedSource::fixture(
+                drasi_core_types::ComponentName::try_new("pg-source")
+                    .expect("fixture component name"),
+            );
             let core = DrasiLib::builder()
                 .with_query_factory(
                     crate::computation::v1::FactoryRegistry::standard()
@@ -1510,21 +1580,32 @@ mod tests {
                         .clone(),
                 )
                 .with_id("snapshot-test")
-                .with_source(source)
+                .with_source_fixture(source)
                 .with_query(
-                    Query::cypher("q1")
-                        .query("MATCH (n:Person) RETURN n.name")
-                        .from_input("pg-source")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("q1")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n:Person) RETURN n.name")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("pg-source")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .build()
                 .await
                 .unwrap();
             core.start().await.unwrap();
 
-            let reaction = PropertiedReaction::new("http-reaction", vec!["q1".to_string()]);
-            core.add_reaction(reaction).await.unwrap();
+            let reaction = PropertiedReaction::fixture(
+                drasi_core_types::ComponentName::try_new("http-reaction")
+                    .expect("fixture component name"),
+                vec!["q1".to_string()],
+            );
+            core.add_reaction_fixture(reaction).await.unwrap();
 
             core
         }
@@ -1540,7 +1621,7 @@ mod tests {
 
             assert_eq!(snapshot.instance_id, "test-server");
             assert!(!snapshot.timestamp.is_empty());
-            // No user sources (only internal component-graph source may be present)
+            assert!(snapshot.sources.is_empty());
             assert!(snapshot.queries.is_empty());
             assert!(snapshot.reactions.is_empty());
         }
@@ -1585,9 +1666,13 @@ mod tests {
             let pg_source = snapshot
                 .sources
                 .iter()
-                .find(|s| s.id == "pg-source")
+                .find(|s| s.name.as_str() == "pg-source")
                 .expect("pg-source should be in snapshot");
 
+            assert_eq!(
+                &pg_source.id,
+                core.component_by_name(&pg_source.name).unwrap().id()
+            );
             assert_eq!(pg_source.source_type, "test-postgres");
             assert!(!pg_source.auto_start);
             assert_eq!(
@@ -1609,12 +1694,23 @@ mod tests {
             let q1 = snapshot
                 .queries
                 .iter()
-                .find(|q| q.id == "q1")
+                .find(|q| q.name.as_str() == "q1")
                 .expect("q1 should be in snapshot");
 
+            assert_eq!(&q1.id, core.component_by_name(&q1.name).unwrap().id());
+            assert_eq!(q1.config.id, q1.id);
+            assert_eq!(q1.config.name, q1.name);
             assert_eq!(q1.config.query, "MATCH (n:Person) RETURN n.name");
             assert!(
-                q1.config.inputs.iter().any(|s| s.component == "pg-source"),
+                q1.config.inputs.iter().any(|s| s.component.as_id()
+                    == Some(
+                        core.component_by_name(
+                            &drasi_core_types::ComponentName::try_new("pg-source")
+                                .expect("fixture component name")
+                        )
+                        .unwrap()
+                        .id()
+                    )),
                 "Query should reference pg-source"
             );
         }
@@ -1628,11 +1724,22 @@ mod tests {
             let reaction = snapshot
                 .reactions
                 .iter()
-                .find(|r| r.id == "http-reaction")
+                .find(|r| r.name.as_str() == "http-reaction")
                 .expect("http-reaction should be in snapshot");
 
             assert_eq!(reaction.reaction_type, "test-http");
-            assert_eq!(reaction.queries, vec!["q1".to_string()]);
+            assert_eq!(
+                reaction.queries,
+                vec![crate::config::ComponentReference::by_id(
+                    core.component_by_name(
+                        &drasi_core_types::ComponentName::try_new("q1")
+                            .expect("fixture component name")
+                    )
+                    .unwrap()
+                    .id()
+                    .clone()
+                )]
+            );
             assert_eq!(
                 reaction.properties.get("base_url"),
                 Some(&serde_json::Value::String(
@@ -1656,19 +1763,40 @@ mod tests {
                 !snapshot.edges.is_empty(),
                 "Snapshot should include dependency edges"
             );
+            let source_id = snapshot
+                .sources
+                .iter()
+                .find(|source| source.name.as_str() == "pg-source")
+                .unwrap()
+                .id
+                .clone();
+            let query_id = snapshot
+                .queries
+                .iter()
+                .find(|query| query.name.as_str() == "q1")
+                .unwrap()
+                .id
+                .clone();
+            let reaction_id = snapshot
+                .reactions
+                .iter()
+                .find(|reaction| reaction.name.as_str() == "http-reaction")
+                .unwrap()
+                .id
+                .clone();
 
             // Check source→query edge exists
-            let has_source_to_query = snapshot
-                .edges
-                .iter()
-                .any(|e| e.from == "pg-source" && e.to == "q1");
+            let has_source_to_query = snapshot.edges.iter().any(|e| {
+                e.from == crate::computation::v1::GraphEntityId::Component(source_id.clone())
+                    && e.to == crate::computation::v1::GraphEntityId::Component(query_id.clone())
+            });
             assert!(has_source_to_query, "Should have edge from pg-source to q1");
 
             // Check query→reaction edge exists
-            let has_query_to_reaction = snapshot
-                .edges
-                .iter()
-                .any(|e| e.from == "q1" && e.to == "http-reaction");
+            let has_query_to_reaction = snapshot.edges.iter().any(|e| {
+                e.from == crate::computation::v1::GraphEntityId::Component(query_id.clone())
+                    && e.to == crate::computation::v1::GraphEntityId::Component(reaction_id.clone())
+            });
             assert!(
                 has_query_to_reaction,
                 "Should have edge from q1 to http-reaction"
@@ -1694,24 +1822,32 @@ mod tests {
             assert_eq!(restored.queries.len(), snapshot.queries.len());
             assert_eq!(restored.reactions.len(), snapshot.reactions.len());
             assert_eq!(restored.edges.len(), snapshot.edges.len());
+            assert_eq!(
+                serde_json::to_value(&restored).unwrap(),
+                serde_json::to_value(&snapshot).unwrap()
+            );
 
             // Verify source properties survived round-trip
             let src = restored
                 .sources
                 .iter()
-                .find(|s| s.id == "pg-source")
+                .find(|s| s.name.as_str() == "pg-source")
                 .unwrap();
             assert_eq!(src.properties.get("port"), Some(&serde_json::json!(5432)));
 
             // Verify query config survived round-trip
-            let q = restored.queries.iter().find(|q| q.id == "q1").unwrap();
+            let q = restored
+                .queries
+                .iter()
+                .find(|q| q.name.as_str() == "q1")
+                .unwrap();
             assert_eq!(q.config.query, "MATCH (n:Person) RETURN n.name");
 
             // Verify reaction properties survived round-trip
             let rxn = restored
                 .reactions
                 .iter()
-                .find(|r| r.id == "http-reaction")
+                .find(|r| r.name.as_str() == "http-reaction")
                 .unwrap();
             assert_eq!(
                 rxn.properties.get("timeout_ms"),
@@ -1722,30 +1858,31 @@ mod tests {
         #[tokio::test]
         async fn snapshot_captures_component_status() {
             let core = build_core_with_components().await;
+            let source = core
+                .component_by_name(&crate::ComponentName::try_new("pg-source").unwrap())
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), source.wait_created())
+                .await
+                .unwrap()
+                .unwrap();
 
             let snapshot = core.snapshot_configuration().await.unwrap();
 
-            // Sources with auto_start=false should be Stopped after add
+            // Creation alone preserves Added until a lifecycle operation is requested.
             let src = snapshot
                 .sources
                 .iter()
-                .find(|s| s.id == "pg-source")
+                .find(|s| s.name.as_str() == "pg-source")
                 .unwrap();
-            assert!(
-                matches!(
-                    src.status,
-                    crate::channels::ComponentStatus::Added
-                        | crate::channels::ComponentStatus::Running
-                ),
-                "Source status should be captured: {:?}",
-                src.status
-            );
+            assert_eq!(src.status, crate::channels::ComponentStatus::Added);
         }
 
         #[tokio::test]
         async fn snapshot_multiple_sources_and_reactions() {
-            let s1 = PropertiedSource::new("src-a");
-            let s2 = TestMockSource::with_auto_start("src-b".to_string(), false).unwrap();
+            let s1 = PropertiedSource::fixture(
+                drasi_core_types::ComponentName::try_new("src-a").expect("fixture component name"),
+            );
+            let s2 = TestMockSource::fixture("src-b", false);
 
             let core = DrasiLib::builder()
                 .with_query_factory(
@@ -1761,49 +1898,71 @@ mod tests {
                         .clone(),
                 )
                 .with_id("multi-test")
-                .with_source(s1)
-                .with_source(s2)
+                .with_source_fixture(s1)
+                .with_source_fixture(s2)
                 .with_query(
-                    Query::cypher("qa")
-                        .query("MATCH (n:A) RETURN n")
-                        .from_input("src-a")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("qa")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n:A) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("src-a")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .with_query(
-                    Query::cypher("qb")
-                        .query("MATCH (n:B) RETURN n")
-                        .from_input("src-b")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("qb")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n:B) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("src-b")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .build()
                 .await
                 .unwrap();
             core.start().await.unwrap();
 
-            let r1 = PropertiedReaction::new("rxn-1", vec!["qa".to_string()]);
-            let r2 = PropertiedReaction::new("rxn-2", vec!["qb".to_string()]);
-            core.add_reaction(r1).await.unwrap();
-            core.add_reaction(r2).await.unwrap();
+            let r1 = PropertiedReaction::fixture(
+                drasi_core_types::ComponentName::try_new("rxn-1").expect("fixture component name"),
+                vec!["qa".to_string()],
+            );
+            let r2 = PropertiedReaction::fixture(
+                drasi_core_types::ComponentName::try_new("rxn-2").expect("fixture component name"),
+                vec!["qb".to_string()],
+            );
+            core.add_reaction_fixture(r1).await.unwrap();
+            core.add_reaction_fixture(r2).await.unwrap();
 
             let snapshot = core.snapshot_configuration().await.unwrap();
 
-            // Should have both user sources (plus internal component-graph source)
-            let user_sources: Vec<_> = snapshot
-                .sources
-                .iter()
-                .filter(|s| s.id == "src-a" || s.id == "src-b")
-                .collect();
-            assert_eq!(user_sources.len(), 2, "Should have 2 user sources");
+            assert_eq!(snapshot.sources.len(), 2, "Should have 2 sources");
 
             assert_eq!(snapshot.queries.len(), 2, "Should have 2 queries");
             assert_eq!(snapshot.reactions.len(), 2, "Should have 2 reactions");
 
             // PropertiedSource has properties, TestMockSource has empty
-            let src_a = snapshot.sources.iter().find(|s| s.id == "src-a").unwrap();
+            let src_a = snapshot
+                .sources
+                .iter()
+                .find(|s| s.name.as_str() == "src-a")
+                .unwrap();
             assert!(!src_a.properties.is_empty(), "src-a should have properties");
-            let src_b = snapshot.sources.iter().find(|s| s.id == "src-b").unwrap();
+            let src_b = snapshot
+                .sources
+                .iter()
+                .find(|s| s.name.as_str() == "src-b")
+                .unwrap();
             assert!(
                 src_b.properties.is_empty(),
                 "src-b (TestMockSource) should have empty properties"
@@ -1819,7 +1978,7 @@ mod tests {
             let reaction = snapshot
                 .reactions
                 .iter()
-                .find(|r| r.id == "http-reaction")
+                .find(|r| r.name.as_str() == "http-reaction")
                 .expect("http-reaction should be in snapshot");
 
             // PropertiedReaction has auto_start=false
@@ -1838,7 +1997,7 @@ mod tests {
             let src = snapshot
                 .sources
                 .iter()
-                .find(|s| s.id == "pg-source")
+                .find(|s| s.name.as_str() == "pg-source")
                 .expect("pg-source should be in snapshot");
 
             assert!(
@@ -1849,7 +2008,10 @@ mod tests {
 
         #[tokio::test]
         async fn snapshot_captures_bootstrap_provider_from_graph() {
-            let source = PropertiedSource::new("bp-source");
+            let source = PropertiedSource::fixture(
+                drasi_core_types::ComponentName::try_new("bp-source")
+                    .expect("fixture component name"),
+            );
             let builder = DrasiLib::builder()
                 .with_query_factory(
                     crate::computation::v1::FactoryRegistry::standard()
@@ -1864,16 +2026,24 @@ mod tests {
                         .clone(),
                 )
                 .with_id("bootstrap-test")
-                .with_source(source)
+                .with_source_fixture(source)
                 .with_query(
-                    Query::cypher("bp-query")
-                        .query("MATCH (n) RETURN n")
-                        .from_input("bp-source")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("bp-query")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("bp-source")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 );
-            let builder = builder.with_bootstrap_for_source(
-                "bp-source",
+            let builder = builder.with_bootstrap_for_source_by_name(
+                drasi_core_types::ComponentName::try_new("bp-source")
+                    .expect("fixture component name"),
                 "postgres",
                 HashMap::from([("timeout_seconds".to_string(), serde_json::json!(300))]),
             );
@@ -1885,7 +2055,7 @@ mod tests {
             let src = snapshot
                 .sources
                 .iter()
-                .find(|s| s.id == "bp-source")
+                .find(|s| s.name.as_str() == "bp-source")
                 .expect("bp-source should be in snapshot");
 
             let bp = src
@@ -1902,7 +2072,10 @@ mod tests {
 
         #[tokio::test]
         async fn snapshot_bootstrap_json_round_trip() {
-            let source = PropertiedSource::new("rt-source");
+            let source = PropertiedSource::fixture(
+                drasi_core_types::ComponentName::try_new("rt-source")
+                    .expect("fixture component name"),
+            );
             let builder = DrasiLib::builder()
                 .with_query_factory(
                     crate::computation::v1::FactoryRegistry::standard()
@@ -1917,9 +2090,10 @@ mod tests {
                         .clone(),
                 )
                 .with_id("bp-roundtrip")
-                .with_source(source);
-            let builder = builder.with_bootstrap_for_source(
-                "rt-source",
+                .with_source_fixture(source);
+            let builder = builder.with_bootstrap_for_source_by_name(
+                drasi_core_types::ComponentName::try_new("rt-source")
+                    .expect("fixture component name"),
                 "scriptfile",
                 HashMap::from([(
                     "file_paths".to_string(),
@@ -1939,7 +2113,7 @@ mod tests {
             let src = restored
                 .sources
                 .iter()
-                .find(|s| s.id == "rt-source")
+                .find(|s| s.name.as_str() == "rt-source")
                 .unwrap();
             let bp = src.bootstrap_provider.as_ref().unwrap();
             assert_eq!(bp.kind, "scriptfile");
@@ -1949,7 +2123,7 @@ mod tests {
         // -- Mock source with raw_config (simulates descriptor-created source) --
 
         struct RawConfigSource {
-            id: String,
+            id: drasi_core_types::ComponentId,
             raw_config: serde_json::Value,
             status_handle: crate::component_graph::ComponentStatusHandle,
             dispatchers: Arc<
@@ -1966,9 +2140,16 @@ mod tests {
         }
 
         impl RawConfigSource {
-            fn new(id: &str, raw_config: serde_json::Value) -> Self {
+            fn fixture(
+                name: drasi_core_types::ComponentName,
+                raw_config: serde_json::Value,
+            ) -> SourceFixture<Self> {
+                SourceFixture::new(name, false, move |id| Ok(Self::new(id.clone(), raw_config)))
+            }
+
+            fn new(id: drasi_core_types::ComponentId, raw_config: serde_json::Value) -> Self {
                 Self {
-                    id: id.to_string(),
+                    id: id.clone(),
                     raw_config,
                     status_handle: crate::component_graph::ComponentStatusHandle::new(id),
                     dispatchers: Arc::new(RwLock::new(Vec::new())),
@@ -1978,7 +2159,7 @@ mod tests {
 
         #[async_trait]
         impl crate::sources::Source for RawConfigSource {
-            fn id(&self) -> &str {
+            fn id(&self) -> &drasi_core_types::ComponentId {
                 &self.id
             }
             fn type_name(&self) -> &str {
@@ -2036,7 +2217,7 @@ mod tests {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
-            async fn initialize(&self, ctx: crate::context::SourceRuntimeContext) {
+            async fn bind_runtime_context(&self, ctx: crate::context::SourceRuntimeContext) {
                 self.status_handle.wire(ctx.update_tx.clone()).await;
             }
         }
@@ -2044,16 +2225,50 @@ mod tests {
         // -- Mock reaction with raw_config --
 
         struct RawConfigReaction {
-            id: String,
-            queries: Vec<String>,
+            id: drasi_core_types::ComponentId,
+            queries: Vec<drasi_computation_contracts::ComponentReference>,
             raw_config: serde_json::Value,
             status_handle: crate::component_graph::ComponentStatusHandle,
         }
 
         impl RawConfigReaction {
-            fn new(id: &str, queries: Vec<String>, raw_config: serde_json::Value) -> Self {
+            fn fixture(
+                name: drasi_core_types::ComponentName,
+                queries: Vec<String>,
+                raw_config: serde_json::Value,
+            ) -> ReactionFixture<Self> {
+                ReactionFixture::new(
+                    name,
+                    queries
+                        .into_iter()
+                        .map(|name| {
+                            crate::config::ComponentReference::by_name(
+                                drasi_core_types::ComponentName::try_new(name)
+                                    .expect("fixture component name"),
+                            )
+                        })
+                        .collect(),
+                    false,
+                    move |id, inputs| {
+                        Ok(Self::new(
+                            id,
+                            inputs
+                                .into_iter()
+                                .map(crate::config::ComponentReference::by_id)
+                                .collect(),
+                            raw_config,
+                        ))
+                    },
+                )
+            }
+
+            fn new(
+                id: drasi_core_types::ComponentId,
+                queries: Vec<drasi_computation_contracts::ComponentReference>,
+                raw_config: serde_json::Value,
+            ) -> Self {
                 Self {
-                    id: id.to_string(),
+                    id: id.clone(),
                     queries,
                     raw_config,
                     status_handle: crate::component_graph::ComponentStatusHandle::new(id),
@@ -2063,7 +2278,7 @@ mod tests {
 
         #[async_trait]
         impl Reaction for RawConfigReaction {
-            fn id(&self) -> &str {
+            fn id(&self) -> &drasi_core_types::ComponentId {
                 &self.id
             }
             fn type_name(&self) -> &str {
@@ -2075,13 +2290,13 @@ mod tests {
                 }
                 HashMap::new()
             }
-            fn query_ids(&self) -> Vec<String> {
+            fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
                 self.queries.clone()
             }
             fn auto_start(&self) -> bool {
                 false
             }
-            async fn initialize(&self, ctx: crate::context::ReactionRuntimeContext) {
+            async fn bind_runtime_context(&self, ctx: crate::context::ReactionRuntimeContext) {
                 self.status_handle.wire(ctx.update_tx.clone()).await;
             }
             async fn start(&self) -> anyhow::Result<()> {
@@ -2124,7 +2339,11 @@ mod tests {
                 "sslMode": { "kind": "EnvironmentVariable", "name": "SSL_MODE", "default": "prefer" }
             });
 
-            let source = RawConfigSource::new("pg-source", raw_config.clone());
+            let source = RawConfigSource::fixture(
+                drasi_core_types::ComponentName::try_new("pg-source")
+                    .expect("fixture component name"),
+                raw_config.clone(),
+            );
             let core = DrasiLib::builder()
                 .with_query_factory(
                     crate::computation::v1::FactoryRegistry::standard()
@@ -2139,13 +2358,20 @@ mod tests {
                         .clone(),
                 )
                 .with_id("raw-config-test")
-                .with_source(source)
+                .with_source_fixture(source)
                 .with_query(
-                    Query::cypher("q1")
-                        .query("MATCH (n) RETURN n")
-                        .from_input("pg-source")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("q1")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("pg-source")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .build()
                 .await
@@ -2156,7 +2382,7 @@ mod tests {
             let src = snapshot
                 .sources
                 .iter()
-                .find(|s| s.id == "pg-source")
+                .find(|s| s.name.as_str() == "pg-source")
                 .expect("pg-source should be in snapshot");
 
             // Static values preserved
@@ -2184,7 +2410,10 @@ mod tests {
         #[tokio::test]
         async fn snapshot_preserves_secret_references_in_reaction_properties() {
             // First, create a source so the query has something to reference
-            let source = PropertiedSource::new("pg-source");
+            let source = PropertiedSource::fixture(
+                drasi_core_types::ComponentName::try_new("pg-source")
+                    .expect("fixture component name"),
+            );
 
             let raw_config = serde_json::json!({
                 "endpoint": "https://api.example.com/webhook",
@@ -2193,8 +2422,12 @@ mod tests {
                 "timeout": { "kind": "EnvironmentVariable", "name": "TIMEOUT_MS", "default": "5000" }
             });
 
-            let reaction =
-                RawConfigReaction::new("http-reaction", vec!["q1".to_string()], raw_config);
+            let reaction = RawConfigReaction::fixture(
+                drasi_core_types::ComponentName::try_new("http-reaction")
+                    .expect("fixture component name"),
+                vec!["q1".to_string()],
+                raw_config,
+            );
 
             let core = DrasiLib::builder()
                 .with_query_factory(
@@ -2210,25 +2443,32 @@ mod tests {
                         .clone(),
                 )
                 .with_id("raw-config-reaction-test")
-                .with_source(source)
+                .with_source_fixture(source)
                 .with_query(
-                    Query::cypher("q1")
-                        .query("MATCH (n) RETURN n")
-                        .from_input("pg-source")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("q1")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("pg-source")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .build()
                 .await
                 .unwrap();
             core.start().await.unwrap();
-            core.add_reaction(reaction).await.unwrap();
+            core.add_reaction_fixture(reaction).await.unwrap();
 
             let snapshot = core.snapshot_configuration().await.unwrap();
             let rxn = snapshot
                 .reactions
                 .iter()
-                .find(|r| r.id == "http-reaction")
+                .find(|r| r.name.as_str() == "http-reaction")
                 .expect("http-reaction should be in snapshot");
 
             // Secret reference preserved
@@ -2266,7 +2506,11 @@ mod tests {
                 "sslMode": "prefer"
             });
 
-            let source = RawConfigSource::new("pg-source", raw_config);
+            let source = RawConfigSource::fixture(
+                drasi_core_types::ComponentName::try_new("pg-source")
+                    .expect("fixture component name"),
+                raw_config,
+            );
             let core = DrasiLib::builder()
                 .with_query_factory(
                     crate::computation::v1::FactoryRegistry::standard()
@@ -2281,13 +2525,20 @@ mod tests {
                         .clone(),
                 )
                 .with_id("camelcase-test")
-                .with_source(source)
+                .with_source_fixture(source)
                 .with_query(
-                    Query::cypher("q1")
-                        .query("MATCH (n) RETURN n")
-                        .from_input("pg-source")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("q1")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("pg-source")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .build()
                 .await
@@ -2298,7 +2549,7 @@ mod tests {
             let src = snapshot
                 .sources
                 .iter()
-                .find(|s| s.id == "pg-source")
+                .find(|s| s.name.as_str() == "pg-source")
                 .unwrap();
 
             // Verify camelCase keys are preserved (not converted to snake_case)
@@ -2331,7 +2582,11 @@ mod tests {
                 ]
             });
 
-            let source = RawConfigSource::new("pg-source", raw_config);
+            let source = RawConfigSource::fixture(
+                drasi_core_types::ComponentName::try_new("pg-source")
+                    .expect("fixture component name"),
+                raw_config,
+            );
             let core = DrasiLib::builder()
                 .with_query_factory(
                     crate::computation::v1::FactoryRegistry::standard()
@@ -2346,13 +2601,20 @@ mod tests {
                         .clone(),
                 )
                 .with_id("mixed-config-test")
-                .with_source(source)
+                .with_source_fixture(source)
                 .with_query(
-                    Query::cypher("q1")
-                        .query("MATCH (n) RETURN n")
-                        .from_input("pg-source")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("q1")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("pg-source")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .build()
                 .await
@@ -2369,7 +2631,7 @@ mod tests {
             let src = restored
                 .sources
                 .iter()
-                .find(|s| s.id == "pg-source")
+                .find(|s| s.name.as_str() == "pg-source")
                 .unwrap();
 
             // All value types survive JSON roundtrip
@@ -2402,37 +2664,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn snapshot_excludes_introspection_source() {
-            let core = build_core_with_components().await;
-
-            let snapshot = core.snapshot_configuration().await.unwrap();
-
-            // The __component_graph__ internal source should not appear in snapshot
-            // (it's filtered by the fact that it doesn't match user source patterns)
-            let has_internal = snapshot.sources.iter().any(|s| s.id.starts_with("__"));
-
-            // Note: Whether internal sources appear depends on the implementation.
-            // If they do appear, the server should filter them. This test documents
-            // the current behavior.
-            if has_internal {
-                // Document that internal sources are present (server should filter)
-                let internal: Vec<_> = snapshot
-                    .sources
-                    .iter()
-                    .filter(|s| s.id.starts_with("__"))
-                    .map(|s| s.id.as_str())
-                    .collect();
-                eprintln!(
-                    "Note: Internal sources present in snapshot (server should filter): {internal:?}"
-                );
-            }
-        }
-
-        #[tokio::test]
         async fn snapshot_captures_bootstrap_via_builder_api() {
             // Use with_bootstrap_for_source() to register bootstrap metadata
             // through the builder API (Option B: external metadata registration).
-            let source = PropertiedSource::new("http-src");
+            let source = PropertiedSource::fixture(
+                drasi_core_types::ComponentName::try_new("http-src")
+                    .expect("fixture component name"),
+            );
             let mut bootstrap_props = HashMap::new();
             bootstrap_props.insert(
                 "endpoints".to_string(),
@@ -2469,14 +2707,26 @@ mod tests {
                         .clone(),
                 )
                 .with_id("builder-bp-test")
-                .with_source(source)
-                .with_bootstrap_for_source("http-src", "http", bootstrap_props.clone())
+                .with_source_fixture(source)
+                .with_bootstrap_for_source_by_name(
+                    drasi_core_types::ComponentName::try_new("http-src")
+                        .expect("fixture component name"),
+                    "http",
+                    bootstrap_props.clone(),
+                )
                 .with_query(
-                    Query::cypher("bp-q1")
-                        .query("MATCH (n:Item) RETURN n")
-                        .from_input("http-src")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("bp-q1")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n:Item) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("http-src")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .build()
                 .await
@@ -2488,7 +2738,7 @@ mod tests {
             let src = snapshot
                 .sources
                 .iter()
-                .find(|s| s.id == "http-src")
+                .find(|s| s.name.as_str() == "http-src")
                 .expect("http-src should be in snapshot");
 
             let bp = src
@@ -2513,7 +2763,9 @@ mod tests {
         async fn snapshot_bootstrap_builder_api_json_roundtrip() {
             // Verify that bootstrap metadata registered via the builder API
             // survives JSON serialization/deserialization (lossless roundtrip).
-            let source = PropertiedSource::new("rt-src");
+            let source = PropertiedSource::fixture(
+                drasi_core_types::ComponentName::try_new("rt-src").expect("fixture component name"),
+            );
             let mut props = HashMap::new();
             props.insert(
                 "url".to_string(),
@@ -2541,14 +2793,26 @@ mod tests {
                         .clone(),
                 )
                 .with_id("rt-bp-test")
-                .with_source(source)
-                .with_bootstrap_for_source("rt-src", "http", props.clone())
+                .with_source_fixture(source)
+                .with_bootstrap_for_source_by_name(
+                    drasi_core_types::ComponentName::try_new("rt-src")
+                        .expect("fixture component name"),
+                    "http",
+                    props.clone(),
+                )
                 .with_query(
-                    Query::cypher("rt-q1")
-                        .query("MATCH (n) RETURN n")
-                        .from_input("rt-src")
-                        .auto_start(false)
-                        .build(),
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("rt-q1")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (n) RETURN n")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("rt-src")
+                            .expect("fixture component name"),
+                    )
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
                 )
                 .build()
                 .await
@@ -2562,7 +2826,11 @@ mod tests {
             let restored: ConfigurationSnapshot =
                 serde_json::from_str(&json).expect("Should deserialize");
 
-            let src = restored.sources.iter().find(|s| s.id == "rt-src").unwrap();
+            let src = restored
+                .sources
+                .iter()
+                .find(|s| s.name.as_str() == "rt-src")
+                .unwrap();
             let bp = src.bootstrap_provider.as_ref().unwrap();
 
             assert_eq!(bp.kind, "http");

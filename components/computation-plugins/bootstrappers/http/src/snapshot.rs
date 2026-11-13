@@ -335,7 +335,7 @@ impl NativeBootstrapProvider for HttpBootstrapProvider {
                 reader
                     .read(
                         SnapshotRequest {
-                            source_id: config.source.as_str(),
+                            source_id: &config.source,
                             node_labels: &config.node_labels,
                             relation_labels: &config.relation_labels,
                         },

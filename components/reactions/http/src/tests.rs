@@ -34,8 +34,17 @@ use crate::{HttpReaction, HttpReactionBuilder};
 
 #[test]
 fn builder_defaults() {
-    let r = HttpReactionBuilder::new("test").build().unwrap();
-    assert_eq!(r.id(), "test");
+    let r = HttpReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+    )
+    .build()
+    .unwrap();
+    assert_eq!(
+        r.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID")
+    );
     let p = r.properties();
     assert_eq!(
         p.get("baseUrl"),
@@ -51,7 +60,12 @@ fn builder_defaults() {
 
 #[test]
 fn http_recovery_archetype_defaults() {
-    let r = HttpReactionBuilder::new("test").build().unwrap();
+    let r = HttpReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+    )
+    .build()
+    .unwrap();
     // HTTP is a stateless at-least-once trigger reaction (archetype 2a).
     assert!(!r.is_durable());
     assert!(!r.needs_snapshot_on_fresh_start());
@@ -60,10 +74,13 @@ fn http_recovery_archetype_defaults() {
 
 #[test]
 fn http_builder_recovery_policy_override() {
-    let r = HttpReactionBuilder::new("test")
-        .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
-        .build()
-        .unwrap();
+    let r = HttpReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+    )
+    .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
+    .build()
+    .unwrap();
     assert_eq!(
         r.base.recovery_policy,
         Some(ReactionRecoveryPolicy::AutoSkipGap)
@@ -72,15 +89,28 @@ fn http_builder_recovery_policy_override() {
 
 #[test]
 fn builder_with_queries_and_token() {
-    let r = HttpReaction::builder("r")
-        .with_base_url("https://api.example.com") // DevSkim: ignore DS137138
-        .with_token("secret")
-        .with_timeout_ms(7000)
-        .with_query("q1")
-        .with_query("q2")
-        .build()
-        .unwrap();
-    assert_eq!(r.query_ids(), vec!["q1", "q2"]);
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_base_url("https://api.example.com") // DevSkim: ignore DS137138
+    .with_token("secret")
+    .with_timeout_ms(7000)
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_query_by_name(drasi_core::ComponentName::try_new("q2").expect("fixture component name"))
+    .build()
+    .unwrap();
+    assert_eq!(
+        r.query_inputs(),
+        vec![
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+            ),
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q2").expect("fixture component name")
+            )
+        ]
+    );
     let p = r.properties();
     assert_eq!(
         p.get("baseUrl"),
@@ -96,11 +126,14 @@ fn builder_with_queries_and_token() {
 
 #[test]
 fn builder_with_adaptive_enables_adaptive_block_in_properties() {
-    let r = HttpReaction::builder("r")
-        .with_adaptive_defaults()
-        .with_batch_endpoint("/batch")
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_adaptive_defaults()
+    .with_batch_endpoint("/batch")
+    .build()
+    .unwrap();
     let p = r.properties();
     let adaptive = p.get("adaptive").expect("adaptive should be present");
     let obj = adaptive.as_object().expect("adaptive should be an object");
@@ -136,11 +169,14 @@ fn builder_with_output_templates_round_trip() {
         default_template: None,
         routes,
     };
-    let r = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_output_templates(templates)
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_output_templates(templates)
+    .build()
+    .unwrap();
     let p = r.properties();
     let templates = p
         .get("outputTemplates")
@@ -154,24 +190,27 @@ fn builder_with_output_templates_round_trip() {
 
 #[test]
 fn builder_with_query_template_adds_to_routes() {
-    let r = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_query_template(
-            "q1",
-            HttpQueryConfig {
-                added: Some(TemplateSpec {
-                    template: String::new(),
-                    extension: HttpCallExt {
-                        url: "/q1".to_string(),
-                        method: "POST".to_string(),
-                        headers: HashMap::new(),
-                    },
-                }),
-                ..Default::default()
-            },
-        )
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_query_template(
+        "q1",
+        HttpQueryConfig {
+            added: Some(TemplateSpec {
+                template: String::new(),
+                extension: HttpCallExt {
+                    url: "/q1".to_string(),
+                    method: "POST".to_string(),
+                    headers: HashMap::new(),
+                },
+            }),
+            ..Default::default()
+        },
+    )
+    .build()
+    .unwrap();
     let p = r.properties();
     let routes = p
         .get("outputTemplates")
@@ -372,7 +411,15 @@ async fn descriptor_rejects_unknown_top_level_fields() {
         "routes": {}
     });
     let err = d
-        .create_reaction("my-r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dd")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .err()
         .expect("descriptor should reject unknown fields");
@@ -394,7 +441,15 @@ async fn descriptor_rejects_unknown_adaptive_fields() {
         "batchEndpoint": "/batch"
     });
     let err = d
-        .create_reaction("my-r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dd")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .err()
         .expect("descriptor should reject snake_case adaptive fields");
@@ -413,10 +468,22 @@ async fn descriptor_creates_standard_reaction() {
         "timeoutMs": 3000
     });
     let r = d
-        .create_reaction("my-r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dd")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .unwrap();
-    assert_eq!(r.id(), "my-r");
+    assert_eq!(
+        r.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dd")
+            .expect("fixture UUID")
+    );
     assert_eq!(r.type_name(), "http");
     let p = r.properties();
     assert_eq!(
@@ -440,7 +507,15 @@ async fn descriptor_creates_adaptive_reaction() {
         "batchEndpoint": "/batch"
     });
     let r = d
-        .create_reaction("my-r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dd")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .unwrap();
     let p = r.properties();
@@ -457,10 +532,13 @@ async fn descriptor_creates_adaptive_reaction() {
 
 #[tokio::test]
 async fn lifecycle_start_stop_standard() {
-    let r = HttpReaction::builder("test-lifecycle")
-        .with_base_url("http://127.0.0.1:1") // unreachable, that's fine
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000de")
+            .expect("fixture UUID"),
+    )
+    .with_base_url("http://127.0.0.1:1") // unreachable, that's fine
+    .build()
+    .unwrap();
     r.start().await.unwrap();
     // Give the loop a moment to enter select
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -474,12 +552,15 @@ async fn lifecycle_start_stop_standard() {
 
 #[tokio::test]
 async fn lifecycle_start_stop_adaptive() {
-    let r = HttpReaction::builder("test-lifecycle-a")
-        .with_base_url("http://127.0.0.1:1")
-        .with_adaptive_defaults()
-        .with_batch_endpoint("/batch")
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000df")
+            .expect("fixture UUID"),
+    )
+    .with_base_url("http://127.0.0.1:1")
+    .with_adaptive_defaults()
+    .with_batch_endpoint("/batch")
+    .build()
+    .unwrap();
     r.start().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     r.stop().await.unwrap();
@@ -496,12 +577,25 @@ async fn lifecycle_start_stop_adaptive() {
 
 #[test]
 fn from_query_is_alias_for_with_query() {
-    let r = HttpReaction::builder("r")
-        .from_query("a")
-        .from_query("b")
-        .build()
-        .unwrap();
-    assert_eq!(r.query_ids(), vec!["a", "b"]);
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .from_query_by_name(drasi_core::ComponentName::try_new("a").expect("fixture component name"))
+    .from_query_by_name(drasi_core::ComponentName::try_new("b").expect("fixture component name"))
+    .build()
+    .unwrap();
+    assert_eq!(
+        r.query_inputs(),
+        vec![
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("a").expect("fixture component name")
+            ),
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("b").expect("fixture component name")
+            )
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -524,12 +618,15 @@ fn spec_with(url: &str, template: &str, headers: HashMap<String, String>) -> Htt
 
 #[test]
 fn build_fails_when_batch_endpoint_set_without_adaptive() {
-    let err = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_batch_endpoint("/batch")
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_batch_endpoint("/batch")
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         err.to_string().contains("batchEndpoint"),
         "error should mention batchEndpoint: {err}"
@@ -538,22 +635,28 @@ fn build_fails_when_batch_endpoint_set_without_adaptive() {
 
 #[test]
 fn build_succeeds_when_batch_endpoint_set_with_adaptive() {
-    let r = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_adaptive_defaults()
-        .with_batch_endpoint("/batch")
-        .build();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_adaptive_defaults()
+    .with_batch_endpoint("/batch")
+    .build();
     assert!(r.is_ok(), "batchEndpoint with adaptive must build");
 }
 
 #[test]
 fn build_fails_when_adaptive_set_without_batch_endpoint() {
-    let err = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_adaptive_defaults()
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_adaptive_defaults()
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         err.to_string().contains("batchEndpoint"),
         "error should mention batchEndpoint: {err}"
@@ -565,12 +668,15 @@ fn build_succeeds_when_adaptive_combined_with_output_templates() {
     // Per-item body templating is supported in adaptive (batch) mode; the
     // url/method/headers simply do not apply to the single batch endpoint.
     let spec = spec_with("", r#"{"id":"{{after.id}}"}"#, HashMap::new());
-    let r = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_query_template("q1", spec)
-        .with_adaptive_defaults()
-        .with_batch_endpoint("/batch")
-        .build();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_query_template("q1", spec)
+    .with_adaptive_defaults()
+    .with_batch_endpoint("/batch")
+    .build();
     assert!(
         r.is_ok(),
         "adaptive + outputTemplates must build: {:?}",
@@ -580,11 +686,14 @@ fn build_succeeds_when_adaptive_combined_with_output_templates() {
 
 #[test]
 fn build_fails_on_invalid_base_url() {
-    let err = HttpReaction::builder("r")
-        .with_base_url("ftp://example.com")
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_base_url("ftp://example.com")
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         format!("{err:#}").contains("baseUrl"),
         "error should mention baseUrl: {err:#}"
@@ -593,11 +702,14 @@ fn build_fails_on_invalid_base_url() {
 
 #[test]
 fn build_fails_on_zero_timeout() {
-    let err = HttpReaction::builder("r")
-        .with_timeout_ms(0)
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_timeout_ms(0)
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         err.to_string().contains("timeoutMs"),
         "error should mention timeoutMs: {err}"
@@ -606,11 +718,14 @@ fn build_fails_on_zero_timeout() {
 
 #[test]
 fn build_fails_on_zero_priority_queue_capacity() {
-    let err = HttpReaction::builder("r")
-        .with_priority_queue_capacity(0)
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_priority_queue_capacity(0)
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         err.to_string().contains("priorityQueueCapacity"),
         "error should mention priorityQueueCapacity: {err}"
@@ -621,12 +736,15 @@ fn build_fails_on_zero_priority_queue_capacity() {
 fn build_fails_on_invalid_http_method() {
     let mut qc = spec_with("/x", "", HashMap::new());
     qc.added.as_mut().unwrap().extension.method = "TRACE".to_string();
-    let err = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_query_template("q1", qc)
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_query_template("q1", qc)
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         format!("{err:#}").contains("HTTP method"),
         "error should mention HTTP method: {err:#}"
@@ -638,12 +756,15 @@ fn build_fails_on_invalid_header_name() {
     let mut headers = HashMap::new();
     headers.insert("bad header".to_string(), "value".to_string());
     let bad = spec_with("/x", "", headers);
-    let err = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_query_template("q1", bad)
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_query_template("q1", bad)
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         format!("{err:#}").contains("header"),
         "error should mention header: {err:#}"
@@ -652,18 +773,21 @@ fn build_fails_on_invalid_header_name() {
 
 #[test]
 fn build_fails_on_invalid_adaptive_ranges() {
-    let err = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_adaptive(AdaptiveBatchConfig {
-            adaptive_min_batch_size: 10,
-            adaptive_max_batch_size: 1,
-            adaptive_window_size: 10,
-            adaptive_batch_timeout_ms: 100,
-        })
-        .with_batch_endpoint("/batch")
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_adaptive(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 10,
+        adaptive_max_batch_size: 1,
+        adaptive_window_size: 10,
+        adaptive_batch_timeout_ms: 100,
+    })
+    .with_batch_endpoint("/batch")
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         format!("{err:#}").contains("adaptiveMinBatchSize"),
         "error should mention adaptiveMinBatchSize: {err:#}"
@@ -674,12 +798,15 @@ fn build_fails_on_invalid_adaptive_ranges() {
 fn build_fails_on_invalid_body_template() {
     // Unclosed block helper → Handlebars compile error.
     let bad = spec_with("/x", "{{#if cond}}", HashMap::new());
-    let err = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_query_template("q1", bad)
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_query_template("q1", bad)
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         format!("{err:#}").contains("template"),
         "error should mention the template: {err:#}"
@@ -691,12 +818,15 @@ fn build_fails_on_invalid_header_template() {
     let mut headers = HashMap::new();
     headers.insert("X-Bad".to_string(), "{{#if cond}}".to_string());
     let bad = spec_with("/x/{{after.id}}", "", headers);
-    let err = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_query_template("q1", bad)
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_query_template("q1", bad)
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         format!("{err:#}").contains("header"),
         "error should mention the header template: {err:#}"
@@ -706,12 +836,17 @@ fn build_fails_on_invalid_header_template() {
 #[test]
 fn build_fails_on_unknown_route_key() {
     let spec = spec_with("/x", "", HashMap::new());
-    let err = HttpReaction::builder("r")
-        .with_query("subscribed")
-        .with_query_template("not-subscribed", spec)
-        .build()
-        .err()
-        .expect("build should fail");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("subscribed").expect("fixture component name"),
+    )
+    .with_query_template("not-subscribed", spec)
+    .build()
+    .err()
+    .expect("build should fail");
     assert!(
         err.to_string().contains("not-subscribed"),
         "error should name the offending route: {err}"
@@ -721,10 +856,15 @@ fn build_fails_on_unknown_route_key() {
 #[test]
 fn build_accepts_route_key_matching_last_dotted_segment() {
     let spec = spec_with("/x", "", HashMap::new());
-    let r = HttpReaction::builder("r")
-        .with_query("source.orders")
-        .with_query_template("orders", spec)
-        .build();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("source.orders").expect("fixture component name"),
+    )
+    .with_query_template("orders", spec)
+    .build();
     assert!(
         r.is_ok(),
         "a route keyed by the last dotted segment must be accepted"
@@ -813,14 +953,15 @@ fn get_template_spec_returns_none_without_templates() {
 // ---------------------------------------------------------------------------
 
 fn add_notification(
-    query_id: &str,
+    query_id: drasi_core::ComponentId,
+    query_name: &str,
     seq: u64,
     data: serde_json::Value,
 ) -> DefaultChangeNotification {
     use chrono::TimeZone;
     let ts = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-    let qr = QueryResult::new(
-        query_id.to_string(),
+    let mut qr = QueryResult::new(
+        query_id,
         seq,
         ts,
         vec![ResultDiff::Add {
@@ -829,6 +970,8 @@ fn add_notification(
         }],
         HashMap::new(),
     );
+    qr.query_name =
+        Some(drasi_core::ComponentName::try_new(query_name).expect("fixture component name"));
     DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap()
 }
 
@@ -847,7 +990,13 @@ fn render_batch_item_uses_body_template_when_present() {
             },
         )]),
     );
-    let n = add_notification("q1", 1, serde_json::json!({"id": "x"}));
+    let n = add_notification(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        "q1",
+        1,
+        serde_json::json!({"id": "x"}),
+    );
     let hb = build_handlebars();
     let item = render_batch_item(&hb, &cfg, &n, "r");
     assert_eq!(item, serde_json::json!({"id": "x", "kind": "templated"}));
@@ -856,12 +1005,22 @@ fn render_batch_item_uses_body_template_when_present() {
 #[test]
 fn render_batch_item_falls_back_to_default_envelope_without_template() {
     let cfg = HttpReactionConfig::default();
-    let n = add_notification("q1", 7, serde_json::json!({"id": "x"}));
+    let n = add_notification(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        "q1",
+        7,
+        serde_json::json!({"id": "x"}),
+    );
     let hb = build_handlebars();
     let item = render_batch_item(&hb, &cfg, &n, "r");
     // Default change-notification envelope (Pattern A item) shape.
     assert_eq!(item.get("operation"), Some(&serde_json::json!("ADD")));
-    assert_eq!(item.get("queryId"), Some(&serde_json::json!("q1")));
+    assert_eq!(
+        item.get("queryId"),
+        Some(&serde_json::json!("00000000-0000-0000-0000-00000000002b"))
+    );
+    assert_eq!(item.get("queryName"), Some(&serde_json::json!("q1")));
     assert_eq!(item.get("sequenceId"), Some(&serde_json::json!(7)));
     assert_eq!(item.get("after"), Some(&serde_json::json!({"id": "x"})));
 }
@@ -883,7 +1042,13 @@ fn render_batch_item_falls_back_when_template_renders_invalid_json() {
             },
         )]),
     );
-    let n = add_notification("q1", 3, serde_json::json!({"id": "x"}));
+    let n = add_notification(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        "q1",
+        3,
+        serde_json::json!({"id": "x"}),
+    );
     let hb = build_handlebars();
     let item = render_batch_item(&hb, &cfg, &n, "r");
     assert_eq!(item.get("operation"), Some(&serde_json::json!("ADD")));
@@ -897,14 +1062,20 @@ fn render_batch_item_resolves_default_template_and_last_segment() {
         Some(added_template(r#"{"d":"{{after.id}}"}"#)),
         HashMap::new(),
     );
-    let n = add_notification("src.q1", 1, serde_json::json!({"id": "z"}));
+    let n = add_notification(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ac")
+            .expect("fixture UUID"),
+        "source.q1",
+        1,
+        serde_json::json!({"id": "z"}),
+    );
     let hb = build_handlebars();
     assert_eq!(
         render_batch_item(&hb, &cfg, &n, "r"),
         serde_json::json!({"d": "z"})
     );
 
-    // A route keyed by the last dotted segment is used for a dotted query id.
+    // A route keyed by the last dotted segment is used for a dotted query name.
     let cfg = cfg_with_routes(
         None,
         HashMap::from([(
@@ -1202,22 +1373,28 @@ fn builder_with_config_replaces_entire_config() {
         timeout_ms: 9999,
         ..Default::default()
     };
-    let r = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_config(cfg)
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_config(cfg)
+    .build()
+    .unwrap();
     assert_eq!(r.config.base_url, "https://x.example.com");
     assert_eq!(r.config.timeout_ms, 9999);
 }
 
 #[test]
 fn builder_with_default_template_appears_in_properties() {
-    let r = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_default_template(added_template(r#"{"id":"{{after.id}}"}"#))
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_default_template(added_template(r#"{"id":"{{after.id}}"}"#))
+    .build()
+    .unwrap();
     let p = r.properties();
     assert!(p
         .get("outputTemplates")
@@ -1227,41 +1404,59 @@ fn builder_with_default_template_appears_in_properties() {
 
 #[test]
 fn builder_with_recovery_policy_builds() {
-    assert!(HttpReaction::builder("r")
-        .with_query("q1")
-        .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
-        .build()
-        .is_ok());
+    assert!(HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID")
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
+    .build()
+    .is_ok());
 }
 
 #[test]
 fn builder_with_priority_queue_capacity_builds() {
-    assert!(HttpReaction::builder("r")
-        .with_query("q1")
-        .with_priority_queue_capacity(250)
-        .build()
-        .is_ok());
+    assert!(HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID")
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_priority_queue_capacity(250)
+    .build()
+    .is_ok());
 }
 
 #[test]
 fn auto_start_defaults_true_and_is_overridable() {
-    let on = HttpReaction::builder("r").with_query("q1").build().unwrap();
+    let on = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()
+    .unwrap();
     assert!(on.auto_start());
-    let off = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let off = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_auto_start(false)
+    .build()
+    .unwrap();
     assert!(!off.auto_start());
 }
 
 #[test]
 fn token_is_included_in_properties_for_persistence() {
-    let r = HttpReaction::builder("r")
-        .with_query("q1")
-        .with_token("sekret")
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_token("sekret")
+    .build()
+    .unwrap();
     assert_eq!(
         r.properties().get("token"),
         Some(&serde_json::Value::String("sekret".to_string()))
@@ -1270,7 +1465,13 @@ fn token_is_included_in_properties_for_persistence() {
 
 #[test]
 fn type_name_is_http() {
-    let r = HttpReaction::builder("r").with_query("q1").build().unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()
+    .unwrap();
     assert_eq!(r.type_name(), "http");
 }
 
@@ -1296,9 +1497,25 @@ fn new_constructs_without_validating() {
         base_url: "ftp://nope".to_string(),
         ..Default::default()
     };
-    let r = HttpReaction::new("r", vec!["q1".to_string()], cfg);
-    assert_eq!(r.id(), "r");
-    assert_eq!(r.query_ids(), vec!["q1".to_string()]);
+    let r = HttpReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
+        cfg,
+    );
+    assert_eq!(
+        r.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        r.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+        )]
+    );
 }
 
 #[tokio::test]
@@ -1307,7 +1524,14 @@ async fn start_revalidates_and_sets_error_on_invalid_config() {
         base_url: "ftp://nope".to_string(),
         ..Default::default()
     };
-    let r = HttpReaction::new("r", vec!["q1".to_string()], cfg);
+    let r = HttpReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
+        cfg,
+    );
     assert!(r.start().await.is_err(), "start must reject invalid config");
     assert!(matches!(r.status().await, ComponentStatus::Error));
 }
@@ -1318,22 +1542,28 @@ async fn start_revalidates_and_sets_error_on_invalid_config() {
 
 #[tokio::test]
 async fn stop_is_safe_without_a_prior_start() {
-    let r = HttpReaction::builder("r")
-        .with_base_url("http://127.0.0.1:1")
-        .with_query("q1")
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_base_url("http://127.0.0.1:1")
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()
+    .unwrap();
     r.stop().await.unwrap();
     assert!(matches!(r.status().await, ComponentStatus::Stopped));
 }
 
 #[tokio::test]
 async fn stop_is_idempotent() {
-    let r = HttpReaction::builder("r")
-        .with_base_url("http://127.0.0.1:1")
-        .with_query("q1")
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_base_url("http://127.0.0.1:1")
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()
+    .unwrap();
     r.start().await.unwrap();
     r.stop().await.unwrap();
     r.stop().await.unwrap();
@@ -1346,21 +1576,36 @@ async fn full_lifecycle_with_runtime_context() {
     use drasi_lib::context::ReactionRuntimeContext;
     use tokio::sync::mpsc;
 
-    let r = HttpReaction::builder("rxn")
-        .with_base_url("http://127.0.0.1:1") // unreachable; delivery fails silently
-        .with_query("q1")
-        .build()
-        .unwrap();
+    let r = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e0")
+            .expect("fixture UUID"),
+    )
+    .with_base_url("http://127.0.0.1:1") // unreachable; delivery fails silently
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()
+    .unwrap();
 
     let (tx, _rx) = mpsc::channel::<ComponentUpdate>(16);
-    let ctx = ReactionRuntimeContext::new("inst", "rxn", None, tx, None);
-    r.initialize(ctx).await;
+    let ctx = ReactionRuntimeContext::new(
+        "inst",
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000000e0")
+            .expect("fixture UUID"),
+        vec![
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        ],
+        None,
+        tx,
+        None,
+    );
+    r.bind_runtime_context(ctx).await;
 
     r.start().await.unwrap();
     assert!(matches!(r.status().await, ComponentStatus::Running));
 
     let qr = QueryResult::new(
-        "q1".to_string(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         1,
         chrono::Utc::now(),
         vec![ResultDiff::Add {
@@ -1391,7 +1636,15 @@ async fn descriptor_preserves_raw_config_for_lossless_properties() {
         "priorityQueueCapacity": 250
     });
     let r = d
-        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .unwrap();
     let p = r.properties();
@@ -1419,7 +1672,15 @@ async fn descriptor_resolves_env_var_config_value_with_default() {
         "baseUrl": "${DRASI_TEST_HTTP_BASE_UNSET:-https://resolved-default.example.com}"
     });
     let r = d
-        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await;
     assert!(
         r.is_ok(),
@@ -1442,7 +1703,15 @@ async fn descriptor_creates_reaction_with_output_templates() {
         }
     });
     let r = d
-        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .unwrap();
     let p = r.properties();
@@ -1464,7 +1733,15 @@ async fn descriptor_rejects_route_key_not_matching_a_query() {
         "outputTemplates": { "routes": { "nope": { "added": { "template": "x" } } } }
     });
     let err = d
-        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .err()
         .expect("unknown route key must be rejected");

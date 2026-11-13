@@ -21,9 +21,9 @@
 
 use async_trait::async_trait;
 use drasi_lib::{
-    channels::QueryResult, ComponentEvent, ComponentStatus, ComponentType, DrasiLib, LogLevel,
-    Query, Reaction, ReactionRuntimeContext, Source, SourceBase, SourceBaseParams,
-    SourceRuntimeContext, SourceSubscriptionSettings, SubscriptionResponse,
+    channels::QueryResult, computation::v1::GraphEntityId, ComponentEvent, ComponentStatus,
+    ComponentType, DrasiLib, LogLevel, Query, Reaction, ReactionRuntimeContext, Source, SourceBase,
+    SourceBaseParams, SourceRuntimeContext, SourceSubscriptionSettings, SubscriptionResponse,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -40,7 +40,7 @@ struct TestSource {
 }
 
 impl TestSource {
-    fn new(id: &str) -> anyhow::Result<Self> {
+    fn new(id: drasi_core::ComponentId) -> anyhow::Result<Self> {
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -50,7 +50,7 @@ impl TestSource {
 
 #[async_trait]
 impl Source for TestSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -66,8 +66,8 @@ impl Source for TestSource {
         self.base.auto_start
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -164,7 +164,10 @@ struct TestReaction {
 }
 
 impl TestReaction {
-    fn new(id: &str, query_ids: Vec<String>) -> Self {
+    fn new(
+        id: drasi_core::ComponentId,
+        query_ids: Vec<drasi_lib::config::ComponentReference>,
+    ) -> Self {
         let params = drasi_lib::ReactionBaseParams::new(id, query_ids);
         Self {
             base: drasi_lib::ReactionBase::new(params),
@@ -174,7 +177,7 @@ impl TestReaction {
 
 #[async_trait]
 impl Reaction for TestReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -186,16 +189,16 @@ impl Reaction for TestReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -277,14 +280,13 @@ impl Reaction for TestReaction {
 // ============================================================================
 
 /// Wait for a component to reach Running status via event notification.
-async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+async fn wait_for_running(drasi: &DrasiLib, component_id: drasi_core::ComponentId) {
     let mut rx = drasi.subscribe_all_component_events();
     let snapshot = drasi.get_graph().await.expect("graph snapshot");
-    if snapshot
-        .nodes
-        .iter()
-        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
-    {
+    if snapshot.nodes.iter().any(|n| {
+        n.id == GraphEntityId::Component(component_id.clone())
+            && n.status == ComponentStatus::Running
+    }) {
         return;
     }
     timeout(Duration::from_secs(5), async {
@@ -314,17 +316,27 @@ async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
 /// Test that source logs are captured and can be streamed.
 #[tokio::test]
 async fn test_source_log_streaming() {
-    let source = TestSource::new("test-source-logs").expect("Failed to create source");
+    let source = TestSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003d5")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("test-source-logs").expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs BEFORE starting
     let (initial_logs, mut log_receiver) = drasi
-        .subscribe_source_logs("test-source-logs")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("test-source-logs")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 
@@ -372,17 +384,28 @@ async fn test_source_log_streaming() {
 /// Test that source events are captured and can be streamed.
 #[tokio::test]
 async fn test_source_event_streaming() {
-    let source = TestSource::new("test-source-events").expect("Failed to create source");
+    let source = TestSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003d6")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("test-source-events")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to events BEFORE starting
     let (initial_events, mut event_receiver) = drasi
-        .subscribe_source_events("test-source-events")
+        .subscribe_source_events_by_name(
+            &drasi_core::ComponentName::try_new("test-source-events")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source events");
 
@@ -437,15 +460,28 @@ async fn test_source_event_streaming() {
 /// Test that query events are captured and can be streamed.
 #[tokio::test]
 async fn test_query_event_streaming() {
-    let source = TestSource::new("query-event-source").expect("Failed to create source");
+    let source = TestSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003d7")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
-    let query = Query::cypher("test-query-events")
-        .from_input("query-event-source")
-        .query("MATCH (n) RETURN n")
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("test-query-events").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("query-event-source").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("query-event-source")
+                .expect("fixture component name"),
+            source,
+        )
         .with_query(query)
         .build()
         .await
@@ -453,7 +489,10 @@ async fn test_query_event_streaming() {
 
     // Subscribe to query events BEFORE starting
     let (initial_events, mut event_receiver) = drasi
-        .subscribe_query_events("test-query-events")
+        .subscribe_query_events_by_name(
+            &drasi_core::ComponentName::try_new("test-query-events")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to query events");
 
@@ -507,15 +546,27 @@ async fn test_query_event_streaming() {
 /// Test that query logs are captured and can be streamed.
 #[tokio::test]
 async fn test_query_log_streaming() {
-    let source = TestSource::new("query-log-source").expect("Failed to create source");
+    let source = TestSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003d8")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
-    let query = Query::cypher("test-query-logs")
-        .from_input("query-log-source")
-        .query("MATCH (n) RETURN n")
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("test-query-logs").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("query-log-source").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("query-log-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
         .build()
         .await
@@ -524,11 +575,20 @@ async fn test_query_log_streaming() {
     drasi.start().await.expect("Failed to start DrasiLib");
 
     // Wait for query to reach Running (startup logs emitted before this)
-    wait_for_running(&drasi, "test-query-logs").await;
+    let query_id = drasi
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("test-query-logs").expect("fixture component name"),
+        )
+        .expect("declared query")
+        .id()
+        .clone();
+    wait_for_running(&drasi, query_id).await;
 
     // Get log history
     let (history, _receiver) = drasi
-        .subscribe_query_logs("test-query-logs")
+        .subscribe_query_logs_by_name(
+            &drasi_core::ComponentName::try_new("test-query-logs").expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to query logs");
 
@@ -543,29 +603,54 @@ async fn test_query_log_streaming() {
 /// Test that reaction events are captured and can be streamed.
 #[tokio::test]
 async fn test_reaction_event_streaming() {
-    let source = TestSource::new("reaction-event-source").expect("Failed to create source");
+    let source = TestSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003da")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
-    let query = Query::cypher("reaction-event-query")
-        .from_input("reaction-event-source")
-        .query("MATCH (n) RETURN n")
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("reaction-event-query").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("reaction-event-source")
+            .expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
 
     let reaction = TestReaction::new(
-        "test-reaction-events",
-        vec!["reaction-event-query".to_string()],
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000448")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("reaction-event-query")
+                .expect("fixture component name"),
+        )],
     );
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("reaction-event-source")
+                .expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("test-reaction-events")
+                .expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to reaction events BEFORE starting
     let (initial_events, mut event_receiver) = drasi
-        .subscribe_reaction_events("test-reaction-events")
+        .subscribe_reaction_events_by_name(
+            &drasi_core::ComponentName::try_new("test-reaction-events")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to reaction events");
 
@@ -619,26 +704,53 @@ async fn test_reaction_event_streaming() {
 /// Test that reaction logs are captured and can be streamed.
 #[tokio::test]
 async fn test_reaction_log_streaming() {
-    let source = TestSource::new("reaction-log-source").expect("Failed to create source");
+    let source = TestSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003db")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
-    let query = Query::cypher("reaction-log-query")
-        .from_input("reaction-log-source")
-        .query("MATCH (n) RETURN n")
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("reaction-log-query").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("reaction-log-source").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
 
-    let reaction = TestReaction::new("test-reaction-logs", vec!["reaction-log-query".to_string()]);
+    let reaction = TestReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000449")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("reaction-log-query")
+                .expect("fixture component name"),
+        )],
+    );
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("reaction-log-source")
+                .expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("test-reaction-logs")
+                .expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs BEFORE starting
     let (_initial_logs, mut log_receiver) = drasi
-        .subscribe_reaction_logs("test-reaction-logs")
+        .subscribe_reaction_logs_by_name(
+            &drasi_core::ComponentName::try_new("test-reaction-logs")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to reaction logs");
 
@@ -679,39 +791,70 @@ async fn test_reaction_log_streaming() {
 /// Test full lifecycle with log and event streaming for all component types.
 #[tokio::test]
 async fn test_full_lifecycle_streaming() {
-    let source = TestSource::new("full-lifecycle-source").expect("Failed to create source");
+    let source = TestSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003dc")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
-    let query = Query::cypher("full-lifecycle-query")
-        .from_input("full-lifecycle-source")
-        .query("MATCH (n) RETURN n")
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("full-lifecycle-query").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("full-lifecycle-source")
+            .expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
 
     let reaction = TestReaction::new(
-        "full-lifecycle-reaction",
-        vec!["full-lifecycle-query".to_string()],
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000044a")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("full-lifecycle-query")
+                .expect("fixture component name"),
+        )],
     );
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("full-lifecycle-source")
+                .expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("full-lifecycle-reaction")
+                .expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to all event streams
     let (_source_events, mut source_event_rx) = drasi
-        .subscribe_source_events("full-lifecycle-source")
+        .subscribe_source_events_by_name(
+            &drasi_core::ComponentName::try_new("full-lifecycle-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source events");
 
     let (_query_events, mut query_event_rx) = drasi
-        .subscribe_query_events("full-lifecycle-query")
+        .subscribe_query_events_by_name(
+            &drasi_core::ComponentName::try_new("full-lifecycle-query")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to query events");
 
     let (_reaction_events, mut reaction_event_rx) = drasi
-        .subscribe_reaction_events("full-lifecycle-reaction")
+        .subscribe_reaction_events_by_name(
+            &drasi_core::ComponentName::try_new("full-lifecycle-reaction")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to reaction events");
 
@@ -809,22 +952,38 @@ async fn test_subscribe_nonexistent_component() {
         .expect("Failed to build DrasiLib");
 
     // Try to subscribe to non-existent source
-    let result = drasi.subscribe_source_logs("nonexistent").await;
+    let result = drasi
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("nonexistent").expect("fixture component name"),
+        )
+        .await;
     assert!(result.is_err(), "Expected error for non-existent source");
 
-    let result = drasi.subscribe_source_events("nonexistent").await;
+    let result = drasi
+        .subscribe_source_events_by_name(
+            &drasi_core::ComponentName::try_new("nonexistent").expect("fixture component name"),
+        )
+        .await;
     assert!(
         result.is_err(),
         "Expected error for non-existent source events"
     );
 
-    let result = drasi.subscribe_query_events("nonexistent").await;
+    let result = drasi
+        .subscribe_query_events_by_name(
+            &drasi_core::ComponentName::try_new("nonexistent").expect("fixture component name"),
+        )
+        .await;
     assert!(
         result.is_err(),
         "Expected error for non-existent query events"
     );
 
-    let result = drasi.subscribe_reaction_events("nonexistent").await;
+    let result = drasi
+        .subscribe_reaction_events_by_name(
+            &drasi_core::ComponentName::try_new("nonexistent").expect("fixture component name"),
+        )
+        .await;
     assert!(
         result.is_err(),
         "Expected error for non-existent reaction events"
@@ -834,17 +993,28 @@ async fn test_subscribe_nonexistent_component() {
 /// Test that log levels are correctly captured.
 #[tokio::test]
 async fn test_log_levels_captured() {
-    let source = TestSource::new("log-levels-source").expect("Failed to create source");
+    let source = TestSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003dd")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("log-levels-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs before starting to detect log arrival
     let (_, mut log_rx) = drasi
-        .subscribe_source_logs("log-levels-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("log-levels-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 
@@ -870,7 +1040,10 @@ async fn test_log_levels_captured() {
 
     // Get log history
     let (history, _) = drasi
-        .subscribe_source_logs("log-levels-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("log-levels-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 

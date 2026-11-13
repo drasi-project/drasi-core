@@ -14,6 +14,9 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use std::{num::NonZeroUsize, sync::Arc};
 
 use bytes::Bytes;
@@ -64,7 +67,8 @@ fn legacy_graph_codec_preserves_all_raw_metadata_and_typed_float_datetime_values
     let change = SourceChange::Insert { element };
     let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 987654321).expect("timestamp");
     let original = Arc::new(SourceEventWrapper {
-        source_id: "legacy-source".into(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000357")
+            .expect("fixture UUID"),
         event: SourceEvent::Change(change.clone()),
         timestamp,
         sequence: 42,
@@ -78,7 +82,7 @@ fn legacy_graph_codec_preserves_all_raw_metadata_and_typed_float_datetime_values
     });
     let envelope = GraphChangeCodec::encode_source_event(
         original.clone(),
-        &ComponentId::try_new("adapter").expect("id"),
+        &fixture_support::component_id(721),
         StreamId::try_new("adapter/out").expect("stream"),
         1,
         Some(SourceSchema::default()),
@@ -142,14 +146,15 @@ fn graph_codec_uses_owned_ingress_and_rejects_corrupt_record_images() {
         },
     };
     let event = Arc::new(SourceEventWrapper::new(
-        "source".into(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
         SourceEvent::Change(change.clone()),
         chrono::Utc::now(),
         1,
     ));
     let envelope = GraphChangeCodec::encode_source_event(
         event,
-        &ComponentId::try_new("adapter").expect("id"),
+        &fixture_support::component_id(721),
         StreamId::try_new("adapter/out").expect("stream"),
         9,
         None,

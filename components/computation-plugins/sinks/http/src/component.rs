@@ -249,7 +249,7 @@ impl HttpSink {
         self.config.failure_policy.delivery(
             self.deliver(&request, &output.endpoint().to_string(), sequence)
                 .await,
-            self.descriptor.id().as_str(),
+            self.descriptor.id(),
             &output.endpoint().to_string(),
             sequence,
         )
@@ -284,7 +284,7 @@ impl HttpSink {
                 if bytes + 12 > self.config.max_request_bytes {
                     self.config.failure_policy.delivery(
                         Err(anyhow::anyhow!("HTTP batch item exceeds maxRequestBytes")),
-                        self.descriptor.id().as_str(),
+                        self.descriptor.id(),
                         &label,
                         sequence,
                     )?;
@@ -311,7 +311,7 @@ impl HttpSink {
                 };
                 self.config.failure_policy.delivery(
                     delivery,
-                    self.descriptor.id().as_str(),
+                    self.descriptor.id(),
                     &label,
                     sequence,
                 )?;

@@ -14,10 +14,15 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use async_trait::async_trait;
 use computation_support::*;
+use drasi_core_types::ComponentName;
 use drasi_lib::{computation::v1::*, DrasiError, DrasiLib};
 use std::{
     sync::{
@@ -142,18 +147,46 @@ fn components(
                 .with_cleanup(calls.clone()),
         )
         .expect("resource")
-        .source(Box::new(Source {
-            descriptor: descriptor("native-source", &[], &["out"]),
-            input: receiver,
-            calls,
-        }))
-        .sink(Box::new(Sink {
-            descriptor: descriptor("native-sink", &["in"], &[]),
-            output: sender,
-        }))
-        .bind_stream(endpoint("native-source", "out"), stream("native-source"))
+        .source(
+            ComponentName::try_new("native-source").unwrap(),
+            Box::new(Source {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b1")
+                        .expect("fixture UUID"),
+                    &[],
+                    &["out"],
+                ),
+                input: receiver,
+                calls,
+            }),
+        )
+        .sink(
+            ComponentName::try_new("native-sink").unwrap(),
+            Box::new(Sink {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b2")
+                        .expect("fixture UUID"),
+                    &["in"],
+                    &[],
+                ),
+                output: sender,
+            }),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b1")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("native-source"),
+        )
         .connect(
-            edge("native-source", "native-sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b1")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b2")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -166,7 +199,13 @@ async fn roundtrip(
     sequence: u64,
 ) {
     input
-        .send(output(root("native-source", sequence, &[1])))
+        .send(output(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001b1")
+                .expect("fixture UUID"),
+            "native-source",
+            sequence,
+            &[1],
+        )))
         .await
         .expect("input");
     assert_eq!(
@@ -184,6 +223,7 @@ async fn instance_lifecycle() {
     let calls = Arc::new(Calls::default());
     let (components, input, mut output_rx) = components(calls.clone());
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -202,12 +242,20 @@ async fn instance_lifecycle() {
         .await
         .expect("instance");
     let handle = drasi.computation_control().expect("instance controller");
+    let native_source_name =
+        drasi_core_types::ComponentName::try_new("native-source").expect("fixture component name");
     let (_, mut logs) = drasi
-        .subscribe_computation_logs(drasi_lib::channels::ComponentType::Source, "native-source")
+        .subscribe_computation_logs_by_name(
+            drasi_lib::channels::ComponentType::Source,
+            &native_source_name,
+        )
         .await
         .expect("scoped logs");
     drasi
-        .computation_component("native-source")
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("native-source")
+                .expect("fixture component name"),
+        )
         .unwrap()
         .wait_created()
         .await
@@ -217,7 +265,7 @@ async fn instance_lifecycle() {
         .desired_snapshot()
         .nodes
         .iter()
-        .any(|node| node.descriptor.id().as_str() == "native-source"));
+        .any(|node| node.descriptor.id() == &component(433)));
     drasi.start().await.expect("start instance");
     let message = tokio::time::timeout(Duration::from_secs(5), logs.recv())
         .await
@@ -245,7 +293,7 @@ async fn instance_lifecycle() {
     }
     assert_eq!(calls.stops.load(Ordering::SeqCst), 1);
     assert_eq!(
-        handle.observed().components[&component("native-source")].lifecycle,
+        handle.observed().components[&component(433)].lifecycle,
         ComponentLifecycle::Stopped
     );
     drasi.start().await.expect("restart instance");
@@ -326,37 +374,112 @@ async fn native_role_logs(instance_id: &str) {
     use drasi_lib::ComponentType;
 
     let batch = ComponentBatch::builder()
-        .source(Box::new(RoleLogger(descriptor("source", &[], &["out"]))))
-        .transformer(Box::new(RoleLogger(descriptor(
-            "transformer",
-            &["in"],
-            &["out"],
-        ))))
-        .transformer(Box::new(RoleLogger(
-            descriptor("query", &["in"], &["out"]).with_semantic_kind(ComponentSemanticKind::Query),
-        )))
-        .sink(Box::new(RoleLogger(
-            descriptor("sink", &["in"], &[]).with_semantic_kind(ComponentSemanticKind::Reaction),
-        )))
-        .service(Box::new(RoleLogger(descriptor("service", &[], &[]))))
-        .bind_stream(endpoint("source", "out"), stream("source"))
-        .bind_stream(endpoint("transformer", "out"), stream("transformer"))
-        .bind_stream(endpoint("query", "out"), stream("query"))
+        .source(
+            ComponentName::try_new("source").unwrap(),
+            Box::new(RoleLogger(descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ))),
+        )
+        .transformer(
+            ComponentName::try_new("transformer").unwrap(),
+            Box::new(RoleLogger(descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001af")
+                    .expect("fixture UUID"),
+                &["in"],
+                &["out"],
+            ))),
+        )
+        .transformer(
+            ComponentName::try_new("query").unwrap(),
+            Box::new(RoleLogger(
+                descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    &["in"],
+                    &["out"],
+                )
+                .with_semantic_kind(ComponentSemanticKind::Query),
+            )),
+        )
+        .sink(
+            ComponentName::try_new("sink").unwrap(),
+            Box::new(RoleLogger(
+                descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                    &["in"],
+                    &[],
+                )
+                .with_semantic_kind(ComponentSemanticKind::Reaction),
+            )),
+        )
+        .service(
+            ComponentName::try_new("service").unwrap(),
+            Box::new(RoleLogger(descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b0")
+                    .expect("fixture UUID"),
+                &[],
+                &[],
+            ))),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001af")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("transformer"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("query"),
+        )
         .connect(
-            edge("source", "transformer"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001af")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("transformer", "query"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001af")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("query", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
         .unwrap();
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -383,11 +506,13 @@ async fn native_role_logs(instance_id: &str) {
     ];
     let mut receivers = Vec::new();
     for (id, category) in categories.clone() {
+        let name = drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
+        let component_id = core.component_by_name(&name).unwrap().id().clone();
         let (_, receiver) = core
-            .subscribe_computation_logs(category.clone(), id)
+            .subscribe_computation_logs_by_name(category.clone(), &name)
             .await
             .unwrap();
-        receivers.push((id, category, receiver));
+        receivers.push((component_id, category, receiver));
     }
     for (id, role, former_category) in [
         (
@@ -398,23 +523,51 @@ async fn native_role_logs(instance_id: &str) {
         ("sink", ComponentRole::Sink, ComponentType::Reaction),
         ("service", ComponentRole::Service, ComponentType::Query),
     ] {
+        let name = drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
+        let component_id = core.component_by_name(&name).unwrap().id().clone();
         let (_, receiver) = core
-            .subscribe_computation_logs(former_category, id)
+            .subscribe_computation_logs_by_name(former_category, &name)
             .await
             .unwrap();
-        receivers.push((id, ComponentLogType::from(role), receiver));
+        receivers.push((component_id, ComponentLogType::from(role), receiver));
     }
-    let (_, reaction_api) = core.subscribe_reaction_logs("sink").await.unwrap();
-    receivers.push(("sink", ComponentLogType::Sink, reaction_api));
+    let (_, reaction_api) = core
+        .subscribe_reaction_logs_by_name(
+            &drasi_core_types::ComponentName::try_new("sink").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
+    receivers.push((
+        core.component_by_name(
+            &drasi_core_types::ComponentName::try_new("sink").expect("fixture component name"),
+        )
+        .unwrap()
+        .id()
+        .clone(),
+        ComponentLogType::Sink,
+        reaction_api,
+    ));
     assert!(core
-        .subscribe_computation_logs(ComponentRole::Source, "service")
+        .subscribe_computation_logs_by_name(
+            ComponentRole::Source,
+            &drasi_core_types::ComponentName::try_new("service").expect("fixture component name"),
+        )
         .await
         .is_err());
     core.start().await.unwrap();
     for (id, category, mut receiver) in receivers {
         let message = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
             .await
-            .expect("native role log was dropped")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "native {category:?} log for {id} was dropped: {:?}",
+                    core.computation_control()
+                        .unwrap()
+                        .observed()
+                        .components
+                        .get(&id)
+                )
+            })
             .unwrap();
         assert_eq!(message.instance_id, instance_id);
         assert_eq!(message.component_id, id);
@@ -422,15 +575,26 @@ async fn native_role_logs(instance_id: &str) {
         assert_eq!(message.message, "native role started");
     }
     for (id, category) in categories {
+        let name = drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
         let (history, _) = core
-            .subscribe_computation_logs(category.clone(), id)
+            .subscribe_computation_logs_by_name(category.clone(), &name)
             .await
             .unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].component_type, category);
     }
-    core.remove_reaction("sink", false).await.unwrap();
-    let key = ComponentLogKey::new(instance_id, ComponentRole::Sink, "sink");
+    core.remove_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("sink").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
+    let key = ComponentLogKey::new(
+        instance_id,
+        ComponentRole::Sink,
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
+    );
     assert_eq!(
         get_or_init_global_registry().log_count_by_key(&key).await,
         0,
@@ -461,6 +625,7 @@ async fn instance_stop_preserves_typed_member_failure_and_allows_cleanup_retry()
     let calls = Arc::new(Calls::default());
     let (batch, _input, _output) = components(calls.clone());
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -494,7 +659,7 @@ async fn instance_stop_preserves_typed_member_failure_and_allows_cleanup_retry()
         panic!("expected stop report");
     };
     assert!(matches!(
-        report.components[&component("native-source")],
+        report.components[&component(433)],
         StopOutcome::StopFailed(_)
     ));
     tokio::time::timeout(Duration::from_secs(5), drasi.shutdown())
@@ -507,6 +672,7 @@ async fn instance_stop_preserves_typed_member_failure_and_allows_cleanup_retry()
 #[tokio::test]
 async fn component_batches_share_identity_and_preserve_existing_instance_members() {
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -523,6 +689,7 @@ async fn component_batches_share_identity_and_preserve_existing_instance_members
         .await
         .expect("instance");
     let control = drasi.computation_control().unwrap();
+    let original_configuration = drasi.desired_configuration().unwrap().desired;
     let original: Vec<_> = control
         .desired_snapshot()
         .nodes
@@ -534,51 +701,47 @@ async fn component_batches_share_identity_and_preserve_existing_instance_members
     drasi
         .add_components(batch.auto_start(false))
         .await
-        .expect("register")
-        .ensure_committed()
-        .expect("desired topology committed");
+        .expect("register");
     drasi.start().await.expect("instance");
     assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
     let (duplicate, _, _) = components(Arc::new(Calls::default()));
-    assert!(matches!(
-        drasi.add_components(duplicate).await,
-        Err(DrasiError::AlreadyExists { .. })
-    ));
+    let Err(error) = drasi.add_components(duplicate).await else {
+        panic!("duplicate IDs must reject");
+    };
+    assert!(
+        matches!(
+            error
+                .downcast_ref::<GraphError>()
+                .map(GraphError::underlying),
+            Some(GraphError::DuplicateComponentId { .. })
+        ),
+        "{error:#}"
+    );
     control
         .start_requested(
             control.desired_snapshot().revision,
-            GraphSelection::Exact(vec![component("native-source"), component("native-sink")]),
+            GraphSelection::Exact(vec![component(433), component(434)]),
         )
         .await
         .expect("manual native activation");
     roundtrip(&input, &mut output_rx, 1).await;
-    let preview = control
-        .preview(
-            control.desired_snapshot().revision,
-            vec![
-                DesiredMutation::RemoveComponents {
-                    selection: GraphSelection::Exact(vec![
-                        component("native-source"),
-                        component("native-sink"),
-                    ]),
-                    policy: RemovalPolicy::Reject,
-                },
-                DesiredMutation::RemoveResource {
-                    resource: ResourceId::try_new("cleanup").unwrap(),
-                    policy: RemovalPolicy::Reject,
-                },
-            ],
+    drasi
+        .apply_desired_state(
+            drasi.desired_configuration().unwrap().revision,
+            "remove-native-batch",
+            original_configuration,
         )
         .await
         .unwrap();
-    control
-        .reconcile(preview, TopologyBindings::default())
-        .await
-        .unwrap()
-        .ensure_committed()
-        .expect("desired topology committed");
+    let status = drasi.reconcile_desired_state().await.unwrap();
+    assert!(status.applied && status.error.is_none(), "{status:?}");
     assert!(drasi.is_running().await);
-    assert!(drasi.computation_component("native-source").is_err());
+    assert!(drasi
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("native-source")
+                .expect("fixture component name")
+        )
+        .is_err());
     assert_eq!(
         control
             .desired_snapshot()
@@ -594,6 +757,7 @@ async fn component_batches_share_identity_and_preserve_existing_instance_members
 #[tokio::test]
 async fn cancelled_shutdown_retains_the_driver_and_actual_async_cleanup_owner() {
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -615,14 +779,12 @@ async fn cancelled_shutdown_retains_the_driver_and_actual_async_cleanup_owner() 
     drasi
         .add_components(batch.auto_start(false))
         .await
-        .expect("register")
-        .ensure_committed()
-        .expect("desired topology committed");
+        .expect("register");
     let handle = drasi.computation_control().unwrap();
     handle
         .start_requested(
             handle.desired_snapshot().revision,
-            GraphSelection::Exact(vec![component("native-source"), component("native-sink")]),
+            GraphSelection::Exact(vec![component(433), component(434)]),
         )
         .await
         .expect("start");
@@ -648,6 +810,7 @@ async fn builder_rejection_awaits_all_owned_resources_without_starting_component
     let (one, _, _) = components(first.clone());
     let (two, _, _) = components(second.clone());
     let result = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -675,13 +838,17 @@ async fn builder_rejection_awaits_all_owned_resources_without_starting_component
 async fn query_creation_failure_retains_component_resources_until_explicit_cleanup() {
     let calls = Arc::new(Calls::default());
     let (batch, _, _) = components(calls.clone());
-    let mut query = drasi_lib::Query::cypher("invalid")
-        .query("MATCH (n) RETURN n")
-        .build();
+    let mut query = drasi_lib::Query::cypher(
+        drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query shape");
     query.storage_backend = Some(drasi_lib::indexes::StorageBackendRef::Named(
         "missing".into(),
     ));
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -700,7 +867,9 @@ async fn query_creation_failure_retains_component_resources_until_explicit_clean
         .await
         .expect("node-first builder retains failed query declarations");
     let query = drasi
-        .computation_component("invalid")
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name"),
+        )
         .expect("query handle");
     let failure = query
         .wait_created()
@@ -724,6 +893,7 @@ async fn failed_builder_rollback_returns_the_actual_retryable_cleanup_owner() {
     let (one, _, _) = components(first.clone());
     let (two, _, _) = components(second.clone());
     let error = match DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -776,6 +946,7 @@ async fn failed_builder_rollback_returns_the_actual_retryable_cleanup_owner() {
 #[tokio::test]
 async fn rejected_registration_keeps_failed_cleanup_separate_from_the_live_graph() {
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -795,23 +966,15 @@ async fn rejected_registration_keeps_failed_cleanup_separate_from_the_live_graph
     let rejected = Arc::new(Calls::default());
     rejected.fail_dispose.store(true, Ordering::Release);
     let (original, _, _) = components(live.clone());
-    drasi
-        .add_components(original)
-        .await
-        .expect("original")
-        .ensure_committed()
-        .expect("desired topology committed");
+    drasi.add_components(original).await.expect("original");
     let (duplicate, _, _) = components(rejected.clone());
     let error = match drasi.add_components(duplicate).await {
         Ok(_) => panic!("duplicate registration succeeded"),
         Err(error) => error,
     };
-    let DrasiError::Internal(cause) = &error else {
-        panic!("missing rejection owner: {error}");
-    };
-    cause
+    error
         .downcast_ref::<ComputationCleanupError>()
-        .expect("cleanup owner")
+        .unwrap_or_else(|| panic!("cleanup owner: {error:#}"))
         .cleanup()
         .await
         .expect("retry");
@@ -821,7 +984,7 @@ async fn rejected_registration_keeps_failed_cleanup_separate_from_the_live_graph
     control
         .start_requested(
             control.desired_snapshot().revision,
-            GraphSelection::Exact(vec![component("native-source"), component("native-sink")]),
+            GraphSelection::Exact(vec![component(433), component(434)]),
         )
         .await
         .expect("original starts");

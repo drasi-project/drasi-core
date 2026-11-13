@@ -6,7 +6,7 @@ mod rows;
 mod shared;
 
 use anyhow::{Context, Result};
-use drasi_computation_contracts::{ComponentId, ComponentRole, ImplementationIdentity, StreamId};
+use drasi_computation_contracts::{ComponentRole, ImplementationIdentity, StreamId};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
     CreatedComponent, Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress,
@@ -180,14 +180,12 @@ impl Factory for PostgresRowsFactory {
         metadata.implementation =
             ImplementationIdentity::try_new(POSTGRES_ROWS, "1").expect("constant implementation");
         metadata.ports =
-            PostgresTransactionSource::describe_rows(ComponentId::try_new("postgres").expect("id"))
-                .expect("row descriptor")
-                .ports()
-                .to_vec();
+            PostgresTransactionSource::row_ports().expect("constant row port descriptor");
         for name in ["persistent", "auto_create_slot", "start_from_slot"] {
             metadata.configuration.fields.insert(
                 name.into(),
                 drasi_computation_plugin_sdk::ConfigField {
+                    constraint: None,
                     value_type: ConfigType::Boolean,
                     required: false,
                     secret: false,
@@ -198,6 +196,7 @@ impl Factory for PostgresRowsFactory {
             metadata.configuration.fields.insert(
                 name.into(),
                 drasi_computation_plugin_sdk::ConfigField {
+                    constraint: None,
                     value_type: ConfigType::Integer,
                     required: false,
                     secret: false,
@@ -275,12 +274,8 @@ impl Factory for PostgresSourceFactory {
             role: ComponentRole::Source,
             configuration_version: 1,
             configuration,
-            ports: PostgresTransactionSource::describe(
-                ComponentId::try_new("postgres").expect("constant id"),
-            )
-            .expect("source descriptor")
-            .ports()
-            .to_vec(),
+            ports: PostgresTransactionSource::transaction_ports()
+                .expect("constant transaction port descriptor"),
             completion: None,
             capabilities: Capabilities::default(),
         }
@@ -334,16 +329,66 @@ mod tests {
     use drasi_computation_plugin_sdk::ExportedPlugin;
 
     #[test]
-    fn source_factory_declares_only_the_standard_graph_schema_and_real_progress() -> Result<()> {
+    fn factory_metadata_constructs_without_database_io() -> Result<()> {
         ExportedPlugin::new(plugin()?)?;
-        let metadata = PostgresSourceFactory.metadata();
-        assert_eq!(metadata.ports.len(), 1);
+        #[cfg(feature = "dynamic-plugin")]
+        assert!(!drasi_computation_plugin_metadata().is_null());
+        for (name, metadata, ports) in [
+            (
+                POSTGRES_SOURCE,
+                PostgresSourceFactory.metadata(),
+                PostgresTransactionSource::transaction_ports()?,
+            ),
+            (
+                POSTGRES_ROWS,
+                PostgresRowsFactory.metadata(),
+                PostgresTransactionSource::row_ports()?,
+            ),
+            (
+                POSTGRES_SHARED_ROWS,
+                PostgresSharedRowsFactory.metadata(),
+                PostgresTransactionSource::row_ports()?,
+            ),
+            (
+                POSTGRES_SHARED_TRANSACTIONS,
+                PostgresSharedTransactionsFactory.metadata(),
+                PostgresTransactionSource::transaction_ports()?,
+            ),
+        ] {
+            assert_eq!(
+                metadata.implementation,
+                ImplementationIdentity::try_new(name, "1")?
+            );
+            assert_eq!(metadata.role, ComponentRole::Source);
+            assert_eq!(metadata.completion, None);
+            assert_eq!(metadata.ports, ports);
+            assert_eq!(metadata.ports.len(), 1);
+            assert_eq!(metadata.ports[0].id().as_str(), "out");
+            assert_eq!(
+                metadata.ports[0].direction(),
+                drasi_computation_contracts::PortDirection::Output
+            );
+            assert_eq!(
+                metadata.ports[0].schema(),
+                drasi_computation_contracts::GraphChangeCodec::schema().descriptor()
+            );
+            assert!(metadata.configuration.fields["settings"].secret);
+        }
+        let transaction_id = drasi_computation_contracts::ComponentId::generate();
+        let transaction = PostgresTransactionSource::describe(transaction_id.clone())?;
+        assert_eq!(transaction.id(), &transaction_id);
         assert_eq!(
-            metadata.ports[0].schema(),
-            drasi_computation_contracts::GraphChangeCodec::schema().descriptor()
+            transaction.ports(),
+            PostgresSourceFactory.metadata().ports.as_slice()
         );
-        assert!(metadata.configuration.fields["settings"].secret);
+        let row_id = drasi_computation_contracts::ComponentId::generate();
+        let row = PostgresTransactionSource::describe_rows(row_id.clone())?;
+        assert_eq!(row.id(), &row_id);
+        assert_eq!(row.ports(), PostgresRowsFactory.metadata().ports.as_slice());
         assert!(PostgresSourceFactory.supports_source_progress());
+        assert!(PostgresRowsFactory.supports_source_progress());
+        assert!(PostgresSharedRowsFactory.supports_consumer_progress());
+        assert!(PostgresSharedTransactionsFactory.supports_consumer_progress());
         Ok(())
     }
 }

@@ -64,13 +64,13 @@ pub struct HereTrafficSource {
 
 impl HereTrafficSource {
     /// Create a HERE Traffic source from configuration.
-    pub fn new(id: impl Into<String>, config: HereTrafficConfig) -> Result<Self> {
+    pub fn new(id: drasi_lib::ComponentId, config: HereTrafficConfig) -> Result<Self> {
         HereTrafficSourceBuilder::from_config(id, config).build()
     }
 
     /// Create a builder using API key authentication.
     pub fn builder(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         api_key: impl Into<String>,
         bounding_box: impl Into<String>,
     ) -> HereTrafficSourceBuilder {
@@ -79,7 +79,7 @@ impl HereTrafficSource {
 
     /// Create a builder using OAuth 2.0 authentication.
     pub fn builder_oauth(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         access_key_id: impl Into<String>,
         access_key_secret: impl Into<String>,
         bounding_box: impl Into<String>,
@@ -132,7 +132,7 @@ impl HereTrafficSource {
 
 #[async_trait]
 impl Source for HereTrafficSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -284,8 +284,8 @@ impl Source for HereTrafficSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -298,7 +298,7 @@ impl Source for HereTrafficSource {
 
 /// Builder for HERE Traffic source.
 pub struct HereTrafficSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: HereTrafficConfig,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
     state_store: Option<Arc<dyn StateStoreProvider>>,
@@ -308,12 +308,12 @@ pub struct HereTrafficSourceBuilder {
 impl HereTrafficSourceBuilder {
     /// Create a builder using API key authentication.
     pub fn new(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         api_key: impl Into<String>,
         bounding_box: impl Into<String>,
     ) -> Self {
         Self {
-            id: id.into(),
+            id,
             config: HereTrafficConfig::new(api_key, bounding_box),
             bootstrap_provider: None,
             state_store: None,
@@ -323,13 +323,13 @@ impl HereTrafficSourceBuilder {
 
     /// Create a builder using OAuth 2.0 authentication.
     pub fn new_oauth(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         access_key_id: impl Into<String>,
         access_key_secret: impl Into<String>,
         bounding_box: impl Into<String>,
     ) -> Self {
         Self {
-            id: id.into(),
+            id,
             config: HereTrafficConfig::new_oauth(access_key_id, access_key_secret, bounding_box),
             bootstrap_provider: None,
             state_store: None,
@@ -337,9 +337,9 @@ impl HereTrafficSourceBuilder {
         }
     }
 
-    pub fn from_config(id: impl Into<String>, config: HereTrafficConfig) -> Self {
+    pub fn from_config(id: drasi_lib::ComponentId, config: HereTrafficConfig) -> Self {
         Self {
-            id: id.into(),
+            id,
             config,
             bootstrap_provider: None,
             state_store: None,
@@ -409,7 +409,7 @@ impl HereTrafficSourceBuilder {
             );
         }
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
 
         if let Some(provider) = self.bootstrap_provider {
             params = params.with_bootstrap_provider(provider);
@@ -503,7 +503,13 @@ async fn poll_and_dispatch(
 
 async fn load_last_poll_timestamp(base: &SourceBase) -> Result<Option<DateTime<Utc>>> {
     if let Some(store) = base.state_store().await {
-        if let Some(bytes) = store.get(&base.id, LAST_POLL_KEY).await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(base.id.clone()),
+                LAST_POLL_KEY,
+            )
+            .await?
+        {
             let raw = String::from_utf8(bytes)?;
             if let Ok(parsed) = DateTime::parse_from_rfc3339(&raw) {
                 let timestamp = parsed.with_timezone(&Utc);
@@ -518,7 +524,11 @@ async fn load_last_poll_timestamp(base: &SourceBase) -> Result<Option<DateTime<U
 async fn save_last_poll_timestamp(base: &SourceBase, timestamp: DateTime<Utc>) -> Result<()> {
     if let Some(store) = base.state_store().await {
         store
-            .set(&base.id, LAST_POLL_KEY, timestamp.to_rfc3339().into_bytes())
+            .set(
+                &drasi_lib::StorePartition::component(base.id.clone()),
+                LAST_POLL_KEY,
+                timestamp.to_rfc3339().into_bytes(),
+            )
             .await?;
     }
     Ok(())

@@ -95,24 +95,30 @@ async fn test_kafka_source_detects_changes() {
     ensure_topic(&bootstrap_servers, topic, 3).await;
 
     // Create source
-    let source = KafkaSource::builder("orders_kafka")
-        .bootstrap_servers(&bootstrap_servers)
-        .topic(topic)
-        .group_id("drasi-test")
-        .node_label("Order")
-        .build()
-        .unwrap();
+    let source = KafkaSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000075")
+            .expect("fixture UUID"),
+    )
+    .bootstrap_servers(&bootstrap_servers)
+    .topic(topic)
+    .group_id("drasi-test")
+    .node_label("Order")
+    .build()
+    .unwrap();
 
     // Create query
-    let query = Query::cypher("q1")
+    let query = Query::cypher(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
         .query("MATCH (o:Order) WHERE o.total > 50 RETURN o.id AS id, o.customer AS customer, o.total AS total")
-        .from_input("orders_kafka")
-        .build();
+        .from_input_by_name(drasi_core::ComponentName::try_new("orders_kafka").expect("fixture component name"))
+        .build().expect("valid query configuration");
 
     // Create reaction
-    let (reaction, handle) = ApplicationReactionBuilder::new("r1")
-        .with_query("q1")
-        .build();
+    let (reaction, handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build();
 
     // Build and start DrasiLib
     let core = Arc::new(
@@ -129,9 +135,15 @@ async fn test_kafka_source_detects_changes() {
                     .expect("reference query factory")
                     .clone(),
             )
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("orders_kafka").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("application").expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -293,23 +305,33 @@ async fn test_kafka_source_custom_mapping() {
         effective_from: None,
     }];
 
-    let source = KafkaSource::builder("items_kafka")
-        .bootstrap_servers(&bootstrap_servers)
-        .topic(topic)
-        .group_id("drasi-test-custom")
-        .node_label("Item")
-        .mappings(mappings)
-        .build()
-        .unwrap();
+    let source = KafkaSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000076")
+            .expect("fixture UUID"),
+    )
+    .bootstrap_servers(&bootstrap_servers)
+    .topic(topic)
+    .group_id("drasi-test-custom")
+    .node_label("Item")
+    .mappings(mappings)
+    .build()
+    .unwrap();
 
-    let query = Query::cypher("q1")
-        .query("MATCH (i:Item) RETURN i.id AS id, i.name AS name, i.price AS price")
-        .from_input("items_kafka")
-        .build();
+    let query =
+        Query::cypher(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+            .query("MATCH (i:Item) RETURN i.id AS id, i.name AS name, i.price AS price")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("items_kafka").expect("fixture component name"),
+            )
+            .build()
+            .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("r1")
-        .with_query("q1")
-        .build();
+    let (reaction, handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -325,9 +347,15 @@ async fn test_kafka_source_custom_mapping() {
                     .expect("reference query factory")
                     .clone(),
             )
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("items_kafka").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("application").expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -459,13 +487,16 @@ async fn test_kafka_bootstrap_source_overlap_handover() {
         produce_order(&producer, &topic, &format!("initial-{i}"), 100).await;
     }
 
-    let source = KafkaSource::builder("orders_handover_kafka")
-        .bootstrap_servers(&bootstrap_servers)
-        .topic(&topic)
-        .group_id("drasi-test-handover")
-        .node_label("Order")
-        .build()
-        .unwrap();
+    let source = KafkaSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000077")
+            .expect("fixture UUID"),
+    )
+    .bootstrap_servers(&bootstrap_servers)
+    .topic(&topic)
+    .group_id("drasi-test-handover")
+    .node_label("Order")
+    .build()
+    .unwrap();
     let bootstrap_provider = KafkaBootstrapProvider::builder()
         .bootstrap_servers(&bootstrap_servers)
         .topic(&topic)
@@ -489,9 +520,11 @@ async fn test_kafka_bootstrap_source_overlap_handover() {
     // Subscribe directly to the source so we observe both the bootstrap snapshot
     // and the CDC stream deterministically.
     let settings = SourceSubscriptionSettings {
-        source_id: "orders_handover_kafka".to_string(),
+        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000077")
+            .expect("fixture UUID"),
         enable_bootstrap: true,
-        query_id: "q-handover".to_string(),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003a")
+            .expect("fixture UUID"),
         nodes: HashSet::from(["Order".to_string()]),
         relations: HashSet::new(),
         resume_from: None,

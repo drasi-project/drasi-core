@@ -31,9 +31,11 @@ mod addition;
 mod configuration;
 mod controller;
 mod execution;
+mod identity;
 pub(crate) use addition::RejectedResources;
 pub use addition::{ComponentAddition, ComponentHandle, RejectedAddition};
 pub use configuration::{CapturedComponentConfiguration, GraphConfigurationSnapshot};
+pub use identity::ComponentConflict;
 mod consumer_progress;
 mod input_progress;
 mod recovery;
@@ -53,11 +55,11 @@ pub use topology::*;
 use super::{
     data::{validate_identifier, validate_schema},
     validate_connection, validate_sink_completion, ComponentDescriptor, ComponentGeneration,
-    ComponentId, ContractError, Delivery, EnvelopeReceiver, EnvelopeSender, EnvelopeSink,
-    EnvelopeSource, GraphRevision, InputEnvelope, InputMergePolicy, LifecyclePolicy, ObservedGraph,
-    OutputEnvelope, OutputProgress, PipeCapabilities, PipeCapability, PipeControl, PipeError,
-    PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy,
-    ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
+    ComponentId, ComponentName, ContractError, Delivery, EnvelopeReceiver, EnvelopeSender,
+    EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, InputMergePolicy, LifecyclePolicy,
+    ObservedGraph, OutputEnvelope, OutputProgress, PipeCapabilities, PipeCapability, PipeControl,
+    PipeError, PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId,
+    RelationshipPolicy, ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
 };
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
@@ -86,6 +88,14 @@ pub enum GraphError {
         cause: Box<GraphError>,
         addition: Arc<addition::RejectedAddition>,
     },
+    #[error("component UUID already belongs to {existing}")]
+    DuplicateComponentId { existing: Box<ComponentConflict> },
+    #[error("component name already belongs to {existing}")]
+    DuplicateComponentName { existing: Box<ComponentConflict> },
+    #[error("externally assigned component UUID {component} is not permitted; create the component through DrasiLib or enable allowExternalComponentIds when constructing the instance")]
+    ExternalComponentId { component: ComponentId },
+    #[error("resolving graph-owned component references failed: {source}")]
+    ReferenceResolution { source: anyhow::Error },
     #[error("invalid graph topology: {reason}")]
     Topology { reason: String },
     #[error("cannot start graph in state {state:?}")]
@@ -184,6 +194,12 @@ pub enum GraphError {
         primary: Option<Box<GraphError>>,
         errors: Vec<GraphError>,
     },
+}
+
+impl From<drasi_core_types::ComponentIdentityError> for GraphError {
+    fn from(error: drasi_core_types::ComponentIdentityError) -> Self {
+        Self::Contract(error.into())
+    }
 }
 
 fn validate_role(
@@ -374,6 +390,8 @@ impl EdgeDefinition {
 /// Descriptive data only: no providers, resolved secrets, or live endpoints.
 #[derive(Debug, Clone)]
 pub struct NodeSnapshot {
+    /// Mutable graph metadata, independent of the plugin's execution descriptor.
+    pub name: ComponentName,
     pub descriptor: ComponentDescriptor,
     pub role: ComponentRole,
     pub completion: Option<SinkCompletion>,
@@ -400,7 +418,7 @@ pub struct GraphSnapshot {
     pub recovery_requirements: Vec<super::RecoveryRequirement>,
     pub lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
     pub specifications: BTreeMap<ComponentId, ComponentSpecification>,
-    pub external_bindings: BTreeMap<ComponentId, Arc<str>>,
+    pub external_bindings: BTreeMap<ComponentId, BindingToken>,
     pub resources: BTreeMap<ResourceId, ResourceSpecification>,
     /// Host-supplied construction recipes. These are privileged configuration,
     /// not properties inferred from arbitrary provider objects.
@@ -460,6 +478,56 @@ enum Component {
 }
 
 impl Component {
+    fn is_constructed(&self) -> bool {
+        !matches!(self, Self::Deferred { .. } | Self::Unresolved(_))
+    }
+
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.initialize().await,
+            Self::Transformer(component) => component.initialize().await,
+            Self::Sink(component) => component.initialize().await,
+            Self::Service(component) => component.initialize().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                anyhow::bail!("component has not been constructed")
+            }
+        }
+    }
+
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.dispose().await,
+            Self::Transformer(component) => component.dispose().await,
+            Self::Sink(component) => component.dispose().await,
+            Self::Service(component) => component.dispose().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => Ok(()),
+        }
+    }
+
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.pause_processing().await,
+            Self::Transformer(component) => component.pause_processing().await,
+            Self::Sink(component) => component.pause_processing().await,
+            Self::Service(component) => component.pause_processing().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                anyhow::bail!("component has not been constructed")
+            }
+        }
+    }
+
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.resume_processing().await,
+            Self::Transformer(component) => component.resume_processing().await,
+            Self::Sink(component) => component.resume_processing().await,
+            Self::Service(component) => component.resume_processing().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                anyhow::bail!("component has not been constructed")
+            }
+        }
+    }
+
     fn recovery_contract(&self) -> super::ComponentRecovery {
         match self {
             Self::Source(component) => {
@@ -595,24 +663,24 @@ impl Component {
         }
     }
 
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         match self {
-            Self::Source(component) => component.deprovision().await,
-            Self::Transformer(component) => component.deprovision().await,
-            Self::Sink(component) => component.deprovision().await,
-            Self::Service(component) => component.deprovision().await,
+            Self::Source(component) => component.delete_owned_resources().await,
+            Self::Transformer(component) => component.delete_owned_resources().await,
+            Self::Sink(component) => component.delete_owned_resources().await,
+            Self::Service(component) => component.delete_owned_resources().await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 anyhow::bail!("component has not been constructed")
             }
         }
     }
 
-    async fn reconfigure(&mut self, context: ConstructionContext) -> anyhow::Result<()> {
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
         match self {
-            Self::Source(component) => component.reconfigure(context).await,
-            Self::Transformer(component) => component.reconfigure(context).await,
-            Self::Sink(component) => component.reconfigure(context).await,
-            Self::Service(component) => component.reconfigure(context).await,
+            Self::Source(component) => component.apply_update(context).await,
+            Self::Transformer(component) => component.apply_update(context).await,
+            Self::Sink(component) => component.apply_update(context).await,
+            Self::Service(component) => component.apply_update(context).await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 Err(anyhow::anyhow!("component has not been constructed"))
             }
@@ -663,7 +731,7 @@ impl Component {
 
 /// Entire topology is validated by `build` before any provider creation or start.
 ///
-/// Policy: DAG; unique component IDs within this graph, port IDs within each
+/// Policy: DAG; unique component IDs and names within this graph, port IDs within each
 /// component, edges and output stream IDs within the graph. Unconnected ports
 /// and required reconstructible connections to undeclared components wait for
 /// their bindings. Outputs require a stream before connection. Sources have
@@ -673,7 +741,7 @@ impl Component {
 /// independent queues would not preserve component-wide FIFO for that stream.
 pub struct ComputationGraphBuilder {
     id: Arc<str>,
-    components: Vec<Component>,
+    components: Vec<(ComponentName, Component)>,
     edges: Vec<(EdgeDefinition, Box<dyn PipeProvider>)>,
     streams: Vec<(Endpoint, StreamId)>,
     requirements: PipeRequirements,
@@ -718,13 +786,17 @@ impl ComputationGraphBuilder {
 
     pub fn component(
         mut self,
+        name: ComponentName,
         specification: ComponentSpecification,
         factory: Arc<dyn ComponentFactory>,
     ) -> Self {
-        self.components.push(Component::Deferred {
-            specification: Arc::new(specification),
-            factory,
-        });
+        self.components.push((
+            name,
+            Component::Deferred {
+                specification: Arc::new(specification),
+                factory,
+            },
+        ));
         self
     }
 
@@ -800,23 +872,28 @@ impl ComputationGraphBuilder {
         Ok(self)
     }
 
-    pub fn source(mut self, source: Box<dyn EnvelopeSource>) -> Self {
-        self.components.push(Component::Source(source));
+    pub fn source(mut self, name: ComponentName, source: Box<dyn EnvelopeSource>) -> Self {
+        self.components.push((name, Component::Source(source)));
         self
     }
 
-    pub fn transformer(mut self, transformer: Box<dyn Transformer>) -> Self {
-        self.components.push(Component::Transformer(transformer));
+    pub fn transformer(mut self, name: ComponentName, transformer: Box<dyn Transformer>) -> Self {
+        self.components
+            .push((name, Component::Transformer(transformer)));
         self
     }
 
-    pub fn sink(mut self, sink: Box<dyn EnvelopeSink>) -> Self {
-        self.components.push(Component::Sink(sink));
+    pub fn sink(mut self, name: ComponentName, sink: Box<dyn EnvelopeSink>) -> Self {
+        self.components.push((name, Component::Sink(sink)));
         self
     }
 
-    pub fn service(mut self, service: Box<dyn super::ComputationService>) -> Self {
-        self.components.push(Component::Service(service));
+    pub fn service(
+        mut self,
+        name: ComponentName,
+        service: Box<dyn super::ComputationService>,
+    ) -> Self {
+        self.components.push((name, Component::Service(service)));
         self
     }
     pub(crate) fn unbound(mut self, relationship: DesiredRelationship) -> Self {
@@ -941,6 +1018,7 @@ impl ComputationGraphBuilder {
             ));
         }
         let mut ids = BTreeMap::new();
+        let mut names = BTreeMap::new();
         let mut nodes = Vec::new();
         let mut transitive_sources = Vec::new();
         for (id, handle) in &self.resource_handles {
@@ -952,7 +1030,34 @@ impl ComputationGraphBuilder {
                 return Err(topology(format!("resource {id} has an incompatible role")));
             }
         }
-        for (index, component) in self.components.iter().enumerate() {
+        for (index, (name, component)) in self.components.iter().enumerate() {
+            let descriptor = component.descriptor();
+            let conflict = |prior: usize| {
+                let (name, component) = &self.components[prior];
+                ComponentConflict::new(
+                    component.descriptor(),
+                    name,
+                    component.role(),
+                    match component {
+                        Component::Deferred { specification, .. } => Some(specification),
+                        Component::Unresolved(definition) => match &definition.construction {
+                            ComponentConstruction::Factory(specification) => Some(specification),
+                            ComponentConstruction::External { .. } => None,
+                        },
+                        _ => None,
+                    },
+                )
+            };
+            if let Some(prior) = ids.insert(descriptor.id().clone(), index) {
+                return Err(GraphError::DuplicateComponentId {
+                    existing: Box::new(conflict(prior)),
+                });
+            }
+            if let Some(prior) = names.insert(name.clone(), index) {
+                return Err(GraphError::DuplicateComponentName {
+                    existing: Box::new(conflict(prior)),
+                });
+            }
             let downstream: Vec<_> = self
                 .edges
                 .iter()
@@ -986,16 +1091,13 @@ impl ComputationGraphBuilder {
                     &self.resource_handles,
                 )?;
             }
-            let descriptor = component.descriptor();
-            if ids.insert(descriptor.id().clone(), index).is_some() {
-                return Err(topology(format!("duplicate component {}", descriptor.id())));
-            }
             validate_role(descriptor, component.role(), component.completion())?;
             component
                 .output_readers()
                 .validate(descriptor)
                 .map_err(|error| topology(error.to_string()))?;
             nodes.push(NodeSnapshot {
+                name: name.clone(),
                 descriptor: descriptor.clone(),
                 role: component.role(),
                 completion: component.completion(),
@@ -1177,7 +1279,7 @@ impl ComputationGraphBuilder {
             let pipe = provider
                 .specification()
                 .unwrap_or_else(|| DesiredPipe::External {
-                    binding: format!("pipe:{edge_index}"),
+                    binding: BindingToken::generate(),
                     capabilities: capabilities.supported().iter().copied().collect(),
                     capacity: capabilities.capacity().map(std::num::NonZeroUsize::get),
                     resources: resources.clone(),
@@ -1242,7 +1344,7 @@ impl ComputationGraphBuilder {
             specifications: self
                 .components
                 .iter()
-                .filter_map(|component| match component {
+                .filter_map(|(_, component)| match component {
                     Component::Deferred { specification, .. } => Some((
                         specification.descriptor.id().clone(),
                         specification.as_ref().clone(),
@@ -1259,7 +1361,7 @@ impl ComputationGraphBuilder {
             external_bindings: self
                 .components
                 .iter()
-                .filter_map(|component| {
+                .filter_map(|(_, component)| {
                     if matches!(component, Component::Deferred { .. })
                         || matches!(component, Component::Unresolved(definition)
                             if matches!(definition.construction, ComponentConstruction::Factory(_)))
@@ -1268,7 +1370,7 @@ impl ComputationGraphBuilder {
                     } else {
                         Some((
                             component.descriptor().id().clone(),
-                            Arc::from(component.descriptor().id().as_str()),
+                            BindingToken::generate(),
                         ))
                     }
                 })
@@ -1283,7 +1385,7 @@ impl ComputationGraphBuilder {
             component_resources: BTreeMap::new(),
             component_plugins: BTreeMap::new(),
         };
-        for (component, node) in self.components.iter().zip(&nodes) {
+        for ((_, component), node) in self.components.iter().zip(&nodes) {
             if let Some(admission) = component.recovery_contract().source_admission {
                 validate_admission(&admission, node, &snapshot, &self.resource_handles, None)?;
             }
@@ -1292,7 +1394,7 @@ impl ComputationGraphBuilder {
         let factories = self
             .components
             .iter()
-            .filter_map(|component| {
+            .filter_map(|(_, component)| {
                 if let Component::Deferred {
                     specification,
                     factory,
@@ -1309,7 +1411,7 @@ impl ComputationGraphBuilder {
             .components
             .into_iter()
             .enumerate()
-            .map(|(index, component)| {
+            .map(|(index, (_, component))| {
                 controller::InstanceSlot::new(
                     component,
                     ComponentGeneration(index as u64 + 1),
@@ -1380,7 +1482,6 @@ impl ComputationGraphBuilder {
                 .collect(),
             order,
             ids,
-            reserved_components: BTreeSet::new(),
             state: watch::channel(GraphState::Ready).0,
             cleanup_timeout: self.cleanup_timeout,
             activation_timeout: self.activation_timeout,
@@ -1396,12 +1497,14 @@ impl ComputationGraphBuilder {
             rejected_additions: Arc::new(std::sync::Mutex::new(Vec::new())),
             rejected_resources: Vec::new(),
             pending_metadata: BTreeMap::new(),
+            pending_exclusive_commands: std::collections::VecDeque::new(),
             protected_components: BTreeSet::new(),
             protected_resources: BTreeSet::new(),
             deferred_activation: im::OrdSet::new(),
             reported_resources: BTreeMap::new(),
             observation_resources: BTreeSet::new(),
             management_protected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            allow_external_component_ids: true,
             retirement: None,
             tasks: Arc::default(),
         };
@@ -1503,9 +1606,61 @@ pub struct GraphControl {
     rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
     management_protected: Arc<std::sync::atomic::AtomicBool>,
     management_access: bool,
+    allow_external_component_ids: bool,
+    dependency_refresh:
+        Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, GraphResult<()>> + Send + Sync>>,
+    name_editor: Option<
+        Arc<
+            dyn Fn(
+                    ComponentId,
+                    ComponentGeneration,
+                    ComponentName,
+                ) -> futures::future::BoxFuture<'static, GraphResult<()>>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl GraphControl {
+    pub(crate) fn with_name_editor(
+        mut self,
+        edit: impl Fn(
+                ComponentId,
+                ComponentGeneration,
+                ComponentName,
+            ) -> futures::future::BoxFuture<'static, GraphResult<()>>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.name_editor = Some(Arc::new(edit));
+        self
+    }
+
+    pub(crate) fn with_dependency_refresh(
+        mut self,
+        refresh: impl Fn() -> futures::future::BoxFuture<'static, GraphResult<()>>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.dependency_refresh = Some(Arc::new(refresh));
+        self
+    }
+
+    pub(super) async fn refresh_dependencies(&self) -> GraphResult<()> {
+        if let Some(refresh) = &self.dependency_refresh {
+            refresh().await?;
+        }
+        Ok(())
+    }
+
+    /// The immutable identity-admission policy selected by the graph's owner.
+    pub fn allows_external_component_ids(&self) -> bool {
+        self.allow_external_component_ids
+    }
+
     pub(crate) fn output_catalogue(&self) -> super::OutputCatalogue {
         super::OutputCatalogue::from_publications(self.registry.clone(), self.state.clone())
     }
@@ -1585,7 +1740,6 @@ pub struct ComputationGraph {
     next_resource_generation: u64,
     order: Vec<usize>,
     ids: BTreeMap<ComponentId, usize>,
-    reserved_components: BTreeSet<Arc<str>>,
     observed: watch::Sender<Arc<ObservedGraph>>,
     desired: watch::Sender<Arc<GraphSnapshot>>,
     state: watch::Sender<GraphState>,
@@ -1605,6 +1759,7 @@ pub struct ComputationGraph {
     rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
     rejected_resources: Vec<Arc<addition::RejectedResources>>,
     pending_metadata: BTreeMap<(ComponentId, bool), controller::Command>,
+    pending_exclusive_commands: std::collections::VecDeque<controller::Command>,
     deferred_activation: im::OrdSet<ComponentId>,
     metadata_changes: registry::MetadataChanges,
     protected_components: BTreeSet<ComponentId>,
@@ -1613,11 +1768,16 @@ pub struct ComputationGraph {
     // Declaration origin is independent of the provider's cleanup ownership or name.
     observation_resources: BTreeSet<ResourceId>,
     management_protected: Arc<std::sync::atomic::AtomicBool>,
+    allow_external_component_ids: bool,
     retirement: Option<Arc<retirement::RetirementState>>,
     tasks: Arc<controller::ExecutionTasks>,
 }
 
 impl ComputationGraph {
+    pub(crate) fn set_component_identity_policy(&mut self, allow_external: bool) {
+        self.allow_external_component_ids = allow_external;
+    }
+
     pub(crate) fn into_component_batch(self) -> GraphResult<super::ComponentBatch> {
         assert_eq!(
             self.state(),
@@ -1640,7 +1800,7 @@ impl ComputationGraph {
                 Component::Deferred { .. } | Component::Unresolved(_)
             ) {
                 bindings.components.insert(
-                    component.descriptor().id().as_str().to_owned(),
+                    self.snapshot.external_bindings[component.descriptor().id()].clone(),
                     ConstructedComponent(component),
                 );
             }
@@ -1658,10 +1818,6 @@ impl ComputationGraph {
 }
 
 impl ComputationGraph {
-    pub(crate) fn reserve_component_id(&mut self, id: &str) {
-        self.reserved_components.insert(Arc::from(id));
-    }
-
     pub(crate) fn set_execution_scope(&mut self, scope: Arc<str>) {
         self.execution_scope = scope;
     }
@@ -1938,6 +2094,8 @@ impl ComputationGraph {
     /// Finite, successful work completes naturally. Component failures remain in
     /// observations with live inspection/control, even if no runnable work remains;
     /// use the control handle to repair, stop, or explicitly cancel the scope.
+    /// Successful completion stops components but retains their initialized
+    /// objects for another run with fresh pipes. Call `dispose()` after the last run.
     ///
     /// ```compile_fail
     /// # use drasi_lib::computation::v1::ComputationGraph;
@@ -1992,6 +2150,9 @@ impl ComputationGraph {
             rejected_additions: self.rejected_additions.clone(),
             management_protected: self.management_protected.clone(),
             management_access: false,
+            allow_external_component_ids: self.allow_external_component_ids,
+            dependency_refresh: None,
+            name_editor: None,
         };
         let state = self.state.clone();
         let observed = self.observed.clone();
@@ -2033,7 +2194,11 @@ impl ComputationGraph {
         }
         self.state.send_replace(GraphState::CleanupRequired);
         let errors = deadline
-            .wait("stopping graph components", true, controller::cleanup(self))
+            .wait(
+                "stopping graph components",
+                true,
+                controller::cleanup(self, true),
+            )
             .await?;
         if errors.is_empty() {
             self.state.send_replace(GraphState::Cancelled);
@@ -2139,7 +2304,11 @@ impl ComputationGraph {
             self.shutdown_timeout,
         )?;
         let mut errors = match deadline
-            .wait("stopping graph components", true, controller::cleanup(self))
+            .wait(
+                "stopping graph components",
+                true,
+                controller::cleanup(self, result.is_err()),
+            )
             .await
         {
             Ok(errors) => errors,
@@ -2855,10 +3024,7 @@ async fn run_node(
             _ = cancelled(quiesce) => {}
             result = service.run() => return result.map_err(|error| component_error(node, "run service", error)),
         }
-        return service
-            .quiesce()
-            .await
-            .map_err(|error| component_error(node, "quiesce service", error));
+        return Ok(());
     }
     let wakeup = match &*component {
         Component::Transformer(transformer) => transformer.wakeup_source(),

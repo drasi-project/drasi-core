@@ -116,7 +116,7 @@ fn decoder(anchor: Option<Position>) -> Binlog {
     let mut config = super::super::tests::config(3306, MySqlOutput::Transactions);
     config.replay = Some(MySqlRetention::Server);
     let mut decoder = Binlog::new(Start {
-        source: ComponentId::try_new("source").unwrap(),
+        source: ComponentId::try_new("e6bef3f5-c4d7-557e-9b72-79a4d98dcaf8").unwrap(),
         stream: StreamId::try_new("changes").unwrap(),
         config,
         binding: [1; 32],

@@ -171,7 +171,7 @@ async fn bootstrap_coordination_releases_transferred_owner_exactly_once_on_rejec
     };
     let make = |table| {
         plugin.factories()[0].create_source_bootstrap(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("b46e36f4-fe0f-515c-83a2-9da878eb53a6")?,
             json!({"table":table}),
             scope(0),
             NativeSourceBootstrapProgress::Single(owner("query")),

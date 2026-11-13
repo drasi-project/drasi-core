@@ -45,6 +45,7 @@ mod output_scope;
 mod plugin;
 pub mod result_index;
 pub(crate) mod session_state;
+mod storage_format;
 mod storage_models;
 
 #[cfg(feature = "computation")]

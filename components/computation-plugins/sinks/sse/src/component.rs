@@ -82,7 +82,7 @@ impl SseSinkConfig {
             ConfigDefinition, ConfigOption as Field, ConfigType::*,
         };
         ConfigDefinition::try_new([
-            Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming graph edge is accepted whether or not it is aliased; the graph supplies the producing component, output port and stream. An unaliased output is named after its producing component. The alias names the output in routes and snapshot URLs."),
+            Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming graph edge is accepted whether or not it is aliased; the graph supplies the producing component, output port and stream. An unaliased output is named after its producing component. The alias names the output in routes and snapshot URLs.").constraint(drasi_computation_contracts::ConfigurationConstraint::output_aliases()),
             Field::new("host", String, false, "IP address on which to listen.").default(host()),
             Field::new("port", Integer, false, "TCP port; zero requests an available local port.").default(port()).minimum(0).maximum(u16::MAX as u64),
             Field::new("ssePath", String, false, "Absolute event-stream path without query, fragment or control characters; /snapshot and its descendants are reserved.").default(path()),
@@ -645,14 +645,19 @@ mod tests {
     use super::*;
     use futures_util::{FutureExt, StreamExt};
 
+    const OUTPUT_COMPONENT_ID: &str = "76b8e87b-4275-567c-a37f-d48582112ba1";
+
     fn q_outputs() -> Value {
-        json!({"q": {"component": "q", "port": "out"}})
+        json!({"q": {"component": OUTPUT_COMPONENT_ID, "port": "out"}})
     }
 
     fn q_inputs() -> Result<Vec<InputBinding>> {
         Ok(vec![InputBinding {
             input_port: PortId::try_new("in")?,
-            output: OutputEndpoint::new(ComponentId::try_new("q")?, PortId::try_new("out")?),
+            output: OutputEndpoint::new(
+                ComponentId::try_new(OUTPUT_COMPONENT_ID)?,
+                PortId::try_new("out")?,
+            ),
             stream: StreamId::try_new("q/out")?,
         }])
     }
@@ -662,9 +667,9 @@ mod tests {
             "outputs": q_outputs(), "host": "127.0.0.1", "port": 0,
         }))?;
         Ok(SseSink {
-            descriptor: SseFactory
-                .metadata()
-                .descriptor(ComponentId::try_new("ui")?)?,
+            descriptor: SseFactory.metadata().descriptor(ComponentId::try_new(
+                "268e23f4-4a61-59ee-8d8f-0ab7a4b9f5c1",
+            )?)?,
             outputs: SinkOutputs::from_inputs(&q_inputs()?, &config.outputs)?,
             renderer: config.renderer(),
             snapshots: None,
@@ -676,10 +681,10 @@ mod tests {
     #[test]
     fn configuration_rejects_invalid_and_unsupported_options() {
         for value in [
-            json!({"outputs": {"bad id": {"component": "q"}}}),
+            json!({"outputs": {"bad id": {"component": OUTPUT_COMPONENT_ID}}}),
             json!({"queryStreams": {"q": "q/out"}}),
             json!({"producers": {"q": "q/out"}}),
-            json!({"outputs": {"q": {"component": "q", "stream": "q/out"}}}),
+            json!({"outputs": {"q": {"component": OUTPUT_COMPONENT_ID, "stream": "q/out"}}}),
             json!({"outputs": q_outputs(), "heartbeatIntervalMs": 0}),
             json!({"outputs": q_outputs(), "broadcastCapacity": 0}),
             json!({"outputs": q_outputs(), "ssePath": "events"}),
@@ -692,10 +697,11 @@ mod tests {
 
     #[test]
     fn routes_must_name_an_incoming_output() -> Result<()> {
-        let config = SseSinkConfig::parse(json!({"routes": {"missing": {}}}))?;
+        let config =
+            SseSinkConfig::parse(json!({"outputs": q_outputs(), "routes": {"missing": {}}}))?;
         let outputs = SinkOutputs::from_inputs(&q_inputs()?, &config.outputs)?;
         assert!(config.validate_outputs(&outputs).is_err());
-        let config = SseSinkConfig::parse(json!({"routes": {"q": {}}}))?;
+        let config = SseSinkConfig::parse(json!({"outputs": q_outputs(), "routes": {"q": {}}}))?;
         let outputs = SinkOutputs::from_inputs(&q_inputs()?, &config.outputs)?;
         config.validate_outputs(&outputs)?;
         assert_eq!(outputs.aliases().collect::<Vec<_>>(), ["q"]);

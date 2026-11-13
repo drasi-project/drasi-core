@@ -29,6 +29,7 @@ workspace = true
 
 [dependencies]
 drasi-core.workspace = true
+drasi-core-types.workspace = true
 drasi-query-ast.workspace = true
 rocksdb = { version = "0.22.0", features = ["default", "multi-threaded-cf"] }
 async-trait = "0.1.68"

@@ -4,6 +4,7 @@
 //! Host-owned index sessions for opted-in native transformers.
 
 use anyhow::Context;
+use drasi_core_types::{CheckpointKey, ComponentId, OutputPartition};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::HashMap,
@@ -53,7 +54,7 @@ const MAX_OPERATIONS: usize = 16;
 type Opening = Pin<Box<dyn Future<Output = Result<ComputationIndexes, IndexError>> + Send>>;
 
 struct CleanupAttempt {
-    component: String,
+    component: ComponentId,
     finished: bool,
 }
 impl Drop for CleanupAttempt {
@@ -127,7 +128,7 @@ struct Live {
     quiesced: bool,
 }
 struct State {
-    component: String,
+    component: ComponentId,
     progress: Option<Arc<progress::Progress>>,
     output: Option<Arc<output::Output>>,
     scheduling: Option<Arc<scheduling::Scheduling>>,
@@ -167,18 +168,19 @@ pub(super) struct ProcessingBinding {
     state: Arc<State>,
     provider: Arc<dyn ComputationIndexProvider>,
     graph: String,
-    component: String,
+    component: ComponentId,
     opening: Mutex<Option<Opening>>,
     runtime: Option<Handle>,
     volatile_processing: bool,
     non_atomic_publication: bool,
+    replacement: bool,
 }
 
 impl ProcessingBinding {
     pub(super) fn new(
         provider: Arc<dyn ComputationIndexProvider>,
         graph: String,
-        component: String,
+        component: ComponentId,
     ) -> Self {
         Self {
             state: Arc::new(State {
@@ -204,11 +206,17 @@ impl ProcessingBinding {
             runtime: None,
             volatile_processing: false,
             non_atomic_publication: false,
+            replacement: false,
         }
     }
 
     pub(super) fn with_volatile_processing(mut self, supported: bool) -> Self {
         self.volatile_processing = supported && self.provider.is_volatile();
+        self
+    }
+
+    pub(super) fn with_replacement(mut self, replacement: bool) -> Self {
+        self.replacement = replacement;
         self
     }
 
@@ -271,11 +279,12 @@ impl ProcessingBinding {
                 .ok_or_else(|| anyhow::anyhow!("processing progress must bind before export"))?
                 .progress = Some(Arc::new(progress::Progress::with_reader(
                 self.graph.clone(),
-                drasi_computation_contracts::ComponentId::try_new(self.component.as_str())?,
+                self.component.clone(),
                 port,
                 owner,
                 self.volatile_processing,
                 self.non_atomic_publication,
+                self.replacement,
             )?));
         }
         Ok(self)
@@ -403,6 +412,14 @@ impl ProcessingBinding {
         self.state.progress_call()
     }
 
+    pub(super) fn cleanup_call(&self) -> anyhow::Result<Option<progress::Call>> {
+        self.state
+            .progress
+            .as_ref()
+            .map(|progress| progress.cleanup_call())
+            .transpose()
+    }
+
     pub(super) async fn bind_outputs(
         &mut self,
         bindings: &drasi_lib::computation::v1::OutputBindings,
@@ -511,6 +528,13 @@ impl ProcessingBinding {
             progress.suspend()?;
         }
         Ok(())
+    }
+
+    fn fence_progress(&self) -> anyhow::Result<()> {
+        if let Some(progress) = &self.state.progress {
+            progress.fail()?;
+        }
+        self.suspend_progress()
     }
 
     pub(super) fn table(&self) -> ProcessingV1 {
@@ -644,6 +668,7 @@ impl ProcessingBinding {
     }
 
     pub(super) async fn close(&mut self) -> anyhow::Result<()> {
+        let cleanup_call = self.cleanup_call()?;
         self.suspend_progress()?;
         let owner = {
             let mut live = self
@@ -706,6 +731,9 @@ impl ProcessingBinding {
                     .as_ref()
                     .expect("volatile processing progress")
                     .reset_after_quiesce(&owner)?;
+                if let Some(call) = cleanup_call {
+                    call.complete();
+                }
                 return Ok(());
             }
             owner.shutdown().await?;
@@ -719,6 +747,9 @@ impl ProcessingBinding {
             progress.discard_volatile_state().await?;
             progress.reset()?;
         }
+        if let Some(call) = cleanup_call {
+            call.complete();
+        }
         Ok(())
     }
 }
@@ -731,10 +762,10 @@ impl Drop for ProcessingBinding {
                 .progress
                 .as_ref()
                 .map_or(Ok(()), |progress| progress.retire_closed()),
-            Ok(true) => self.suspend_progress(),
+            Ok(true) => self.fence_progress(),
             Err(error) => {
                 log::error!("native processing cleanup state unavailable: {error:#}");
-                self.suspend_progress()
+                self.fence_progress()
             }
         };
         if let Err(error) = retirement {
@@ -1028,7 +1059,7 @@ impl drasi_core::computation::TransactionGroupMutation for Publication {
 async fn drive(
     owner: &Arc<ComputationTransaction>,
     work: &Work,
-    component: &str,
+    component: &ComponentId,
     progress: Option<&Arc<progress::Progress>>,
     output: Option<&Arc<output::Output>>,
     scheduling: Option<&Arc<scheduling::Scheduling>>,
@@ -1106,7 +1137,7 @@ async fn drive(
 async fn drive_inner(
     owner: &ComputationTransaction,
     work: &Work,
-    component: &str,
+    component: &ComponentId,
     progress: Option<&progress::Draft>,
     output: Option<&output::Draft>,
     scheduling: Option<&scheduling::Draft>,
@@ -1220,7 +1251,7 @@ fn processing_failure(error: ComputationQueryError) -> Failure {
 }
 
 struct IndexRequests<'a> {
-    component: &'a str,
+    component: &'a ComponentId,
     resources: &'a ComputationIndexes,
     configured_joins: AtomicBool,
     streams: tokio::sync::Mutex<SlotStreams>,
@@ -1465,7 +1496,7 @@ impl RequestHandler for IndexRequests<'_> {
                 wire::decode::<()>(input)?;
                 let value = self
                     .checkpoint_store()?
-                    .read_checkpoint(progress::RESET_GENERATION)
+                    .read_checkpoint(&CheckpointKey::Metadata(progress::RESET_GENERATION.into()))
                     .await?;
                 if let Some(value) = &value {
                     anyhow::ensure!(
@@ -1635,7 +1666,7 @@ impl RequestHandler for IndexRequests<'_> {
                 let key: String = wire::decode(input)?;
                 let checkpoint = self
                     .checkpoint_store()?
-                    .read_checkpoint(&key)
+                    .read_checkpoint(&CheckpointKey::Metadata(key))
                     .await
                     .map_err(|error| index_error_to_failure(&error))?;
                 wire::encode(&checkpoint.map(|value| {
@@ -1656,7 +1687,7 @@ impl RequestHandler for IndexRequests<'_> {
                 );
                 let position = position.map(bytes::Bytes::from);
                 self.checkpoint_store()?
-                    .stage_checkpoint(&key, sequence, position.as_ref())
+                    .stage_checkpoint(&CheckpointKey::Metadata(key), sequence, position.as_ref())
                     .await
                     .map_err(|error| index_error_to_failure(&error))?;
                 wire::encode(&())
@@ -1666,7 +1697,7 @@ impl RequestHandler for IndexRequests<'_> {
                 wire::encode(
                     &self
                         .checkpoint_store()?
-                        .read_result_sequence(self.component)
+                        .read_result_sequence(&OutputPartition::Component(self.component.clone()))
                         .await
                         .map_err(|error| index_error_to_failure(&error))?,
                 )
@@ -1679,7 +1710,10 @@ impl RequestHandler for IndexRequests<'_> {
                         .await?;
                 }
                 self.checkpoint_store()?
-                    .stage_result_sequence(self.component, sequence)
+                    .stage_result_sequence(
+                        &OutputPartition::Component(self.component.clone()),
+                        sequence,
+                    )
                     .await
                     .map_err(|error| index_error_to_failure(&error))?;
                 wire::encode(&())
@@ -1695,7 +1729,11 @@ impl RequestHandler for IndexRequests<'_> {
                     .resources
                     .outbox_writer()
                     .expect("validated atomic outbox")
-                    .read_page(self.component, after, limits)
+                    .read_page(
+                        &OutputPartition::Component(self.component.clone()),
+                        after,
+                        limits,
+                    )
                     .await
                     .map_err(|error| index_error_to_failure(&error))?;
                 limits
@@ -1717,7 +1755,12 @@ impl RequestHandler for IndexRequests<'_> {
                     .resources
                     .outbox_writer()
                     .expect("validated atomic outbox")
-                    .append_and_trim(self.component, sequence, &data, retain_from)
+                    .append_and_trim(
+                        &OutputPartition::Component(self.component.clone()),
+                        sequence,
+                        &data,
+                        retain_from,
+                    )
                     .await
                     .map_err(|error| index_error_to_failure(&error))?;
                 if let (Some(output), Some(envelope)) = (self.output, envelope) {

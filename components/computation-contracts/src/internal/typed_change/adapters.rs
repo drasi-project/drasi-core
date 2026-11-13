@@ -28,6 +28,7 @@ use crate::{
     exchange::{QueryResult, ResultDiff, SourceEvent, SourceEventParts, SourceEventWrapper},
     graph_codec::result_change::{result_changes, ResultChange},
     profiling::ProfilingMetadata,
+    ComponentId, QueryInputOrigin,
 };
 
 use super::{
@@ -67,8 +68,8 @@ pub(crate) enum ChangeAdapterError {
 
 #[derive(Debug, Clone)]
 pub(crate) struct QueryEnvelopeMetadata {
-    query_id: Arc<str>,
-    source_id: Option<Arc<str>>,
+    query_id: ComponentId,
+    input_origin: Option<QueryInputOrigin>,
     sequence: u64,
     timestamp: DateTime<Utc>,
     metadata: HashMap<String, serde_json::Value>,
@@ -79,16 +80,16 @@ pub(crate) struct QueryEnvelopeMetadata {
 impl QueryEnvelopeMetadata {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        query_id: impl Into<Arc<str>>,
-        source_id: Option<Arc<str>>,
+        query_id: ComponentId,
+        input_origin: Option<QueryInputOrigin>,
         sequence: u64,
         timestamp: DateTime<Utc>,
         metadata: HashMap<String, serde_json::Value>,
         profiling: Option<ProfilingMetadata>,
     ) -> Self {
         Self {
-            query_id: query_id.into(),
-            source_id,
+            query_id,
+            input_origin,
             sequence,
             timestamp,
             metadata,
@@ -113,7 +114,7 @@ pub(crate) fn source_event_to_envelope(
     };
 
     source_change_to_envelope(
-        Arc::from(wrapper.source_id.as_str()),
+        wrapper.source_id.clone(),
         change.clone(),
         wrapper.timestamp,
         wrapper.profiling.clone(),
@@ -140,7 +141,7 @@ pub(crate) fn source_event_parts_to_envelope(
     };
 
     source_change_to_envelope(
-        Arc::from(source_id),
+        source_id,
         change,
         timestamp,
         profiling,
@@ -152,7 +153,7 @@ pub(crate) fn source_event_parts_to_envelope(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn source_change_to_envelope(
-    source_id: Arc<str>,
+    source_id: ComponentId,
     change: SourceChange,
     timestamp: DateTime<Utc>,
     profiling: Option<ProfilingMetadata>,
@@ -225,7 +226,7 @@ pub(crate) fn source_change_to_envelope(
     };
 
     let mut identity = StableIdBuilder::new("drasi.internal.graph-change-set/v1");
-    identity.string("source-id", &source_id);
+    identity.string("source-id", source_id.as_str());
     identity.optional_u64("sequence", sequence);
     identity.optional_bytes(
         "source-position",
@@ -240,7 +241,7 @@ pub(crate) fn source_change_to_envelope(
         deleted,
     )?;
     let system = SystemMetadata::new(
-        Some(source_id),
+        Some(QueryInputOrigin::Source(source_id)),
         None,
         sequence,
         source_position,
@@ -263,7 +264,7 @@ pub(crate) fn source_event_from_envelope(
         .ok_or(ChangeAdapterError::InvalidGraphEnvelope)?;
 
     Ok(SourceEventWrapper {
-        source_id: source_id.to_string(),
+        source_id: source_id.clone(),
         event: SourceEvent::Change(change),
         timestamp: system.timestamp(),
         profiling: system.profiling().cloned(),
@@ -446,7 +447,7 @@ pub(crate) fn query_evaluation_to_envelope(
     let mut updated = Vec::new();
     let mut deleted = Vec::new();
     let mut identity = StableIdBuilder::new("drasi.internal.query-change-set/v2");
-    identity.string("query-id", &metadata.query_id);
+    identity.string("query-id", metadata.query_id.as_str());
     identity.u64("sequence", metadata.sequence);
     identity.u64(
         "schema-fingerprint",
@@ -553,7 +554,7 @@ pub(crate) fn query_evaluation_to_envelope(
         deleted,
     )?;
     let system = SystemMetadata::new(
-        metadata.source_id,
+        metadata.input_origin,
         Some(metadata.query_id),
         Some(metadata.sequence),
         None,
@@ -689,7 +690,9 @@ pub(crate) fn query_result_from_envelope(
         .ok_or(ChangeAdapterError::MissingQuerySequence)?;
 
     Ok(QueryResult {
-        query_id: query_id.to_string(),
+        query_id: query_id.clone(),
+        query_name: None,
+        input_alias: None,
         sequence,
         timestamp: system.timestamp(),
         results: ordered.into_iter().map(|(_, result)| result).collect(),

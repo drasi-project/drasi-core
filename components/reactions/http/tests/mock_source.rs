@@ -46,7 +46,7 @@ impl MockSourceHandle {
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(self.source_id.as_str()),
+                    namespace: Arc::from(self.source_id.as_str()),
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
@@ -68,12 +68,11 @@ pub struct MockSource {
 }
 
 impl MockSource {
-    pub fn new(id: impl Into<String>) -> Result<(Self, MockSourceHandle)> {
-        let id = id.into();
+    pub fn new(id: drasi_lib::ComponentId) -> Result<(Self, MockSourceHandle)> {
         let (app_tx, app_rx) = mpsc::channel(1000);
         let handle = MockSourceHandle {
             tx: app_tx,
-            source_id: id.clone(),
+            source_id: id.to_string(),
         };
         let source = Self {
             base: SourceBase::new(SourceBaseParams::new(id))?,
@@ -122,7 +121,7 @@ impl MockSource {
 
 #[async_trait]
 impl Source for MockSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         &self.base.id
     }
 
@@ -142,8 +141,8 @@ impl Source for MockSource {
         true
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {

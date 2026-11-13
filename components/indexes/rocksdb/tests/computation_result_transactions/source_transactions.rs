@@ -79,16 +79,23 @@ async fn stage_results(
     }
     fixture
         .checkpoint
-        .stage_checkpoint("source", sequence, None)
+        .stage_checkpoint(
+            &drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
+            sequence,
+            None,
+        )
         .await?;
     fixture
         .checkpoint
-        .stage_result_sequence(QUERY, sequence)
+        .stage_result_sequence(&query_partition(), sequence)
         .await?;
     fixture
         .outbox
         .append(
-            QUERY,
+            &query_partition(),
             sequence,
             &serde_json::to_vec(&rows).map_err(IndexError::other)?,
         )
@@ -96,7 +103,7 @@ async fn stage_results(
     fixture
         .live
         .apply_mutations(
-            QUERY,
+            &query_id(),
             &rows
                 .iter()
                 .map(|(signature, data)| RowMutation {
@@ -135,14 +142,18 @@ async fn source_transaction_retains_final_rows_and_leaves_ordinary_batches_uncha
     .await;
     let results = commit(&grouped, 1, repeated_row()).await;
     added_name(&results, "final");
-    let stored = grouped.live.read_snapshot(QUERY).await.expect("live state");
+    let stored = grouped
+        .live
+        .read_snapshot(&query_id())
+        .await
+        .expect("live state");
     assert_eq!(stored.len(), 1);
     let values: QueryVariables = serde_json::from_slice(&stored[0].1).expect("persisted final row");
     assert_eq!(values["name"], VariableValue::String("final".into()));
     assert_eq!(
         grouped
             .outbox
-            .read_from(QUERY, 0)
+            .read_from(&query_partition(), 0)
             .await
             .expect("outbox")
             .len(),
@@ -276,7 +287,7 @@ async fn source_transaction_transient_relations_never_escape_the_group() {
     assert!(transient.is_empty());
     assert!(fixture
         .live
-        .read_snapshot(QUERY)
+        .read_snapshot(&query_id())
         .await
         .expect("live state")
         .is_empty());
@@ -402,7 +413,7 @@ async fn source_transaction_cancelled_staging_fences_owner_and_restarts_as_one_g
     assert_eq!(
         fixture
             .outbox
-            .read_from(QUERY, 0)
+            .read_from(&query_partition(), 0)
             .await
             .expect("reopened output")
             .len(),
@@ -410,7 +421,7 @@ async fn source_transaction_cancelled_staging_fences_owner_and_restarts_as_one_g
     );
     let stored = fixture
         .live
-        .read_snapshot(QUERY)
+        .read_snapshot(&query_id())
         .await
         .expect("reopened state");
     assert_eq!(stored.len(), 1);
@@ -468,7 +479,15 @@ async fn source_transaction_shared_journal_commits_only_final_results() {
                 .resources()
                 .outbox_writer()
                 .expect("pipe")
-                .read_from("pipe-output", 0)
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000337"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
                 .await
                 .expect("journal output")
                 .len(),

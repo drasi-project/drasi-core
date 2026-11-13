@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::VecDeque,
     sync::{
@@ -30,7 +34,15 @@ use futures::{future::pending, poll};
 use tokio::sync::Notify;
 
 fn component(id: &str) -> ComponentId {
-    ComponentId::try_new(id).expect("valid fixture component ID")
+    fixture_support::component_id(match id {
+        "source" => 1,
+        "sink" => 2,
+        "transform" => 3,
+        "second" => 4,
+        "duplicate" => 5,
+        "unknown" => 6,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 fn port(id: &str) -> PortId {
@@ -67,6 +79,8 @@ fn envelope(sequence: u64) -> Envelope {
 
 #[derive(Clone, Default)]
 struct Signals {
+    initialized: Arc<AtomicUsize>,
+    disposed: Arc<AtomicUsize>,
     starts: Arc<Mutex<Vec<String>>>,
     stops: Arc<Mutex<Vec<String>>>,
     active: Arc<AtomicUsize>,
@@ -106,6 +120,7 @@ enum Behavior {
 
 struct Fixture {
     descriptor: ComponentDescriptor,
+    name: String,
     signals: Signals,
     behavior: Behavior,
     values: VecDeque<Envelope>,
@@ -116,6 +131,7 @@ struct Fixture {
 impl Fixture {
     fn new(id: &str, directions: &[(&str, PortDirection)], signals: &Signals) -> Self {
         Self {
+            name: id.to_owned(),
             descriptor: ComponentDescriptor::try_new(
                 component(id),
                 directions
@@ -172,12 +188,22 @@ impl ComputationComponent for Fixture {
         &self.descriptor
     }
 
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.signals.initialized.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.signals.disposed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
     async fn start(&mut self) -> anyhow::Result<()> {
         self.signals
             .starts
             .lock()
             .expect("start log lock")
-            .push(self.descriptor.id().to_string());
+            .push(self.name.clone());
         let _active = InFlight::new(&self.signals);
         if matches!(
             self.behavior,
@@ -207,14 +233,14 @@ impl ComputationComponent for Fixture {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|id| id == self.descriptor.id().as_str()),
+                .any(|name| name == &self.name),
             "cleanup cannot precede this component's own start"
         );
         self.signals
             .stops
             .lock()
             .expect("stop log lock")
-            .push(self.descriptor.id().to_string());
+            .push(self.name.clone());
         if matches!(self.behavior, Behavior::PendingStop) {
             let _active = InFlight::new(&self.signals);
             pending::<()>().await;
@@ -257,7 +283,8 @@ impl Transformer for Fixture {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
         self.processing().await?;
         self.sequence += 1;
-        let stream = StreamId::try_new("transform/out").expect("valid transform stream");
+        let stream =
+            StreamId::try_new(format!("{}/out", self.name)).expect("valid transform stream");
         Ok(vec![OutputEnvelope {
             port: port("out"),
             envelope: input.envelope.derive(
@@ -275,8 +302,8 @@ fn direct(
     provider: Box<dyn PipeProvider>,
 ) -> ComputationGraphBuilder {
     ComputationGraph::builder("lifecycle")
-        .source(Box::new(source))
-        .sink(Box::new(sink))
+        .fixture_source(Box::new(source))
+        .fixture_sink(Box::new(sink))
         .bind_stream(
             endpoint("source", "out"),
             StreamId::try_new("source/out").expect("valid fixture stream"),
@@ -289,9 +316,9 @@ fn direct(
 
 fn chain(source: Fixture, transform: Fixture, sink: Fixture) -> ComputationGraph {
     ComputationGraph::builder("chain")
-        .source(Box::new(source))
-        .transformer(Box::new(transform))
-        .sink(Box::new(sink))
+        .fixture_source(Box::new(source))
+        .fixture_transformer(Box::new(transform))
+        .fixture_sink(Box::new(sink))
         .bind_stream(
             endpoint("source", "out"),
             StreamId::try_new("source/out").expect("valid fixture stream"),
@@ -998,14 +1025,14 @@ fn whole_topology_preflight_rejects_invalid_structure_before_any_side_effects() 
         } else {
             "preflight"
         })
-        .source(Box::new(source));
+        .fixture_source(Box::new(source));
         if case == "role" {
-            builder = builder.source(Box::new(sink));
+            builder = builder.fixture_source(Box::new(sink));
         } else {
-            builder = builder.sink(Box::new(sink));
+            builder = builder.fixture_sink(Box::new(sink));
         }
         if case == "duplicate-node" {
-            builder = builder.source(Box::new(Fixture::source(&signals)));
+            builder = builder.fixture_source(Box::new(Fixture::source(&signals)));
         }
         if case != "missing-stream" {
             builder = builder.bind_stream(
@@ -1092,8 +1119,8 @@ fn whole_topology_preflight_rejects_invalid_structure_before_any_side_effects() 
                 &signals,
             );
             builder = builder
-                .transformer(Box::new(Fixture::transformer(&signals)))
-                .transformer(Box::new(second))
+                .fixture_transformer(Box::new(Fixture::transformer(&signals)))
+                .fixture_transformer(Box::new(second))
                 .bind_stream(
                     endpoint("transform", "out"),
                     StreamId::try_new("transform/out").unwrap(),
@@ -1128,8 +1155,8 @@ fn empty_and_deferred_graphs_build_without_startup_side_effects() {
 
     let signals = Signals::default();
     let unconnected = ComputationGraph::builder("unconnected")
-        .source(Box::new(Fixture::source(&signals)))
-        .sink(Box::new(Fixture::sink(&signals)))
+        .fixture_source(Box::new(Fixture::source(&signals)))
+        .fixture_sink(Box::new(Fixture::sink(&signals)))
         .bind_stream(
             endpoint("source", "out"),
             StreamId::try_new("source/out").unwrap(),
@@ -1310,7 +1337,7 @@ async fn partial_provider_setup_retains_good_bindings_until_scoped_cleanup() {
             }),
         );
         builder = builder
-            .sink(Box::new(Fixture::new(
+            .fixture_sink(Box::new(Fixture::new(
                 "second",
                 &[("in", PortDirection::Input)],
                 &signals,
@@ -1360,14 +1387,34 @@ async fn clean_restart_creates_fresh_provider_instances_and_old_controls_are_ine
     )
     .build()
     .unwrap();
-    graph.start().unwrap().await.unwrap();
+    let run = graph.start().unwrap();
+    let control = run.control();
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .unwrap_or_else(|_| panic!("first finite run did not finish: {:?}", control.observed()))
+        .unwrap();
+    assert_eq!(signals.initialized.load(Ordering::SeqCst), 2);
+    assert_eq!(signals.disposed.load(Ordering::SeqCst), 0);
     assert_eq!(controls.lock().unwrap().len(), 1);
     let old = controls.lock().unwrap()[0].clone();
     let run = graph.start().unwrap();
+    let control = run.control();
     old.cancel();
-    run.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "restarted finite run did not finish: {:?}",
+                control.observed()
+            )
+        })
+        .unwrap();
     assert_eq!(controls.lock().unwrap().len(), 2);
     assert_eq!(graph.state(), GraphState::Completed);
+    assert_eq!(signals.initialized.load(Ordering::SeqCst), 2);
+    assert_eq!(signals.disposed.load(Ordering::SeqCst), 0);
+    graph.dispose().await.unwrap();
+    assert_eq!(signals.disposed.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -1402,7 +1449,7 @@ async fn fanout_send_failure_reports_prior_branch_acceptance_without_retry() {
         Fixture::sink(&signals),
         Box::new(BoundedPipeConfig { capacity: 1 }),
     )
-    .sink(Box::new(Fixture::new(
+    .fixture_sink(Box::new(Fixture::new(
         "second",
         &[("in", PortDirection::Input)],
         &signals,
@@ -1466,7 +1513,7 @@ async fn one_slow_fanout_branch_does_not_prevent_whole_graph_cancellation() {
         Fixture::sink(&signals),
         Box::new(BoundedPipeConfig { capacity: 1 }),
     )
-    .sink(Box::new(second))
+    .fixture_sink(Box::new(second))
     .connect(
         EdgeDefinition::new(endpoint("source", "out"), endpoint("second", "in")),
         Box::new(BoundedPipeConfig { capacity: 1 }),
@@ -1606,8 +1653,8 @@ fn one_stream_cannot_reconverge_through_multiple_ports_of_one_component() {
     );
     let creates = Arc::new(AtomicUsize::new(0));
     let mut builder = ComputationGraph::builder("no-duplicate-stream-queues")
-        .source(Box::new(source))
-        .sink(Box::new(sink))
+        .fixture_source(Box::new(source))
+        .fixture_sink(Box::new(sink))
         .bind_stream(
             endpoint("source", "out"),
             StreamId::try_new("source/out").unwrap(),

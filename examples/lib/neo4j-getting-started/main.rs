@@ -73,9 +73,9 @@ async fn main() -> Result<()> {
                 .query_factory()?,
             )
             .with_id("neo4j-example")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
             .build()
             .await?,
     );

@@ -23,10 +23,15 @@ use std::{num::NonZeroUsize, time::Duration};
 
 const INSTANCE: &str = "parallel-example";
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let drasi = DrasiLib::builder()
         .with_query_factory(std::sync::Arc::new(ContinuousQueryFactory::default()))
+        .with_allow_external_component_ids(true)
         .with_id(INSTANCE)
         .build()
         .await?;
@@ -54,38 +59,58 @@ async fn run(drasi: &DrasiLib) -> Result<()> {
             .desired_snapshot()
             .id
             .to_string(),
-        "orders",
+        component_id(227).clone(),
         stream.clone(),
         NonZeroUsize::new(16).context("source capacity")?,
     )?;
     let output = source.output();
-    let added = drasi
+    drasi
         .add_components(
             ComponentBatch::builder()
-                .source(Box::new(source))
+                .source(ComponentName::try_new("orders")?, Box::new(source))
                 .bind_stream(output.clone(), stream)
                 .build()?,
         )
         .await?;
-    anyhow::ensure!(added.committed, "source declaration failed: {added:?}");
-    let query = |id| {
-        Query::cypher(id)
-            .query("MATCH (o:Order) RETURN o.name AS name")
-            .from_input("orders")
-            .enable_bootstrap(false)
-            .build()
+    let query = |name, id| {
+        Ok::<_, anyhow::Error>(
+            Query::cypher(name)
+                .query("MATCH (o:Order) RETURN o.name AS name")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("orders")
+                        .expect("fixture component name"),
+                )
+                .enable_bootstrap(false)
+                .build()?
+                .with_assigned_id(component_id(id)),
+        )
     };
     let pipeline = drasi
         .computation_pipeline()?
         .native_source(output)?
-        .query(query("primary"))
-        .query(query("observer"))
+        .query(query(
+            drasi_core_types::ComponentName::try_new("primary").expect("fixture component name"),
+            1,
+        )?)
+        .query(query(
+            drasi_core_types::ComponentName::try_new("observer").expect("fixture component name"),
+            2,
+        )?)
         .build()?;
-    let added = drasi.add_components(pipeline).await?;
-    anyhow::ensure!(added.committed, "query declarations failed: {added:?}");
+    drasi.add_components(pipeline).await?;
     drasi.start().await?;
-    let mut primary = drasi.subscribe_query_results("primary").await?.stream;
-    let mut observer = drasi.subscribe_query_results("observer").await?.stream;
+    let mut primary = drasi
+        .subscribe_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("primary").expect("fixture component name"),
+        )
+        .await?
+        .stream;
+    let mut observer = drasi
+        .subscribe_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("observer").expect("fixture component name"),
+        )
+        .await?
+        .stream;
     input
         .send_node_insert(
             "one",
@@ -108,7 +133,11 @@ async fn run(drasi: &DrasiLib) -> Result<()> {
         drasi.computation_info().await?.revision
     );
 
-    drasi.stop_query("observer").await?;
+    drasi
+        .stop_query_by_name(
+            &drasi_core_types::ComponentName::try_new("observer").expect("fixture component name"),
+        )
+        .await?;
     input
         .send_node_insert(
             "two",
@@ -122,7 +151,11 @@ async fn run(drasi: &DrasiLib) -> Result<()> {
         .await?
         .context("primary reader stopped")??;
     println!("With the observer query stopped: {:?}", result.results);
-    drasi.start_query("observer").await?;
+    drasi
+        .start_query_by_name(
+            &drasi_core_types::ComponentName::try_new("observer").expect("fixture component name"),
+        )
+        .await?;
     let resumed = tokio::time::timeout(Duration::from_secs(5), observer.next())
         .await?
         .context("observer reader stopped")??;

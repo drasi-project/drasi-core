@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::v1::{ComponentBatch, ComputationInfo, ReconciliationReport};
-use crate::{DrasiError, DrasiLib, Result};
+use super::v1::{ComponentBatch, ComputationInfo};
+use crate::error::OperationSubject;
+use crate::{ComponentId, ComponentName, DrasiError, DrasiLib, Result};
 
 /// Descriptive user configuration, excluding generated ordinary-query infrastructure.
 /// The existing source/query/reaction representation is retained under `instance`.
@@ -31,6 +32,91 @@ pub struct InstanceConfigurationSnapshot {
 }
 
 impl DrasiLib {
+    /// Resolve a current name without interpreting UUID-shaped names as IDs.
+    pub fn component_by_name(&self, name: &ComponentName) -> Result<super::v1::ComponentHandle> {
+        let handle = self
+            .computation_control()?
+            .component_handle_by_name(name)
+            .map_err(anyhow::Error::from)?;
+        let current = self.computation_runtime.component_handle(handle.id())?;
+        if current.generation() != handle.generation() {
+            return Err(DrasiError::from(anyhow::Error::from(
+                super::v1::GraphError::StaleGeneration,
+            )));
+        }
+        self.computation_runtime
+            .public_handle(current)
+            .map_err(Into::into)
+    }
+
+    /// Rename graph-owned metadata through the configuration owner without changing identity.
+    pub async fn rename_component_by_id(
+        &self,
+        id: &ComponentId,
+        name: ComponentName,
+    ) -> Result<()> {
+        self.computation_runtime
+            .rename_owned(id.clone(), name)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn rename_component_by_name(
+        &self,
+        current_name: &ComponentName,
+        name: ComponentName,
+    ) -> Result<()> {
+        let id = self.resolve_any_component_name(current_name)?;
+        self.rename_component_by_id(&id, name).await
+    }
+
+    /// Accept one native factory definition, then construct it with its assigned UUID.
+    pub async fn create_computation_component(
+        &self,
+        definition: crate::management::ComponentDefinition,
+    ) -> Result<super::v1::ComponentHandle> {
+        self.state_guard.require_initialized()?;
+        let owner = self
+            .management
+            .get()
+            .ok_or_else(|| DrasiError::invalid_state("configuration owner is unavailable"))?;
+        let receipt = owner
+            .accept_auto(crate::management::AuthoringOperation::Definitions(
+                crate::management::ConfigurationRequest::adding([
+                    crate::management::NewComponentDefinition::Native(definition),
+                ]),
+            ))
+            .await?;
+        let id = receipt
+            .creation
+            .as_ref()
+            .and_then(|creation| creation.components.first())
+            .ok_or_else(|| DrasiError::invalid_state("accepted component has no assignment"))?
+            .id
+            .clone();
+        owner.wait_declared(&id).await?;
+        self.component_by_id(&id)
+    }
+
+    /// Accept factory declarations with scoped UUID allocation. The callback
+    /// prepares metadata only; eager component objects are rejected.
+    pub async fn create_components(
+        &self,
+        construct: impl FnOnce(&mut super::v1::ComponentIds) -> super::v1::GraphResult<ComponentBatch>
+            + Send
+            + 'static,
+    ) -> Result<crate::management::AcceptanceReceipt> {
+        self.state_guard.require_initialized()?;
+        self.management
+            .get()
+            .ok_or_else(|| DrasiError::invalid_state("configuration owner is unavailable"))?
+            .accept_auto(crate::management::AuthoringOperation::Scoped(Box::new(
+                construct,
+            )))
+            .await
+            .map_err(Into::into)
+    }
+
     /// Snapshot ordinary and native component configuration without pausing
     /// processing. Concurrent reconfiguration is detected and retried; ordinary
     /// status updates do not invalidate the captured configuration. Unresolved
@@ -141,7 +227,7 @@ impl DrasiLib {
                 continue;
             }
             return Ok(InstanceConfigurationSnapshot {
-                version: 1,
+                version: 2,
                 instance,
                 native_components,
             });
@@ -154,7 +240,9 @@ impl DrasiLib {
     /// Access the instance controller for explicit port connections and inspection.
     pub fn computation_control(&self) -> Result<super::v1::GraphControl> {
         self.state_guard.require_initialized()?;
-        self.computation_runtime.control().map_err(DrasiError::from)
+        self.computation_runtime
+            .public_control()
+            .map_err(DrasiError::from)
     }
 
     /// Generic discovery and reading of the optional snapshot/replay providers
@@ -163,15 +251,19 @@ impl DrasiLib {
         Ok(super::v1::OutputCatalogue::new(self.computation_control()?))
     }
 
-    pub fn computation_component(&self, id: &str) -> Result<super::v1::ComponentHandle> {
-        let id = super::v1::ComponentId::try_new(id)
-            .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))?;
+    pub fn component_by_id(&self, id: &ComponentId) -> Result<super::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
         self.computation_runtime
-            .component_handle(&id)
+            .component_handle(id)
+            .and_then(|handle| self.computation_runtime.public_handle(handle))
             .map_err(|error| {
-                DrasiError::operation_failed("component", id.as_str(), "get", error.to_string())
-                    .with_cause(error)
+                DrasiError::operation_failed(
+                    "component",
+                    OperationSubject::Id(id.clone()),
+                    "get",
+                    error.to_string(),
+                )
+                .with_cause(error)
             })
     }
 
@@ -189,41 +281,54 @@ impl DrasiLib {
     /// Inspect a query's internal native graph, including its concrete index,
     /// bootstrap and pipe resources. An unrealized query exposes its parent
     /// declaration so its construction failure remains inspectable.
-    pub async fn inspect_query_computation(
+    pub async fn inspect_query_computation_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> Result<super::v1::ComputationInspector> {
         self.state_guard.require_initialized()?;
         self.computation_runtime
             .query_inspector(id)
             .await
             .map_err(|error| {
-                DrasiError::operation_failed("query", id, "inspect_computation", error.to_string())
-                    .with_cause(error)
+                DrasiError::operation_failed(
+                    "query",
+                    OperationSubject::Id(id.clone()),
+                    "inspect_computation",
+                    error.to_string(),
+                )
+                .with_cause(error)
             })
+    }
+
+    pub async fn inspect_query_computation_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<super::v1::ComputationInspector> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.inspect_query_computation_by_id(&id).await
     }
 
     /// Add an owned component or factory declaration using the same node-first
     /// controller used by ordinary source, query and reaction additions.
     pub async fn add_computation_component(
         &self,
-        mut addition: super::v1::ComponentAddition,
+        addition: super::v1::ComponentAddition,
     ) -> Result<super::v1::ComponentHandle> {
-        let control = self.computation_control()?;
-        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         let id = addition.definition.descriptor.id().clone();
-        if !self.is_running().await {
-            addition.bindings.defer_activation = true;
-        }
-        let handle = control.add_component(addition).await.map_err(|error| {
-            DrasiError::operation_failed("component", id.as_str(), "add", error.to_string())
-                .with_cause(error)
-        })?;
-        self.computation_runtime
-            .refresh_pending_query_inputs()
-            .await
-            .map_err(DrasiError::from)?;
-        Ok(handle)
+        let mut definition = crate::management::DesiredInstance::default().topology;
+        definition.components.push(addition.definition);
+        definition.resources = addition.resources;
+        self.add_components(ComponentBatch {
+            definition,
+            bindings: addition.bindings,
+        })
+        .await?;
+        let owner = self
+            .management
+            .get()
+            .ok_or_else(|| DrasiError::invalid_state("configuration owner is unavailable"))?;
+        owner.wait_declared(&id).await?;
+        self.component_by_id(&id)
     }
 
     pub(crate) async fn add_factory_component(
@@ -272,9 +377,11 @@ impl DrasiLib {
 
     pub async fn add_transformer_with_handle(
         &self,
+        name: super::v1::ComponentName,
         transformer: impl super::v1::Transformer + 'static,
     ) -> Result<super::v1::ComponentHandle> {
         self.add_computation_component(super::v1::ComponentAddition::new(
+            name,
             super::v1::ConstructedComponent::transformer(Box::new(transformer)),
         ))
         .await
@@ -282,15 +389,16 @@ impl DrasiLib {
 
     pub async fn add_transformer(
         &self,
+        name: super::v1::ComponentName,
         transformer: impl super::v1::Transformer + 'static,
     ) -> Result<()> {
-        self.add_transformer_with_handle(transformer).await?;
+        self.add_transformer_with_handle(name, transformer).await?;
         Ok(())
     }
 
-    pub async fn borrow_computation_source(
+    pub async fn borrow_computation_source_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> Result<std::sync::Arc<super::v1::SourcePluginHost>> {
         self.state_guard.require_initialized()?;
         let source = self
@@ -302,16 +410,24 @@ impl DrasiLib {
                     .downcast_ref::<crate::error::ComponentNotFoundError>()
                     .is_some()
                 {
-                    DrasiError::component_not_found("source", id)
+                    DrasiError::component_not_found_by_id("source", id)
                 } else {
                     DrasiError::from(error)
                 }
             })?;
         Ok(source)
     }
-    pub async fn borrow_computation_reaction(
+    pub async fn borrow_computation_source_by_name(
         &self,
-        id: &str,
+        name: &ComponentName,
+    ) -> Result<std::sync::Arc<super::v1::SourcePluginHost>> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.borrow_computation_source_by_id(&id).await
+    }
+
+    pub async fn borrow_computation_reaction_by_id(
+        &self,
+        id: &ComponentId,
         catalog: super::v1::QueryResultsCatalog,
     ) -> Result<std::sync::Arc<super::v1::ReactionPluginHost>> {
         self.state_guard.require_initialized()?;
@@ -324,7 +440,7 @@ impl DrasiLib {
                     .downcast_ref::<crate::error::ComponentNotFoundError>()
                     .is_some()
                 {
-                    DrasiError::component_not_found("reaction", id)
+                    DrasiError::component_not_found_by_id("reaction", id)
                 } else {
                     DrasiError::from(error)
                 }
@@ -332,6 +448,16 @@ impl DrasiLib {
         super::v1::ReactionPluginHost::borrowed(reaction, catalog)
             .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))
     }
+
+    pub async fn borrow_computation_reaction_by_name(
+        &self,
+        name: &ComponentName,
+        catalog: super::v1::QueryResultsCatalog,
+    ) -> Result<std::sync::Arc<super::v1::ReactionPluginHost>> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.borrow_computation_reaction_by_id(&id, catalog).await
+    }
+
     /// Register the query plugin used by subsequent ordinary query declarations.
     /// The selected implementation cannot be replaced underneath existing queries.
     pub fn register_query_factory(
@@ -448,17 +574,15 @@ impl DrasiLib {
     /// remain accepted, including Query for transformers/services and Reaction
     /// for sinks, but returned messages report the actual native role.
     /// A category unrelated to the component is rejected.
-    pub async fn subscribe_computation_logs(
+    pub async fn subscribe_computation_logs_by_id(
         &self,
         component_type: impl Into<crate::observability::ComponentLogType>,
-        component_id: &str,
+        component_id: &ComponentId,
     ) -> Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
-        self.computation_component(component_id)?;
-        super::v1::ComponentId::try_new(component_id)
-            .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))?;
+        self.component_by_id(component_id)?;
         let publication = self.computation_control()?.registry_snapshot();
         let key = self
             .computation_runtime
@@ -473,6 +597,19 @@ impl DrasiLib {
         }
         Ok(self.log_registry.subscribe_by_key(&key).await)
     }
+
+    pub async fn subscribe_computation_logs_by_name(
+        &self,
+        component_type: impl Into<crate::observability::ComponentLogType>,
+        name: &ComponentName,
+    ) -> Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        let id = self.resolve_any_component_name(name)?;
+        self.subscribe_computation_logs_by_id(component_type, &id)
+            .await
+    }
     pub async fn computation_info(&self) -> Result<ComputationInfo> {
         self.state_guard.require_initialized()?;
         Ok(self.instance_graph.get().await?.info())
@@ -480,78 +617,16 @@ impl DrasiLib {
 
     /// Add a batch to the instance graph, retaining failed declarations and
     /// exposing construction and activation outcomes in the returned report.
-    pub async fn add_components(&self, batch: ComponentBatch) -> Result<ReconciliationReport> {
-        let control = self.computation_control();
-        let pending = self
-            .instance_graph
-            .retain(batch, control.as_ref().ok().cloned());
-        let result: Result<ReconciliationReport> = async {
-            let control = control?;
-            control
-                .require_configuration_write()
-                .map_err(anyhow::Error::from)?;
-            let _lifecycle = self.instance_graph.lifecycle.lock().await;
-            if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
-                return Err(DrasiError::invalid_state("instance has been shut down"));
-            }
-            let mut batch = pending.take().await?;
-            self.computation_runtime
-                .bind_batch_source_dependencies(&mut batch)
-                .await?;
-            let current = control.registry_snapshot();
-            let mut ids: std::collections::BTreeSet<_> = current
-                .desired
-                .nodes
-                .iter()
-                .map(|node| node.descriptor.id().clone())
-                .collect();
-            for component in &batch.definition.components {
-                if !ids.insert(component.descriptor.id().clone()) {
-                    return Err(DrasiError::already_exists(
-                        "component",
-                        component.descriptor.id().to_string(),
-                    ));
-                }
-            }
-            if batch.definition.graph_id != current.desired.id.as_ref() {
-                return Err(DrasiError::invalid_config(
-                    "component definition does not belong to the instance ComputationGraph",
-                ));
-            }
-            batch.bindings.defer_activation |= !self.is_running().await;
-            batch.bindings.deferred_management_validation = true;
-            control
-                .add_components(batch)
-                .await
-                .map_err(|error| DrasiError::from(anyhow::Error::from(error)))
-        }
-        .await;
-        match result {
-            Ok(report) => {
-                if let Err(error) = pending.cleanup().await {
-                    if !report.committed || report.summary != super::v1::OperationSummary::Completed
-                    {
-                        return Err(super::instance::components_cleanup_error(
-                            pending,
-                            DrasiError::Internal(
-                                super::v1::LifecycleReportError::Reconciliation(report).into(),
-                            ),
-                            Some(error),
-                        ));
-                    }
-                    return Err(super::instance::components_cleanup_error(
-                        pending, error, None,
-                    ));
-                }
-                if report.committed {
-                    self.computation_runtime
-                        .refresh_pending_query_inputs()
-                        .await
-                        .map_err(DrasiError::from)?;
-                }
-                Ok(report)
-            }
-            Err(error) => Err(super::instance::reject_components(pending, error).await),
-        }
+    pub async fn add_components(
+        &self,
+        batch: ComponentBatch,
+    ) -> Result<crate::management::AcceptanceReceipt> {
+        self.state_guard.require_initialized()?;
+        self.management
+            .get()
+            .ok_or_else(|| DrasiError::invalid_state("configuration owner is unavailable"))?
+            .accept_auto(crate::management::AuthoringOperation::Provided(batch))
+            .await
+            .map_err(Into::into)
     }
 }

@@ -14,6 +14,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use crate::{ComponentId, ComponentName};
 use anyhow::Result;
 
 use crate::{
@@ -39,45 +40,53 @@ impl ReactionManager {
         Self { runtime }
     }
 
-    pub async fn provision_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
-        self.runtime.declare_reaction(Box::new(reaction)).await
-    }
-
-    pub async fn start_reaction(&self, id: String) -> Result<()> {
-        self.runtime.start_component(&id, "reaction").await
-    }
-
-    pub async fn stop_reaction(&self, id: String) -> Result<()> {
-        self.runtime.stop_component(&id, "reaction").await
-    }
-
-    pub async fn get_reaction_status(&self, id: String) -> Result<ComponentStatus> {
-        self.runtime.component_status(&id, "reaction").await
-    }
-
-    pub async fn get_reaction(&self, id: String) -> Result<ReactionRuntime> {
-        self.runtime.reaction_info(&id).await
-    }
-
-    pub async fn get_reaction_instance(&self, id: &str) -> Result<Arc<dyn Reaction>> {
-        self.runtime.reaction(id).await
-    }
-
-    pub async fn teardown_reaction(&self, id: String, cleanup: bool) -> Result<()> {
+    pub async fn provision_reaction(
+        &self,
+        name: crate::config::ComponentName,
+        reaction: impl Reaction + 'static,
+    ) -> Result<()> {
         self.runtime
-            .remove_component(&id, "reaction", cleanup)
+            .declare_reaction(name, Box::new(reaction))
             .await
     }
 
-    pub async fn update_reaction(
-        &self,
-        id: String,
-        reaction: impl Reaction + 'static,
-    ) -> Result<()> {
-        self.runtime.update_reaction(&id, Box::new(reaction)).await
+    pub async fn start_reaction_by_id(&self, id: &ComponentId) -> Result<()> {
+        self.runtime.start_component(id, "reaction").await
     }
 
-    pub async fn list_reactions(&self) -> crate::error::Result<Vec<(String, ComponentStatus)>> {
+    pub async fn stop_reaction_by_id(&self, id: &ComponentId) -> Result<()> {
+        self.runtime.stop_component(id, "reaction").await
+    }
+
+    pub async fn get_reaction_status_by_id(&self, id: &ComponentId) -> Result<ComponentStatus> {
+        self.runtime.component_status(id, "reaction").await
+    }
+
+    pub async fn get_reaction_by_id(&self, id: &ComponentId) -> Result<ReactionRuntime> {
+        self.runtime.reaction_info(id).await
+    }
+
+    pub async fn get_reaction_instance_by_id(&self, id: &ComponentId) -> Result<Arc<dyn Reaction>> {
+        self.runtime.reaction(id).await
+    }
+
+    pub async fn teardown_reaction_by_id(&self, id: &ComponentId, cleanup: bool) -> Result<()> {
+        self.runtime.remove_component(id, "reaction", cleanup).await
+    }
+
+    pub async fn update_reaction_by_id(
+        &self,
+        id: &ComponentId,
+        definition: crate::management::OrdinaryComponentRecord,
+    ) -> Result<()> {
+        self.runtime
+            .update_ordinary_definition(id, "reaction", definition)
+            .await
+    }
+
+    pub async fn list_reactions(
+        &self,
+    ) -> crate::error::Result<Vec<crate::config::ComponentListEntry>> {
         Ok(self.runtime.list_components("reaction").await?)
     }
 
@@ -89,18 +98,18 @@ impl ReactionManager {
         self.runtime.stop_kind("reaction").await
     }
 
-    pub async fn get_reaction_events(&self, id: &str) -> Vec<ComponentEvent> {
-        self.runtime.component_events(id).await
+    pub async fn get_reaction_events_by_id(&self, id: &ComponentId) -> Result<Vec<ComponentEvent>> {
+        Ok(self.runtime.component_events(id).await)
     }
 
     pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
         self.runtime.events(Some(ComponentType::Reaction)).await
     }
 
-    pub async fn get_reaction_metrics(
+    pub async fn get_reaction_metrics_by_id(
         &self,
-        id: &str,
-    ) -> Result<HashMap<String, ReactionMetricsSnapshot>> {
+        id: &ComponentId,
+    ) -> Result<HashMap<ComponentId, ReactionMetricsSnapshot>> {
         self.runtime.reaction_metrics(id).await
     }
 
@@ -108,9 +117,9 @@ impl ReactionManager {
         &self.runtime.lifecycle_metrics
     }
 
-    pub async fn subscribe_logs(
+    pub async fn subscribe_logs_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<LogMessage>,
         tokio::sync::broadcast::Receiver<LogMessage>,
@@ -118,13 +127,100 @@ impl ReactionManager {
         Ok(self.runtime.subscribe_logs(id, "reaction").await?)
     }
 
-    pub async fn subscribe_events(
+    pub async fn subscribe_events_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         Ok(self.runtime.subscribe_events(id, "reaction").await?)
+    }
+
+    pub async fn start_reaction_by_name(&self, name: &ComponentName) -> Result<()> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.start_reaction_by_id(&id).await
+    }
+
+    pub async fn stop_reaction_by_name(&self, name: &ComponentName) -> Result<()> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.stop_reaction_by_id(&id).await
+    }
+
+    pub async fn get_reaction_status_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<ComponentStatus> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_status_by_id(&id).await
+    }
+
+    pub async fn get_reaction_by_name(&self, name: &ComponentName) -> Result<ReactionRuntime> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_by_id(&id).await
+    }
+
+    pub async fn get_reaction_instance_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<Arc<dyn Reaction>> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_instance_by_id(&id).await
+    }
+
+    pub async fn teardown_reaction_by_name(
+        &self,
+        name: &ComponentName,
+        cleanup: bool,
+    ) -> Result<()> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.teardown_reaction_by_id(&id, cleanup).await
+    }
+
+    pub async fn update_reaction_by_name(
+        &self,
+        name: &ComponentName,
+        definition: crate::management::OrdinaryComponentRecord,
+    ) -> Result<()> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.update_reaction_by_id(&id, definition).await
+    }
+
+    pub async fn get_reaction_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<Vec<ComponentEvent>> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_events_by_id(&id).await
+    }
+
+    pub async fn get_reaction_metrics_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<HashMap<ComponentId, ReactionMetricsSnapshot>> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_metrics_by_id(&id).await
+    }
+
+    pub async fn subscribe_logs_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<LogMessage>,
+        tokio::sync::broadcast::Receiver<LogMessage>,
+    )> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.subscribe_logs_by_id(&id).await
+    }
+
+    pub async fn subscribe_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        let id = self.runtime.component_id_by_name(name, Some("reaction"))?;
+        self.subscribe_events_by_id(&id).await
     }
 }

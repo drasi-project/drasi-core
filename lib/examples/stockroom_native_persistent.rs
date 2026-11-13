@@ -29,16 +29,29 @@ fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("example capacities are nonzero")
 }
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
+fn named_component_id(name: &str) -> ComponentId {
+    component_id(match name {
+        "inventory" => 1,
+        "low-stock" => 2,
+        "alerts" => 3,
+        other => panic!("missing explicit example component ID for {other}"),
+    })
+}
+
 fn endpoint(component: &str, port: &str) -> anyhow::Result<Endpoint> {
     Ok(Endpoint::new(
-        ComponentId::try_new(component)?,
+        named_component_id(component),
         PortId::try_new(port)?,
     ))
 }
 
 fn descriptor(id: &str, input: bool) -> anyhow::Result<ComponentDescriptor> {
     Ok(ComponentDescriptor::try_new(
-        ComponentId::try_new(id)?,
+        named_component_id(id),
         vec![PortDescriptor::new(
             PortId::try_new(if input { "in" } else { "out" })?,
             if input {
@@ -213,13 +226,19 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
     // guide:persistent-channels
     let incoming = QosChannel::persistent_with_recovery(
         channel_definition("inventory/out", "low-stock")?,
-        provider.create_indexes(GRAPH, "input-journal").await?,
+        provider
+            .create_indexes(
+                GRAPH,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000132")
+                    .expect("fixture UUID"),
+            )
+            .await?,
         codec()?,
         "inventory",
         QosRecoveryOptions::Admission(AdmissionOptions {
             construction_scope: INSTANCE.into(),
             graph_id: GRAPH.into(),
-            component_id: ComponentId::try_new("inventory")?,
+            component_id: component_id(758),
             failure_scope: FailureMode::ProcessRestart,
             max_producers: size(1),
             receipts_per_producer: size(32),
@@ -228,7 +247,13 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
     .await?;
     let outgoing = QosChannel::persistent_with_recovery(
         channel_definition("low-stock/out", "alerts")?,
-        provider.create_indexes(GRAPH, "output-journal").await?,
+        provider
+            .create_indexes(
+                GRAPH,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c6")
+                    .expect("fixture UUID"),
+            )
+            .await?,
         codec()?,
         "low-stock",
         QosRecoveryOptions::Replay(ReplayOptions {
@@ -242,7 +267,7 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: GRAPH.into(),
-            id: ComponentId::try_new("low-stock")?,
+            id: component_id(757),
             query: "MATCH (p:Product) WHERE p.quantity < p.minimum RETURN p.sku AS sku, p.quantity AS quantity".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("low-stock/out")?,
@@ -251,14 +276,16 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
         provider.clone(),
     ).await?.with_recovery_scope(INSTANCE)?;
     let query = query.with_delivery_tracking();
-    let indexes = provider.create_indexes(GRAPH, "alert-completion").await?;
+    let indexes = provider
+        .create_indexes(
+            GRAPH,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c7")
+                .expect("fixture UUID"),
+        )
+        .await?;
     let contract = ComponentRecovery::transactional_consumer(&indexes)?;
     let runner = Arc::new(Mutex::new(DeliveryRunner::new_transactional(
-        DeliveryScope::new(
-            INSTANCE.into(),
-            GRAPH.into(),
-            ComponentId::try_new("alerts")?,
-        )?,
+        DeliveryScope::new(INSTANCE.into(), GRAPH.into(), component_id(759))?,
         indexes,
         codec()?,
         DeliveryOptions {
@@ -270,18 +297,24 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
     )?));
     let (completed, mut completion) = mpsc::channel(4);
     let mut batch = ComponentBatch::builder()
-        .source(Box::new(Inventory {
-            descriptor: descriptor("inventory", false)?,
-            admission: admission.clone(),
-        }))
-        .transformer(Box::new(query))
-        .sink(Box::new(Alerts {
-            descriptor: descriptor("alerts", true)?,
-            runner: runner.clone(),
-            contract,
-            stage,
-            completed,
-        }))
+        .source(
+            ComponentName::try_new("inventory")?,
+            Box::new(Inventory {
+                descriptor: descriptor("inventory", false)?,
+                admission: admission.clone(),
+            }),
+        )
+        .transformer(ComponentName::try_new("low-stock")?, Box::new(query))
+        .sink(
+            ComponentName::try_new("alerts")?,
+            Box::new(Alerts {
+                descriptor: descriptor("alerts", true)?,
+                runner: runner.clone(),
+                contract,
+                stage,
+                completed,
+            }),
+        )
         .bind_stream(
             endpoint("inventory", "out")?,
             StreamId::try_new("inventory/out")?,
@@ -323,6 +356,7 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
             ),
         );
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_id(INSTANCE)
         .with_components(batch.build()?)
         .build()
@@ -331,12 +365,21 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
         core.start().await?;
         tokio::time::timeout(
             Duration::from_secs(10),
-            core.computation_component("inventory")?.wait_started(),
+            core.component_by_name(
+                &drasi_core_types::ComponentName::try_new("inventory")
+                    .expect("fixture component name"),
+            )?
+            .wait_started(),
         )
         .await??;
         if stage {
             ensure!(
-                core.get_query_results("low-stock").await?.is_empty(),
+                core.get_query_results_by_name(
+                    &drasi_core_types::ComponentName::try_new("low-stock")
+                        .expect("fixture component name")
+                )
+                .await?
+                .is_empty(),
                 "stage requires a new directory"
             );
             let input = GraphChangeCodec::encode_change(
@@ -356,9 +399,7 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
                 1,
                 None,
             )?;
-            let producer = admission
-                .register_producer(ComponentId::try_new("stockroom-app")?)
-                .await?;
+            let producer = admission.register_producer(component_id(763)).await?;
             let first = admission.admit(&producer, 1, &input).await?;
             let retry = admission.admit(&producer, 1, &input).await?;
             ensure!(
@@ -373,7 +414,11 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
                 && delivery.processed.get("alerts").copied() == Some(delivery.accepted)
             {
                 ensure!(
-                    core.get_query_results("low-stock").await?
+                    core.get_query_results_by_name(
+                        &drasi_core_types::ComponentName::try_new("low-stock")
+                            .expect("fixture component name")
+                    )
+                    .await?
                         == vec![serde_json::json!({"sku":"bolts","quantity":3})],
                     "completed alert has inconsistent query state"
                 );
@@ -385,7 +430,11 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
             .await?
             .context("alert output closed")?;
         ensure!(
-            core.get_query_results("low-stock").await?
+            core.get_query_results_by_name(
+                &drasi_core_types::ComponentName::try_new("low-stock")
+                    .expect("fixture component name")
+            )
+            .await?
                 == vec![serde_json::json!({"sku":"bolts","quantity":3})]
         );
         if stage {

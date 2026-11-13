@@ -4,15 +4,15 @@
 (implementation `"1"`, configuration `1`).
 
 `HttpSourceConfig` and its validation live in this crate's `config` module.
-Use `HttpSourceConfig::from_value` for JSON settings; `SourceConfig` remains an
-import-compatible name.
+Use `HttpSourceConfig::from_value` for JSON settings.
 
 ```sh
 cargo build -p drasi-computation-source-http --features dynamic-plugin
 ```
 
-Configuration requires `stream`. Defaults are `sourceId="facilities-db"`,
-`host="0.0.0.0"`, `port=9000`, `timeoutMs=60000`, `ingressCapacity=1024`,
+Configuration requires `stream`. The source identity is always the component UUID
+assigned by the graph and is not configurable. Defaults are `host="0.0.0.0"`,
+`port=9000`, `timeoutMs=60000`, `ingressCapacity=1024`,
 `maxMessageBytes=2097152`, `maxBatchEvents=1024`, `adaptiveEnabled=false`.
 Its `out` port emits `GraphChangeCodec` envelopes; construction binds no socket.
 
@@ -42,7 +42,6 @@ values remain `iso8601`, `unix_seconds`, `unix_millis` and `unix_nanos`.
 ```json
 {
   "stream": "webhooks/out",
-  "sourceId": "webhooks",
   "host": "127.0.0.1",
   "port": 9000,
   "webhooks": {
@@ -80,7 +79,8 @@ converted before admission, and a failed admission reports its accepted prefix.
 Retried volatile requests can repeat that prefix.
 
 Durable webhooks use the same host admission service as the standard durable
-routes. Register a producer through `/sources/{sourceId}/admission/v1`, then send
+routes. Register a producer through `/sources/{componentId}/admission/v1`, using
+the source component UUID, then send
 its JSON session in `x-drasi-producer-session` and the first sequence in
 `x-drasi-first-sequence`. Every mapping must specify `effectiveFrom`. Successful
 admission returns the usual receipt list, with one consecutive producer sequence

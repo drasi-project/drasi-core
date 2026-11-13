@@ -563,15 +563,13 @@ impl FfiWalOptionalU64Result {
 
 unsafe impl Send for FfiWalOptionalU64Result {}
 
-/// A single entry returned by `read_from`: sequence + opaque SourceChange pointer.
-///
-/// The SourceChange is heap-allocated (Box) on the host side. The plugin takes
-/// ownership via `Box::from_raw(event)`.
+/// A single WAL entry: sequence and producer-owned MessagePack event bytes.
+/// The read-result release callback frees both the entries and their payloads.
 #[repr(C)]
 pub struct FfiWalEntry {
     pub sequence: u64,
-    /// Pointer to a heap-allocated `SourceChange`. Plugin takes ownership.
-    pub event: *mut c_void,
+    pub event: *mut u8,
+    pub event_len: usize,
 }
 
 /// Result of a WAL `read_from` operation: either a buffer of entries or an error.

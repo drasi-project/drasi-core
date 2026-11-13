@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
@@ -48,7 +52,7 @@ struct SourceFixture {
 
 #[async_trait]
 impl Source for SourceFixture {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         self.base.get_id()
     }
     fn type_name(&self) -> &str {
@@ -60,9 +64,9 @@ impl Source for SourceFixture {
     fn supports_replay(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.calls.initialize.fetch_add(1, Ordering::SeqCst);
-        self.base.initialize(context).await;
+        self.base.bind_runtime_context(context).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.calls.start.fetch_add(1, Ordering::SeqCst);
@@ -83,7 +87,7 @@ impl Source for SourceFixture {
         self.calls.stop.fetch_add(1, Ordering::SeqCst);
         self.base.stop_common().await
     }
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         self.calls.deprovision.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -98,7 +102,7 @@ impl Source for SourceFixture {
         assert!(!settings.request_position_handle);
         assert!(settings.resume_from.is_none());
         assert!(settings.resume_sequence.is_none());
-        assert!(settings.query_id.starts_with("computation:"));
+        assert!(uuid::Uuid::parse_str(settings.query_id.as_str()).is_ok());
         self.base
             .subscribe_with_bootstrap(&settings, self.type_name())
             .await
@@ -140,17 +144,23 @@ impl EnvelopeSink for SinkFixture {
 #[tokio::test]
 async fn owned_legacy_source_has_exact_lifecycle_and_awaited_worker_cleanup() {
     let calls = Arc::new(Calls::default());
-    let base = Arc::new(SourceBase::new(SourceBaseParams::new("raw-source")).expect("source base"));
+    let base = Arc::new(
+        SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001be")
+                .expect("fixture UUID"),
+        ))
+        .expect("source base"),
+    );
     let resource = Arc::new(LegacySourceResource::owned(Box::new(SourceFixture {
         base: base.clone(),
         calls: calls.clone(),
     })));
     let resource_id = ResourceId::try_new("owned-source").expect("id");
-    let component = ComponentId::try_new("adapter").expect("id");
+    let component = fixture_support::component_id(721);
     let stream = StreamId::try_new("adapter/out").expect("stream");
     let output = Endpoint::new(component.clone(), PortId::try_new("out").expect("port"));
     let input = Endpoint::new(
-        ComponentId::try_new("sink").expect("id"),
+        fixture_support::component_id(101),
         PortId::try_new("in").expect("port"),
     );
     let schema = GraphChangeCodec::schema();
@@ -158,6 +168,7 @@ async fn owned_legacy_source_has_exact_lifecycle_and_awaited_worker_cleanup() {
     let (sender, mut receiver) = mpsc::channel(1);
     let mut graph = ComputationGraph::builder("owned-legacy")
         .component(
+            ComponentName::try_new("adapter").expect("fixture name"),
             ComponentSpecification {
                 descriptor: ComponentDescriptor::try_new(
                     component,
@@ -194,7 +205,7 @@ async fn owned_legacy_source_has_exact_lifecycle_and_awaited_worker_cleanup() {
                 .with_cleanup(resource),
         )
         .expect("owned source cleanup registered")
-        .sink(Box::new(SinkFixture {
+        .fixture_sink(Box::new(SinkFixture {
             descriptor: ComponentDescriptor::try_new(
                 input.component.clone(),
                 vec![PortDescriptor::new(
@@ -240,7 +251,8 @@ async fn owned_legacy_source_has_exact_lifecycle_and_awaited_worker_cleanup() {
                 .expect("metadata")
                 .expect("source")
                 .source_id,
-            "raw-source"
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001be")
+                .expect("fixture UUID")
         );
         control.cancel();
     });

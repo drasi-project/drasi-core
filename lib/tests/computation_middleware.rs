@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -43,7 +47,16 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 fn component(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("component ID")
+    fixture_support::component_id(match value {
+        "source" => 1,
+        "query" => 2,
+        "middleware" => 3,
+        "producer" => 4,
+        "left" => 5,
+        "right" => 6,
+        "collector" => 7,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 fn port(value: &str) -> PortId {
@@ -207,7 +220,7 @@ fn mutation(element: Element, update: bool) -> SourceChange {
 
 fn event(producer: &str, sequence: u64, change: SourceChange) -> ChangeEnvelope {
     let source = Arc::new(SourceEventWrapper {
-        source_id: format!("raw-{producer}"),
+        source_id: component(producer),
         event: SourceEvent::Change(change),
         timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 123_456_789).expect("timestamp"),
         sequence: sequence + 1000,
@@ -626,7 +639,7 @@ async fn metadata_ancestry_and_input_are_preserved_across_clean_restart() {
     let metadata = GraphChangeCodec::source_metadata(&first)
         .expect("metadata")
         .expect("raw source metadata");
-    assert_eq!(metadata.source_id, "raw-producer");
+    assert_eq!(metadata.source_id, component("producer"));
     assert_eq!(metadata.sequence, Some(1040));
     assert_eq!(metadata.source_position, Some(vec![0xff, 0, 7]));
     assert_eq!(
@@ -1008,18 +1021,18 @@ async fn two_producer_graph(
     let subject = MiddlewareTransformer::new(definition(middleware, pipeline), registry())
         .expect("construct graph middleware");
     let mut graph = ComputationGraph::builder("middleware-without-continuous-query")
-        .source(Box::new(GraphSource {
+        .fixture_source(Box::new(GraphSource {
             descriptor: graph_descriptor("left", "out", PortDirection::Output),
             events: inputs[..2].iter().cloned().collect(),
             started: false,
         }))
-        .source(Box::new(GraphSource {
+        .fixture_source(Box::new(GraphSource {
             descriptor: graph_descriptor("right", "out", PortDirection::Output),
             events: inputs[2..].iter().cloned().collect(),
             started: false,
         }))
-        .transformer(Box::new(subject))
-        .sink(Box::new(GraphCollector {
+        .fixture_transformer(Box::new(subject))
+        .fixture_sink(Box::new(GraphCollector {
             descriptor: graph_descriptor("collector", "in", PortDirection::Input),
             events: received.clone(),
             started: false,
@@ -1079,7 +1092,7 @@ async fn two_producer_graph(
             decoded(output),
             [mutation(
                 node(
-                    &element.get_reference().source_id,
+                    &element.get_reference().namespace,
                     &element.get_reference().element_id,
                     expected_label,
                     element.get_effective_from(),

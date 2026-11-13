@@ -119,13 +119,18 @@ fn every_sink_completion_requirement_combination_is_checked() {
 
 #[test]
 fn descriptor_roundtrips_revalidate_all_schema_and_component_fields() {
-    let original = descriptor("source", &[], &["out"])
-        .with_plugin_identity(PluginIdentity {
-            id: Arc::from("test/plugin"),
-            version: Arc::from("1"),
-        })
-        .expect("identity")
-        .with_semantic_kind(ComponentSemanticKind::Source);
+    let original = descriptor(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &[],
+        &["out"],
+    )
+    .with_plugin_identity(PluginIdentity {
+        id: Arc::from("test/plugin"),
+        version: Arc::from("1"),
+    })
+    .expect("identity")
+    .with_semantic_kind(ComponentSemanticKind::Source);
     let value = serde_json::to_value(&original).expect("serialized descriptor");
     let restored: ComponentDescriptor = serde_json::from_value(value.clone()).expect("roundtrip");
     assert_eq!(restored, original);

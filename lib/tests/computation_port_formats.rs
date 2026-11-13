@@ -18,6 +18,9 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 mod computation_support;
 
 use std::{
@@ -94,15 +97,23 @@ impl EnvelopeSink for FormatSink {
     }
 }
 
-fn envelope(schema: SchemaDescriptor, producer: &str, readings: &[u16]) -> Envelope {
+fn envelope(
+    schema: SchemaDescriptor,
+    producer: &ComponentId,
+    namespace: &str,
+    readings: &[u16],
+) -> Envelope {
     let mut envelope = ChangeEnvelope::new(
-        EnvelopeId::try_new(producer, Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 1]))
-            .expect("envelope ID"),
-        changes_with_schema(schema, producer, 1, readings),
-        SystemMetadata::new(stream(producer), 1),
+        EnvelopeId::try_new(
+            producer.as_str(),
+            Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 1]),
+        )
+        .expect("envelope ID"),
+        changes_with_schema(schema, namespace, 1, readings),
+        SystemMetadata::new(stream(namespace), 1),
     );
     envelope
-        .append_annotation(annotation(producer))
+        .append_annotation(annotation(producer, "producer"))
         .expect("source context");
     envelope
 }
@@ -224,7 +235,7 @@ impl ComponentFactory for FormatFactory {
             ComponentRole::Source => ConstructedComponent::source(Box::new(FormatSource {
                 output: Some(OutputEnvelope {
                     port: port("out"),
-                    envelope: envelope(schema, context.component_id.as_str(), &[7]),
+                    envelope: envelope(schema, &context.component_id, "source", &[7]),
                 }),
                 descriptor,
             })),
@@ -262,9 +273,8 @@ impl Fixture {
     ) -> anyhow::Result<(ComponentSpecification, ComponentSpecification)> {
         Ok((
             self.source
-                .specification_from_config(component("source"), source)?,
-            self.sink
-                .specification_from_config(component("sink"), sink)?,
+                .specification_from_config(component(77), source)?,
+            self.sink.specification_from_config(component(101), sink)?,
         ))
     }
 
@@ -274,11 +284,27 @@ impl Fixture {
         sink: ComponentSpecification,
     ) -> GraphResult<ComputationGraph> {
         ComputationGraph::builder("port-formats")
-            .component(source, self.source.clone())
-            .component(sink, self.sink.clone())
-            .bind_stream(endpoint("source", "out"), stream("source"))
+            .component(
+                fixture_support::component_name(),
+                source,
+                self.source.clone(),
+            )
+            .component(fixture_support::component_name(), sink, self.sink.clone())
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            )
             .connect(
-                edge("source", "sink"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()
@@ -426,7 +452,7 @@ fn unsupported_overrides_fail_when_describing_the_configuration() {
     ] {
         let error = fixture
             .source
-            .specification_from_config(component("source"), configuration.clone())
+            .specification_from_config(component(77), configuration.clone())
             .expect_err("unsupported override");
         assert!(
             error.to_string().contains(expected),
@@ -437,7 +463,7 @@ fn unsupported_overrides_fail_when_describing_the_configuration() {
     assert!(fixture
         .sink
         .specification_from_config(
-            component("sink"),
+            component(101),
             json!({"ports": {"out": {"format": "test.reading-v1"}}}),
         )
         .is_err());
@@ -477,7 +503,7 @@ fn handwritten_specifications_are_checked_before_any_construction() {
             }
             "descriptor-without-override" => {
                 source.descriptor = ComponentDescriptor::try_new(
-                    component("source"),
+                    component(77),
                     vec![PortDescriptor::new(
                         port("out"),
                         PortDirection::Output,
@@ -489,7 +515,7 @@ fn handwritten_specifications_are_checked_before_any_construction() {
                 sink = fixture
                     .sink
                     .specification_from_config(
-                        component("sink"),
+                        component(101),
                         json!({"ports": {"in": {"format": CUSTOM_FORMAT}}}),
                     )
                     .expect("sink");

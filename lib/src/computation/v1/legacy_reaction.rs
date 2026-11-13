@@ -187,8 +187,13 @@ mod tests {
 
     #[async_trait]
     impl crate::Reaction for RecordingReaction {
-        fn id(&self) -> &str {
-            "reaction"
+        fn id(&self) -> &drasi_core_types::ComponentId {
+            static ID: std::sync::LazyLock<drasi_core_types::ComponentId> =
+                std::sync::LazyLock::new(|| {
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                        .expect("fixture UUID")
+                });
+            &ID
         }
         fn type_name(&self) -> &str {
             "recording"
@@ -196,10 +201,12 @@ mod tests {
         fn properties(&self) -> HashMap<String, serde_json::Value> {
             HashMap::new()
         }
-        fn query_ids(&self) -> Vec<String> {
-            vec!["query".into()]
+        fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )]
         }
-        async fn initialize(&self, _context: ReactionRuntimeContext) {}
+        async fn bind_runtime_context(&self, _context: ReactionRuntimeContext) {}
         async fn start(&self) -> anyhow::Result<()> {
             Ok(())
         }
@@ -219,13 +226,13 @@ mod tests {
     }
 
     fn sink(reaction: &Arc<RecordingReaction>) -> LegacyReactionSink {
-        LegacyReactionSink::borrowed(ComponentId::try_new("sink").expect("id"), reaction.clone())
+        LegacyReactionSink::borrowed(crate::test_helpers::component_id(101), reaction.clone())
     }
 
     fn added_row(sequence: u64) -> InputEnvelope {
         let envelope = QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new("query").expect("id"),
+            &crate::test_helpers::component_id(46),
             SystemMetadata::new(StreamId::try_new("query/out").expect("stream"), sequence),
             &crate::computation::v1::ResultNodeProjector::try_new("test/reaction/query", None)
                 .unwrap(),
@@ -234,8 +241,11 @@ mod tests {
                 row_signature: 1,
             }],
             QueryOutputMetadata {
-                query_id: "query".into(),
-                source_id: None,
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000002e",
+                )
+                .expect("fixture UUID"),
+                input_origin: None,
                 timestamp: chrono::Utc::now(),
                 metadata: HashMap::new(),
                 profiling: None,
@@ -262,7 +272,11 @@ mod tests {
         let [result] = attempts.as_slice() else {
             panic!("expected one enqueue, got {}", attempts.len());
         };
-        assert_eq!(result.query_id, "query");
+        assert_eq!(
+            result.query_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID")
+        );
         assert_eq!(result.sequence, 7);
         assert!(matches!(
             result.results.as_slice(),

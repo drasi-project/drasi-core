@@ -28,8 +28,8 @@ pub struct MsSqlReadOnlySnapshotFactory;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Configuration {
-    pub source: String,
-    pub stream: String,
+    pub source: ComponentId,
+    pub stream: StreamId,
     pub settings: NativeConfig,
     #[serde(default)]
     pub labels: Vec<String>,
@@ -50,7 +50,7 @@ pub fn plugin() -> Result<PluginDefinition> {
 impl BootstrapFactory for MsSqlBootstrapFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
         let mut configuration = ConfigSchema::from_fields([
-            ("source", ConfigType::String, true),
+            ("source", ConfigType::ComponentId, true),
             ("stream", ConfigType::String, true),
             ("settings", ConfigType::Object, true),
             ("labels", ConfigType::Array, false),
@@ -155,8 +155,6 @@ impl MsSqlBootstrap {
                 "read-only SQL Server snapshot requires explicit tables and no barrier_table"
             );
         }
-        ComponentId::try_new(config.source.as_str())?;
-        StreamId::try_new(config.stream.as_str())?;
         Ok(Self {
             config,
             progress,
@@ -209,13 +207,13 @@ impl NativeBootstrapProvider for MsSqlBootstrap {
         let generation = self.generation.load(Ordering::Acquire);
         let (run, rows) = native::start_snapshot(
             self.config.settings.clone(),
-            self.config.source.clone(),
+            self.config.source.to_string(),
             self.config.labels.clone(),
             self.progress.is_some(),
         )?;
         *current = Some(run.clone());
         drop(current);
-        let stream = StreamId::try_new(self.config.stream.as_str())?;
+        let stream = self.config.stream.clone();
         let active = self.generation.clone();
         let changes = futures_util::stream::unfold(
             (rows, run, active, stream, 0u64, false),
@@ -287,7 +285,7 @@ impl NativeBootstrapProvider for MsSqlBootstrap {
             .map(|boundary| {
                 Ok::<_, anyhow::Error>(BootstrapWatermark {
                     producer: None,
-                    stream: StreamId::try_new(self.config.stream.as_str())?,
+                    stream: self.config.stream.clone(),
                     source_id: Some(self.config.source.clone()),
                     sequence: 0,
                     position: Some(boundary.encode()?.into()),
@@ -319,6 +317,9 @@ drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SOURCE_ID: &str = "129871df-b1dc-5c0d-aaec-9da46eb3f6b8";
+
     #[test]
     fn factory_exports_query_owned_consistent_bootstrap() -> Result<()> {
         drasi_computation_plugin_sdk::ExportedPlugin::new(plugin()?)?;
@@ -330,7 +331,7 @@ mod tests {
     #[test]
     fn standalone_mode_is_read_only_and_does_not_claim_cdc_progress() -> Result<()> {
         let config: Configuration = serde_json::from_value(serde_json::json!({
-            "source":"items","stream":"items/out","settings":{
+            "source":SOURCE_ID,"stream":"items/out","settings":{
                 "connection":{"host":"no-constructor-io","database":"d","user":"reader","tables":["dbo.Items"]}
             }
         }))?;

@@ -47,6 +47,8 @@ pub enum ConfigurationType {
     Boolean,
     Integer,
     String,
+    ComponentId,
+    ComponentName,
     Object,
     Array,
     Json,
@@ -58,6 +60,12 @@ impl ConfigurationType {
             Self::Boolean => value.is_boolean(),
             Self::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
             Self::String => value.is_string(),
+            Self::ComponentId => value
+                .as_str()
+                .is_some_and(|text| super::ComponentId::try_new(text).is_ok()),
+            Self::ComponentName => value
+                .as_str()
+                .is_some_and(|text| super::ComponentName::try_new(text).is_ok()),
             Self::Object => value.is_object(),
             Self::Array => value.is_array(),
             Self::Json => true,
@@ -70,6 +78,17 @@ pub struct ConfigurationField {
     pub value_type: ConfigurationType,
     pub required: bool,
     pub secret: bool,
+    pub constraint: Option<drasi_computation_contracts::ConfigurationConstraint>,
+}
+
+impl ConfigurationField {
+    fn accepts(&self, value: &serde_json::Value) -> bool {
+        self.value_type.accepts(value)
+            && self
+                .constraint
+                .as_ref()
+                .is_none_or(|constraint| constraint.accepts(value))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +107,7 @@ impl ConfigurationSchema {
                 value_type: ConfigurationType::Object,
                 required: false,
                 secret: false,
+                constraint: None,
             },
         );
         self
@@ -119,7 +139,7 @@ impl ConfigurationSchema {
             }
             match value {
                 ConfigurationValue::Literal(value) => {
-                    if field.is_some_and(|field| field.secret || !field.value_type.accepts(value)) {
+                    if field.is_some_and(|field| field.secret || !field.accepts(value)) {
                         return Err(super::topology(format!("configuration field {key} requires a compatible value or unresolved secret reference")));
                     }
                 }
@@ -188,7 +208,7 @@ impl ConfigurationSchema {
             if self
                 .fields
                 .get(key)
-                .is_some_and(|field| !field.value_type.accepts(&value))
+                .is_some_and(|field| !field.accepts(&value))
             {
                 return Err(ComponentCreationError::terminal(anyhow::anyhow!(
                     "resolved configuration field {key} has an incompatible type"
@@ -514,6 +534,10 @@ impl ComponentCreationError {
 pub struct ConstructedComponent(pub(super) Component);
 
 impl ConstructedComponent {
+    pub(crate) fn descriptor(&self) -> &ComponentDescriptor {
+        self.0.descriptor()
+    }
+
     pub fn source(source: Box<dyn EnvelopeSource>) -> Self {
         Self(Component::Source(source))
     }
@@ -573,8 +597,48 @@ pub trait ComponentFactory: Send + Sync {
     fn record_schemas(&self) -> Vec<Arc<crate::computation::v1::Schema>> {
         Vec::new()
     }
-    fn supports_reconfiguration(&self) -> bool {
+    /// Pure per-change assessment by the component author. Creation capability
+    /// alone never authorizes retaining, restarting or reconstructing an object.
+    /// References remain explicit; this must not perform I/O or mutate resources.
+    fn plan_update(
+        &self,
+        _current: &ComponentSpecification,
+        _proposed: &ComponentSpecification,
+    ) -> anyhow::Result<crate::computation::v1::ComponentUpdatePlan> {
+        anyhow::bail!(
+            "factory '{}' does not support managed updates",
+            self.descriptor().implementation.name
+        )
+    }
+    /// Whether this registered factory rebuilds query-owned state during controlled
+    /// startup, without processing live inputs. Defaults to rejecting data resets.
+    fn supports_query_reconstruction(&self) -> bool {
         false
+    }
+    /// Validate the bounded data contract after author assessment and on recovery.
+    /// This does not authorize resource replacement or downstream state deletion.
+    fn validate_update_plan(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+        plan: crate::computation::v1::ComponentUpdatePlan,
+    ) -> anyhow::Result<()> {
+        use crate::computation::v1::{ComponentUpdateData, ComponentUpdateMode};
+        if plan.data != ComponentUpdateData::Preserve {
+            anyhow::ensure!(
+                self.supports_query_reconstruction()
+                    && current.descriptor.semantic_kind()
+                        == Some(super::super::ComponentSemanticKind::Query)
+                    && plan.mode == ComponentUpdateMode::Recreate
+                    && current.implementation == proposed.implementation
+                    && current.descriptor == proposed.descriptor
+                    && current.role == proposed.role
+                    && current.completion == proposed.completion
+                    && current.dependencies == proposed.dependencies,
+                "data reconstruction requires a qualified query factory, Recreate and stable bindings"
+            );
+        }
+        Ok(())
     }
     /// Whether construction consumes [`ConstructionContext::input_bindings`].
     /// Only such factories wait for their declared incoming endpoints and
@@ -676,9 +740,54 @@ pub struct ConstructionContext {
     resources: BTreeMap<ResourceId, ResourceHandle>,
     output_catalogue: crate::computation::v1::OutputCatalogue,
     input_bindings: Vec<InputBinding>,
+    replacement: bool,
+    update_directive: Option<crate::computation::v1::ComponentUpdateDirective>,
+}
+
+/// An accepted update of an existing initialized object. This is execution
+/// context, not a serializable request or caller-supplied update authorization.
+pub struct ComponentUpdateContext {
+    /// Stable owner-issued operation ID, retained across retry and process recovery.
+    /// Durable effects must recognize retries across process loss, not merely
+    /// cache a result on the current object.
+    pub operation_id: Arc<str>,
+    /// The factory's approved strategy, validated by the configuration owner.
+    pub plan: crate::computation::v1::ComponentUpdatePlan,
+    /// The creation specification before this accepted update.
+    pub current: Arc<ComponentSpecification>,
+    /// Resolved target configuration and the object's actual bound resources.
+    pub proposed: ConstructionContext,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ComponentUpdateExecution {
+    pub(crate) operation_id: Arc<str>,
+    pub(crate) plan: crate::computation::v1::ComponentUpdatePlan,
+    pub(crate) current: Arc<ComponentSpecification>,
+    pub(crate) proposed: Arc<ComponentSpecification>,
+    pub(crate) require_confirmation: bool,
+}
+
+pub(crate) struct ConstructionBindings {
+    pub(crate) inputs: Vec<InputBinding>,
+    pub(crate) replacement: bool,
+    pub(crate) update: Option<crate::computation::v1::ComponentUpdateDirective>,
 }
 
 impl ConstructionContext {
+    /// Whether this construction replaces an existing graph generation with the
+    /// same immutable component identity.
+    pub fn is_replacement(&self) -> bool {
+        self.replacement
+    }
+
+    /// The accepted update intent when this object is being reconstructed.
+    /// Initial creation has no directive. A directive is not a storage-reset
+    /// boolean: the owner validates data-boundary capabilities before issuing it.
+    pub fn update_directive(&self) -> Option<&crate::computation::v1::ComponentUpdateDirective> {
+        self.update_directive.as_ref()
+    }
+
     /// The component's validated, declared incoming edges. Populated only for
     /// factories reporting [`ComponentFactory::binds_inputs`]; those are held
     /// until every incoming output has a declared stream and are reconstructed
@@ -725,7 +834,7 @@ impl ConstructionContext {
         resources: BTreeMap<ResourceId, ResourceHandle>,
         schema: &ConfigurationSchema,
         output_catalogue: crate::computation::v1::OutputCatalogue,
-        input_bindings: Vec<InputBinding>,
+        bindings: ConstructionBindings,
     ) -> Result<Self, ComponentCreationError> {
         let configuration = schema
             .resolve_values(&specification.configuration, &resources)
@@ -739,7 +848,9 @@ impl ConstructionContext {
             configuration,
             resources,
             output_catalogue,
-            input_bindings,
+            input_bindings: bindings.inputs,
+            replacement: bindings.replacement,
+            update_directive: bindings.update,
         })
     }
 }

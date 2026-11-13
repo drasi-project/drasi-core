@@ -239,7 +239,7 @@ impl MySqlSource {
             .as_ref()
             .map(|_| {
                 InputPositionPolicy::new(
-                    SourceProgressKey::Source(id.to_string()),
+                    SourceProgressKey::Source(id.clone()),
                     if rows.is_some() {
                         Arc::new(rows::Positions)
                             as Arc<dyn drasi_computation_contracts::InputPositionComparator>
@@ -271,20 +271,21 @@ impl MySqlSource {
         })
     }
 
-    pub fn describe(id: ComponentId, output: MySqlOutput) -> Result<ComponentDescriptor> {
+    pub fn ports(output: MySqlOutput) -> Result<Vec<PortDescriptor>> {
         let schema = match output {
             MySqlOutput::Changes => GraphChangeCodec::schema(),
             MySqlOutput::Transactions => SourceTransactionCodec::schema(),
         };
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("out")?,
-                PortDirection::Output,
-                schema.descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("out")?,
+            PortDirection::Output,
+            schema.descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
+    pub fn describe(id: ComponentId, output: MySqlOutput) -> Result<ComponentDescriptor> {
+        Ok(ComponentDescriptor::try_new(id, Self::ports(output)?)?)
     }
 
     async fn prepare(&self, snapshot: Starting) -> Result<Worker> {
@@ -554,7 +555,7 @@ impl MySqlSource {
         }
         if !retained && gtid.is_none() {
             return Err(SourceError::PositionUnavailable {
-                source_id: self.descriptor.id().as_str().into(),
+                source_id: self.descriptor.id().clone(),
                 requested: Bytes::from(serde_json::to_vec(&MySqlStartPosition::Position {
                     file,
                     position: offset,
@@ -746,7 +747,7 @@ impl MySqlSource {
             }
             if !retained {
                 return Err(SourceError::PositionUnavailable {
-                    source_id: self.descriptor.id().to_string(),
+                    source_id: self.descriptor.id().clone(),
                     requested: Bytes::from(serde_json::to_vec(&position)?),
                     earliest_available: None,
                 }
@@ -974,7 +975,7 @@ pub fn checkpoint(
 ) -> Result<Option<Position>> {
     let Some(checkpoint) = snapshot
         .checkpoints
-        .get(&SourceProgressKey::Source(source.as_str().into()))
+        .get(&SourceProgressKey::Source(source.clone()))
     else {
         return Ok(None);
     };
@@ -1093,7 +1094,7 @@ fn binding(
 #[derive(Debug)]
 pub enum SourceError {
     PositionUnavailable {
-        source_id: String,
+        source_id: ComponentId,
         requested: Bytes,
         earliest_available: Option<Bytes>,
     },

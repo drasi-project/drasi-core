@@ -16,9 +16,12 @@
 
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
+use drasi_core_types::{ComponentId, StorageScope};
 use drasi_lib::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -35,6 +38,120 @@ const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metad
 
 /// Key under which the last-assigned sequence number is persisted.
 const COUNTER_KEY: &str = "counter";
+const FORMAT_KEY: &str = "identity-format";
+const OWNER_KEY: &str = "owner";
+const ROOT_FORMAT_FILE: &str = ".drasi-wal-identity-format";
+const ROOT_FORMAT: &[u8] = b"drasi-wal-identity-v2\n";
+
+fn ensure_root_format(root: &Path) -> Result<(), WalError> {
+    let result = (|| -> std::io::Result<()> {
+        let marker = root.join(ROOT_FORMAT_FILE);
+        let validate = |bytes: Vec<u8>| {
+            if bytes == ROOT_FORMAT {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unsupported WAL identity format",
+                ))
+            }
+        };
+        match std::fs::read(&marker) {
+            Ok(bytes) => return validate(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        for entry in std::fs::read_dir(root)? {
+            if entry?
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "redb")
+            {
+                return match std::fs::read(&marker) {
+                    Ok(bytes) => validate(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "unversioned WAL storage; use an empty directory or matching binaries",
+                        ))
+                    }
+                    Err(error) => Err(error),
+                };
+            }
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(mut file) => {
+                file.write_all(ROOT_FORMAT)?;
+                file.sync_all()?;
+                std::fs::File::open(root)?.sync_all()
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                validate(std::fs::read(marker)?)
+            }
+            Err(error) => Err(error),
+        }
+    })();
+    result.map_err(|error| WalError::StorageError(format!("WAL root format check failed: {error}")))
+}
+
+fn ensure_database_format(
+    db: &Database,
+    scope: &StorageScope,
+    source: &ComponentId,
+) -> Result<(), WalError> {
+    let owner = bincode::serialize(&(scope, source))
+        .map_err(|error| WalError::SerializationError(error.to_string()))?;
+    let result = (|| -> Result<(), String> {
+        let mut transaction = db.begin_write().map_err(|error| error.to_string())?;
+        transaction.set_durability(redb::Durability::Immediate);
+        let existing = transaction
+            .list_tables()
+            .map_err(|error| error.to_string())?
+            .next()
+            .is_some()
+            || transaction
+                .list_multimap_tables()
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_some();
+        {
+            let mut table = transaction
+                .open_table(METADATA_TABLE)
+                .map_err(|error| error.to_string())?;
+            let version = table
+                .get(FORMAT_KEY)
+                .map_err(|error| error.to_string())?
+                .map(|value| value.value().to_vec());
+            match version {
+                Some(version) if version == WAL_FORMAT_VERSION.to_le_bytes() => {
+                    let stored_owner = table.get(OWNER_KEY).map_err(|error| error.to_string())?;
+                    if stored_owner.is_none_or(|stored| stored.value() != owner) {
+                        return Err(
+                            "WAL owner does not match the requested scope and component".into()
+                        );
+                    }
+                }
+                None if !existing => {
+                    table
+                        .insert(FORMAT_KEY, WAL_FORMAT_VERSION.to_le_bytes().as_slice())
+                        .map_err(|error| error.to_string())?;
+                    table
+                        .insert(OWNER_KEY, owner.as_slice())
+                        .map_err(|error| error.to_string())?;
+                }
+                _ => return Err("unsupported WAL database identity format".into()),
+            }
+        }
+        transaction.commit().map_err(|error| error.to_string())
+    })();
+    result.map_err(|error| {
+        WalError::StorageError(format!("WAL database format check failed: {error}"))
+    })
+}
 
 fn committed_counter(transaction: &redb::ReadTransaction) -> Result<u64, WalError> {
     let table = match transaction.open_table(METADATA_TABLE) {
@@ -63,14 +180,14 @@ fn committed_counter(transaction: &redb::ReadTransaction) -> Result<u64, WalErro
 /// Redb-backed Write-Ahead Log provider.
 ///
 /// Manages one redb database file per registered source at
-/// `{root_dir}/{source_id}.redb`. Per-source state (DB handle, in-memory counter,
-/// config) is kept in an internal `HashMap` keyed by `source_id`.
+/// `{root_dir}/{source_id}.redb` for the root scope, or a filename containing
+/// the scope digest and source UUID for a nested scope. In-memory state is keyed
+/// by the typed scope and component pair; database metadata verifies the owner.
 ///
-/// WAL binary format is not stable across versions; WAL files should be
-/// treated as ephemeral and are expected to be wiped on upgrade.
+/// Incompatible or unversioned storage is rejected before use, not reset.
 pub struct RedbWalProvider {
     root_dir: PathBuf,
-    states: Arc<RwLock<HashMap<String, Arc<SourceWalState>>>>,
+    states: Arc<RwLock<HashMap<(StorageScope, ComponentId), Arc<SourceWalState>>>>,
 }
 
 /// Per-source state managed internally by [`RedbWalProvider`].
@@ -91,60 +208,49 @@ impl RedbWalProvider {
         }
     }
 
-    fn wal_path(&self, source_id: &str) -> PathBuf {
-        self.root_dir.join(format!("{source_id}.redb"))
+    fn wal_path(&self, scope: &StorageScope, source_id: &ComponentId) -> PathBuf {
+        let filename = if scope.segments().is_empty() {
+            format!("{source_id}.redb")
+        } else {
+            format!(
+                "scope-{:x}-{source_id}.redb",
+                Sha256::digest(scope.storage_key().as_bytes())
+            )
+        };
+        self.root_dir.join(filename)
     }
 
-    /// Validate that `source_id` is safe to use as a filename segment.
-    ///
-    /// Rejects empty strings, path separators (`/`, `\`), parent-directory
-    /// tokens (`..`), hidden-file leading dots, NUL bytes, and any character
-    /// outside the conservative set `[A-Za-z0-9_-]`. File-backed providers
-    /// concatenate `source_id` into on-disk paths, so accepting arbitrary
-    /// strings here would let callers write or delete files outside
-    /// `root_dir` via a hostile or typo'd id.
-    fn validate_source_id(source_id: &str) -> Result<(), WalError> {
-        if source_id.is_empty() {
-            return Err(WalError::InvalidSourceId(
-                source_id.to_string(),
-                "source_id must not be empty".to_string(),
-            ));
-        }
-        if source_id == "." || source_id == ".." || source_id.starts_with('.') {
-            return Err(WalError::InvalidSourceId(
-                source_id.to_string(),
-                "source_id must not start with '.'".to_string(),
-            ));
-        }
-        for ch in source_id.chars() {
-            if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
-                return Err(WalError::InvalidSourceId(
-                    source_id.to_string(),
-                    format!(
-                        "source_id may contain only ASCII alphanumerics, '_', or '-' (found '{ch}')"
-                    ),
-                ));
-            }
-        }
-        Ok(())
+    async fn validate_root_format(&self) -> Result<(), WalError> {
+        let root = self.root_dir.clone();
+        tokio::task::spawn_blocking(move || ensure_root_format(&root))
+            .await
+            .map_err(|error| WalError::StorageError(format!("WAL format worker failed: {error}")))?
     }
 
-    async fn get_state(&self, source_id: &str) -> Result<Arc<SourceWalState>, WalError> {
+    async fn get_state(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<Arc<SourceWalState>, WalError> {
         self.states
             .read()
             .await
-            .get(source_id)
+            .get(&(scope.clone(), source_id.clone()))
             .cloned()
-            .ok_or_else(|| WalError::SourceNotRegistered(source_id.to_string()))
+            .ok_or_else(|| WalError::SourceNotRegistered(source_id.clone()))
     }
 }
 
 #[async_trait]
 impl WalProvider for RedbWalProvider {
-    async fn register(&self, source_id: &str, config: WriteAheadLogConfig) -> Result<(), WalError> {
+    async fn register(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        config: WriteAheadLogConfig,
+    ) -> Result<(), WalError> {
         // Enforces MIN_MAX_EVENTS
         config.validate()?;
-        Self::validate_source_id(source_id)?;
 
         // Hold the write lock across the whole registration flow. Registration
         // is a cold, per-source startup path, so serializing it is fine, and
@@ -156,22 +262,24 @@ impl WalProvider for RedbWalProvider {
 
         // Idempotency: re-registering with the same config is a no-op; a
         // different config on an already-registered source is an error.
-        if let Some(existing) = states.get(source_id) {
+        if let Some(existing) = states.get(&(scope.clone(), source_id.clone())) {
             if existing.config.max_events == config.max_events
                 && existing.config.capacity_policy == config.capacity_policy
             {
                 return Ok(());
             } else {
-                return Err(WalError::SourceAlreadyRegistered(source_id.to_string()));
+                return Err(WalError::SourceAlreadyRegistered(source_id.clone()));
             }
         }
 
         tokio::fs::create_dir_all(&self.root_dir)
             .await
             .map_err(|e| WalError::StorageError(format!("Failed to create WAL root dir: {e}")))?;
+        self.validate_root_format().await?;
 
-        let path = self.wal_path(source_id);
-        let (db, counter_value) = open_or_create_db(path.clone()).await?;
+        let path = self.wal_path(scope, source_id);
+        let (db, counter_value) =
+            open_or_create_db(path.clone(), scope.clone(), source_id.clone()).await?;
 
         let state = Arc::new(SourceWalState {
             db: Arc::new(db),
@@ -180,13 +288,18 @@ impl WalProvider for RedbWalProvider {
             path,
         });
 
-        states.insert(source_id.to_string(), state);
+        states.insert((scope.clone(), source_id.clone()), state);
 
         log::info!("WAL registered for source '{source_id}' (counter={counter_value})");
         Ok(())
     }
 
-    async fn append(&self, source_id: &str, event: &SourceChange) -> Result<u64, WalError> {
+    async fn append(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        event: &SourceChange,
+    ) -> Result<u64, WalError> {
         // Reject Future variant at the trait boundary
         if matches!(event, SourceChange::Future { .. }) {
             return Err(WalError::InvalidEvent(
@@ -194,7 +307,7 @@ impl WalProvider for RedbWalProvider {
             ));
         }
 
-        let state = self.get_state(source_id).await?;
+        let state = self.get_state(scope, source_id).await?;
 
         event
             .validate()
@@ -209,7 +322,7 @@ impl WalProvider for RedbWalProvider {
         let bytes = bincode::serialize(&record)
             .map_err(|e| WalError::SerializationError(format!("bincode serialize failed: {e}")))?;
 
-        let source_id_owned = source_id.to_string();
+        let source_id_owned = source_id.clone();
 
         tokio::task::spawn_blocking(move || {
             let write_txn = state
@@ -304,12 +417,13 @@ impl WalProvider for RedbWalProvider {
 
     async fn read_from(
         &self,
-        source_id: &str,
+        scope: &StorageScope,
+        source_id: &ComponentId,
         sequence: u64,
     ) -> Result<Vec<(u64, SourceChange)>, WalError> {
-        let state = self.get_state(source_id).await?;
+        let state = self.get_state(scope, source_id).await?;
         let db = state.db.clone();
-        let source_id_owned = source_id.to_string();
+        let source_id_owned = source_id.clone();
 
         tokio::task::spawn_blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
@@ -394,8 +508,13 @@ impl WalProvider for RedbWalProvider {
         .map_err(|e| WalError::StorageError(format!("spawn_blocking join error: {e}")))?
     }
 
-    async fn prune_up_to(&self, source_id: &str, sequence: u64) -> Result<u64, WalError> {
-        let state = self.get_state(source_id).await?;
+    async fn prune_up_to(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        sequence: u64,
+    ) -> Result<u64, WalError> {
+        let state = self.get_state(scope, source_id).await?;
         let db = state.db.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -444,8 +563,12 @@ impl WalProvider for RedbWalProvider {
         .map_err(|e| WalError::StorageError(format!("spawn_blocking join error: {e}")))?
     }
 
-    async fn head_sequence(&self, source_id: &str) -> Result<u64, WalError> {
-        let db = self.get_state(source_id).await?.db.clone();
+    async fn head_sequence(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<u64, WalError> {
+        let db = self.get_state(scope, source_id).await?.db.clone();
         tokio::task::spawn_blocking(move || {
             let transaction = db.begin_read().map_err(|error| {
                 WalError::StorageError(format!("read committed WAL head: {error}"))
@@ -456,8 +579,12 @@ impl WalProvider for RedbWalProvider {
         .map_err(|error| WalError::StorageError(format!("WAL head reader failed: {error}")))?
     }
 
-    async fn oldest_sequence(&self, source_id: &str) -> Result<Option<u64>, WalError> {
-        let state = self.get_state(source_id).await?;
+    async fn oldest_sequence(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<Option<u64>, WalError> {
+        let state = self.get_state(scope, source_id).await?;
         let db = state.db.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -484,8 +611,12 @@ impl WalProvider for RedbWalProvider {
         .map_err(|e| WalError::StorageError(format!("spawn_blocking join error: {e}")))?
     }
 
-    async fn event_count(&self, source_id: &str) -> Result<u64, WalError> {
-        let state = self.get_state(source_id).await?;
+    async fn event_count(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<u64, WalError> {
+        let state = self.get_state(scope, source_id).await?;
         let db = state.db.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -511,17 +642,31 @@ impl WalProvider for RedbWalProvider {
         .map_err(|e| WalError::StorageError(format!("spawn_blocking join error: {e}")))?
     }
 
-    async fn delete_wal(&self, source_id: &str) -> Result<(), WalError> {
-        Self::validate_source_id(source_id)?;
+    async fn delete_wal(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<(), WalError> {
+        if !tokio::fs::try_exists(&self.root_dir)
+            .await
+            .map_err(|error| WalError::StorageError(error.to_string()))?
+        {
+            return Ok(());
+        }
+        self.validate_root_format().await?;
 
         // Remove from internal map first (drops Arc<SourceWalState>, which
         // drops the inner Arc<Database> once no other refs remain).
-        let removed = self.states.write().await.remove(source_id);
+        let removed = self
+            .states
+            .write()
+            .await
+            .remove(&(scope.clone(), source_id.clone()));
 
         // Best-effort file deletion — whether or not the source was registered.
         let path = match &removed {
             Some(state) => state.path.clone(),
-            None => self.wal_path(source_id),
+            None => self.wal_path(scope, source_id),
         };
 
         if path.exists() {
@@ -535,11 +680,16 @@ impl WalProvider for RedbWalProvider {
 
 /// Open or create the redb database at `path` and restore the persisted
 /// counter. Runs the blocking redb calls inside `spawn_blocking`.
-async fn open_or_create_db(path: PathBuf) -> Result<(Database, u64), WalError> {
+async fn open_or_create_db(
+    path: PathBuf,
+    scope: StorageScope,
+    source_id: ComponentId,
+) -> Result<(Database, u64), WalError> {
     tokio::task::spawn_blocking(move || {
         let db = Database::create(&path).map_err(|e| {
             WalError::StorageError(format!("Failed to open WAL database at {path:?}: {e}"))
         })?;
+        ensure_database_format(&db, &scope, &source_id)?;
 
         let counter_value = {
             let read_txn = db
@@ -563,12 +713,28 @@ mod progress_tests {
     async fn an_uncommitted_sequence_reservation_is_not_the_replay_head() {
         let directory = tempfile::tempdir().unwrap();
         let provider = RedbWalProvider::new(directory.path());
+        let source_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID");
         provider
-            .register("source", WriteAheadLogConfig::default())
+            .register(
+                &drasi_core_types::StorageScope::default(),
+                &source_id,
+                WriteAheadLogConfig::default(),
+            )
             .await
             .unwrap();
-        let state = provider.get_state("source").await.unwrap();
+        let state = provider
+            .get_state(&drasi_core_types::StorageScope::default(), &source_id)
+            .await
+            .unwrap();
         state.counter.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(provider.head_sequence("source").await.unwrap(), 0);
+        assert_eq!(
+            provider
+                .head_sequence(&drasi_core_types::StorageScope::default(), &source_id)
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

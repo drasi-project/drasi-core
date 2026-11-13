@@ -151,7 +151,7 @@ impl SourcePluginDescriptor for KubernetesSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -191,7 +191,7 @@ impl SourcePluginDescriptor for KubernetesSourceDescriptor {
         };
         config.validate()?;
 
-        let mut source = KubernetesSourceBuilder::new(id)
+        let mut source = KubernetesSourceBuilder::new(id.clone())
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;

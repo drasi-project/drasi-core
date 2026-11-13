@@ -4,15 +4,15 @@
 (implementation `"1"`, configuration `1`).
 
 `GrpcSourceConfig` and its validation live in this crate's `config` module.
-Use `GrpcSourceConfig::from_value` for JSON settings; `SourceConfig` remains an
-import-compatible name.
+Use `GrpcSourceConfig::from_value` for JSON settings.
 
 ```sh
 cargo build -p drasi-computation-source-grpc --features dynamic-plugin
 ```
 
-Configuration requires `stream`. Defaults are `sourceId="facilities-db"`,
-`host="0.0.0.0"`, `port=50051`, `timeoutMs=60000`, `ingressCapacity=1024`,
+Configuration requires `stream`. The source identity is always the component UUID
+assigned by the graph and is not configurable. Defaults are `host="0.0.0.0"`,
+`port=50051`, `timeoutMs=60000`, `ingressCapacity=1024`,
 `maxMessageBytes=4194304`, `adaptiveEnabled=false`. `maxBatchEvents` is not accepted.
 Its `out` port emits `GraphChangeCodec` envelopes; construction binds no socket.
 

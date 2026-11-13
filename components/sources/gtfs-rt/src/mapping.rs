@@ -65,9 +65,9 @@ impl GraphItem {
         }
     }
 
-    pub fn metadata(&self, source_id: &str) -> ElementMetadata {
+    pub fn metadata(&self, source_id: &drasi_lib::ComponentId) -> ElementMetadata {
         ElementMetadata {
-            reference: ElementReference::new(source_id, &self.id),
+            reference: ElementReference::new(source_id.as_str(), &self.id),
             labels: Arc::from(
                 self.labels
                     .iter()
@@ -78,7 +78,7 @@ impl GraphItem {
         }
     }
 
-    pub fn to_element(&self, source_id: &str) -> Result<Element> {
+    pub fn to_element(&self, source_id: &drasi_lib::ComponentId) -> Result<Element> {
         let metadata = self.metadata(source_id);
         let properties = self.to_element_properties()?;
 
@@ -92,8 +92,8 @@ impl GraphItem {
                 out_node_id,
             } => Element::Relation {
                 metadata,
-                in_node: ElementReference::new(source_id, in_node_id),
-                out_node: ElementReference::new(source_id, out_node_id),
+                in_node: ElementReference::new(source_id.as_str(), in_node_id),
+                out_node: ElementReference::new(source_id.as_str(), out_node_id),
                 properties,
             },
         };
@@ -318,7 +318,7 @@ pub fn build_graph_snapshot(
 
 pub fn snapshot_insert_changes(
     snapshot: &GraphSnapshot,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
 ) -> Result<Vec<SourceChange>> {
     let mut changes = Vec::new();
 
@@ -336,7 +336,7 @@ pub fn snapshot_insert_changes(
 pub fn diff_graph_snapshots(
     previous: &GraphSnapshot,
     current: &GraphSnapshot,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
 ) -> Result<Vec<SourceChange>> {
     let mut insert_ids = Vec::new();
     let mut update_ids = Vec::new();
@@ -1424,7 +1424,13 @@ mod tests {
         let old_snapshot = GraphSnapshot::from_items(old_items);
         let new_snapshot = GraphSnapshot::from_items(new_items);
 
-        let changes = diff_graph_snapshots(&old_snapshot, &new_snapshot, "source-1").unwrap();
+        let changes = diff_graph_snapshots(
+            &old_snapshot,
+            &new_snapshot,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000096")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert_eq!(changes.len(), 2);
 
         assert!(changes

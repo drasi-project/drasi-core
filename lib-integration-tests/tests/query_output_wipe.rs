@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for #823: wipe query output on reconfigure and delete-and-recreate.
+//! Managed semantic updates reset output and preserve the new lifetime through restart.
 
 mod index_observation;
 
@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
-use drasi_lib::queries::{FetchError, Query as QueryInstance};
+use drasi_lib::queries::Query as QueryInstance;
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
     CapacityPolicy, DrasiLib, DurabilityConfig, Query, Reaction, ReactionBase, ReactionBaseParams,
@@ -41,7 +41,9 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const SOURCE_ID: &str = "people-source";
+const SOURCE_UUID: &str = "00000000-0000-0000-0000-000000000342";
 const QUERY_ID: &str = "people-query";
+const QUERY_UUID: &str = "12f8e4ae-2e5a-58ad-bb76-a321e6dc8f6e";
 const REACTION_ID: &str = "wipe-recording-reaction";
 const QUERY_TEXT_V1: &str = "MATCH (p:Person) RETURN p.personId AS id, p.name AS name";
 const QUERY_TEXT_V2: &str =
@@ -93,17 +95,30 @@ struct DurableObservation {
 }
 
 async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
-    let created = index_observation::open_query_indexes(rocks, QUERY_ID).await?;
+    let created = index_observation::open_query_indexes(
+        rocks,
+        &drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+    )
+    .await?;
     let store = created
         .checkpoint_store
         .as_ref()
         .context("checkpoint store")?;
-    let result_sequence = store.read_result_sequence(QUERY_ID).await?;
+    let result_sequence = store
+        .read_result_sequence(&drasi_core::interface::OutputPartition::Component(
+            drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+        ))
+        .await?;
     let outbox_sequences = created
         .outbox_writer
         .as_ref()
         .context("outbox")?
-        .read_from(QUERY_ID, 0)
+        .read_from(
+            &drasi_core::interface::OutputPartition::Component(
+                drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+            ),
+            0,
+        )
         .await?
         .into_iter()
         .map(|(seq, _)| seq)
@@ -112,7 +127,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         .live_results_writer
         .as_ref()
         .context("live results")?
-        .row_count(QUERY_ID)
+        .row_count(&drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"))
         .await?;
     drop(created);
     Ok(DurableObservation {
@@ -123,15 +138,22 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
 }
 
 fn query_config(text: &str) -> drasi_lib::config::QueryConfig {
-    Query::cypher(QUERY_ID)
-        .query(text)
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .with_outbox_capacity(32)
-        .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-        .with_recovery_policy(RecoveryPolicy::Strict)
-        .build()
+    let mut config = Query::cypher(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .with_id(drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"))
+    .query(text)
+    .from_input_by_id(drasi_core::ComponentId::try_new(SOURCE_UUID).expect("fixture UUID"))
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .with_outbox_capacity(32)
+    .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+    .with_recovery_policy(RecoveryPolicy::Strict)
+    .build()
+    .expect("query configuration");
+    config.priority_queue_capacity = Some(10_000);
+    config.dispatch_buffer_capacity = Some(1_000);
+    config
 }
 
 struct RecordingReaction {
@@ -186,9 +208,15 @@ fn recording_reaction(
     auto_start: bool,
 ) -> (RecordingReaction, RecordingReceiver) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let params = ReactionBaseParams::new(REACTION_ID, vec![QUERY_ID.to_string()])
-        .with_recovery_policy(policy)
-        .with_auto_start(auto_start);
+    let params = ReactionBaseParams::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000034d")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+        )],
+    )
+    .with_recovery_policy(policy)
+    .with_auto_start(auto_start);
     let bootstrap_count = Arc::new(AtomicUsize::new(0));
     let bootstrap_as_of = Arc::new(Mutex::new(None));
     (
@@ -210,7 +238,7 @@ fn recording_reaction(
 
 #[async_trait]
 impl Reaction for RecordingReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -222,16 +250,16 @@ impl Reaction for RecordingReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -330,18 +358,24 @@ async fn build_core_with_admission(
             capacity_policy: CapacityPolicy::RejectIncoming,
         }),
     };
-    let (source, handle) = ApplicationSource::new(SOURCE_ID, source_config)?;
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new(SOURCE_UUID).expect("fixture UUID"),
+        source_config,
+    )?;
     let wal = Arc::new(RedbWalProvider::new(&opts.wal));
     let mut builder = lib_integration_tests::query_builder()
         .with_id("query-output-wipe")
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("people-source").expect("fixture component name"),
+            source,
+        )
         .with_wal_provider(wal)
         .with_index_provider(
             "rocks",
             Arc::new(index_observation::ObservedIndexProvider::new(
                 Arc::new(RocksDbIndexProvider::new(&paths.rocks, false, false)),
                 &paths.rocks,
-                QUERY_ID,
+                drasi_core::ComponentId::try_new(QUERY_UUID)?,
             )),
         );
     if !native {
@@ -352,45 +386,46 @@ async fn build_core_with_admission(
         builder = builder.with_state_store_provider(store);
     }
     if let Some(reaction) = opts.reaction {
-        builder = builder.with_reaction(reaction);
+        builder = builder.with_reaction(
+            drasi_core::ComponentName::try_new(REACTION_ID).expect("fixture component name"),
+            reaction,
+        );
     }
 
     let core = builder.build().await?;
     if native {
-        use drasi_lib::computation::v1::{SourcePluginHost, SourceSubscriptionOptions};
+        use drasi_lib::computation::v1::SourceSubscriptionOptions;
         let pipeline = core
             .computation_pipeline()?
             .source(
-                SourcePluginHost::borrowed(
-                    core.source_manager()
-                        .get_source_instance(SOURCE_ID)
-                        .await
-                        .context("source must be created before native query admission")?,
-                ),
+                core.borrow_computation_source_by_id(&drasi_core::ComponentId::try_new(
+                    SOURCE_UUID,
+                )?)
+                .await?,
                 SourceSubscriptionOptions {
                     borrowed_recovery: true,
                     allow_broadcast_loss: true,
                     ..Default::default()
                 },
             )?
-            .query(query_config(opts.query_text));
-        let report = core.add_components(pipeline.build()?).await?;
-        anyhow::ensure!(
-            report.committed,
-            "native query was not accepted: {report:?}"
-        );
+            .query(
+                query_config(opts.query_text)
+                    .with_assigned_id(drasi_lib::config::ComponentId::try_new(QUERY_UUID)?),
+            );
+        core.add_components(pipeline.build()?).await?;
     }
     Ok((core, handle))
 }
 
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
+    let name = drasi_core::ComponentName::try_new(id)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let graph = core.get_graph().await.expect("graph snapshot");
         if graph
             .nodes
             .iter()
-            .any(|node| node.id == id && node.status == expected)
+            .any(|node| node.name.as_ref() == Some(&name) && node.status == expected)
         {
             return Ok(());
         }
@@ -417,7 +452,10 @@ async fn wait_for_snapshot_seq(core: &DrasiLib, min_seq: u64) -> Result<u64> {
     loop {
         let query = core
             .query_manager()
-            .get_query_instance(QUERY_ID)
+            .get_query_instance_by_name(
+                &drasi_core::ComponentName::try_new("people-query")
+                    .expect("fixture component name"),
+            )
             .await
             .map_err(anyhow::Error::msg)?;
         let snapshot = timeout(Duration::from_secs(10), query.fetch_snapshot())
@@ -446,7 +484,9 @@ async fn start_running(core: &DrasiLib) -> Result<()> {
 
 async fn fetch_query(core: &DrasiLib) -> Result<Arc<dyn QueryInstance>> {
     core.query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)
 }
@@ -461,55 +501,101 @@ async fn outbox_sequences(core: &DrasiLib, after_sequence: u64) -> Result<(u64, 
     ))
 }
 
-fn assert_new_generation_outbox(sequences: &[u64], latest: u64, prior_high_water: u64) {
-    if sequences.is_empty() {
-        assert_eq!(latest, prior_high_water);
-        return;
-    }
-    assert_eq!(
-        sequences[0],
-        prior_high_water + 1,
-        "wiped output must continue above the retained high-water, got {sequences:?}"
-    );
-    assert!(
-        sequences.windows(2).all(|w| w[1] == w[0] + 1),
-        "new-config outbox must be contiguous, got {sequences:?}"
-    );
-    assert_eq!(sequences.last(), Some(&latest));
+#[derive(Debug, PartialEq)]
+struct QueryOutputObservation {
+    sequence: u64,
+    config_hash: u64,
+    output_generation: u64,
+    rows: Vec<serde_json::Value>,
+    outbox_latest_sequence: u64,
+    outbox_results: Vec<serde_json::Value>,
 }
 
-async fn wait_for_wipe(core: &DrasiLib, previous_generation: u64, high_water: u64) -> Result<u64> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let query = fetch_query(core).await?;
-        let snapshot = match timeout(Duration::from_secs(10), query.fetch_snapshot()).await {
-            Ok(snapshot) => snapshot?,
-            Err(error) => anyhow::bail!(
-                "query snapshot read timed out after replacement: {error}; observations: {:?}",
-                core.computation_control()?.observed().components
-            ),
-        };
-        if snapshot.output_generation > previous_generation {
-            assert_eq!(snapshot.as_of_sequence, high_water);
-            assert!(snapshot.is_empty(), "reset must discard every old live row");
-            return Ok(snapshot.as_of_sequence);
+impl QueryOutputObservation {
+    fn without_post_commit_timings(mut self) -> Self {
+        // Durable replay omits only these post-commit timing observations.
+        for result in &mut self.outbox_results {
+            for field in [
+                "/profiling/query_core_return_ns",
+                "/profiling/query_send_ns",
+            ] {
+                if let Some(value) = result.pointer_mut(field) {
+                    *value = serde_json::Value::Null;
+                }
+            }
         }
-        if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "output generation did not bump after reconfigure; seq={} gen={}",
-                snapshot.as_of_sequence,
-                snapshot.output_generation
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        self
     }
+}
+
+async fn observe_query_output(core: &DrasiLib) -> Result<QueryOutputObservation> {
+    observe_query_output_from(core, 0).await
+}
+
+async fn observe_query_output_from(core: &DrasiLib, after: u64) -> Result<QueryOutputObservation> {
+    let query = fetch_query(core).await?;
+    let snapshot = query.fetch_snapshot().await?;
+    let outbox = query.fetch_outbox(after).await?;
+    assert_eq!(outbox.config_hash, snapshot.config_hash);
+    assert_eq!(outbox.output_generation, snapshot.output_generation);
+    let mut rows = snapshot.to_vec();
+    rows.sort_by_cached_key(|row| row.to_string());
+    Ok(QueryOutputObservation {
+        sequence: snapshot.as_of_sequence,
+        config_hash: snapshot.config_hash,
+        output_generation: snapshot.output_generation,
+        rows,
+        outbox_latest_sequence: outbox.latest_sequence,
+        outbox_results: outbox
+            .results
+            .iter()
+            .map(|result| serde_json::to_value(result.as_ref()))
+            .collect::<serde_json::Result<Vec<_>>>()?,
+    })
+}
+
+async fn reset_query_text_update(core: &DrasiLib) -> Result<QueryOutputObservation> {
+    let name = drasi_core::ComponentName::try_new(QUERY_ID)?;
+    let accepted = core.get_query_config_by_name(&name).await?;
+    assert_eq!(accepted.query, QUERY_TEXT_V1);
+    let generation = core.component_by_name(&name)?.observed()?.generation;
+    let output = observe_query_output(core).await?;
+    assert_eq!((output.sequence, output.outbox_latest_sequence), (3, 3));
+    assert_eq!(output.rows.len(), 3);
+    assert_eq!(output.outbox_results.len(), 3);
+    core.update_query_by_name(&name, query_config(QUERY_TEXT_V2))
+        .await?;
+    assert_eq!(
+        core.get_query_config_by_name(&name).await?.query,
+        QUERY_TEXT_V2
+    );
+    assert!(core.component_by_name(&name)?.observed()?.generation > generation);
+    let reset = observe_query_output_from(core, output.sequence).await?;
+    assert_ne!(reset.config_hash, output.config_hash);
+    assert!(reset.output_generation > output.output_generation);
+    assert_eq!(
+        (reset.sequence, reset.outbox_latest_sequence),
+        (output.sequence, output.sequence)
+    );
+    assert!(reset.rows.is_empty());
+    assert!(reset.outbox_results.is_empty());
+    Ok(reset)
 }
 
 async fn read_reaction_checkpoint(
     store: &RedbStateStoreProvider,
 ) -> Result<Option<ReactionCheckpoint>> {
-    let key = format!("checkpoint:{QUERY_ID}");
-    match store.get(REACTION_ID, &key).await? {
+    let key = format!("checkpoint:{QUERY_UUID}");
+    match store
+        .get(
+            &drasi_core::interface::StorePartition::component(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000034d")
+                    .expect("fixture UUID"),
+            ),
+            &key,
+        )
+        .await?
+    {
         Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
         None => Ok(None),
     }
@@ -538,22 +624,26 @@ async fn wait_for_reaction_checkpoint_sequence(
 }
 
 async fn stop_reaction_and_wait(core: &DrasiLib) -> Result<()> {
-    core.stop_reaction(REACTION_ID).await?;
+    core.stop_reaction_by_name(
+        &drasi_core::ComponentName::try_new("wipe-recording-reaction")
+            .expect("fixture component name"),
+    )
+    .await?;
     wait_for_status(core, REACTION_ID, ComponentStatus::Stopped).await
 }
 
-/// Update query text in-process: old output disappears without reusing result sequences.
+/// Semantic updates discard incompatible output and process the next event under the new query.
 #[tokio::test]
-async fn update_query_text_wipes_output_in_process() -> Result<()> {
-    update_query_text_in_process(false).await
+async fn query_text_update_resets_output_in_process() -> Result<()> {
+    query_text_update_in_process(false).await
 }
 
 #[tokio::test]
-async fn native_query_text_update_wipes_output_in_process() -> Result<()> {
-    update_query_text_in_process(true).await
+async fn native_query_text_update_resets_output_in_process() -> Result<()> {
+    query_text_update_in_process(true).await
 }
 
-async fn update_query_text_in_process(native: bool) -> Result<()> {
+async fn query_text_update_in_process(native: bool) -> Result<()> {
     let paths = Paths::new(if native {
         "update-native-query"
     } else {
@@ -580,57 +670,34 @@ async fn update_query_text_in_process(native: bool) -> Result<()> {
     let (latest, sequences, hash_v1) = outbox_sequences(&core, 0).await?;
     assert_eq!(latest, 3);
     assert_eq!(sequences, vec![1, 2, 3]);
-    let generation_v1 = fetch_query(&core)
-        .await?
-        .fetch_snapshot()
-        .await?
-        .output_generation;
-
-    core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
-        .await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
-    let post_wipe = wait_for_wipe(&core, generation_v1, 3).await?;
-
-    let query = fetch_query(&core).await?;
-    let snapshot = query.fetch_snapshot().await?;
-    assert!(
-        snapshot.output_generation > generation_v1,
-        "reconfigure must bump output generation"
-    );
-    assert_ne!(snapshot.config_hash, hash_v1);
-    assert!(matches!(
-        query.fetch_outbox(0).await,
-        Err(FetchError::OutboxGap(_))
-    ));
-    let outbox = query.fetch_outbox(3).await?;
-    let sequences: Vec<u64> = outbox.results.iter().map(|r| r.sequence).collect();
-    assert_new_generation_outbox(&sequences, outbox.latest_sequence, 3);
-    assert_eq!(outbox.config_hash, snapshot.config_hash);
-    assert_eq!(outbox.latest_sequence, post_wipe);
+    let reset = reset_query_text_update(&core).await?;
+    assert_ne!(reset.config_hash, hash_v1);
 
     insert_person(&source, "p4", "Dana").await?;
-    let seq = wait_for_snapshot_seq(&core, post_wipe + 1).await?;
-    assert_eq!(
-        seq,
-        post_wipe + 1,
-        "next live emission after reconfigure must continue from the wiped head"
-    );
-    let (latest, sequences, hash_v2) = outbox_sequences(&core, 3).await?;
-    assert_eq!(latest, post_wipe + 1);
+    assert_eq!(wait_for_snapshot_seq(&core, 4).await?, 4);
+    let (latest, sequences, hash) = outbox_sequences(&core, reset.sequence).await?;
+    assert_eq!(latest, 4);
     assert_eq!(sequences, vec![4]);
-    assert_new_generation_outbox(&sequences, latest, 3);
-    assert_eq!(hash_v2, snapshot.config_hash);
+    assert_eq!(hash, reset.config_hash);
+    let continued = observe_query_output_from(&core, reset.sequence).await?;
+    assert_eq!(continued.output_generation, reset.output_generation);
+    assert_eq!(
+        continued.rows,
+        vec![serde_json::json!({"id": "p4", "name": "Dana", "active": true})]
+    );
+    let (_, sequences, _) = outbox_sequences(&core, reset.sequence).await?;
+    assert_eq!(sequences, vec![4]);
 
     core.shutdown().await?;
     paths.cleanup();
     Ok(())
 }
 
-/// 2. Update then new-process restart: hydrated state is the new config only.
+/// The new output generation survives Strict recovery and restart.
 #[tokio::test]
-async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()> {
+async fn updated_query_then_restart_preserves_new_output() -> Result<()> {
     let paths = Paths::new("update-restart")?;
-    {
+    let (accepted_config, preserved_output) = {
         let (core, source) = build_core(
             &paths,
             CoreOpts {
@@ -646,38 +713,36 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
         insert_person(&source, "p2", "Bob").await?;
         insert_person(&source, "p3", "Carol").await?;
         wait_for_snapshot_seq(&core, 3).await?;
-        let generation_v1 = fetch_query(&core)
-            .await?
-            .fetch_snapshot()
-            .await?
-            .output_generation;
-
-        core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
-            .await?;
-        wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
-        let post_wipe = wait_for_wipe(&core, generation_v1, 3).await?;
+        let reset = reset_query_text_update(&core).await?;
         insert_person(&source, "p4", "Dana").await?;
-        wait_for_snapshot_seq(&core, post_wipe + 1).await?;
+        assert_eq!(wait_for_snapshot_seq(&core, 4).await?, 4);
+        let preserved = observe_query_output_from(&core, reset.sequence).await?;
+        assert_eq!(preserved.config_hash, reset.config_hash);
+        assert_eq!(preserved.output_generation, reset.output_generation);
+        assert_eq!(
+            preserved.rows,
+            vec![serde_json::json!({"id": "p4", "name": "Dana", "active": true})]
+        );
+        let accepted = serde_json::to_value(
+            core.get_query_config_by_name(&drasi_core::ComponentName::try_new(QUERY_ID)?)
+                .await?,
+        )?;
         core.shutdown().await?;
-    }
+        (accepted, preserved)
+    };
 
     let durable = inspect_durable(&paths.rocks).await?;
     assert_eq!(durable.result_sequence, Some(4));
     assert_eq!(durable.outbox_sequences, vec![4]);
-    assert_new_generation_outbox(
-        &durable.outbox_sequences,
-        durable.result_sequence.unwrap_or(0),
-        3,
-    );
     assert_eq!(
         durable.outbox_sequences.last().copied(),
         durable.result_sequence,
-        "old outbox keys must not coexist with the reset sequence, got {:?}",
+        "the preserved outbox must end at the committed sequence, got {:?}",
         durable.outbox_sequences
     );
     assert_eq!(
         durable.live_row_count, 1,
-        "live rows must contain only the new-config event, not leftover old-config state"
+        "only the post-update event belongs to the new output lifetime"
     );
 
     {
@@ -701,7 +766,12 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
             .downcast_ref::<drasi_lib::error::PartialStartError>()
             .is_some());
         wait_for_status(&core, QUERY_ID, ComponentStatus::Error).await?;
-        let observed = core.computation_component(QUERY_ID)?.observed()?;
+        let observed = core
+            .component_by_name(
+                &drasi_core::ComponentName::try_new("people-query")
+                    .expect("fixture component name"),
+            )?
+            .observed()?;
         let failure = observed
             .failure
             .context("missing source history must fail")?;
@@ -745,6 +815,19 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
         let (latest, sequences, _) = outbox_sequences(&core, 3).await?;
         assert_eq!(latest, durable.result_sequence.unwrap_or(0));
         assert_eq!(sequences, durable.outbox_sequences);
+        assert_eq!(
+            observe_query_output_from(&core, 3)
+                .await?
+                .without_post_commit_timings(),
+            preserved_output.without_post_commit_timings()
+        );
+        assert_eq!(
+            serde_json::to_value(
+                core.get_query_config_by_name(&drasi_core::ComponentName::try_new(QUERY_ID)?)
+                    .await?,
+            )?,
+            accepted_config
+        );
         core.shutdown().await?;
     }
 
@@ -775,7 +858,10 @@ async fn delete_and_recreate_same_query_id_starts_at_sequence_zero() -> Result<(
     insert_person(&source, "p2", "Bob").await?;
     wait_for_snapshot_seq(&core, 2).await?;
 
-    core.remove_query(QUERY_ID).await?;
+    core.remove_query_by_name(
+        &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .await?;
     core.shutdown().await?;
 
     let durable = inspect_durable(&paths.rocks).await?;
@@ -834,9 +920,15 @@ async fn stop_query_same_config_preserves_output() -> Result<()> {
     insert_person(&source, "p2", "Bob").await?;
     wait_for_snapshot_seq(&core, 2).await?;
 
-    core.stop_query(QUERY_ID).await?;
+    core.stop_query_by_name(
+        &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .await?;
     wait_for_status(&core, QUERY_ID, ComponentStatus::Stopped).await?;
-    core.start_query(QUERY_ID).await?;
+    core.start_query_by_name(
+        &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .await?;
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
 
     let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
@@ -860,7 +952,7 @@ async fn stop_query_same_config_preserves_output() -> Result<()> {
     Ok(())
 }
 
-async fn seed_reaction_then_update_query(
+async fn seed_reaction_then_recreate_query(
     paths: &Paths,
     policy: ReactionRecoveryPolicy,
     snapshot_on_fresh: bool,
@@ -886,9 +978,15 @@ async fn seed_reaction_then_update_query(
     timeout(Duration::from_secs(15), start_running(&core))
         .await
         .context("initial query startup timed out")??;
-    timeout(Duration::from_secs(15), core.start_reaction(REACTION_ID))
-        .await
-        .context("initial reaction startup timed out")??;
+    timeout(
+        Duration::from_secs(15),
+        core.start_reaction_by_name(
+            &drasi_core::ComponentName::try_new("wipe-recording-reaction")
+                .expect("fixture component name"),
+        ),
+    )
+    .await
+    .context("initial reaction startup timed out")??;
     wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
 
     insert_person(&source, "p1", "Alice").await?;
@@ -916,14 +1014,53 @@ async fn seed_reaction_then_update_query(
     assert_eq!(checkpoint.sequence, 3);
     assert_eq!(checkpoint.config_hash, hash_v1);
 
-    timeout(
-        Duration::from_secs(15),
-        core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2)),
-    )
+    timeout(Duration::from_secs(15), async {
+        core.remove_reaction_by_name(&drasi_core::ComponentName::try_new(REACTION_ID)?, false)
+            .await?;
+        core.remove_query_by_name(&drasi_core::ComponentName::try_new(QUERY_ID)?)
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    })
     .await
-    .context("query replacement with a stopped reaction timed out")??;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
-    wait_for_wipe(&core, snapshot.output_generation, 3).await?;
+    .context("explicit reaction/query removal timed out")??;
+    core.shutdown().await?;
+    drop(receiver);
+    drop(source);
+    drop(core);
+
+    let retained = read_reaction_checkpoint(store.as_ref())
+        .await?
+        .context("reaction checkpoint must survive cleanup=false removal")?;
+    assert_eq!(retained.sequence, checkpoint.sequence);
+    assert_eq!(retained.config_hash, checkpoint.config_hash);
+    let wal = paths
+        .wal
+        .parent()
+        .context("fixture WAL parent")?
+        .join("source-wal-b");
+    std::fs::create_dir_all(&wal)?;
+    let (reaction, receiver) = recording_reaction(policy, snapshot_on_fresh, false);
+    let (core, source) = build_core(
+        paths,
+        CoreOpts {
+            query_text: QUERY_TEXT_V2,
+            wal,
+            state: Some(store.clone()),
+            reaction: Some(reaction),
+        },
+    )
+    .await?;
+    start_running(&core).await?;
+    let fresh = fetch_query(&core).await?.fetch_snapshot().await?;
+    assert_eq!(fresh.as_of_sequence, 0);
+    assert!(fresh.is_empty());
+    assert_ne!(fresh.config_hash, hash_v1);
+    let (latest, sequences, hash_v2) = outbox_sequences(&core, 0).await?;
+    assert_eq!(latest, 0);
+    assert!(sequences.is_empty());
+    assert_eq!(hash_v2, fresh.config_hash);
+    assert_eq!(receiver.bootstrap_count(), 0);
+    assert_eq!(receiver.bootstrap_as_of(), None);
     Ok((core, source, receiver, store, hash_v1))
 }
 
@@ -932,7 +1069,7 @@ async fn seed_reaction_then_update_query(
 async fn reaction_strict_hash_mismatch_fails_start() -> Result<()> {
     let paths = Paths::new("strict-mismatch")?;
     let (core, source, mut receiver, _store, hash_v1) =
-        seed_reaction_then_update_query(&paths, ReactionRecoveryPolicy::Strict, true).await?;
+        seed_reaction_then_recreate_query(&paths, ReactionRecoveryPolicy::Strict, true).await?;
 
     let before = fetch_query(&core)
         .await?
@@ -945,9 +1082,15 @@ async fn reaction_strict_hash_mismatch_fails_start() -> Result<()> {
     let hash_v2 = snapshot.config_hash;
     assert_ne!(hash_v2, hash_v1);
 
-    let result = timeout(Duration::from_secs(15), core.start_reaction(REACTION_ID))
-        .await
-        .context("mismatched reaction restart timed out")?;
+    let result = timeout(
+        Duration::from_secs(15),
+        core.start_reaction_by_name(
+            &drasi_core::ComponentName::try_new("wipe-recording-reaction")
+                .expect("fixture component name"),
+        ),
+    )
+    .await
+    .context("mismatched reaction restart timed out")?;
     assert!(
         result.is_err(),
         "Strict policy should fail on config-hash mismatch"
@@ -974,7 +1117,7 @@ async fn reaction_strict_hash_mismatch_fails_start() -> Result<()> {
 async fn reaction_autoreset_hash_mismatch_bootstraps_new_query() -> Result<()> {
     let paths = Paths::new("autoreset-mismatch")?;
     let (core, source, receiver, store, hash_v1) =
-        seed_reaction_then_update_query(&paths, ReactionRecoveryPolicy::AutoReset, true).await?;
+        seed_reaction_then_recreate_query(&paths, ReactionRecoveryPolicy::AutoReset, true).await?;
 
     let before = fetch_query(&core)
         .await?
@@ -987,7 +1130,11 @@ async fn reaction_autoreset_hash_mismatch_bootstraps_new_query() -> Result<()> {
     let hash_v2 = snapshot.config_hash;
     assert_ne!(hash_v2, hash_v1);
 
-    core.start_reaction(REACTION_ID).await?;
+    core.start_reaction_by_name(
+        &drasi_core::ComponentName::try_new("wipe-recording-reaction")
+            .expect("fixture component name"),
+    )
+    .await?;
     wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1016,7 +1163,8 @@ async fn reaction_autoreset_hash_mismatch_bootstraps_new_query() -> Result<()> {
 async fn reaction_autoskipgap_hash_mismatch_jumps_to_head() -> Result<()> {
     let paths = Paths::new("autoskip-mismatch")?;
     let (core, source, mut receiver, store, hash_v1) =
-        seed_reaction_then_update_query(&paths, ReactionRecoveryPolicy::AutoSkipGap, false).await?;
+        seed_reaction_then_recreate_query(&paths, ReactionRecoveryPolicy::AutoSkipGap, false)
+            .await?;
 
     let before = fetch_query(&core)
         .await?
@@ -1031,7 +1179,11 @@ async fn reaction_autoskipgap_hash_mismatch_jumps_to_head() -> Result<()> {
     let hash_v2 = snapshot.config_hash;
     assert_ne!(hash_v2, hash_v1);
 
-    core.start_reaction(REACTION_ID).await?;
+    core.start_reaction_by_name(
+        &drasi_core::ComponentName::try_new("wipe-recording-reaction")
+            .expect("fixture component name"),
+    )
+    .await?;
     wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
 
     let extra = receiver.drain_available();

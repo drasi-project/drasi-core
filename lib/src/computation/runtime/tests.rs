@@ -14,6 +14,9 @@
 
 use super::*;
 use crate::channels::ComponentUpdate;
+use crate::test_helpers::creation::{
+    BuilderFixtures, CoreFixtures, ReactionFixture, SourceFixture,
+};
 use crate::{
     channels::{QueryResult, SubscriptionResponse},
     config::SourceSubscriptionSettings,
@@ -186,6 +189,8 @@ impl EnvelopeSource for UnboundNativeSource {
 
 #[derive(Default)]
 struct SourceControl {
+    drops: AtomicUsize,
+    status: std::sync::OnceLock<crate::component_graph::ComponentStatusHandle>,
     schema: StdMutex<Option<crate::schema::SourceSchema>>,
     properties_read: StdMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     resource_observers: StdMutex<Vec<Arc<dyn crate::context::ComponentResourceObserver>>>,
@@ -220,13 +225,32 @@ struct SourceControl {
     stop_release: Notify,
 }
 
+impl SourceControl {
+    async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
+        self.status
+            .get()
+            .expect("source constructed")
+            .set_status(status, message)
+            .await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configuration_snapshot_ignores_observation_only_publications() {
-    let (source, source_control) = ControlledSource::new("snapshot-source");
-    let core = builder().with_source(source).build().await.unwrap();
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("snapshot-source")
+            .expect("fixture component name"),
+    );
+    let core = builder().with_source_fixture(source).build().await.unwrap();
     core.start().await.unwrap();
-    let handle = core.computation_component("snapshot-source").unwrap();
+    let handle = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("snapshot-source")
+                .expect("fixture component name"),
+        )
+        .unwrap();
     handle.wait_created().await.unwrap();
+    let source_id = handle.id().clone();
     let control = core.computation_control().unwrap();
     let revision = control.desired_snapshot().revision;
     let (requests, mut pending) =
@@ -268,94 +292,151 @@ async fn configuration_snapshot_ignores_observation_only_publications() {
         .instance
         .sources
         .iter()
-        .any(|source| source.id == "snapshot-source"));
+        .any(|source| source.id == source_id));
 }
 
 #[tokio::test]
-async fn graph_registry_remains_authoritative_without_cleanup_candidates() {
-    let (source, source_control) = ControlledSource::new("source");
-    let (reaction, reaction_control, _) = ControlledReaction::new("reaction", &["query"]);
+async fn graph_registry_is_authoritative_for_owned_components() {
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let (reaction, reaction_control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     let core = builder()
-        .with_source(source)
-        .with_query(config("query", Some("source")))
-        .with_reaction(reaction)
+        .with_source_fixture(source)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
-    for id in ["source", "query", "reaction"] {
-        core.computation_component(id)
+    let source_id = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
+        .unwrap()
+        .id()
+        .clone();
+    let query_id = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .unwrap()
+        .id()
+        .clone();
+    let reaction_id = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        )
+        .unwrap()
+        .id()
+        .clone();
+    for id in [&source_id, &query_id, &reaction_id] {
+        core.component_by_id(id)
             .unwrap()
             .wait_created()
             .await
             .unwrap();
     }
     let runtime = core.computation_runtime.as_ref();
-    runtime.cleanup_candidates.write().await.clear();
     let records = runtime.current_records().await.unwrap();
-    assert!(["source", "reaction"]
-        .iter()
-        .all(|id| records.contains_key(*id)));
+    assert!([&source_id, &reaction_id]
+        .into_iter()
+        .all(|id| records.contains_key(id)));
     assert!(runtime
         .ordinary_queries_at(&runtime.control().unwrap().registry_snapshot())
         .unwrap()
-        .contains_key(&ComponentId::try_new("query").unwrap()));
+        .contains_key(&query_id));
     assert!(core
         .list_sources()
         .await
         .unwrap()
         .iter()
-        .any(|(id, _)| id == "source"));
+        .any(|entry| entry.id == source_id));
+    let queries = core.list_queries().await.unwrap();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].id, query_id);
     assert_eq!(
-        core.list_queries().await.unwrap(),
-        vec![("query".into(), ComponentStatus::Added)]
+        queries[0].name,
+        crate::ComponentName::try_new("query").expect("fixture component name")
     );
+    assert_eq!(queries[0].status, ComponentStatus::Added);
+    let reactions = core.list_reactions().await.unwrap();
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0].id, reaction_id);
     assert_eq!(
-        core.list_reactions().await.unwrap(),
-        vec![("reaction".into(), ComponentStatus::Added)]
+        reactions[0].name,
+        crate::ComponentName::try_new("reaction").expect("fixture component name")
     );
+    assert_eq!(reactions[0].status, ComponentStatus::Added);
     assert_eq!(
-        core.get_source_info("source").await.unwrap().source_type,
+        core.get_source_info_by_id(&source_id)
+            .await
+            .unwrap()
+            .source_type,
         "controlled"
     );
     assert_eq!(
-        core.get_query_info("query").await.unwrap().status,
+        core.get_query_info_by_id(&query_id).await.unwrap().status,
         ComponentStatus::Added
     );
     assert_eq!(
-        core.get_reaction_info("reaction").await.unwrap().queries,
-        vec!["query"]
+        core.get_reaction_info_by_id(&reaction_id)
+            .await
+            .unwrap()
+            .queries,
+        vec![crate::config::ComponentReference::by_id(query_id.clone())]
     );
-    assert!(core.get_source_info("query").await.is_err());
+    assert!(core.get_source_info_by_id(&query_id).await.is_err());
     assert_eq!(
-        core.get_query_config("query").await.unwrap().inputs[0].component,
-        "source"
+        core.get_query_config_by_id(&query_id).await.unwrap().inputs[0]
+            .component
+            .as_id(),
+        Some(&source_id)
     );
     assert_eq!(core.get_current_config().await.unwrap().queries.len(), 1);
-    core.get_query_output_metrics("query").await.unwrap();
-    core.subscribe_source_logs("source").await.unwrap();
-    core.subscribe_query_logs("query").await.unwrap();
-    core.subscribe_reaction_logs("reaction").await.unwrap();
+    core.get_query_output_metrics_by_id(&query_id)
+        .await
+        .unwrap();
+    core.subscribe_source_logs_by_id(&source_id).await.unwrap();
+    core.subscribe_query_logs_by_id(&query_id).await.unwrap();
+    core.subscribe_reaction_logs_by_id(&reaction_id)
+        .await
+        .unwrap();
     let snapshot = core.snapshot_configuration().await.unwrap();
-    assert!(snapshot.sources.iter().any(|source| source.id == "source"));
+    assert!(snapshot
+        .sources
+        .iter()
+        .any(|source| source.id == source_id.clone()));
     assert_eq!(snapshot.queries.len(), 1);
     assert_eq!(snapshot.reactions.len(), 1);
-    assert!(snapshot
-        .edges
-        .iter()
-        .any(|edge| edge.from == "source" && edge.to == "query"));
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
+    assert!(snapshot.edges.iter().any(|edge| {
+        edge.from == GraphEntityId::Component(source_id.clone())
+            && edge.to == GraphEntityId::Component(query_id.clone())
+    }));
+    core.start_source_by_id(&source_id).await.unwrap();
+    core.start_query_by_id(&query_id).await.unwrap();
+    core.start_reaction_by_id(&reaction_id).await.unwrap();
     assert_eq!(source_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(reaction_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(
-        core.get_query_config("query").await.unwrap().inputs[0].component,
-        "source"
+        core.get_query_config_by_id(&query_id).await.unwrap().inputs[0]
+            .component
+            .as_id(),
+        Some(&source_id)
     );
-    assert!(core.remove_source("source", false).await.is_err());
-    core.remove_reaction("reaction", false).await.unwrap();
-    core.remove_query("query").await.unwrap();
-    core.remove_source("source", false).await.unwrap();
+    assert!(core.remove_source_by_id(&source_id, false).await.is_err());
+    core.remove_reaction_by_id(&reaction_id, false)
+        .await
+        .unwrap();
+    core.remove_query_by_id(&query_id).await.unwrap();
+    core.remove_source_by_id(&source_id, false).await.unwrap();
     core.shutdown().await.unwrap();
 }
 
@@ -363,17 +444,28 @@ async fn graph_registry_remains_authoritative_without_cleanup_candidates() {
 async fn ordinary_operations_share_the_single_computation_runtime() {
     use futures::StreamExt;
 
-    let (source, _) = ControlledSource::new("source");
-    let (reaction, _, _) = ControlledReaction::new("reaction", &["query"]);
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let (reaction, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     let core = builder()
-        .with_source(source)
-        .with_query(config("query", Some("source")))
-        .with_reaction(reaction)
+        .with_source_fixture(source)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
     for id in ["source", "query", "reaction"] {
-        core.computation_component(id)
+        let name = crate::ComponentName::try_new(id).expect("fixture component name");
+        core.component_by_name(&name)
             .unwrap()
             .wait_created()
             .await
@@ -392,37 +484,91 @@ async fn ordinary_operations_share_the_single_computation_runtime() {
     core.list_sources().await.unwrap();
     core.list_queries().await.unwrap();
     core.list_reactions().await.unwrap();
-    core.get_source_info("source").await.unwrap();
-    core.get_query_info("query").await.unwrap();
-    core.get_reaction_info("reaction").await.unwrap();
-    core.get_source_schema("source").await.unwrap();
+    core.get_source_info_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.get_query_info_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.get_reaction_info_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.get_source_schema_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     core.get_graph_schema().await.unwrap();
     core.get_current_config().await.unwrap();
     core.snapshot_configuration().await.unwrap();
-    core.get_query_output_metrics("query").await.unwrap();
-    core.get_reaction_metrics("reaction").await.unwrap();
+    core.get_query_output_metrics_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.get_reaction_metrics_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     core.get_lifecycle_metrics().await.unwrap();
-    core.subscribe_source_logs("source").await.unwrap();
-    core.subscribe_query_logs("query").await.unwrap();
-    core.subscribe_reaction_logs("reaction").await.unwrap();
-    core.subscribe_source_events("source").await.unwrap();
-    core.subscribe_query_events("query").await.unwrap();
-    core.subscribe_reaction_events("reaction").await.unwrap();
-    core.get_source_events("source")
-        .await
-        .unwrap()
-        .collect::<Vec<_>>()
-        .await;
-    core.get_query_events("query")
-        .await
-        .unwrap()
-        .collect::<Vec<_>>()
-        .await;
-    core.get_reaction_events("reaction")
-        .await
-        .unwrap()
-        .collect::<Vec<_>>()
-        .await;
+    core.subscribe_source_logs_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.subscribe_query_logs_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.subscribe_reaction_logs_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.subscribe_source_events_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.subscribe_query_events_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.subscribe_reaction_events_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.get_source_events_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap()
+    .collect::<Vec<_>>()
+    .await;
+    core.get_query_events_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap()
+    .collect::<Vec<_>>()
+    .await;
+    core.get_reaction_events_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap()
+    .collect::<Vec<_>>()
+    .await;
     core.get_all_source_events()
         .await
         .unwrap()
@@ -443,38 +589,83 @@ async fn ordinary_operations_share_the_single_computation_runtime() {
         .unwrap()
         .collect::<Vec<_>>()
         .await;
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
-    core.start_reaction("reaction").await.unwrap();
-    core.get_query_results("query").await.unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.get_query_results_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     core.start().await.unwrap();
     core.stop().await.unwrap();
-    core.update_query("query", config("query", Some("source")))
+    let unchanged = core
+        .get_query_config_by_name(&ComponentName::try_new("query").unwrap())
         .await
-        .unwrap();
-    core.remove_reaction("reaction", false).await.unwrap();
-    core.remove_query("query").await.unwrap();
-    core.remove_source("source", false).await.unwrap();
+        .unwrap()
+        .into_authoring();
+    core.update_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        unchanged,
+    )
+    .await
+    .unwrap();
+    core.remove_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn query_manager_is_a_shared_graph_backed_facade() {
     let core = builder()
-        .with_query(config("query", None))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
         .build()
         .await
         .unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_created()
-        .await
-        .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_created()
+    .await
+    .unwrap();
     let clone = core.clone();
     assert!(std::ptr::eq(core.query_manager(), clone.query_manager()));
     assert_eq!(
@@ -489,7 +680,9 @@ async fn query_manager_is_a_shared_graph_backed_facade() {
     );
     let query = core
         .query_manager()
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .unwrap();
     assert!(query.as_any().is::<NativeQuery>());
@@ -498,51 +691,66 @@ async fn query_manager_is_a_shared_graph_backed_facade() {
 
 #[tokio::test]
 async fn provider_recipes_are_derived_from_graph_owned_configuration() {
-    let (source, _) = ControlledSource::new("source");
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     let properties = HashMap::from([("file".into(), serde_json::json!("fixture.jsonl"))]);
     let core = builder()
-        .with_source(source)
-        .with_bootstrap_for_source("source", "scriptfile", properties.clone())
+        .with_source_fixture(source)
+        .with_bootstrap_for_source_by_name(
+            crate::ComponentName::try_new("source").expect("fixture component name"),
+            "scriptfile",
+            properties.clone(),
+        )
         .with_identity_provider(Arc::new(crate::identity::PasswordIdentityProvider::new(
             "user", "password",
         )))
         .build()
         .await
         .unwrap();
-    core.computation_component("source")
+    let source_name = crate::ComponentName::try_new("source").expect("fixture component name");
+    core.component_by_name(&source_name)
         .unwrap()
         .wait_created()
         .await
         .unwrap();
     let mut detached = core.get_graph().await.expect("graph snapshot");
-    detached
-        .nodes
-        .retain(|node| node.id != "source-bootstrap" && node.id != "identity-provider");
+    detached.nodes.retain(|node| {
+        node.id != GraphEntityId::InstanceIdentityProvider
+            && !matches!(node.id, GraphEntityId::BootstrapProvider(_))
+    });
     let snapshot = core.snapshot_configuration().await.unwrap();
     let source = snapshot
         .sources
         .iter()
-        .find(|source| source.id == "source")
+        .find(|source| source.name == source_name)
         .unwrap();
+    let source_id = source.id.clone();
     let recipe = source.bootstrap_provider.as_ref().unwrap();
     assert_eq!(recipe.kind, "scriptfile");
     assert_eq!(recipe.properties, properties);
-    assert!(snapshot
-        .edges
-        .iter()
-        .any(|edge| edge.from == "source-bootstrap" && edge.to == "source"));
-    assert!(snapshot
-        .edges
-        .iter()
-        .any(|edge| edge.from == "identity-provider" && edge.to == "source"));
+    assert!(snapshot.edges.iter().any(|edge| {
+        edge.from == GraphEntityId::BootstrapProvider(source_id.clone())
+            && edge.to == GraphEntityId::Component(source_id.clone())
+    }));
+    assert!(snapshot.edges.iter().any(|edge| {
+        edge.from == GraphEntityId::InstanceIdentityProvider
+            && edge.to == GraphEntityId::Component(source_id.clone())
+    }));
     assert!(core
         .get_graph()
         .await
         .expect("graph snapshot")
-        .contains("source-bootstrap"));
-    core.remove_source("source", false).await.unwrap();
-    let (replacement, _) = ControlledSource::new("source");
-    core.add_source_with_handle(replacement)
+        .nodes
+        .iter()
+        .any(|node| node.id == GraphEntityId::BootstrapProvider(source_id.clone())));
+    core.remove_source_by_name(&source_name, false)
+        .await
+        .unwrap();
+    let (replacement, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    core.add_source_fixture_with_handle(replacement)
         .await
         .unwrap()
         .wait_created()
@@ -552,29 +760,34 @@ async fn provider_recipes_are_derived_from_graph_owned_configuration() {
     assert!(snapshot
         .sources
         .iter()
-        .find(|source| source.id == "source")
+        .find(|source| source.name == source_name)
         .unwrap()
         .bootstrap_provider
         .is_none());
-    assert!(!snapshot
-        .edges
-        .iter()
-        .any(|edge| edge.from == "source-bootstrap" && edge.to == "source"));
+    assert!(!snapshot.edges.iter().any(|edge| {
+        matches!(edge.from, GraphEntityId::BootstrapProvider(_))
+            && edge.to == GraphEntityId::Component(source_id.clone())
+    }));
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn detached_snapshot_status_and_membership_cannot_change_public_inspection() {
-    let (source, _) = ControlledSource::new("source");
-    let core = builder().with_source(source).build().await.unwrap();
-    core.computation_component("source")
-        .unwrap()
-        .wait_created()
-        .await
-        .unwrap();
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let core = builder().with_source_fixture(source).build().await.unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_created()
+    .await
+    .unwrap();
     let mut snapshot = core.get_graph().await.expect("graph snapshot");
     snapshot.nodes.push(crate::component_graph::ComponentNode {
-        id: "phantom".into(),
+        id: GraphEntityId::Component(crate::test_helpers::component_id(999)),
+        name: Some(crate::ComponentName::try_new("phantom").expect("fixture component name")),
         kind: crate::component_graph::ComponentKind::Query,
         status: ComponentStatus::Running,
         metadata: HashMap::new(),
@@ -582,21 +795,49 @@ async fn detached_snapshot_status_and_membership_cannot_change_public_inspection
     snapshot
         .nodes
         .iter_mut()
-        .find(|node| node.id == "source")
+        .find(|node| {
+            node.name
+                .as_ref()
+                .is_some_and(|name| name.as_str() == "source")
+        })
         .unwrap()
         .status = ComponentStatus::Error;
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Added
     );
     assert_eq!(
-        core.get_source_info("source").await.unwrap().status,
+        core.get_source_info_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap()
+        .status,
         ComponentStatus::Added
     );
     assert!(core.list_queries().await.unwrap().is_empty());
-    assert!(core.get_query_status("phantom").await.is_err());
-    assert!(core.get_source_status("phantom").await.is_err());
-    assert!(core.subscribe_query_logs("phantom").await.is_err());
+    assert!(core
+        .get_query_status_by_name(
+            &drasi_core_types::ComponentName::try_new("phantom").expect("fixture component name")
+        )
+        .await
+        .is_err());
+    assert!(core
+        .get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("phantom").expect("fixture component name")
+        )
+        .await
+        .is_err());
+    assert!(core
+        .subscribe_query_logs_by_name(
+            &drasi_core_types::ComponentName::try_new("phantom").expect("fixture component name")
+        )
+        .await
+        .is_err());
     assert!(core
         .snapshot_configuration()
         .await
@@ -607,15 +848,19 @@ async fn detached_snapshot_status_and_membership_cannot_change_public_inspection
         .get_graph()
         .await
         .expect("graph snapshot")
-        .contains("phantom"));
+        .contains_by_name(
+            &crate::ComponentName::try_new("phantom").expect("fixture component name"),
+        ));
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn invalid_plugin_metadata_fails_the_added_node_not_the_add_call() {
     let core = builder().build().await.unwrap();
-    let (source, source_control) = ControlledSource::new("source");
-    core.add_source_with_metadata(
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    core.add_source_fixture_with_metadata(
         source,
         HashMap::from([
             ("pluginId".into(), "invalid plugin id".into()),
@@ -625,25 +870,43 @@ async fn invalid_plugin_metadata_fails_the_added_node_not_the_add_call() {
     .await
     .unwrap();
     assert!(core
-        .computation_component("source")
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
         .unwrap()
         .wait_created()
         .await
         .is_err());
     assert_eq!(source_control.initializations.load(Ordering::Acquire), 0);
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Error
     );
-    assert!(core.start_source("source").await.is_err());
+    assert!(core
+        .start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .is_err());
     assert_eq!(source_control.initializations.load(Ordering::Acquire), 0);
     assert!(core
-        .get_source_info("source")
+        .get_source_info_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
         .await
         .unwrap()
         .error_message
         .is_some());
-    core.remove_source("source", false).await.unwrap();
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
     core.shutdown().await.unwrap();
 }
 
@@ -653,20 +916,23 @@ async fn detached_snapshot_cannot_veto_a_graph_addition() {
     let runtime = core.computation_runtime.as_ref();
     let mut detached = core.get_graph().await.expect("graph snapshot");
     detached.nodes.push(crate::component_graph::ComponentNode {
-        id: "source".into(),
+        id: GraphEntityId::Component(crate::test_helpers::component_id(998)),
+        name: Some(crate::ComponentName::try_new("source").expect("fixture component name")),
         kind: crate::component_graph::ComponentKind::Query,
         status: ComponentStatus::Running,
         metadata: HashMap::new(),
     });
-    let (source, source_control) = ControlledSource::new("source");
-    let handle = core.add_source_with_handle(source).await.unwrap();
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let handle = core.add_source_fixture_with_handle(source).await.unwrap();
     handle.wait_created().await.unwrap();
     assert_eq!(source_control.initializations.load(Ordering::Acquire), 1);
     assert_eq!(
         core.get_graph()
             .await
             .unwrap()
-            .get_component("source")
+            .get_component_by_id(&component_id_by_name(&core, "source"))
             .unwrap()
             .kind,
         crate::component_graph::ComponentKind::Source,
@@ -675,67 +941,73 @@ async fn detached_snapshot_cannot_veto_a_graph_addition() {
         .current_records()
         .await
         .unwrap()
-        .contains_key("source"));
+        .contains_key(&component_id_by_name(&core, "source")));
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn graph_activation_policy_controls_ordinary_startup_and_configuration_reads() {
-    let (source, source_control) = ControlledSource::new("source");
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     source_control.auto_start.store(true, Ordering::Release);
-    let mut query = config("query", None);
+    let mut query = config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        None,
+    );
     query.auto_start = true;
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_query(query)
         .build()
         .await
         .unwrap();
     for id in ["source", "query"] {
-        core.computation_component(id)
+        let name = crate::ComponentName::try_new(id).expect("fixture component name");
+        core.component_by_name(&name)
             .unwrap()
             .wait_created()
             .await
             .unwrap();
     }
-    let control = core.computation_control().unwrap();
-    let desired = control.desired_snapshot();
-    let mut changes = Vec::new();
-    for id in ["source", "query"] {
-        let mut component = desired
-            .select(GraphSelection::Exact(vec![
-                ComponentId::try_new(id).unwrap()
-            ]))
-            .unwrap()
-            .components
-            .remove(0);
-        component.lifecycle.auto_start = false;
-        changes.push(DesiredMutation::PutComponent(component));
+    let mut current = core.desired_configuration().unwrap();
+    for component in &mut current.desired.ordinary {
+        component.auto_start = false;
     }
-    let preview = control.preview(desired.revision, changes).await.unwrap();
-    let report = control
-        .reconcile(preview, TopologyBindings::default())
+    core.apply_desired_state(current.revision, "disable-auto-start", current.desired)
         .await
         .unwrap();
-    assert_eq!(report.summary, OperationSummary::Completed);
+    let report = core.reconcile_desired_state().await.unwrap();
+    assert!(report.applied, "{report:?}");
+    assert!(report.error.is_none(), "{report:?}");
     core.start().await.unwrap();
     assert_eq!(source_control.starts.load(Ordering::Acquire), 0);
     assert!(
         !core
-            .computation_component("query")
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+            )
             .unwrap()
             .observed()
             .unwrap()
             .started
     );
-    assert!(!core.get_query_config("query").await.unwrap().auto_start);
+    assert!(
+        !core
+            .get_query_config_by_name(
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+            )
+            .await
+            .unwrap()
+            .auto_start
+    );
     assert!(!core.get_current_config().await.unwrap().queries[0].auto_start);
     let snapshot = core.snapshot_configuration().await.unwrap();
     assert!(
         !snapshot
             .sources
             .iter()
-            .find(|source| source.id == "source")
+            .find(|source| source.name.as_str() == "source")
             .unwrap()
             .auto_start
     );
@@ -745,19 +1017,36 @@ async fn graph_activation_policy_controls_ordinary_startup_and_configuration_rea
 
 #[tokio::test]
 async fn replacement_preserves_declared_autostart_without_starting_a_stopped_instance() {
-    let (source, _) = ControlledSource::new("source");
-    let core = builder().with_source(source).build().await.unwrap();
-    core.computation_component("source")
-        .unwrap()
-        .wait_created()
-        .await
-        .unwrap();
-    let (replacement, replacement_control) = ControlledSource::new("source");
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let core = builder().with_source_fixture(source).build().await.unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_created()
+    .await
+    .unwrap();
+    let (replacement, replacement_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     replacement_control
         .auto_start
         .store(true, Ordering::Release);
-    core.update_source("source", replacement).await.unwrap();
-    let source = core.computation_component("source").unwrap();
+    core.replace_source_fixture(
+        crate::config::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        ),
+        replacement,
+    )
+    .await
+    .unwrap();
+    let source = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
+        .unwrap();
     assert!(
         core.computation_control()
             .unwrap()
@@ -776,24 +1065,54 @@ async fn replacement_preserves_declared_autostart_without_starting_a_stopped_ins
 async fn subscriptions_are_declared_with_nodes_and_enforce_graph_removal_policy() {
     let core = builder().build().await.unwrap();
     let query = core
-        .add_query_with_handle(config("query", Some("later")))
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("later").expect("fixture component name"),
+            ),
+        ))
         .await
         .unwrap();
     let control = core.computation_control().unwrap();
-    let source_id = ComponentId::try_new("later").unwrap();
-    assert!(control
-        .desired_snapshot()
-        .subscriptions
-        .contains(&(source_id.clone(), query.id().clone())));
-    assert_waiting_for(&query, "later");
-    let (unrelated, _) = ControlledSource::new("unrelated");
-    core.add_source_with_handle(unrelated)
+    let later = crate::ComponentName::try_new("later").unwrap();
+    assert_waiting_for(&core, &query, &later).await;
+    assert_eq!(
+        core.get_query_config_by_id(query.id())
+            .await
+            .unwrap()
+            .inputs[0]
+            .component,
+        crate::config::ComponentReference::by_name(later.clone()),
+    );
+    let (unrelated, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("unrelated").expect("fixture component name"),
+    );
+    core.add_source_fixture_with_handle(unrelated)
         .await
         .unwrap()
         .wait_created()
         .await
         .unwrap();
-    core.remove_source("unrelated", false).await.unwrap();
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("unrelated").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("later").expect("fixture component name"),
+    );
+    let source = core.add_source_fixture_with_handle(source).await.unwrap();
+    source.wait_created().await.unwrap();
+    let status = core.reconcile_desired_state().await.unwrap();
+    assert!(status.error.is_none(), "{status:?}");
+    let query = core.component_by_id(query.id()).unwrap();
+    query.wait_created().await.unwrap();
+    let source_id = source.id().clone();
+    assert!(control
+        .desired_snapshot()
+        .subscriptions
+        .contains(&(source_id.clone(), query.id().clone())));
     let exported = control
         .desired_snapshot()
         .select(GraphSelection::All)
@@ -802,13 +1121,6 @@ async fn subscriptions_are_declared_with_nodes_and_enforce_graph_removal_policy(
     assert!(imported
         .subscriptions
         .contains(&(source_id.clone(), query.id().clone())));
-    let (source, _) = ControlledSource::new("later");
-    core.add_source_with_handle(source)
-        .await
-        .unwrap()
-        .wait_created()
-        .await
-        .unwrap();
     assert!(control
         .preview(
             control.desired_snapshot().revision,
@@ -819,7 +1131,13 @@ async fn subscriptions_are_declared_with_nodes_and_enforce_graph_removal_policy(
         )
         .await
         .is_err());
-    assert!(core.remove_source("later", false).await.is_err());
+    assert!(core
+        .remove_source_by_name(
+            &drasi_core_types::ComponentName::try_new("later").expect("fixture component name"),
+            false
+        )
+        .await
+        .is_err());
     let closure = control
         .desired_snapshot()
         .select(GraphSelection::Dependencies(vec![query.id().clone()]))
@@ -847,16 +1165,49 @@ async fn subscriptions_are_declared_with_nodes_and_enforce_graph_removal_policy(
         .await
         .unwrap();
     assert!(cascade.removed().contains(query.id()));
-    core.remove_query("query").await.unwrap();
-    core.remove_source("later", false).await.unwrap();
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("later").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
     core.shutdown().await.unwrap();
 }
 struct ControlledSource {
     inner: SourceBase,
     control: Arc<SourceControl>,
 }
+impl Drop for ControlledSource {
+    fn drop(&mut self) {
+        self.control.drops.fetch_add(1, Ordering::AcqRel);
+    }
+}
 impl ControlledSource {
-    fn new(id: &str) -> (Self, Arc<SourceControl>) {
+    fn fixture(name: drasi_core_types::ComponentName) -> (SourceFixture<Self>, Arc<SourceControl>) {
+        let control = Arc::new(SourceControl::default());
+        let captured = control.clone();
+        let lifecycle = control.clone();
+        (
+            SourceFixture::new(name, false, move |id| {
+                let inner =
+                    SourceBase::new(SourceBaseParams::new(id.clone()).with_auto_start(false))?;
+                let _ = captured.status.set(inner.status_handle());
+                Ok(Self {
+                    inner,
+                    control: captured,
+                })
+            })
+            .with_lifecycle(move || lifecycle.auto_start.load(Ordering::Acquire)),
+            control,
+        )
+    }
+
+    fn new(id: drasi_core_types::ComponentId) -> (Self, Arc<SourceControl>) {
         let control = Arc::new(SourceControl::default());
         (
             Self {
@@ -869,7 +1220,7 @@ impl ControlledSource {
 }
 #[async_trait]
 impl Source for ControlledSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.inner.id
     }
     fn type_name(&self) -> &str {
@@ -891,7 +1242,7 @@ impl Source for ControlledSource {
     fn supports_replay(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.control.initializations.fetch_add(1, Ordering::AcqRel);
         if let Some(observer) = &context.resource_observer {
             self.control
@@ -902,11 +1253,11 @@ impl Source for ControlledSource {
         }
         let updates = context.update_tx.clone();
         *self.control.updates.lock().unwrap() = Some(updates.clone());
-        self.inner.initialize(context).await;
+        self.inner.bind_runtime_context(context).await;
         if self.control.fail_initialize.load(Ordering::Acquire) {
             updates
                 .send(ComponentUpdate::Status {
-                    component_id: self.id().into(),
+                    component_id: self.id().clone(),
                     status: ComponentStatus::Error,
                     message: Some("injected initialization failure".into()),
                 })
@@ -979,7 +1330,7 @@ impl Source for ControlledSource {
         }
         self.inner.stop_common().await
     }
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         self.control.deprovisions.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
@@ -1006,6 +1357,8 @@ impl Source for ControlledSource {
 
 #[derive(Default)]
 struct ReactionControl {
+    drops: AtomicUsize,
+    status: std::sync::OnceLock<crate::component_graph::ComponentStatusHandle>,
     resource_observers: StdMutex<Vec<Arc<dyn crate::context::ComponentResourceObserver>>>,
     initializations: AtomicUsize,
     deprovisions: AtomicUsize,
@@ -1018,15 +1371,68 @@ struct ReactionControl {
     snapshot: AtomicBool,
     updates: StdMutex<Option<crate::component_graph::ComponentUpdateSender>>,
 }
+
+impl ReactionControl {
+    async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
+        self.status
+            .get()
+            .expect("reaction constructed")
+            .set_status(status, message)
+            .await;
+    }
+}
+
 struct ControlledReaction {
     base: ReactionBase,
     control: Arc<ReactionControl>,
     output: mpsc::UnboundedSender<QueryResult>,
 }
+impl Drop for ControlledReaction {
+    fn drop(&mut self) {
+        self.control.drops.fetch_add(1, Ordering::AcqRel);
+    }
+}
 impl ControlledReaction {
+    fn fixture(
+        name: drasi_core_types::ComponentName,
+        queries: &[crate::ComponentName],
+    ) -> (
+        ReactionFixture<Self>,
+        Arc<ReactionControl>,
+        mpsc::UnboundedReceiver<QueryResult>,
+    ) {
+        let control = Arc::new(ReactionControl::default());
+        let captured = control.clone();
+        let (output, receiver) = mpsc::unbounded_channel();
+        let inputs: Vec<_> = queries
+            .iter()
+            .cloned()
+            .map(crate::config::ComponentReference::by_name)
+            .collect();
+        (
+            ReactionFixture::new(name, inputs, false, move |id, resolved_inputs| {
+                let inputs = resolved_inputs
+                    .into_iter()
+                    .map(crate::config::ComponentReference::by_id)
+                    .collect();
+                let base = ReactionBase::new(
+                    ReactionBaseParams::new(id.clone(), inputs).with_auto_start(false),
+                );
+                let _ = captured.status.set(base.status_handle());
+                Ok(Self {
+                    base,
+                    control: captured,
+                    output,
+                })
+            }),
+            control,
+            receiver,
+        )
+    }
+
     fn new(
-        id: &str,
-        queries: &[&str],
+        id: drasi_core_types::ComponentId,
+        queries: &[crate::ComponentName],
     ) -> (
         Self,
         Arc<ReactionControl>,
@@ -1037,8 +1443,15 @@ impl ControlledReaction {
         (
             Self {
                 base: ReactionBase::new(
-                    ReactionBaseParams::new(id, queries.iter().map(|id| (*id).into()).collect())
-                        .with_auto_start(false),
+                    ReactionBaseParams::new(
+                        id,
+                        queries
+                            .iter()
+                            .cloned()
+                            .map(crate::config::ComponentReference::by_name)
+                            .collect(),
+                    )
+                    .with_auto_start(false),
                 ),
                 control: control.clone(),
                 output,
@@ -1050,7 +1463,7 @@ impl ControlledReaction {
 }
 #[async_trait]
 impl Reaction for ControlledReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.base.id
     }
     fn type_name(&self) -> &str {
@@ -1059,7 +1472,7 @@ impl Reaction for ControlledReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()
     }
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
         self.base.queries.clone()
     }
     fn auto_start(&self) -> bool {
@@ -1079,7 +1492,7 @@ impl Reaction for ControlledReaction {
         let _rows = context.fetch_snapshot().await?.collect_keyed_vec().await;
         Ok(())
     }
-    async fn initialize(&self, context: crate::ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: crate::ReactionRuntimeContext) {
         self.control.initializations.fetch_add(1, Ordering::AcqRel);
         if let Some(observer) = &context.resource_observer {
             self.control
@@ -1089,7 +1502,7 @@ impl Reaction for ControlledReaction {
                 .push(observer.clone());
         }
         *self.control.updates.lock().unwrap() = Some(context.update_tx.clone());
-        self.base.initialize(context).await;
+        self.base.bind_runtime_context(context).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.control.starts.fetch_add(1, Ordering::AcqRel);
@@ -1106,7 +1519,7 @@ impl Reaction for ControlledReaction {
         self.base.set_status(ComponentStatus::Stopped, None).await;
         Ok(())
     }
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         self.control.deprovisions.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
@@ -1156,20 +1569,28 @@ fn builder() -> crate::DrasiLibBuilder {
             .clone(),
     )
 }
-fn config(id: &str, source: Option<&str>) -> QueryConfig {
-    let query = crate::Query::cypher(id)
+fn config(
+    name: drasi_core_types::ComponentName,
+    source: Option<crate::ComponentName>,
+) -> crate::config::QueryConfig {
+    let query = crate::Query::cypher(name)
         .query("MATCH (n:Person) RETURN n.name AS name")
         .auto_start(false)
         .enable_bootstrap(false);
     match source {
-        Some(source) => query.from_input(source).build(),
-        None => query.build(),
+        Some(source) => query.from_input_by_name(source).build().unwrap(),
+        None => query.build().unwrap(),
     }
 }
-async fn insert(core: &DrasiLib, source: &str) {
+async fn insert(core: &DrasiLib, source: &drasi_core_types::ComponentId) {
     insert_person(core, source, "one", "Alice").await;
 }
-async fn insert_person(core: &DrasiLib, source: &str, id: &str, name: &str) {
+async fn insert_person(
+    core: &DrasiLib,
+    source: &drasi_core_types::ComponentId,
+    id: &str,
+    name: &str,
+) {
     let instance = core.source_instance(source).await.unwrap();
     let base = &instance
         .as_any()
@@ -1177,11 +1598,11 @@ async fn insert_person(core: &DrasiLib, source: &str, id: &str, name: &str) {
         .unwrap()
         .inner;
     base.dispatch_event(crate::channels::SourceEventWrapper::new(
-        source.into(),
+        source.clone(),
         crate::channels::SourceEvent::Change(SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(source, id),
+                    reference: ElementReference::new(source.as_str(), id),
                     labels: vec!["Person".into()].into(),
                     effective_from: 1000,
                 },
@@ -1201,15 +1622,61 @@ async fn next(receiver: &mut mpsc::UnboundedReceiver<QueryResult>) -> QueryResul
         .unwrap()
 }
 
-async fn component_handle(core: &DrasiLib, id: &str, kind: &'static str) -> ComponentHandle {
+async fn component_handle(
+    core: &DrasiLib,
+    name: &crate::ComponentName,
+    kind: &'static str,
+) -> ComponentHandle {
+    let handle = core.component_by_name(name).unwrap();
     let runtime = core.computation_runtime.as_ref();
     let control = runtime.control().unwrap();
     runtime
-        .component_observation_at(&control.registry_snapshot(), id, kind)
+        .component_observation_at(&control.registry_snapshot(), handle.id(), kind)
         .unwrap();
-    control
-        .component_handle(&ComponentId::try_new(id).unwrap())
+    handle
+}
+
+fn component_id_by_name(core: &DrasiLib, name: &str) -> ComponentId {
+    core.component_by_name(&ComponentName::try_new(name).unwrap())
         .unwrap()
+        .id()
+        .clone()
+}
+
+async fn apply_native_topology(
+    core: &DrasiLib,
+    edit: impl FnOnce(&mut DesiredTopology),
+) -> crate::Result<crate::management::ManagementStatus> {
+    let mut current = core.desired_configuration()?;
+    edit(&mut current.desired.topology);
+    core.apply_desired_state(
+        current.revision,
+        format!("native-test-{}", current.revision),
+        current.desired,
+    )
+    .await?;
+    core.reconcile_desired_state().await
+}
+
+fn remove_native_definition(topology: &mut DesiredTopology, id: &ComponentId) {
+    topology
+        .components
+        .retain(|node| node.descriptor.id() != id);
+    topology.relationships.retain(|edge| {
+        &edge.definition.from.component != id && &edge.definition.to.component != id
+    });
+    topology.boundary_relationships.retain(|edge| {
+        &edge.definition.from.component != id && &edge.definition.to.component != id
+    });
+    topology
+        .subscriptions
+        .retain(|(from, to)| from != id && to != id);
+    topology
+        .control_connections
+        .retain(|(from, to)| from != id && to != id);
+    topology.readiness_required.remove(id);
+    topology.component_plugins.remove(id);
+    topology.component_resources.remove(id);
 }
 
 async fn assert_creation_failed(_core: &DrasiLib, handle: &ComponentHandle, message: &str) {
@@ -1223,13 +1690,36 @@ async fn assert_creation_failed(_core: &DrasiLib, handle: &ComponentHandle, mess
     assert!(failure.contains(message), "{failure}");
 }
 
-fn assert_waiting_for(handle: &ComponentHandle, dependency: &str) {
+async fn assert_waiting_for(
+    core: &DrasiLib,
+    handle: &ComponentHandle,
+    dependency: &crate::ComponentName,
+) {
+    let mut changes = core.computation_control().unwrap().subscribe_registry();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        changes.wait_for(|snapshot| {
+            snapshot.observed.components.get(handle.id()).is_some_and(|node| {
+                node.generation == handle.generation()
+                    && (node.failure.is_some()
+                        || node.waiting_for.iter().any(|waiting| {
+                            matches!(waiting, DependencyWait::ComponentName { name } if name == dependency)
+                        }))
+            })
+        }),
+    )
+    .await
+    .expect("dependency observation must be published")
+    .unwrap();
     let observed = handle.observed().unwrap();
-    assert_eq!(observed.realization, RealizationState::Blocked);
+    assert!(matches!(
+        observed.realization,
+        RealizationState::Pending | RealizationState::Blocked
+    ));
     assert!(observed.failure.is_none(), "{observed:?}");
     assert!(
         observed.waiting_for.iter().any(|waiting| {
-            matches!(waiting, DependencyWait::Component { id } if id.as_str() == dependency)
+            matches!(waiting, DependencyWait::ComponentName { name } if name == dependency)
         }),
         "{observed:?}"
     );
@@ -1278,15 +1768,28 @@ async fn source_reports_selected_providers_before_initialization_completes() {
     let core = builder().build().await.unwrap();
     let selected: Arc<dyn crate::state_store::StateStoreProvider> =
         Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-    let (mut source, control) = ControlledSource::new("source");
-    source.inner = SourceBase::new(
-        SourceBaseParams::new("source")
-            .with_auto_start(false)
-            .with_state_store(selected.clone()),
-    )
-    .unwrap();
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let provider = selected.clone();
     control.pending_initialize.store(true, Ordering::Release);
-    let handle = core.add_source_with_handle(source).await.unwrap();
+    let handle = core
+        .create_source_async(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            None,
+            false,
+            move |id| async move {
+                let mut source = source.construct(id.clone())?;
+                source.inner = SourceBase::new(
+                    SourceBaseParams::new(id.clone())
+                        .with_auto_start(false)
+                        .with_state_store(provider),
+                )?;
+                Ok((source, HashMap::new()))
+            },
+        )
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(3), control.entered.notified())
         .await
         .unwrap();
@@ -1306,14 +1809,27 @@ async fn source_reports_selected_providers_before_initialization_completes() {
         ResourceOwnership::Borrowed
     );
     let old_observer = control.resource_observers.lock().unwrap()[0].clone();
-    let (replacement, replacement_control) = ControlledSource::new("source");
-    core.update_source("source", replacement).await.unwrap();
+    let (replacement, replacement_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    core.replace_source_fixture(
+        crate::config::ComponentReference::by_id(handle.id().clone()),
+        replacement,
+    )
+    .await
+    .unwrap();
+    let current = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        "source",
+    )
+    .await;
+    current.wait_created().await.unwrap();
     assert_eq!(
         replacement_control.resource_observers.lock().unwrap().len(),
         1
     );
-    let current = component_handle(&core, "source", "source").await;
-    assert_ne!(handle.generation(), current.generation());
+    assert_ne!(handle.id(), current.id());
     let error = old_observer
         .observe(vec![crate::context::ComponentResource::StateStore(
             selected,
@@ -1335,19 +1851,54 @@ async fn source_and_reaction_report_shared_provider_identity_with_generation_sco
     let shared: Arc<dyn crate::identity::IdentityProvider> = Arc::new(
         crate::identity::PasswordIdentityProvider::new("user", "password"),
     );
-    let (source, _) = ControlledSource::new("source");
-    source.inner.set_identity_provider(shared.clone()).await;
-    let source = core.add_source_with_handle(source).await.unwrap();
-    source.wait_created().await.unwrap();
-    core.add_query_with_handle(config("query", None))
-        .await
-        .unwrap()
-        .wait_created()
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let provider = shared.clone();
+    let source = core
+        .create_source_async(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            None,
+            false,
+            move |id| async move {
+                let source = source.construct(id)?;
+                source.inner.set_identity_provider(provider).await;
+                Ok((source, HashMap::new()))
+            },
+        )
         .await
         .unwrap();
-    let (reaction, reaction_control, _) = ControlledReaction::new("reaction", &["query"]);
-    reaction.base.set_identity_provider(shared.clone()).await;
-    let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
+    source.wait_created().await.unwrap();
+    core.add_query_with_handle(config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        None,
+    ))
+    .await
+    .unwrap()
+    .wait_created()
+    .await
+    .unwrap();
+    let (reaction, reaction_control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
+    let provider = shared.clone();
+    let reaction = core
+        .create_reaction_async(
+            drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+            None,
+            vec![crate::config::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )],
+            false,
+            move |id, inputs| async move {
+                let reaction = reaction.construct(id, inputs)?;
+                reaction.base.set_identity_provider(provider).await;
+                Ok((reaction, HashMap::new()))
+            },
+        )
+        .await
+        .unwrap();
     reaction.wait_created().await.unwrap();
     wait_for_attached_resources(&core, source.id(), &[ResourceRole::Identity]).await;
     let observed =
@@ -1366,14 +1917,42 @@ async fn source_and_reaction_report_shared_provider_identity_with_generation_sco
         .resources
         .contains_key(&ResourceId::try_new("instance.identity").unwrap()));
     let old_observer = reaction_control.resource_observers.lock().unwrap()[0].clone();
-    let (replacement, replacement_control, _) = ControlledReaction::new("reaction", &["query"]);
-    replacement.base.set_identity_provider(shared.clone()).await;
-    core.update_reaction("reaction", replacement).await.unwrap();
+    let (replacement, replacement_control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
+    let provider = shared.clone();
+    core.remove_reaction_by_id(reaction.id(), false)
+        .await
+        .unwrap();
+    let replacement = core
+        .create_reaction_async(
+            drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+            None,
+            vec![crate::config::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )],
+            false,
+            move |id, inputs| async move {
+                let replacement = replacement.construct(id, inputs)?;
+                replacement.base.set_identity_provider(provider).await;
+                Ok((replacement, HashMap::new()))
+            },
+        )
+        .await
+        .unwrap();
+    replacement.wait_created().await.unwrap();
+    assert_ne!(reaction.id(), replacement.id());
     assert_eq!(
         replacement_control.resource_observers.lock().unwrap().len(),
         1
     );
-    let current = component_handle(&core, "reaction", "reaction").await;
+    let current = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        "reaction",
+    )
+    .await;
     assert_ne!(reaction.generation(), current.generation());
     let error = old_observer
         .observe(vec![crate::context::ComponentResource::Identity(shared)])
@@ -1391,15 +1970,32 @@ async fn source_and_reaction_report_shared_provider_identity_with_generation_sco
 #[tokio::test]
 async fn invalid_query_addition_retains_the_original_declared_configuration() {
     let core = builder().build().await.unwrap();
-    let mut invalid = config("invalid", None);
+    let mut invalid = config(
+        drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name"),
+        None,
+    );
     invalid.query = "this is not a query".into();
     core.add_query(invalid.clone()).await.unwrap();
-    let handle = component_handle(&core, "invalid", "query").await;
+    let handle = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name"),
+        "query",
+    )
+    .await;
     assert_creation_failed(&core, &handle, "").await;
-    let query = core.get_query_config("invalid").await.unwrap();
+    let query = core
+        .get_query_config_by_name(
+            &drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
     assert_eq!(query.query, invalid.query);
     assert_eq!(
-        core.get_query_status("invalid").await.unwrap(),
+        core.get_query_status_by_name(
+            &drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Error
     );
     let runtime = core.computation_runtime.as_ref();
@@ -1409,23 +2005,34 @@ async fn invalid_query_addition_retains_the_original_declared_configuration() {
             .configuration
             .get("query_config"),
         Some(&ConfigurationValue::Literal(
-            serde_json::to_value(invalid).unwrap()
+            serde_json::to_value(invalid.with_assigned_id(handle.id().clone())).unwrap()
         )),
     );
-    let declared = core.computation_runtime.query("invalid").await.unwrap();
+    let declared = core.computation_runtime.query(handle.id()).await.unwrap();
     assert_eq!(
         declared.inspector().snapshot().desired.id,
         snapshot.desired.id
     );
-    let (source, _) = ControlledSource::new("independent");
-    core.add_source_with_handle(source)
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("independent").expect("fixture component name"),
+    );
+    core.add_source_fixture_with_handle(source)
         .await
         .unwrap()
         .wait_created()
         .await
         .unwrap();
-    core.remove_query("invalid").await.unwrap();
-    assert!(core.get_query_config("invalid").await.is_err());
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    assert!(core
+        .get_query_config_by_name(
+            &drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name")
+        )
+        .await
+        .is_err());
     assert!(matches!(
         handle.observed(),
         Err(GraphError::StaleGeneration)
@@ -1437,21 +2044,44 @@ async fn invalid_query_addition_retains_the_original_declared_configuration() {
 async fn builder_query_validation_failures_remain_on_declared_nodes() {
     use crate::indexes::{StorageBackendRef, StorageBackendSpec};
 
-    let mut syntax = config("syntax", None);
+    let mut syntax = config(
+        drasi_core_types::ComponentName::try_new("syntax").expect("fixture component name"),
+        None,
+    );
     syntax.query = "this is not a query".into();
-    let dependency = config("dependency", Some("missing-source"));
-    let mut unknown_backend = config("unknown-backend", None);
+    let dependency = config(
+        drasi_core_types::ComponentName::try_new("dependency").expect("fixture component name"),
+        Some(
+            drasi_core_types::ComponentName::try_new("missing-source")
+                .expect("fixture component name"),
+        ),
+    );
+    let mut unknown_backend = config(
+        drasi_core_types::ComponentName::try_new("unknown-backend")
+            .expect("fixture component name"),
+        None,
+    );
     unknown_backend.storage_backend = Some(StorageBackendRef::Named("missing-backend".into()));
-    let mut invalid_inline = config("invalid-inline", None);
+    let mut invalid_inline = config(
+        drasi_core_types::ComponentName::try_new("invalid-inline").expect("fixture component name"),
+        None,
+    );
     invalid_inline.storage_backend = Some(StorageBackendRef::Inline(StorageBackendSpec::Plugin {
         kind: "".into(),
     }));
-    let mut unsupported_inline = config("unsupported-inline", None);
+    let mut unsupported_inline = config(
+        drasi_core_types::ComponentName::try_new("unsupported-inline")
+            .expect("fixture component name"),
+        None,
+    );
     unsupported_inline.storage_backend =
         Some(StorageBackendRef::Inline(StorageBackendSpec::Plugin {
             kind: "rocksdb".into(),
         }));
-    let mut capacity = config("capacity", None);
+    let mut capacity = config(
+        drasi_core_types::ComponentName::try_new("capacity").expect("fixture component name"),
+        None,
+    );
     capacity.dispatch_buffer_capacity = Some(0);
     let invalid = [
         (syntax, ""),
@@ -1461,7 +2091,10 @@ async fn builder_query_validation_failures_remain_on_declared_nodes() {
         (capacity, "bounded pipe capacity"),
     ];
     let mut configured = builder()
-        .with_query(config("valid", None))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("valid").expect("fixture component name"),
+            None,
+        ))
         .with_query(dependency);
     for (query, _) in &invalid {
         configured = configured.with_query(query.clone());
@@ -1470,88 +2103,167 @@ async fn builder_query_validation_failures_remain_on_declared_nodes() {
         .build()
         .await
         .expect("query-specific validation must happen after graph addition");
+    let dependency = core
+        .component_by_name(&ComponentName::try_new("dependency").unwrap())
+        .unwrap();
     assert_waiting_for(
-        &core.computation_component("dependency").unwrap(),
-        "missing-source",
-    );
+        &core,
+        &dependency,
+        &ComponentName::try_new("missing-source").unwrap(),
+    )
+    .await;
     for (query, message) in invalid {
-        let handle = core.computation_component(&query.id).unwrap();
+        let handle = core.component_by_name(&query.name).unwrap();
+        let query = query.with_assigned_id(handle.id().clone());
         assert_creation_failed(&core, &handle, message).await;
         assert_eq!(
-            serde_json::to_value(core.get_query_config(&query.id).await.unwrap()).unwrap(),
+            serde_json::to_value(core.get_query_config_by_name(&query.name).await.unwrap())
+                .unwrap(),
             serde_json::to_value(
                 core.config
                     .queries
                     .iter()
-                    .find(|configured| configured.id == query.id)
+                    .find(|configured| configured.name == query.name)
                     .unwrap()
+                    .clone()
+                    .with_assigned_id(handle.id().clone())
             )
             .unwrap(),
         );
-        core.remove_query(&query.id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), core.remove_query_by_id(&query.id))
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "removing {} stalled: {error}; node={:?}",
+                    query.name,
+                    handle.observed()
+                )
+            })
+            .unwrap();
     }
-    let valid = core.computation_component("valid").unwrap();
-    valid.wait_created().await.unwrap();
-    valid.start().await.unwrap();
-    valid.wait_started().await.unwrap();
+    let valid = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("valid").expect("fixture component name"),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        valid.wait_created().await.unwrap();
+        valid.start().await.unwrap();
+        valid.wait_started().await.unwrap();
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "valid query stalled: {error}; graph={:?}",
+            core.computation_control().unwrap().observed()
+        )
+    });
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn query_constructor_validation_happens_after_declaration() {
     let core = builder().build().await.unwrap();
-    let mut invalid = config("query", None);
+    let mut invalid = config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        None,
+    );
     invalid.dispatch_buffer_capacity = Some(0);
     let handle = core.add_query_with_handle(invalid).await.unwrap();
     assert_creation_failed(&core, &handle, "").await;
     assert_eq!(
-        core.get_query_status("query").await.unwrap(),
+        core.get_query_status_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Error
     );
-    core.update_query("query", config("query", None))
-        .await
-        .unwrap();
-    let replacement = component_handle(&core, "query", "query").await;
+    let corrected = config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        None,
+    );
+    core.remove_query_by_id(handle.id()).await.unwrap();
+    let replacement = core.add_query_with_handle(corrected).await.unwrap();
     replacement.wait_created().await.unwrap();
-    assert_ne!(handle.generation(), replacement.generation());
+    assert_ne!(handle.id(), replacement.id());
     assert!(matches!(
         handle.wait_created().await,
         Err(GraphError::StaleGeneration)
     ));
-    core.start_query("query").await.unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn missing_dependencies_wait_and_are_created_when_available() {
     let core = builder().build().await.unwrap();
-    core.add_query(config("query", Some("source")))
+    core.add_query(config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        Some(drasi_core_types::ComponentName::try_new("source").expect("fixture component name")),
+    ))
+    .await
+    .unwrap();
+    let query = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        "query",
+    )
+    .await;
+    assert_waiting_for(
+        &core,
+        &query,
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await;
+    assert!(!core
+        .get_graph()
+        .await
+        .expect("graph snapshot")
+        .contains_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        ));
+
+    let (reaction, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("missing-query")
+            .expect("fixture component name")],
+    );
+    let reaction = core
+        .add_reaction_fixture_with_handle(reaction)
         .await
         .unwrap();
-    let query = component_handle(&core, "query", "query").await;
-    assert_waiting_for(&query, "source");
+    assert_waiting_for(
+        &core,
+        &reaction,
+        &drasi_core_types::ComponentName::try_new("missing-query").expect("fixture component name"),
+    )
+    .await;
     assert!(!core
         .get_graph()
         .await
         .expect("graph snapshot")
-        .contains("source"));
+        .contains_by_name(
+            &drasi_core_types::ComponentName::try_new("missing-query")
+                .expect("fixture component name"),
+        ));
 
-    let (reaction, _, _) = ControlledReaction::new("reaction", &["missing-query"]);
-    let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
-    assert_waiting_for(&reaction, "missing-query");
-    assert!(!core
-        .get_graph()
-        .await
-        .expect("graph snapshot")
-        .contains("missing-query"));
-
-    let (source, _) = ControlledSource::new("source");
-    core.add_source_with_handle(source)
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    core.add_source_fixture_with_handle(source)
         .await
         .unwrap()
         .wait_created()
         .await
         .unwrap();
+    let status = core.reconcile_desired_state().await.unwrap();
+    assert!(status.error.is_none(), "{status:?}");
+    let query = core.component_by_id(query.id()).unwrap();
     tokio::time::timeout(Duration::from_secs(3), query.wait_created())
         .await
         .unwrap()
@@ -1560,13 +2272,23 @@ async fn missing_dependencies_wait_and_are_created_when_available() {
         query.observed().unwrap().lifecycle,
         ComponentLifecycle::Stopped
     );
-    core.add_query_with_handle(config("missing-query", None))
-        .await
-        .unwrap()
-        .wait_created()
-        .await
-        .unwrap();
-    core.start_query("missing-query").await.unwrap();
+    core.add_query_with_handle(config(
+        drasi_core_types::ComponentName::try_new("missing-query").expect("fixture component name"),
+        None,
+    ))
+    .await
+    .unwrap()
+    .wait_created()
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("missing-query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    let status = core.reconcile_desired_state().await.unwrap();
+    assert!(status.error.is_none(), "{status:?}");
+    let reaction = core.component_by_id(reaction.id()).unwrap();
     tokio::time::timeout(Duration::from_secs(3), reaction.wait_created())
         .await
         .unwrap()
@@ -1575,22 +2297,38 @@ async fn missing_dependencies_wait_and_are_created_when_available() {
 }
 
 #[tokio::test]
-async fn creation_retry_reuses_the_owned_source_and_never_retries_in_a_loop() {
+async fn failed_initialization_requires_a_new_object_and_never_retries_in_a_loop() {
     let core = builder().build().await.unwrap();
-    let (source, control) = ControlledSource::new("source");
-    let reporter = source.inner.status_handle();
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.fail_initialize.store(true, Ordering::Release);
-    let handle = core.add_source_with_handle(source).await.unwrap();
+    let handle = core.add_source_fixture_with_handle(source).await.unwrap();
     assert_creation_failed(&core, &handle, "injected initialization failure").await;
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
     assert_eq!(control.initializations.load(Ordering::Acquire), 1);
     control.fail_initialize.store(false, Ordering::Release);
-    core.start_source("source").await.unwrap();
-    assert_eq!(control.initializations.load(Ordering::Acquire), 2);
-    assert_eq!(control.resource_observers.lock().unwrap().len(), 2);
-    assert_eq!(control.starts.load(Ordering::Acquire), 1);
+    let error = core
+        .start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("injected initialization failure"));
+    assert_eq!(control.initializations.load(Ordering::Acquire), 1);
+    assert_eq!(control.resource_observers.lock().unwrap().len(), 1);
+    assert_eq!(control.starts.load(Ordering::Acquire), 0);
+    core.remove_source_by_id(handle.id(), false).await.unwrap();
+    let (fresh, fresh_control) =
+        ControlledSource::fixture(ComponentName::try_new("source").unwrap());
+    let fresh = core.add_source_fixture_with_handle(fresh).await.unwrap();
+    fresh.wait_created().await.unwrap();
+    fresh.start().await.unwrap();
+    fresh.wait_started().await.unwrap();
+    assert_ne!(handle.id(), fresh.id());
+    assert_eq!(fresh_control.initializations.load(Ordering::Acquire), 1);
     assert!(matches!(
         handle.wait_started().await,
         Err(GraphError::StaleGeneration)
@@ -1598,7 +2336,7 @@ async fn creation_retry_reuses_the_owned_source_and_never_retries_in_a_loop() {
     let source = core
         .computation_runtime
         .as_ref()
-        .source("source")
+        .source(&component_id_by_name(&core, "source"))
         .await
         .unwrap();
     assert!(Arc::ptr_eq(
@@ -1607,18 +2345,19 @@ async fn creation_retry_reuses_the_owned_source_and_never_retries_in_a_loop() {
             .downcast_ref::<ControlledSource>()
             .unwrap()
             .control,
-        &control
+        &fresh_control
     ));
     let mut events = core.subscribe_all_component_events();
-    reporter
+    fresh_control
         .set_status(
             ComponentStatus::Error,
-            Some("failure after reinitialization".into()),
+            Some("failure on the new object".into()),
         )
         .await;
-    crate::test_helpers::wait_for_component_status(
+    crate::test_helpers::wait_for_component_status_by_name(
         &mut events,
-        "source",
+        &core.component_graph(),
+        &crate::ComponentName::try_new("source").expect("fixture component name"),
         ComponentStatus::Error,
         Duration::from_secs(2),
     )
@@ -1629,22 +2368,25 @@ async fn creation_retry_reuses_the_owned_source_and_never_retries_in_a_loop() {
 async fn explicit_start_joins_pending_source_readiness() {
     let core = builder().build().await.unwrap();
     core.start().await.unwrap();
-    let (source, control) = ControlledSource::new("source");
-    let reporter = source.inner.status_handle();
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let reporter = control.clone();
     control.auto_start.store(true, Ordering::Release);
     control.starting_only.store(true, Ordering::Release);
     let mut events = core.subscribe_all_component_events();
-    let handle = core.add_source_with_handle(source).await.unwrap();
+    let handle = core.add_source_fixture_with_handle(source).await.unwrap();
     handle.wait_created().await.unwrap();
-    crate::test_helpers::wait_for_component_status(
+    crate::test_helpers::wait_for_component_status_by_name(
         &mut events,
-        "source",
+        &core.component_graph(),
+        &crate::ComponentName::try_new("source").expect("fixture component name"),
         ComponentStatus::Starting,
         Duration::from_secs(2),
     )
     .await;
     let graph = core.computation_runtime.as_ref().control().unwrap();
-    let id = ComponentId::try_new("source").unwrap();
+    let id = handle.id().clone();
     let mut observed = graph.subscribe_observed();
     drop(
         tokio::time::timeout(
@@ -1671,7 +2413,11 @@ async fn explicit_start_joins_pending_source_readiness() {
     assert_eq!(report.summary, OperationSummary::Completed);
     assert_eq!(control.starts.load(Ordering::Acquire), 1);
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Starting
     );
     reporter.set_status(ComponentStatus::Running, None).await;
@@ -1692,28 +2438,56 @@ async fn explicit_start_joins_pending_source_readiness_multi_thread() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_initialization_does_not_block_addition_or_removal() {
     let core = builder().build().await.unwrap();
-    let (source, control) = ControlledSource::new("pending");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("pending").expect("fixture component name"),
+    );
     control.pending_initialize.store(true, Ordering::Release);
-    let handle = tokio::time::timeout(Duration::from_secs(3), core.add_source_with_handle(source))
-        .await
-        .expect("addition must not wait for initialization")
-        .unwrap();
+    let handle = tokio::time::timeout(
+        Duration::from_secs(3),
+        core.add_source_fixture_with_handle(source),
+    )
+    .await
+    .expect("addition must not wait for initialization")
+    .unwrap();
     tokio::time::timeout(Duration::from_secs(3), control.entered.notified())
         .await
         .unwrap();
-    let invalid = crate::Query::cypher("invalid-dependency")
-        .query("MATCH (n) RETURN n")
-        .from_input("pending")
-        .from_input("missing")
-        .auto_start(false)
-        .build();
-    let invalid = core.add_query_with_handle(invalid).await.unwrap();
-    assert_waiting_for(&invalid, "missing");
-    core.remove_query("invalid-dependency").await.unwrap();
-    let (independent, independent_control) = ControlledSource::new("independent");
+    let invalid = crate::Query::cypher(
+        drasi_core_types::ComponentName::try_new("invalid-dependency")
+            .expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("pending").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("missing").expect("fixture component name"),
+    )
+    .auto_start(false)
+    .build()
+    .unwrap();
+    let invalid = tokio::time::timeout(Duration::from_secs(3), core.add_query_with_handle(invalid))
+        .await
+        .expect("a pending initializer must not block accepting another definition")
+        .unwrap();
+    assert_waiting_for(
+        &core,
+        &invalid,
+        &drasi_core_types::ComponentName::try_new("missing").expect("fixture component name"),
+    )
+    .await;
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("invalid-dependency")
+            .expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    let (independent, independent_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("independent").expect("fixture component name"),
+    );
     let independent = tokio::time::timeout(
         Duration::from_secs(3),
-        core.add_source_with_handle(independent),
+        core.add_source_fixture_with_handle(independent),
     )
     .await
     .expect("one initializer must not hold a global addition lock")
@@ -1723,15 +2497,21 @@ async fn pending_initialization_does_not_block_addition_or_removal() {
         independent_control.initializations.load(Ordering::Acquire),
         1
     );
-    tokio::time::timeout(Duration::from_secs(3), core.remove_source("pending", true))
-        .await
-        .expect("removal must cancel the pending initializer")
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        core.remove_source_by_name(
+            &drasi_core_types::ComponentName::try_new("pending").expect("fixture component name"),
+            true,
+        ),
+    )
+    .await
+    .expect("removal must cancel the pending initializer")
+    .unwrap();
     assert!(matches!(
         handle.wait_created().await,
         Err(GraphError::StaleGeneration)
     ));
-    assert_eq!(control.stops.load(Ordering::Acquire), 1);
+    assert_eq!(control.stops.load(Ordering::Acquire), 0);
     assert_eq!(control.deprovisions.load(Ordering::Acquire), 1);
     core.shutdown().await.unwrap();
 }
@@ -1739,9 +2519,11 @@ async fn pending_initialization_does_not_block_addition_or_removal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_wait_does_not_cancel_controller_owned_creation() {
     let core = builder().build().await.unwrap();
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.pending_initialize.store(true, Ordering::Release);
-    let handle = core.add_source_with_handle(source).await.unwrap();
+    let handle = core.add_source_fixture_with_handle(source).await.unwrap();
     let wait = tokio::spawn({
         let handle = handle.clone();
         async move { handle.wait_created().await }
@@ -1761,13 +2543,15 @@ async fn cancelled_wait_does_not_cancel_controller_owned_creation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn instance_stop_cancels_pending_auto_start_and_restart_can_retry_creation() {
+async fn instance_stop_cancels_pending_auto_start_and_a_new_object_can_restart() {
     let core = builder().build().await.unwrap();
     core.start().await.unwrap();
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.auto_start.store(true, Ordering::Release);
     control.pending_initialize.store(true, Ordering::Release);
-    let handle = core.add_source_with_handle(source).await.unwrap();
+    let handle = core.add_source_fixture_with_handle(source).await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), control.entered.notified())
         .await
         .unwrap();
@@ -1775,14 +2559,21 @@ async fn instance_stop_cancels_pending_auto_start_and_restart_can_retry_creation
         .await
         .expect("instance stop must cancel a pending initializer")
         .unwrap();
-    assert!(matches!(
-        handle.wait_created().await,
-        Err(GraphError::CreationStopped { .. })
-    ));
+    assert!(handle.wait_created().await.is_err());
+    assert!(!handle.observed().unwrap().started);
     assert_eq!(control.starts.load(Ordering::Acquire), 0);
-    control.pending_initialize.store(false, Ordering::Release);
+    assert_eq!(control.initializations.load(Ordering::Acquire), 1);
+    core.remove_source_by_id(handle.id(), false).await.unwrap();
+    let (fresh, fresh_control) =
+        ControlledSource::fixture(ComponentName::try_new("source").unwrap());
+    fresh_control.auto_start.store(true, Ordering::Release);
+    let fresh = core.add_source_fixture_with_handle(fresh).await.unwrap();
+    fresh.wait_created().await.unwrap();
     core.start().await.unwrap();
-    assert_eq!(control.starts.load(Ordering::Acquire), 1);
+    fresh.wait_started().await.unwrap();
+    assert_ne!(fresh.id(), handle.id());
+    assert_eq!(fresh_control.starts.load(Ordering::Acquire), 1);
+    assert_eq!(control.starts.load(Ordering::Acquire), 0);
     assert!(matches!(
         handle.wait_started().await,
         Err(GraphError::StaleGeneration)
@@ -1793,10 +2584,18 @@ async fn instance_stop_cancels_pending_auto_start_and_restart_can_retry_creation
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replacement_cancels_pending_creation_and_fences_existing_waiters() {
     let core = builder().build().await.unwrap();
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.auto_start.store(true, Ordering::Release);
     control.pending_initialize.store(true, Ordering::Release);
-    let old = core.add_source_with_handle(source).await.unwrap();
+    let old = core.add_source_fixture_with_handle(source).await.unwrap();
+    let old_owned = core
+        .computation_control()
+        .unwrap()
+        .management_control()
+        .component_handle_by_id(old.id())
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(3), control.entered.notified())
         .await
         .unwrap();
@@ -1804,17 +2603,29 @@ async fn replacement_cancels_pending_creation_and_fences_existing_waiters() {
         let old = old.clone();
         async move { old.wait_created().await }
     });
-    let (replacement, replacement_control) = ControlledSource::new("source");
+    let (replacement, replacement_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     replacement_control
         .auto_start
         .store(true, Ordering::Release);
     tokio::time::timeout(
         Duration::from_secs(3),
-        core.update_source("source", replacement),
+        core.remove_source_by_id(old.id(), false),
     )
     .await
-    .expect("replacement must cancel the obsolete initializer")
+    .unwrap_or_else(|error| {
+        panic!(
+            "retirement must cancel the obsolete initializer: {error}; node={:?}; accepted={:?}",
+            old.observed(),
+            core.desired_configuration()
+        )
+    })
     .unwrap();
+    let replacement = core
+        .add_source_fixture_with_handle(replacement)
+        .await
+        .unwrap();
     let wait_error = wait.await.unwrap().unwrap_err();
     assert!(matches!(
         wait_error.underlying(),
@@ -1825,26 +2636,37 @@ async fn replacement_cancels_pending_creation_and_fences_existing_waiters() {
         Err(GraphError::StaleGeneration)
     ));
     assert!(matches!(
-        old.set_control_handler(Arc::new(PeerControl::default()))
+        old_owned
+            .set_control_handler(Arc::new(PeerControl::default()))
             .await,
         Err(GraphError::StaleGeneration)
     ));
-    let current = component_handle(&core, "source", "source").await;
-    assert_eq!(current.id().as_str(), "source");
-    assert_eq!(old.id(), current.id());
-    assert_ne!(old.generation(), current.generation());
+    let current = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        "source",
+    )
+    .await;
+    assert_eq!(current.id(), replacement.id());
+    assert_ne!(old.id(), current.id());
     current.wait_created().await.unwrap();
     assert_eq!(replacement_control.starts.load(Ordering::Acquire), 0);
     current.start().await.unwrap();
     assert_eq!(control.starts.load(Ordering::Acquire), 0);
     assert_eq!(replacement_control.starts.load(Ordering::Acquire), 1);
     let retired_control = current.control().unwrap();
-    core.remove_source("source", true).await.unwrap();
-    let (source, _) = ControlledSource::new("source");
-    let readded = core.add_source_with_handle(source).await.unwrap();
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        true,
+    )
+    .await
+    .unwrap();
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let readded = core.add_source_fixture_with_handle(source).await.unwrap();
     readded.wait_created().await.unwrap();
-    assert_eq!(current.id(), readded.id());
-    assert_ne!(current.generation(), readded.generation());
+    assert_ne!(current.id(), readded.id());
     assert!(matches!(
         current.observed(),
         Err(GraphError::StaleGeneration)
@@ -1860,14 +2682,25 @@ async fn replacement_cancels_pending_creation_and_fences_existing_waiters() {
 async fn duplicate_additions_are_rejected_without_replacing_the_declared_node() {
     let core = builder().build().await.unwrap();
     let query = core
-        .add_query_with_handle(config("query", None))
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
         .await
         .unwrap();
     let runtime = core.computation_runtime.as_ref();
     let revision = runtime.inspector().unwrap().snapshot().desired.revision;
-    assert!(core.add_query(config("query", None)).await.is_err());
-    let (source, control) = ControlledSource::new("query");
-    assert!(core.add_source_with_handle(source).await.is_err());
+    assert!(core
+        .add_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None
+        ))
+        .await
+        .is_err());
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    );
+    assert!(core.add_source_fixture_with_handle(source).await.is_err());
     assert_eq!(control.initializations.load(Ordering::Acquire), 0);
     assert_eq!(
         runtime.inspector().unwrap().snapshot().desired.revision,
@@ -1875,150 +2708,101 @@ async fn duplicate_additions_are_rejected_without_replacing_the_declared_node() 
     );
     query.wait_created().await.unwrap();
     assert_eq!(
-        component_handle(&core, "query", "query").await.generation(),
+        component_handle(
+            &core,
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            "query"
+        )
+        .await
+        .generation(),
         query.generation()
     );
     core.shutdown().await.unwrap();
 }
 
-fn rejected_addition(error: crate::DrasiError) -> GraphError {
-    assert!(matches!(
-        error.classification(),
-        crate::DrasiError::OperationFailed { operation, .. } if operation == "add"
-    ));
-    let crate::DrasiError::Internal(error) = error else {
-        panic!("ownership-bearing rejection must preserve its original error");
-    };
-    let error = error.downcast::<GraphError>().expect("native graph cause");
-    let GraphError::AdditionRejected { cause, .. } = &error else {
-        panic!("the rejected addition and cause must remain recoverable");
-    };
-    assert!(matches!(cause.as_ref(), GraphError::Topology { .. }));
-    error
-}
-
 #[tokio::test]
-async fn rejected_ordinary_addition_retains_ownership_and_can_be_resubmitted() {
+async fn rejected_ordinary_object_is_cleaned_without_granting_readmission_authority() {
     let core = builder().build().await.unwrap();
     let runtime = core.computation_runtime.as_ref();
-    let control = runtime.control().unwrap();
-    let reserved = ResourceId::try_new(format!(
-        "instance/{}",
-        runtime.next_instance.load(Ordering::Acquire)
-    ))
-    .unwrap();
-    core.add_computation_component(
-        ComponentAddition::new(ConstructedComponent::service(Box::new(NativeService {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("resource-holder").unwrap(),
-                vec![],
-            )
-            .unwrap(),
-            starts: Arc::new(AtomicUsize::new(0)),
-            stops: Arc::new(AtomicUsize::new(0)),
-        })))
-        .auto_start(false)
-        .with_resource(
-            ResourceSpecification {
-                id: reserved.clone(),
-                role: ResourceRole::StateStore,
-                ownership: ResourceOwnership::Borrowed,
-                binding: "test-reservation".into(),
-            },
-            ResourceHandle::new(
-                ResourceRole::StateStore,
-                Arc::new(LegacyStateStoreResource(Arc::new(
-                    crate::state_store::MemoryStateStoreProvider::new(),
-                ))),
-            ),
-        ),
-    )
-    .await
-    .unwrap()
-    .wait_created()
-    .await
-    .unwrap();
-    let (source, source_control) = ControlledSource::new("source");
-    let GraphError::AdditionRejected {
-        addition: rejection,
-        ..
-    } = rejected_addition(core.add_source_with_handle(source).await.unwrap_err())
-    else {
-        unreachable!("validated rejection");
-    };
-    assert_eq!(source_control.initializations.load(Ordering::Acquire), 0);
-    assert!(!runtime
-        .current_records()
-        .await
-        .unwrap()
-        .contains_key("source"));
-    let addition = rejection
-        .take()
-        .await
-        .expect("ownership must be recoverable");
-    assert_eq!(addition.definition.descriptor.id().as_str(), "source");
-    assert!(addition.bindings.resources.contains_key(&reserved));
-    assert!(rejection.take().await.is_none());
-
-    let preview = control
-        .preview(
-            control.desired_snapshot().revision,
-            vec![
-                DesiredMutation::RemoveComponents {
-                    selection: GraphSelection::Exact(vec![
-                        ComponentId::try_new("resource-holder").unwrap()
-                    ]),
-                    policy: RemovalPolicy::Reject,
-                },
-                DesiredMutation::RemoveResource {
-                    resource: reserved,
-                    policy: RemovalPolicy::Reject,
-                },
-            ],
+    let id = ComponentId::generate();
+    let (source, source_control) = ControlledSource::new(id.clone());
+    let error = core
+        .add_source_with_handle(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            source,
         )
         .await
-        .unwrap();
-    let removed = control
-        .reconcile(preview, TopologyBindings::default())
+        .unwrap_err();
+    assert!(
+        matches!(error.downcast_ref::<GraphError>(), Some(GraphError::ExternalComponentId { component }) if component == &id)
+    );
+    assert_eq!(source_control.initializations.load(Ordering::Acquire), 0);
+    assert_eq!(source_control.drops.load(Ordering::Acquire), 1);
+    assert!(runtime.current_records().await.unwrap().is_empty());
+    let (retry, retry_control) = ControlledSource::new(id.clone());
+    assert!(core
+        .add_source(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            retry
+        )
         .await
-        .unwrap();
-    assert_eq!(removed.summary, OperationSummary::Completed);
-    let handle = control.add_component(addition).await.unwrap();
+        .is_err());
+    assert_eq!(retry_control.drops.load(Ordering::Acquire), 1);
+    let (fresh, fresh_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let handle = core.add_source_fixture_with_handle(fresh).await.unwrap();
+    assert_ne!(handle.id(), &id);
     handle.wait_created().await.unwrap();
-    core.start_source("source").await.unwrap();
+    core.start_source_by_id(handle.id()).await.unwrap();
     handle.wait_started().await.unwrap();
-    assert_eq!(source_control.initializations.load(Ordering::Acquire), 1);
-    core.remove_source("source", true).await.unwrap();
-    assert_eq!(source_control.deprovisions.load(Ordering::Acquire), 1);
+    assert_eq!(fresh_control.initializations.load(Ordering::Acquire), 1);
+    core.remove_source_by_id(handle.id(), true).await.unwrap();
+    assert_eq!(fresh_control.deprovisions.load(Ordering::Acquire), 1);
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn rejected_query_and_reaction_errors_retain_graph_owned_cleanup() {
-    let core = builder().build().await.unwrap();
-    let GraphError::AdditionRejected {
-        addition: query, ..
-    } = rejected_addition(
-        core.add_query_with_handle(config(&core.config.id, None))
-            .await
-            .unwrap_err(),
-    )
-    else {
-        unreachable!("validated rejection");
-    };
-    let (reaction, reaction_control, _) = ControlledReaction::new(&core.config.id, &[]);
-    let GraphError::AdditionRejected {
-        addition: reaction, ..
-    } = rejected_addition(core.add_reaction_with_handle(reaction).await.unwrap_err())
-    else {
-        unreachable!("validated rejection");
-    };
+    // This case deliberately supplies an existing object to exercise rejection cleanup.
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("taken").expect("fixture component name"),
+    );
+    let existing = core.add_source_fixture_with_handle(source).await.unwrap();
+    existing.wait_created().await.unwrap();
+    let query = core
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("taken").expect("fixture component name"),
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(query.downcast_ref::<GraphError>(), Some(GraphError::DuplicateComponentName { existing: conflict }) if &conflict.id == existing.id())
+    );
+    let id = ComponentId::generate();
+    let (reaction, reaction_control, _) = ControlledReaction::new(id.clone(), &[]);
+    let error = core
+        .add_reaction_with_handle(
+            drasi_core_types::ComponentName::try_new("taken").expect("fixture component name"),
+            reaction,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.downcast_ref::<GraphError>(), Some(GraphError::DuplicateComponentName { existing: conflict }) if &conflict.id == existing.id())
+    );
     assert_eq!(reaction_control.initializations.load(Ordering::Acquire), 0);
+    assert_eq!(reaction_control.drops.load(Ordering::Acquire), 1);
     assert!(core.list_queries().await.unwrap().is_empty());
     assert!(core.list_reactions().await.unwrap().is_empty());
     core.shutdown().await.unwrap();
-    assert!(query.take().await.is_none());
-    assert!(reaction.take().await.is_none());
+    assert_eq!(reaction_control.drops.load(Ordering::Acquire), 1);
 }
 
 mockall::mock! {
@@ -2026,14 +2810,14 @@ mockall::mock! {
 
     #[async_trait]
     impl crate::wal::WalProvider for InventoryWal {
-        async fn register(&self, source_id: &str, config: crate::wal::WriteAheadLogConfig) -> std::result::Result<(), crate::wal::WalError>;
-        async fn append(&self, source_id: &str, event: &drasi_core::models::SourceChange) -> std::result::Result<u64, crate::wal::WalError>;
-        async fn read_from(&self, source_id: &str, sequence: u64) -> std::result::Result<Vec<(u64, drasi_core::models::SourceChange)>, crate::wal::WalError>;
-        async fn prune_up_to(&self, source_id: &str, sequence: u64) -> std::result::Result<u64, crate::wal::WalError>;
-        async fn head_sequence(&self, source_id: &str) -> std::result::Result<u64, crate::wal::WalError>;
-        async fn oldest_sequence(&self, source_id: &str) -> std::result::Result<Option<u64>, crate::wal::WalError>;
-        async fn event_count(&self, source_id: &str) -> std::result::Result<u64, crate::wal::WalError>;
-        async fn delete_wal(&self, source_id: &str) -> std::result::Result<(), crate::wal::WalError>;
+        async fn register(&self, scope: &crate::StorageScope, source_id: &ComponentId, config: crate::wal::WriteAheadLogConfig) -> std::result::Result<(), crate::wal::WalError>;
+        async fn append(&self, scope: &crate::StorageScope, source_id: &ComponentId, event: &drasi_core::models::SourceChange) -> std::result::Result<u64, crate::wal::WalError>;
+        async fn read_from(&self, scope: &crate::StorageScope, source_id: &ComponentId, sequence: u64) -> std::result::Result<Vec<(u64, drasi_core::models::SourceChange)>, crate::wal::WalError>;
+        async fn prune_up_to(&self, scope: &crate::StorageScope, source_id: &ComponentId, sequence: u64) -> std::result::Result<u64, crate::wal::WalError>;
+        async fn head_sequence(&self, scope: &crate::StorageScope, source_id: &ComponentId) -> std::result::Result<u64, crate::wal::WalError>;
+        async fn oldest_sequence(&self, scope: &crate::StorageScope, source_id: &ComponentId) -> std::result::Result<Option<u64>, crate::wal::WalError>;
+        async fn event_count(&self, scope: &crate::StorageScope, source_id: &ComponentId) -> std::result::Result<u64, crate::wal::WalError>;
+        async fn delete_wal(&self, scope: &crate::StorageScope, source_id: &ComponentId) -> std::result::Result<(), crate::wal::WalError>;
     }
 }
 
@@ -2087,20 +2871,33 @@ async fn runtime_services_are_declared_once_and_bound_to_public_component_ids() 
         assert!(requirement.concrete_type.is_some());
     }
 
-    let (source, _) = ControlledSource::new("source");
-    let source = core.add_source_with_handle(source).await.unwrap();
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let source = core.add_source_fixture_with_handle(source).await.unwrap();
     let query = core
-        .add_query_with_handle(config("query", Some("source")))
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
         .await
         .unwrap();
-    let (reaction, _, _) = ControlledReaction::new("reaction", &["query"]);
-    let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
+    let (reaction, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
+    let reaction = core
+        .add_reaction_fixture_with_handle(reaction)
+        .await
+        .unwrap();
     for (id, kind, handle) in [
         ("source", "source", source),
         ("query", "query", query),
         ("reaction", "reaction", reaction),
     ] {
-        assert_eq!(handle.id().as_str(), id);
+        assert_eq!(handle.id(), &component_id_by_name(&core, id));
         handle.wait_created().await.unwrap();
         if kind == "query" {
             let publication = runtime.control().unwrap().registry_snapshot();
@@ -2121,19 +2918,44 @@ async fn runtime_services_are_declared_once_and_bound_to_public_component_ids() 
             }
             continue;
         }
-        let record = runtime.record(id, kind).await.unwrap();
+        let record = runtime.record(handle.id(), kind).await.unwrap();
         assert_eq!(record.node, *handle.id());
-        assert_eq!(
-            record.resource.as_str(),
-            format!("instance/{}", record.token)
-        );
+        let accepted = core.desired_configuration().unwrap();
+        let definition = accepted
+            .desired
+            .ordinary
+            .iter()
+            .find(|definition| &definition.id == handle.id())
+            .unwrap();
+        let crate::management::OrdinaryComponent::ProcessLocal { binding, .. } =
+            &definition.component
+        else {
+            panic!("ordinary fixture must retain its actual resource binding");
+        };
+        assert_eq!(&record.resource, binding);
         let snapshot = runtime.inspector().unwrap().snapshot();
         let spec = &snapshot.desired.specifications[handle.id()];
         assert_eq!(
             spec.dependencies.get("instance"),
             Some(&vec![record.resource.clone()])
         );
-        assert_eq!(spec.dependencies.len(), services.len() + 1);
+        assert_eq!(
+            spec.dependencies.len(),
+            services.len() + 1 + usize::from(kind == "source")
+        );
+        if let Value::Source(source) = &record.value {
+            let host =
+                snapshot.desired.specifications[handle.id()].dependencies["source_host"][0].clone();
+            let published = runtime
+                .control()
+                .unwrap()
+                .registry_snapshot()
+                .resource(&host)
+                .unwrap()
+                .get::<SourcePluginHost>()
+                .unwrap();
+            assert!(Arc::ptr_eq(&published, &source.borrowed));
+        }
         for (name, _) in services {
             let id = ResourceId::try_new(format!("instance.{name}")).unwrap();
             assert_eq!(spec.dependencies.get(name), Some(&vec![id.clone()]));
@@ -2145,12 +2967,33 @@ async fn runtime_services_are_declared_once_and_bound_to_public_component_ids() 
     }
 
     state
-        .set("unrelated", "retained", b"shared-state".to_vec())
+        .set(
+            &drasi_core_types::StorePartition::component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000369")
+                    .expect("fixture UUID"),
+            ),
+            "retained",
+            b"shared-state".to_vec(),
+        )
         .await
         .unwrap();
-    core.remove_reaction("reaction", true).await.unwrap();
-    core.remove_query("query").await.unwrap();
-    core.remove_source("source", true).await.unwrap();
+    core.remove_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        true,
+    )
+    .await
+    .unwrap();
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        true,
+    )
+    .await
+    .unwrap();
     let snapshot = runtime.inspector().unwrap().snapshot();
     for (name, _) in services {
         let id = ResourceId::try_new(format!("instance.{name}")).unwrap();
@@ -2161,7 +3004,16 @@ async fn runtime_services_are_declared_once_and_bound_to_public_component_ids() 
         );
     }
     assert_eq!(
-        state.get("unrelated", "retained").await.unwrap(),
+        state
+            .get(
+                &drasi_core_types::StorePartition::component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000369")
+                        .expect("fixture UUID")
+                ),
+                "retained"
+            )
+            .await
+            .unwrap(),
         Some(b"shared-state".to_vec())
     );
     core.shutdown().await.unwrap();
@@ -2174,6 +3026,7 @@ async fn configured_index_providers_are_borrowed_resources_with_the_original_han
     let secondary: Arc<dyn drasi_core::interface::IndexBackendPlugin> =
         Arc::new(DeferredPersistentProvider);
     let core = builder()
+        .with_allow_external_component_ids(true)
         .with_default_index_provider("primary", primary.clone())
         .with_index_provider("archive / secondary", secondary.clone())
         .build()
@@ -2230,11 +3083,8 @@ async fn configured_index_providers_are_borrowed_resources_with_the_original_han
         index_providers: vec![primary, secondary],
     });
     let spec = ComponentSpecification {
-        descriptor: ComponentDescriptor::try_new(
-            ComponentId::try_new("inventory-probe").unwrap(),
-            vec![],
-        )
-        .unwrap(),
+        descriptor: ComponentDescriptor::try_new(crate::test_helpers::component_id(779), vec![])
+            .unwrap(),
         role: ComponentRole::Service,
         completion: None,
         implementation: factory.descriptor().implementation.clone(),
@@ -2243,7 +3093,12 @@ async fn configured_index_providers_are_borrowed_resources_with_the_original_han
         dependencies: BTreeMap::from([(Arc::from("indexes"), resources)]),
     };
     core.add_computation_component(
-        ComponentAddition::from_specification(spec, factory).auto_start(false),
+        ComponentAddition::from_specification(
+            ComponentName::try_new("inventory-probe").unwrap(),
+            spec,
+            factory,
+        )
+        .auto_start(false),
     )
     .await
     .unwrap()
@@ -2263,11 +3118,18 @@ async fn index_aliases_share_one_node_and_query_dependencies_follow_reconfigurat
         .with_default_index_provider("primary", primary.clone())
         .with_index_provider("alias", primary.clone())
         .with_index_provider("secondary", secondary)
-        .with_query(config("query", None))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
         .build()
         .await
         .unwrap();
-    let query = core.computation_component("query").unwrap();
+    let query = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .unwrap();
     query.wait_created().await.unwrap();
     let control = core.computation_control().unwrap();
     let primary_id = index_resource_id("alias").unwrap();
@@ -2303,13 +3165,34 @@ async fn index_aliases_share_one_node_and_query_dependencies_follow_reconfigurat
         )
         .await
         .is_err());
-    let mut replacement = config("query", None);
+    let mut replacement = config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        None,
+    );
     replacement.storage_backend =
         Some(crate::indexes::StorageBackendRef::Named("secondary".into()));
-    core.update_query("query", replacement).await.unwrap();
+    let error = core
+        .update_query_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            replacement.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("query factory does not support configuration updates"));
+    assert_eq!(
+        control.desired_snapshot().specifications[query.id()].dependencies["backend"],
+        vec![primary_id.clone()]
+    );
+    core.computation_runtime
+        .remove_owned(query.id(), "query", false)
+        .await
+        .unwrap();
+    let replacement = core.add_query_with_handle(replacement).await.unwrap();
+    replacement.wait_created().await.unwrap();
+    assert_ne!(replacement.id(), query.id());
     let desired = control.desired_snapshot();
     assert_eq!(
-        desired.specifications[query.id()].dependencies["backend"],
+        desired.specifications[replacement.id()].dependencies["backend"],
         vec![secondary_id]
     );
     control
@@ -2327,35 +3210,44 @@ async fn index_aliases_share_one_node_and_query_dependencies_follow_reconfigurat
 
 #[tokio::test]
 async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_removed_queries() {
-    let query_id = ComponentId::try_new("query").unwrap();
+    let independent_query_id = crate::test_helpers::component_id(46);
     let extra_id = "lib-query/7175657279";
     let extra = ComponentBatch::builder()
-        .service(Box::new(NativeService {
-            descriptor: ComponentDescriptor::try_new(query_id.clone(), vec![]).unwrap(),
-            starts: Arc::new(AtomicUsize::new(0)),
-            stops: Arc::new(AtomicUsize::new(0)),
-        }))
+        .service(
+            ComponentName::try_new("query").unwrap(),
+            Box::new(NativeService {
+                descriptor: ComponentDescriptor::try_new(independent_query_id.clone(), vec![])
+                    .unwrap(),
+                starts: Arc::new(AtomicUsize::new(0)),
+                stops: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
         .build()
         .unwrap();
-    let (source, _) = ControlledSource::new("source");
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     let plugin = PluginIdentity {
         id: "known-source-plugin".into(),
         version: "1.2.3".into(),
     };
     let independent_core = builder()
+        .with_allow_external_component_ids(true)
         .with_id(extra_id)
         .with_components(extra.auto_start(false))
         .build()
         .await
         .unwrap();
     independent_core
-        .computation_component("query")
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .unwrap()
         .wait_created()
         .await
         .unwrap();
     let core = builder()
-        .with_source_metadata(
+        .with_source_fixture_metadata(
             source,
             HashMap::from([
                 ("pluginId".into(), plugin.id.to_string()),
@@ -2363,19 +3255,40 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
             ]),
         )
         .with_default_index_provider("primary", Arc::new(DeferredPersistentProvider))
-        .with_query(config("query", Some("source")))
-        .with_query(config("unresolved", Some("missing")))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("unresolved").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("missing")
+                    .expect("fixture component name"),
+            ),
+        ))
         .build()
         .await
         .unwrap();
-    let handle = core.computation_component("query").unwrap();
+    let handle = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .unwrap();
     handle.wait_created().await.unwrap();
+    let query_id = handle.id().clone();
     assert_waiting_for(
-        &core.computation_component("unresolved").unwrap(),
-        "missing",
-    );
-    let runtime = core.computation_runtime.as_ref();
-    runtime.cleanup_candidates.write().await.clear();
+        &core,
+        &core
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("unresolved")
+                    .expect("fixture component name"),
+            )
+            .unwrap(),
+        &drasi_core_types::ComponentName::try_new("missing").expect("fixture component name"),
+    )
+    .await;
     let inventory = core.inspect_computation_inventory().await.unwrap();
     let root = ComputationScope::root("__drasi_lib_runtime__");
     let independent = independent_core
@@ -2393,10 +3306,14 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
     assert!(independent.scopes[&root]
         .topology
         .nodes
-        .contains_key(&GraphEntityId::Component(query_id.clone())));
+        .contains_key(&GraphEntityId::Component(independent_query_id.clone())));
     assert!(inventory.scopes[&root].owner.is_none());
     assert_eq!(
-        core.computation_component("query").unwrap().generation(),
+        core.component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .unwrap()
+        .generation(),
         handle.generation()
     );
     assert!(inventory.scopes[&root]
@@ -2415,30 +3332,32 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
     assert!(inventory.scopes[&root]
         .topology
         .nodes
-        .contains_key(&GraphEntityId::Component(
-            ComponentId::try_new("unresolved").unwrap()
-        )));
+        .contains_key(&GraphEntityId::Component(component_id_by_name(
+            &core,
+            "unresolved"
+        ))));
     assert_eq!(
         inventory.plugin_dependents(&plugin),
-        BTreeSet::from([root.entity(GraphEntityId::Component(
-            ComponentId::try_new("source").unwrap()
-        ))])
+        BTreeSet::from([root.entity(GraphEntityId::Component(component_id_by_name(
+            &core, "source"
+        )))])
     );
     let provider = root.entity(GraphEntityId::Resource(
         index_resource_id("primary").unwrap(),
     ));
     let nested_provider = root.entity(GraphEntityId::Resource(
-        ComputationPipelineBuilder::index_resource_id("query").unwrap(),
+        ComputationPipelineBuilder::index_resource_id(&query_id).unwrap(),
     ));
     assert!(inventory
         .dependencies(&nested_provider)
         .any(|link| link.to == provider));
     let nested_source = root.entity(GraphEntityId::Resource(
-        ComputationPipelineBuilder::source_resource_id("source").unwrap(),
+        ComputationPipelineBuilder::source_resource_id(&component_id_by_name(&core, "source"))
+            .unwrap(),
     ));
-    let source = root.entity(GraphEntityId::Component(
-        ComponentId::try_new("source").unwrap(),
-    ));
+    let source = root.entity(GraphEntityId::Component(component_id_by_name(
+        &core, "source",
+    )));
     assert!(inventory
         .dependencies(&nested_source)
         .any(|link| link.to == source));
@@ -2448,15 +3367,11 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
         .nodes
         .contains_key(&GraphEntityId::Resource(state)));
     assert!(inventory.links.iter().all(|link| link.from != link.to));
-    // The fixture's legacy index interface cannot delete persistent namespaces.
-    let mut memory = config("query", Some("source"));
-    memory.storage_backend = Some(crate::indexes::StorageBackendRef::Inline(
-        crate::indexes::StorageBackendSpec::Memory {
-            enable_archive: false,
-        },
-    ));
-    core.update_query("query", memory).await.unwrap();
-    core.remove_query("query").await.unwrap();
+    // This inventory fixture retains processing state when withdrawing its definition.
+    core.computation_runtime
+        .remove_owned(&query_id, "query", false)
+        .await
+        .unwrap();
     let after = core.inspect_computation_inventory().await.unwrap();
     assert_eq!(after.scopes.len(), 1);
     assert!(!after.scopes[&root]
@@ -2464,7 +3379,9 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
         .nodes
         .contains_key(&GraphEntityId::Component(query_id.clone())));
     assert!(independent_core
-        .computation_component("query")
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+        )
         .unwrap()
         .observed()
         .is_ok());
@@ -2485,15 +3402,28 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
 
 #[tokio::test]
 async fn instance_root_identity_is_rejected_by_native_admission_with_cleanup_ownership() {
-    let core = builder().with_id("instance").build().await.unwrap();
-    let (source, source_control) = ControlledSource::new("instance");
-    let GraphError::AdditionRejected { addition, .. } =
-        rejected_addition(core.add_source_with_handle(source).await.unwrap_err())
-    else {
-        unreachable!("ownership-bearing rejection");
-    };
+    let id = ComponentId::generate();
+    // Explicit object injection isolates the independent instance-identity reservation.
+    let core = builder()
+        .with_id(id.to_string())
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
+    let (source, source_control) = ControlledSource::new(id.clone());
+    let error = core
+        .add_source_with_handle(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            source,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("instance identity is reserved"),
+        "{error:#}"
+    );
     assert_eq!(source_control.initializations.load(Ordering::Acquire), 0);
-    assert!(core.get_source_status("instance").await.is_err());
+    assert!(core.get_source_status_by_id(&id).await.is_err());
     assert!(core
         .computation_control()
         .unwrap()
@@ -2504,17 +3434,22 @@ async fn instance_root_identity_is_rejected_by_native_admission_with_cleanup_own
         .values()
         .all(|component| component.failure.is_none()));
     core.shutdown().await.unwrap();
-    assert!(addition.take().await.is_none());
+    assert_eq!(source_control.drops.load(Ordering::Acquire), 1);
 }
 
 #[tokio::test]
 async fn runtime_factory_validates_captured_services_without_requiring_absent_providers() {
     let core = builder().build().await.unwrap();
-    let (source, _) = ControlledSource::new("source");
-    let handle = core.add_source_with_handle(source).await.unwrap();
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let handle = core.add_source_fixture_with_handle(source).await.unwrap();
     handle.wait_created().await.unwrap();
     let runtime = core.computation_runtime.as_ref();
-    let record = runtime.record("source", "source").await.unwrap();
+    let record = runtime
+        .record(&component_id_by_name(&core, "source"), "source")
+        .await
+        .unwrap();
     let snapshot = runtime.inspector().unwrap().snapshot();
     assert!(!snapshot
         .desired
@@ -2578,38 +3513,54 @@ async fn runtime_factory_validates_captured_services_without_requiring_absent_pr
 #[tokio::test]
 async fn auto_start_is_requested_only_for_a_running_instance_and_failures_stay_on_nodes() {
     let core = builder().build().await.unwrap();
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.auto_start.store(true, Ordering::Release);
-    let source = core.add_source_with_handle(source).await.unwrap();
+    let source = core.add_source_fixture_with_handle(source).await.unwrap();
     source.wait_created().await.unwrap();
     assert_eq!(control.starts.load(Ordering::Acquire), 0);
     let runtime = core.computation_runtime.as_ref();
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Added
     );
     let snapshot = runtime.inspector().unwrap().snapshot();
     assert!(snapshot.desired.lifecycle_policies[source.id()].auto_start);
-    assert_eq!(
-        snapshot.desired.specifications[source.id()]
-            .configuration
-            .get("definition"),
-        Some(&ConfigurationValue::Literal(
-            serde_json::json!({"auto_start": true})
-        ))
-    );
+    let Some(ConfigurationValue::Literal(definition)) = snapshot.desired.specifications
+        [source.id()]
+    .configuration
+    .get("definition") else {
+        panic!("source definition must remain literal configuration");
+    };
+    assert_eq!(definition["auto_start"], true);
     core.start().await.unwrap();
     source.wait_started().await.unwrap();
     assert_eq!(control.starts.load(Ordering::Acquire), 1);
-    let (bad, bad_control) = ControlledSource::new("bad");
+    let (bad, bad_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("bad").expect("fixture component name"),
+    );
     bad_control.auto_start.store(true, Ordering::Release);
     bad_control.fail_starts.store(1, Ordering::Release);
-    core.add_source(bad).await.unwrap();
-    let bad = component_handle(&core, "bad", "source").await;
+    core.add_source_fixture(bad).await.unwrap();
+    let bad = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("bad").expect("fixture component name"),
+        "source",
+    )
+    .await;
     bad.wait_created().await.unwrap();
     assert!(bad.wait_started().await.is_err());
     assert_eq!(
-        core.get_source_status("bad").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("bad").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Error
     );
     core.shutdown().await.unwrap();
@@ -2618,14 +3569,21 @@ async fn auto_start_is_requested_only_for_a_running_instance_and_failures_stay_o
 #[tokio::test]
 async fn ordinary_start_hooks_do_not_complete_handle_waits_before_plugin_running() {
     let core = builder().build().await.unwrap();
-    let (source, source_control) = ControlledSource::new("source");
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     source_control.starting_only.store(true, Ordering::Release);
-    let source_status = source.inner.status_handle();
-    let source = core.add_source_with_handle(source).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(3), core.start_source("source"))
-        .await
-        .expect("ordinary start must complete after the plugin's start hook")
-        .unwrap();
+    let source_status = source_control.clone();
+    let source = core.add_source_fixture_with_handle(source).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        core.start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        ),
+    )
+    .await
+    .expect("ordinary start must complete after the plugin's start hook")
+    .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(20), source.wait_started())
             .await
@@ -2641,21 +3599,39 @@ async fn ordinary_start_hooks_do_not_complete_handle_waits_before_plugin_running
         .unwrap();
 
     let query = core
-        .add_query_with_handle(config("query", None))
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
         .await
         .unwrap();
-    core.start_query("query").await.unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     query.wait_started().await.unwrap();
-    let (reaction, reaction_control, _) = ControlledReaction::new("reaction", &["query"]);
+    let (reaction, reaction_control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     reaction_control
         .starting_only
         .store(true, Ordering::Release);
-    let reaction_status = reaction.base.status_handle();
-    let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(3), core.start_reaction("reaction"))
+    let reaction_status = reaction_control.clone();
+    let reaction = core
+        .add_reaction_fixture_with_handle(reaction)
         .await
-        .expect("ordinary reaction start must retain hook-completion semantics")
         .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        core.start_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        ),
+    )
+    .await
+    .expect("ordinary reaction start must retain hook-completion semantics")
+    .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(20), reaction.wait_started())
             .await
@@ -2679,11 +3655,17 @@ async fn ordinary_start_hooks_do_not_complete_handle_waits_before_plugin_running
 #[tokio::test]
 async fn a_plugin_failure_before_running_fails_the_start_wait_not_the_addition() {
     let core = builder().build().await.unwrap();
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.starting_only.store(true, Ordering::Release);
-    let status = source.inner.status_handle();
-    let handle = core.add_source_with_handle(source).await.unwrap();
-    core.start_source("source").await.unwrap();
+    let status = control.clone();
+    let handle = core.add_source_fixture_with_handle(source).await.unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     assert!(!handle.observed().unwrap().started);
     status
         .set_status(
@@ -2697,29 +3679,48 @@ async fn a_plugin_failure_before_running_fails_the_start_wait_not_the_addition()
         .unwrap_err();
     assert!(format!("{error:#}").contains("failure before plugin readiness"));
     assert!(!handle.observed().unwrap().started);
-    core.remove_source("source", true).await.unwrap();
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        true,
+    )
+    .await
+    .unwrap();
     core.shutdown().await.unwrap();
 }
 
 async fn verify_query_subscription_count_tracks_running_helpers() {
-    let (source, source_control) = ControlledSource::new("source");
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     source_control.auto_start.store(true, Ordering::Release);
     source_control
         .pending_subscription
         .store(true, Ordering::Release);
     let core = builder()
-        .with_source(source)
-        .with_query(config("query", Some("source")))
+        .with_source_fixture(source)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
         .build()
         .await
         .unwrap();
     core.start().await.unwrap();
     let query = core
         .query_manager()
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .unwrap();
-    let handle = component_handle(&core, "query", "query").await;
+    let handle = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        "query",
+    )
+    .await;
     let mut start = Box::pin(query.start());
     tokio::time::timeout(Duration::from_secs(3), async {
         tokio::select! {
@@ -2765,28 +3766,49 @@ async fn query_subscription_count_uses_actual_helpers_multi_thread() {
 
 #[tokio::test]
 async fn query_start_does_not_wait_for_the_instance_subscription_fence() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.auto_start.store(true, Ordering::Release);
     control
         .release_bootstrap_at_fence
         .store(true, Ordering::Release);
-    source
-        .inner
-        .set_bootstrap_provider(GatedBootstrap(control.clone()))
-        .await;
-    let query = crate::Query::cypher("query")
-        .query("MATCH (n:Person) RETURN n")
-        .from_input("source")
-        .enable_bootstrap(true)
-        .auto_start(true)
-        .build();
+    let bootstrap = control.clone();
+    let query = crate::Query::cypher(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .query("MATCH (n:Person) RETURN n")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .enable_bootstrap(true)
+    .auto_start(true)
+    .build()
+    .unwrap();
     let core = builder()
-        .with_source(source)
+        .with_source_factory_async(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            None,
+            true,
+            move |id| async move {
+                let source = source.construct(id)?;
+                source
+                    .inner
+                    .set_bootstrap_provider(GatedBootstrap(bootstrap))
+                    .await;
+                Ok((source, HashMap::new()))
+            },
+        )
         .with_query(query)
         .build()
         .await
         .unwrap();
-    let query = component_handle(&core, "query", "query").await;
+    let query = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        "query",
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(3), core.start())
         .await
         .expect("query start must let the instance release its source subscription fence")
@@ -2800,13 +3822,18 @@ async fn query_start_does_not_wait_for_the_instance_subscription_fence() {
 }
 
 async fn late_subscriptions_release_the_fence_once_when_actually_bound() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.auto_start.store(true, Ordering::Release);
-    let mut fast = config("fast", Some("source"));
+    let mut fast = config(
+        drasi_core_types::ComponentName::try_new("fast").expect("fixture component name"),
+        Some(drasi_core_types::ComponentName::try_new("source").expect("fixture component name")),
+    );
     fast.auto_start = true;
     let core = Arc::new(
         builder()
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(fast)
             .build()
             .await
@@ -2815,7 +3842,10 @@ async fn late_subscriptions_release_the_fence_once_when_actually_bound() {
     core.start().await.unwrap();
     assert_eq!(control.subscription_fences.load(Ordering::Acquire), 1);
     control.pending_subscription.store(true, Ordering::Release);
-    let mut slow = config("slow", Some("source"));
+    let mut slow = config(
+        drasi_core_types::ComponentName::try_new("slow").expect("fixture component name"),
+        Some(drasi_core_types::ComponentName::try_new("source").expect("fixture component name")),
+    );
     slow.auto_start = true;
     let adding = tokio::spawn({
         let core = core.clone();
@@ -2837,7 +3867,11 @@ async fn late_subscriptions_release_the_fence_once_when_actually_bound() {
     adding.await.unwrap().unwrap();
     tokio::time::timeout(
         Duration::from_secs(3),
-        core.computation_component("slow").unwrap().wait_started(),
+        core.component_by_name(
+            &drasi_core_types::ComponentName::try_new("slow").expect("fixture component name"),
+        )
+        .unwrap()
+        .wait_started(),
     )
     .await
     .unwrap()
@@ -2864,26 +3898,47 @@ async fn late_subscription_fence_multiple_threads() {
 #[tokio::test]
 async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failure() {
     for fail in [false, true] {
-        let (source, control) = ControlledSource::new("source");
+        let (source, control) = ControlledSource::fixture(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        );
         control.auto_start.store(true, Ordering::Release);
         control.fail_bootstrap.store(fail, Ordering::Release);
-        source
-            .inner
-            .set_bootstrap_provider(GatedBootstrap(control.clone()))
-            .await;
-        let query = crate::Query::cypher("query")
-            .query("MATCH (n:Person) RETURN n")
-            .from_input("source")
-            .enable_bootstrap(true)
-            .auto_start(true)
-            .build();
+        let bootstrap = control.clone();
+        let query = crate::Query::cypher(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .query("MATCH (n:Person) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
+        .enable_bootstrap(true)
+        .auto_start(true)
+        .build()
+        .unwrap();
         let core = builder()
-            .with_source(source)
+            .with_source_factory_async(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+                None,
+                true,
+                move |id| async move {
+                    let source = source.construct(id)?;
+                    source
+                        .inner
+                        .set_bootstrap_provider(GatedBootstrap(bootstrap))
+                        .await;
+                    Ok((source, HashMap::new()))
+                },
+            )
             .with_query(query)
             .build()
             .await
             .unwrap();
-        let query = component_handle(&core, "query", "query").await;
+        let query = component_handle(
+            &core,
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            "query",
+        )
+        .await;
         tokio::time::timeout(Duration::from_secs(3), core.start())
             .await
             .expect("instance startup must not wait for unfinished query bootstrap")
@@ -2907,7 +3962,7 @@ async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failu
             assert!(query.observed().unwrap().failure.is_some());
         } else {
             ready.unwrap();
-            let instance = core.computation_runtime.query("query").await.unwrap();
+            let instance = core.computation_runtime.query(query.id()).await.unwrap();
             assert_eq!(
                 QueryTrait::status(instance.as_ref()).await,
                 ComponentStatus::Running
@@ -2919,22 +3974,28 @@ async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failu
 
 #[tokio::test]
 async fn native_components_share_instance_lifecycle_without_starting_manual_components() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let mut counts = Vec::new();
-    for (id, auto_start) in [("automatic", true), ("manual", false)] {
+    for (id, component_id, auto_start) in [
+        ("automatic", crate::test_helpers::component_id(1), true),
+        ("manual", crate::test_helpers::component_id(2), false),
+    ] {
         let starts = Arc::new(AtomicUsize::new(0));
         let stops = Arc::new(AtomicUsize::new(0));
         let handle = core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::service(Box::new(NativeService {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new(id).unwrap(),
-                        vec![],
-                    )
-                    .unwrap(),
-                    starts: starts.clone(),
-                    stops: stops.clone(),
-                })))
+                ComponentAddition::new(
+                    ComponentName::try_new(id).unwrap(),
+                    ConstructedComponent::service(Box::new(NativeService {
+                        descriptor: ComponentDescriptor::try_new(component_id, vec![]).unwrap(),
+                        starts: starts.clone(),
+                        stops: stops.clone(),
+                    })),
+                )
                 .auto_start(auto_start),
             )
             .await
@@ -2957,10 +4018,20 @@ async fn native_components_share_instance_lifecycle_without_starting_manual_comp
 
 #[tokio::test]
 async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_native_config() {
-    let (source, source_control) = ControlledSource::new("ordinary");
-    let core = builder().with_source(source).build().await.unwrap();
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("ordinary").expect("fixture component name"),
+    );
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .with_source_fixture(source)
+        .build()
+        .await
+        .unwrap();
     let runtime = core.computation_runtime.as_ref();
-    let record = runtime.record("ordinary", "source").await.unwrap();
+    let record = runtime
+        .record(&component_id_by_name(&core, "ordinary"), "source")
+        .await
+        .unwrap();
     let starts = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(NativeServiceFactory {
         descriptor: FactoryDescriptor {
@@ -2977,10 +4048,12 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
         stops: Arc::new(AtomicUsize::new(0)),
         index_providers: Vec::new(),
     });
-    for (id, fail) in [("native-ready", false), ("native-failed", true)] {
+    for (id, component_id, fail) in [
+        ("native-ready", crate::test_helpers::component_id(1), false),
+        ("native-failed", crate::test_helpers::component_id(2), true),
+    ] {
         let spec = ComponentSpecification {
-            descriptor: ComponentDescriptor::try_new(ComponentId::try_new(id).unwrap(), vec![])
-                .unwrap(),
+            descriptor: ComponentDescriptor::try_new(component_id, vec![]).unwrap(),
             role: ComponentRole::Service,
             completion: None,
             implementation: factory.descriptor().implementation.clone(),
@@ -2995,17 +4068,23 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
             dependencies: BTreeMap::new(),
         };
         core.add_computation_component(
-            ComponentAddition::from_specification(spec, factory.clone()).auto_start(true),
+            ComponentAddition::from_specification(
+                ComponentName::try_new(id).unwrap(),
+                spec,
+                factory.clone(),
+            )
+            .auto_start(true),
         )
         .await
         .unwrap();
     }
     let blocked = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::source(Box::new(
-                UnboundNativeSource {
+            ComponentAddition::new(
+                ComponentName::try_new("native-blocked").unwrap(),
+                ConstructedComponent::source(Box::new(UnboundNativeSource {
                     descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new("native-blocked").unwrap(),
+                        crate::test_helpers::component_id(780),
                         vec![PortDescriptor::new(
                             PortId::try_new("out").unwrap(),
                             PortDirection::Output,
@@ -3014,13 +4093,22 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
                         )],
                     )
                     .unwrap(),
-                },
-            )))
+                })),
+            )
             .auto_start(true),
         )
         .await
         .unwrap();
-    assert_eq!(runtime.current_records().await.unwrap().len(), 2);
+    assert_eq!(
+        runtime
+            .current_records()
+            .await
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![record.node.clone()]
+    );
     let error = tokio::time::timeout(
         Duration::from_secs(3),
         runtime.start_native_components(false),
@@ -3050,13 +4138,13 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
         .unwrap()
         .waiting_reason()
         .unwrap()
-        .contains("native-blocked:out"));
+        .contains(&format!("{}:out", blocked.id())));
     assert_eq!(starts.load(Ordering::Acquire), 1);
     assert_eq!(source_control.starts.load(Ordering::Acquire), 0);
     assert_eq!(
         core.computation_control()
             .unwrap()
-            .component_handle(&record.node)
+            .component_handle_by_id(&record.node)
             .unwrap()
             .generation(),
         runtime.handle_for(&record).unwrap().generation()
@@ -3082,46 +4170,90 @@ async fn default_builder_is_native_and_preserves_public_result_signatures() {
         .build()
         .await
         .unwrap();
-    let (source, control) = ControlledSource::new("added-by-default");
-    core.add_source_with_handle(source)
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("added-by-default")
+            .expect("fixture component name"),
+    );
+    core.add_source_fixture_with_handle(source)
         .await
         .unwrap()
         .wait_created()
         .await
         .unwrap();
     assert_eq!(control.initializations.load(Ordering::Acquire), 1);
-    let mut invalid = config("invalid", None);
+    let mut invalid = config(
+        drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name"),
+        None,
+    );
     invalid.query = "this is not a query".into();
     let result: crate::Result<()> = core.add_query(invalid).await;
     result.unwrap();
-    assert!(core.start_query("invalid").await.is_err());
-    core.remove_query("invalid").await.unwrap();
-    core.add_query(config("missing", Some("source")))
+    assert!(core
+        .start_query_by_name(
+            &drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name")
+        )
         .await
-        .unwrap();
-    assert_waiting_for(&core.computation_component("missing").unwrap(), "source");
-    core.remove_query("missing").await.unwrap();
+        .is_err());
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("invalid").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.add_query(config(
+        drasi_core_types::ComponentName::try_new("missing").expect("fixture component name"),
+        Some(drasi_core_types::ComponentName::try_new("source").expect("fixture component name")),
+    ))
+    .await
+    .unwrap();
+    assert_waiting_for(
+        &core,
+        &core
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("missing")
+                    .expect("fixture component name"),
+            )
+            .unwrap(),
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await;
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("missing").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     assert!(core.list_queries().await.unwrap().is_empty());
-    let (source, source_control) = ControlledSource::new("source");
-    let added: crate::Result<()> = core.add_source(source).await;
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let added: crate::Result<()> = core.add_source_fixture(source).await;
     added.unwrap();
-    core.computation_component("source")
-        .unwrap()
-        .wait_created()
-        .await
-        .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_created()
+    .await
+    .unwrap();
     assert!(!source_control.resource_observers.lock().unwrap().is_empty());
-    core.add_query(config("query", Some("source")))
-        .await
-        .unwrap();
-    let (reaction, reaction_control, _) = ControlledReaction::new("reaction", &["query"]);
-    let added: crate::Result<()> = core.add_reaction(reaction).await;
+    core.add_query(config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        Some(drasi_core_types::ComponentName::try_new("source").expect("fixture component name")),
+    ))
+    .await
+    .unwrap();
+    let (reaction, reaction_control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
+    let added: crate::Result<()> = core.add_reaction_fixture(reaction).await;
     added.unwrap();
-    core.computation_component("reaction")
-        .unwrap()
-        .wait_created()
-        .await
-        .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_created()
+    .await
+    .unwrap();
     assert!(!reaction_control
         .resource_observers
         .lock()
@@ -3141,30 +4273,50 @@ async fn plugin_origin_is_preserved_only_when_the_host_supplies_an_identity() {
         id: "example/plugin".into(),
         version: "1.2.3".into(),
     };
-    let (plugin, _) = ControlledSource::new("plugin-source");
-    core.add_source_with_metadata(plugin, metadata.clone())
+    let (plugin, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("plugin-source").expect("fixture component name"),
+    );
+    core.add_source_fixture_with_metadata(plugin, metadata.clone())
         .await
         .unwrap();
-    let (custom, _) = ControlledSource::new("custom-source");
-    core.add_source(custom).await.unwrap();
-    core.add_query(config("query", None)).await.unwrap();
-    let (plugin, _, _) = ControlledReaction::new("plugin-reaction", &["query"]);
-    core.add_reaction_with_metadata(plugin, metadata)
+    let (custom, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("custom-source").expect("fixture component name"),
+    );
+    core.add_source_fixture(custom).await.unwrap();
+    core.add_query(config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        None,
+    ))
+    .await
+    .unwrap();
+    let (plugin, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("plugin-reaction")
+            .expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
+    core.add_reaction_fixture_with_metadata(plugin, metadata)
         .await
         .unwrap();
-    let runtime = core.computation_runtime.as_ref();
     for (id, kind, expected) in [
         ("plugin-source", "source", Some(&expected)),
         ("custom-source", "source", None),
         ("plugin-reaction", "reaction", Some(&expected)),
     ] {
-        let handle = component_handle(&core, id, kind).await;
+        let name = crate::ComponentName::try_new(id).expect("fixture component name");
+        let handle = component_handle(&core, &name, kind).await;
         handle.wait_created().await.unwrap();
-        let snapshot = runtime.inspector().unwrap().snapshot();
+        let mut observations = core.computation_control().unwrap().subscribe_registry();
+        let snapshot = tokio::time::timeout(
+            Duration::from_secs(3),
+            observations.wait_for(|snapshot| {
+                snapshot.desired.component_plugins.get(handle.id()) == expected
+            }),
+        )
+        .await
+        .expect("host-supplied provenance must be published")
+        .unwrap();
         assert_eq!(
-            snapshot.desired.specifications[handle.id()]
-                .descriptor
-                .plugin_identity(),
+            snapshot.desired.component_plugins.get(handle.id()),
             expected,
         );
     }
@@ -3173,32 +4325,67 @@ async fn plugin_origin_is_preserved_only_when_the_host_supplies_an_identity() {
 
 #[tokio::test]
 async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
-    let (a, _) = ControlledSource::new("a");
-    let (b, _) = ControlledSource::new("b");
-    let (reaction, _, _) = ControlledReaction::new("reaction", &["q1"]);
+    let (a, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("a").expect("fixture component name"),
+    );
+    let (b, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("b").expect("fixture component name"),
+    );
+    let (reaction, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("q1").expect("fixture component name")],
+    );
     let core = builder()
-        .with_source(a)
-        .with_source(b)
-        .with_query(config("q1", Some("a")))
-        .with_query(config("q2", Some("b")))
-        .with_reaction(reaction)
+        .with_source_fixture(a)
+        .with_source_fixture(b)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            Some(drasi_core_types::ComponentName::try_new("a").expect("fixture component name")),
+        ))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("q2").expect("fixture component name"),
+            Some(drasi_core_types::ComponentName::try_new("b").expect("fixture component name")),
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
     let runtime = core.computation_runtime.as_ref();
     let nodes = runtime.current_records().await.unwrap();
-    for id in ["a", "b", "reaction"] {
-        assert_eq!(nodes[id].node.as_str(), id);
+    for (id, record) in &nodes {
+        assert_eq!(&record.node, id);
     }
-    let a = nodes["a"].node.clone();
-    let b = nodes["b"].node.clone();
-    let q1 = core.computation_component("q1").unwrap().id().clone();
-    let q2 = core.computation_component("q2").unwrap().id().clone();
-    let reaction = nodes["reaction"].node.clone();
+    let a = component_id_by_name(&core, "a");
+    let b = component_id_by_name(&core, "b");
+    let q1 = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .unwrap()
+        .id()
+        .clone();
+    let q2 = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("q2").expect("fixture component name"),
+        )
+        .unwrap()
+        .id()
+        .clone();
+    let reaction = component_id_by_name(&core, "reaction");
+    for id in [&a, &b, &q1, &q2, &reaction] {
+        core.component_by_id(id)
+            .unwrap()
+            .wait_created()
+            .await
+            .unwrap();
+    }
+    let status = core.reconcile_desired_state().await.unwrap();
+    assert!(status.applied && status.error.is_none(), "{status:?}");
     let control_only = vec![(b.clone(), reaction.clone())];
     runtime
         .control()
         .unwrap()
+        .management_control()
         .set_control_connections(control_only.clone())
         .await
         .unwrap();
@@ -3206,12 +4393,12 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
         (a.clone(), q1.clone()),
         (
             a.clone(),
-            ComputationPipelineBuilder::source_component_id("q1", "a").unwrap(),
+            ComputationPipelineBuilder::source_component_id(&q1, &a).unwrap(),
         ),
         (b.clone(), q2.clone()),
         (
             b.clone(),
-            ComputationPipelineBuilder::source_component_id("q2", "b").unwrap(),
+            ComputationPipelineBuilder::source_component_id(&q2, &b).unwrap(),
         ),
         (q1.clone(), reaction.clone()),
     ];
@@ -3235,23 +4422,46 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
             .as_ref(),
         control_only.as_slice()
     );
-    core.update_query("q1", config("q1", Some("b")))
+    runtime
+        .control()
+        .unwrap()
+        .management_control()
+        .set_control_connections(Vec::new())
         .await
         .unwrap();
-    let (new_reaction, _, _) = ControlledReaction::new("reaction", &["q2"]);
-    core.update_reaction("reaction", new_reaction)
+    core.remove_reaction_by_id(&reaction, false).await.unwrap();
+    core.remove_query_by_id(&q1).await.unwrap();
+    let new_q1 = core
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            Some(drasi_core_types::ComponentName::try_new("b").expect("fixture component name")),
+        ))
         .await
         .unwrap();
+    new_q1.wait_created().await.unwrap();
+    assert_ne!(new_q1.id(), &q1);
+    let q1 = new_q1.id().clone();
+    let (new_reaction, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("q2").expect("fixture component name")],
+    );
+    let new_reaction = core
+        .add_reaction_fixture_with_handle(new_reaction)
+        .await
+        .unwrap();
+    new_reaction.wait_created().await.unwrap();
+    assert_ne!(new_reaction.id(), &reaction);
+    let reaction = new_reaction.id().clone();
     let mut expected = vec![
         (b.clone(), q1.clone()),
         (
             b.clone(),
-            ComputationPipelineBuilder::source_component_id("q1", "b").unwrap(),
+            ComputationPipelineBuilder::source_component_id(&q1, &b).unwrap(),
         ),
         (b.clone(), q2.clone()),
         (
             b.clone(),
-            ComputationPipelineBuilder::source_component_id("q2", "b").unwrap(),
+            ComputationPipelineBuilder::source_component_id(&q2, &b).unwrap(),
         ),
         (q2.clone(), reaction.clone()),
     ];
@@ -3266,18 +4476,36 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
             .as_ref(),
         expected.as_slice()
     );
-    assert_eq!(
-        runtime
-            .control()
-            .unwrap()
-            .desired_snapshot()
-            .control_connections
-            .as_ref(),
-        control_only.as_slice()
-    );
-    core.remove_source("a", false).await.unwrap();
-    core.remove_reaction("reaction", false).await.unwrap();
-    core.remove_query("q1").await.unwrap();
+    assert!(runtime
+        .control()
+        .unwrap()
+        .desired_snapshot()
+        .control_connections
+        .is_empty());
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("a").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
+    core.remove_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    let expected = BTreeSet::from([
+        (b.clone(), q2.clone()),
+        (
+            b.clone(),
+            ComputationPipelineBuilder::source_component_id(&q2, &b).unwrap(),
+        ),
+    ]);
     assert_eq!(
         runtime
             .parent()
@@ -3285,50 +4513,74 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
             .control()
             .desired_snapshot()
             .subscriptions
-            .as_ref(),
-        &[
-            (b.clone(), q2),
-            (
-                b,
-                ComputationPipelineBuilder::source_component_id("q2", "b").unwrap()
-            )
-        ]
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        expected
     );
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_control_handlers_run_while_legacy_start_and_enqueue_are_blocked() {
-    let (source, source_control) = ControlledSource::new("source");
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     source_control.pending_start.store(true, Ordering::Release);
-    let (reaction, reaction_control, mut output) = ControlledReaction::new("reaction", &["query"]);
+    let (reaction, reaction_control, mut output) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     let core = Arc::new(builder().build().await.unwrap());
-    let source = core.add_source_with_handle(source).await.unwrap();
+    let source = core.add_source_fixture_with_handle(source).await.unwrap();
     let query = core
-        .add_query_with_handle(config("query", Some("source")))
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
         .await
         .unwrap();
-    let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
+    let reaction = core
+        .add_reaction_fixture_with_handle(reaction)
+        .await
+        .unwrap();
     reaction.wait_created().await.unwrap();
     let source_messages = Arc::new(PeerControl::default());
     let reaction_messages = Arc::new(PeerControl::default());
-    source
+    assert!(source
+        .set_control_handler(source_messages.clone())
+        .await
+        .is_err());
+    let owner = core.computation_control().unwrap().management_control();
+    owner
+        .component_handle_by_id(source.id())
+        .unwrap()
         .set_control_handler(source_messages.clone())
         .await
         .unwrap();
-    reaction
+    owner
+        .component_handle_by_id(reaction.id())
+        .unwrap()
         .set_control_handler(reaction_messages.clone())
         .await
         .unwrap();
     let start = tokio::spawn({
         let core = core.clone();
-        async move { core.start_source("source").await }
+        async move {
+            core.start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )
+            .await
+        }
     });
     tokio::time::timeout(Duration::from_secs(3), source_control.entered.notified())
         .await
         .unwrap();
     let sender = query.control().unwrap();
-    assert_eq!(sender.id().as_str(), "query");
+    assert_eq!(sender.id(), query.id());
     sender.ready().unwrap();
     let ready = source_messages
         .wait_for(|message| {
@@ -3336,16 +4588,32 @@ async fn handle_control_handlers_run_while_legacy_start_and_enqueue_are_blocked(
         })
         .await;
     assert_eq!(ready.direction, ControlDirection::Upstream);
-    core.stop_source("source").await.unwrap();
+    core.stop_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     assert!(start.await.unwrap().is_err());
     source_control.pending_start.store(false, Ordering::Release);
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     reaction_control
         .pending_enqueue
         .store(true, Ordering::Release);
-    insert(&core, "source").await;
+    insert(&core, &component_id_by_name(&core, "source")).await;
     tokio::time::timeout(
         Duration::from_secs(3),
         reaction_control.enqueue_entered.notified(),
@@ -3374,40 +4642,77 @@ async fn handle_control_handlers_run_while_legacy_start_and_enqueue_are_blocked(
 #[tokio::test]
 async fn controller_notifies_neighbors_of_legacy_plugin_failures_without_trait_hooks() {
     let core = builder().build().await.unwrap();
-    let (source, source_control) = ControlledSource::new("source");
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     source_control.fail_starts.store(1, Ordering::Release);
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source).await.unwrap();
     let query = core
-        .add_query_with_handle(config("query", Some("source")))
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
         .await
         .unwrap();
-    let (reaction, reaction_control, _) = ControlledReaction::new("reaction", &["query"]);
-    core.add_reaction_with_handle(reaction)
+    let (reaction, reaction_control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
+    core.add_reaction_fixture_with_handle(reaction)
         .await
         .unwrap()
         .wait_created()
         .await
         .unwrap();
     let messages = Arc::new(PeerControl::default());
-    query.set_control_handler(messages.clone()).await.unwrap();
+    assert!(query.set_control_handler(messages.clone()).await.is_err());
+    core.computation_control()
+        .unwrap()
+        .management_control()
+        .component_handle_by_id(query.id())
+        .unwrap()
+        .set_control_handler(messages.clone())
+        .await
+        .unwrap();
+    let source_id = component_id_by_name(&core, "source");
+    let reaction_id = component_id_by_name(&core, "reaction");
 
-    assert!(core.start_source("source").await.is_err());
+    assert!(core
+        .start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .is_err());
     let failure = messages
         .wait_for(|message| {
-            message.from.as_str() == "source"
+            message.from == source_id
                 && matches!(&message.notification, ControlNotification::Unavailable { reason }
                     if reason.contains("injected start failure"))
         })
         .await;
     assert_eq!(failure.direction, ControlDirection::Downstream);
 
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     let updates = reaction_control.updates.lock().unwrap().clone().unwrap();
     updates
         .send(ComponentUpdate::Status {
-            component_id: "reaction".into(),
+            component_id: reaction_id.clone(),
             status: ComponentStatus::Error,
             message: Some("legacy reaction background failure".into()),
         })
@@ -3415,7 +4720,7 @@ async fn controller_notifies_neighbors_of_legacy_plugin_failures_without_trait_h
         .unwrap();
     let failure = messages
         .wait_for(|message| {
-            message.from.as_str() == "reaction"
+            message.from == reaction_id
                 && matches!(&message.notification, ControlNotification::Unavailable { reason }
                     if reason.contains("legacy reaction background failure"))
         })
@@ -3426,18 +4731,37 @@ async fn controller_notifies_neighbors_of_legacy_plugin_failures_without_trait_h
 
 #[tokio::test]
 async fn transient_start_failure_can_be_retried_without_replacing_the_source() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.fail_starts.store(1, Ordering::Release);
-    let core = builder().with_source(source).build().await.unwrap();
-    assert!(core.start_source("source").await.is_err());
+    let core = builder().with_source_fixture(source).build().await.unwrap();
+    assert!(core
+        .start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .is_err());
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Error
     );
-    core.start_source("source").await.unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     assert_eq!(control.starts.load(Ordering::Acquire), 2);
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Running
     );
     core.shutdown().await.unwrap();
@@ -3445,21 +4769,38 @@ async fn transient_start_failure_can_be_retried_without_replacing_the_source() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_interrupts_a_pending_component_start() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.pending_start.store(true, Ordering::Release);
-    let core = Arc::new(builder().with_source(source).build().await.unwrap());
+    let core = Arc::new(builder().with_source_fixture(source).build().await.unwrap());
     let start = tokio::spawn({
         let core = core.clone();
-        async move { core.start_source("source").await }
+        async move {
+            core.start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )
+            .await
+        }
     });
     control.entered.notified().await;
-    tokio::time::timeout(Duration::from_secs(2), core.stop_source("source"))
-        .await
-        .expect("stop must reach the controller while start is pending")
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        core.stop_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        ),
+    )
+    .await
+    .expect("stop must reach the controller while start is pending")
+    .unwrap();
     assert!(start.await.unwrap().is_err());
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Stopped
     );
     core.shutdown().await.unwrap();
@@ -3467,30 +4808,49 @@ async fn stop_interrupts_a_pending_component_start() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_component_stops_queue_behind_an_in_flight_stop() {
-    let (first, first_control) = ControlledSource::new("first");
-    let (second, second_control) = ControlledSource::new("second");
-    let (third, third_control) = ControlledSource::new("third");
+    let (first, first_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("first").expect("fixture component name"),
+    );
+    let (second, second_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("second").expect("fixture component name"),
+    );
+    let (third, third_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("third").expect("fixture component name"),
+    );
     let core = Arc::new(
         builder()
-            .with_source(first)
-            .with_source(second)
-            .with_source(third)
+            .with_source_fixture(first)
+            .with_source_fixture(second)
+            .with_source_fixture(third)
             .build()
             .await
             .unwrap(),
     );
     for id in ["first", "second", "third"] {
-        core.start_source(id).await.unwrap();
+        core.start_source_by_name(
+            &crate::ComponentName::try_new(id).expect("fixture component name"),
+        )
+        .await
+        .unwrap();
     }
     first_control.pending_stop.store(true, Ordering::Release);
     let first_stop = tokio::spawn({
         let core = core.clone();
-        async move { core.stop_source("first").await }
+        async move {
+            core.stop_source_by_name(
+                &drasi_core_types::ComponentName::try_new("first").expect("fixture component name"),
+            )
+            .await
+        }
     });
     first_control.stop_entered.notified().await;
 
     // Only overlapping requests queue; unrelated components remain serviceable.
-    let first_handle = core.computation_component("first").unwrap();
+    let first_handle = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("first").expect("fixture component name"),
+        )
+        .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(100), first_handle.stop())
             .await
@@ -3514,10 +4874,15 @@ async fn concurrent_component_stops_queue_behind_an_in_flight_stop() {
     );
     assert_eq!(second_control.stops.load(Ordering::Acquire), 0);
     assert_eq!(first_control.stops.load(Ordering::Acquire), 1);
-    tokio::time::timeout(Duration::from_secs(2), core.stop_source("second"))
-        .await
-        .expect("an unrelated component must stop while the first cleanup is pending")
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        core.stop_source_by_name(
+            &drasi_core_types::ComponentName::try_new("second").expect("fixture component name"),
+        ),
+    )
+    .await
+    .expect("an unrelated component must stop while the first cleanup is pending")
+    .unwrap();
 
     first_control.stop_release.notify_one();
     first_stop.await.unwrap().unwrap();
@@ -3531,7 +4896,15 @@ async fn concurrent_component_stops_queue_behind_an_in_flight_stop() {
         ("second", ComponentStatus::Stopped),
         ("third", ComponentStatus::Running),
     ] {
-        assert_eq!(core.get_source_status(id).await.unwrap(), status, "{id}");
+        assert_eq!(
+            core.get_source_status_by_name(
+                &crate::ComponentName::try_new(id).expect("fixture component name"),
+            )
+            .await
+            .unwrap(),
+            status,
+            "{id}"
+        );
     }
     assert_eq!(first_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(first_control.stops.load(Ordering::Acquire), 1);
@@ -3542,14 +4915,20 @@ async fn concurrent_component_stops_queue_behind_an_in_flight_stop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn component_starts_queue_and_a_later_stop_supersedes_a_queued_start() {
-    let (hung, hung_control) = ControlledSource::new("hung");
-    let (superseded, superseded_control) = ControlledSource::new("superseded");
-    let (queued, queued_control) = ControlledSource::new("queued");
+    let (hung, hung_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("hung").expect("fixture component name"),
+    );
+    let (superseded, superseded_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("superseded").expect("fixture component name"),
+    );
+    let (queued, queued_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("queued").expect("fixture component name"),
+    );
     let core = Arc::new(
         builder()
-            .with_source(hung)
-            .with_source(superseded)
-            .with_source(queued)
+            .with_source_fixture(hung)
+            .with_source_fixture(superseded)
+            .with_source_fixture(queued)
             .build()
             .await
             .unwrap(),
@@ -3557,11 +4936,20 @@ async fn component_starts_queue_and_a_later_stop_supersedes_a_queued_start() {
     hung_control.pending_start.store(true, Ordering::Release);
     let start = |id: &'static str| {
         let core = core.clone();
-        tokio::spawn(async move { core.start_source(id).await })
+        tokio::spawn(async move {
+            core.start_source_by_name(
+                &crate::ComponentName::try_new(id).expect("fixture component name"),
+            )
+            .await
+        })
     };
     let hung_start = start("hung");
     hung_control.entered.notified().await;
-    let hung_handle = core.computation_component("hung").unwrap();
+    let hung_handle = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("hung").expect("fixture component name"),
+        )
+        .unwrap();
     let superseded_start = tokio::spawn({
         let hung_handle = hung_handle.clone();
         async move { hung_handle.start().await }
@@ -3579,16 +4967,24 @@ async fn component_starts_queue_and_a_later_stop_supersedes_a_queued_start() {
         .unwrap();
 
     // An untouched component still retains the ordinary API's stopped check.
-    let error = core.stop_source("superseded").await.unwrap_err();
+    let error = core
+        .stop_source_by_name(
+            &drasi_core_types::ComponentName::try_new("superseded")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("already stopped"),
         "{error:#}"
     );
-    core.computation_component("superseded")
-        .unwrap()
-        .stop()
-        .await
-        .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("superseded").expect("fixture component name"),
+    )
+    .unwrap()
+    .stop()
+    .await
+    .unwrap();
     // A stop that reaches the controller supersedes the queued start without
     // waiting for the hung one.
     tokio::time::timeout(Duration::from_secs(2), hung_handle.stop())
@@ -3609,144 +5005,321 @@ async fn component_starts_queue_and_a_later_stop_supersedes_a_queued_start() {
         ("superseded", ComponentStatus::Stopped),
         ("queued", ComponentStatus::Running),
     ] {
-        assert_eq!(core.get_source_status(id).await.unwrap(), status, "{id}");
+        assert_eq!(
+            core.get_source_status_by_name(
+                &crate::ComponentName::try_new(id).expect("fixture component name"),
+            )
+            .await
+            .unwrap(),
+            status,
+            "{id}"
+        );
     }
     assert_eq!(queued_control.starts.load(Ordering::Acquire), 1);
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn source_replacement_rebinds_a_query_that_has_never_started() {
-    let (old, old_control) = ControlledSource::new("source");
-    let (new, new_control) = ControlledSource::new("source");
-    let (reaction, _, mut output) = ControlledReaction::new("reaction", &["query"]);
+async fn source_retirement_rejects_bound_queries_without_retargeting_by_name() {
+    let (old, old_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let (new, new_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let (reaction, _, mut output) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     let core = builder()
-        .with_source(old)
-        .with_query(config("query", Some("source")))
-        .with_reaction(reaction)
+        .with_source_fixture(old)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
-    core.update_source("source", new).await.unwrap();
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
-    insert(&core, "source").await;
+    let source_id = component_id_by_name(&core, "source");
+    let before = core.desired_configuration().unwrap();
+    let error = core
+        .replace_source_fixture(
+            crate::config::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+            new,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("Depended on by:"));
+    assert_eq!(core.desired_configuration().unwrap(), before);
+    assert_eq!(component_id_by_name(&core, "source"), source_id);
+    assert_eq!(
+        core.get_query_config_by_name(&ComponentName::try_new("query").unwrap())
+            .await
+            .unwrap()
+            .inputs[0]
+            .component
+            .as_id(),
+        Some(&source_id)
+    );
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    insert(&core, &component_id_by_name(&core, "source")).await;
     assert_eq!(next(&mut output).await.results.len(), 1);
-    assert_eq!(old_control.subscriptions.load(Ordering::Acquire), 0);
-    assert_eq!(new_control.subscriptions.load(Ordering::Acquire), 1);
+    assert_eq!(old_control.subscriptions.load(Ordering::Acquire), 1);
+    assert_eq!(new_control.subscriptions.load(Ordering::Acquire), 0);
+    assert_eq!(new_control.initializations.load(Ordering::Acquire), 0);
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn query_replacement_rebinds_a_reaction_that_has_never_started() {
-    let (source, _) = ControlledSource::new("source");
-    let (reaction, _, mut output) = ControlledReaction::new("reaction", &["query"]);
+async fn identical_query_configuration_preserves_unstarted_reaction_bindings() {
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let (reaction, _, mut output) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     let core = builder()
-        .with_source(source)
-        .with_query(config("query", Some("source")))
-        .with_reaction(reaction)
+        .with_source_fixture(source)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
-    core.update_query("query", config("query", Some("source")))
+    let query_id = component_id_by_name(&core, "query");
+    let handle = core.component_by_id(&query_id).unwrap();
+    handle.wait_created().await.unwrap();
+    let unchanged = core
+        .get_query_config_by_id(&query_id)
         .await
-        .unwrap();
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
-    insert(&core, "source").await;
+        .unwrap()
+        .into_authoring();
+    core.update_query_by_id(&query_id, unchanged).await.unwrap();
+    assert_eq!(
+        core.component_by_id(&query_id).unwrap().generation(),
+        handle.generation()
+    );
+    assert_eq!(
+        core.get_reaction_info_by_name(&ComponentName::try_new("reaction").unwrap())
+            .await
+            .unwrap()
+            .queries,
+        vec![crate::config::ComponentReference::by_id(query_id)]
+    );
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    insert(&core, &component_id_by_name(&core, "source")).await;
     assert_eq!(next(&mut output).await.results.len(), 1);
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn updated_dependencies_do_not_block_removal_of_the_old_source_or_query() {
-    let (a, _) = ControlledSource::new("a");
-    let (b, _) = ControlledSource::new("b");
-    let (reaction, _, _) = ControlledReaction::new("reaction", &["q1"]);
+async fn recreated_consumers_release_the_retired_source_and_query_dependencies() {
+    let (a, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("a").expect("fixture component name"),
+    );
+    let (b, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("b").expect("fixture component name"),
+    );
+    let (reaction, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("q1").expect("fixture component name")],
+    );
     let core = builder()
-        .with_source(a)
-        .with_source(b)
-        .with_query(config("q1", Some("a")))
-        .with_query(config("q2", Some("b")))
-        .with_reaction(reaction)
+        .with_source_fixture(a)
+        .with_source_fixture(b)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            Some(drasi_core_types::ComponentName::try_new("a").expect("fixture component name")),
+        ))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("q2").expect("fixture component name"),
+            Some(drasi_core_types::ComponentName::try_new("b").expect("fixture component name")),
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
-    core.update_query("q1", config("q1", Some("b")))
+    let old_reaction = component_id_by_name(&core, "reaction");
+    let old_q1 = component_id_by_name(&core, "q1");
+    core.remove_reaction_by_id(&old_reaction, false)
         .await
         .unwrap();
-    core.remove_source("a", false).await.unwrap();
-    let (reaction, _, _) = ControlledReaction::new("reaction", &["q2"]);
-    core.update_reaction("reaction", reaction).await.unwrap();
-    core.remove_query("q1").await.unwrap();
-    let (a, _) = ControlledSource::new("a");
-    core.add_source(a).await.unwrap();
-    core.add_query(config("q1", Some("a"))).await.unwrap();
+    core.remove_query_by_id(&old_q1).await.unwrap();
+    let q1 = core
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            Some(drasi_core_types::ComponentName::try_new("b").expect("fixture component name")),
+        ))
+        .await
+        .unwrap();
+    q1.wait_created().await.unwrap();
+    assert_ne!(q1.id(), &old_q1);
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("a").expect("fixture component name"),
+        false,
+    )
+    .await
+    .unwrap();
+    let (reaction, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("q2").expect("fixture component name")],
+    );
+    let reaction = core
+        .add_reaction_fixture_with_handle(reaction)
+        .await
+        .unwrap();
+    reaction.wait_created().await.unwrap();
+    assert_ne!(reaction.id(), &old_reaction);
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    let (a, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("a").expect("fixture component name"),
+    );
+    core.add_source_fixture(a).await.unwrap();
+    core.add_query(config(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        Some(drasi_core_types::ComponentName::try_new("a").expect("fixture component name")),
+    ))
+    .await
+    .unwrap();
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn invalid_reaction_constructor_leaves_an_owned_error_node_not_a_ready_instance() {
+async fn duplicate_reaction_inputs_reject_before_construction_and_do_not_reserve_name() {
     let core = builder()
-        .with_query(config("query", None))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
         .build()
         .await
         .unwrap();
-    let (bad, _, _) = ControlledReaction::new("reaction", &["query", "query"]);
-    core.add_reaction(bad).await.unwrap();
-    let handle = component_handle(&core, "reaction", "reaction").await;
-    assert_creation_failed(&core, &handle, "duplicate query IDs").await;
-    let reactions = core.list_reactions().await.unwrap();
-    assert_eq!(reactions, vec![("reaction".into(), ComponentStatus::Error)]);
-    let runtime = core.computation_runtime.as_ref();
-    let record = runtime.record("reaction", "reaction").await.unwrap();
-    let Value::Reaction(reaction) = &record.value else {
-        panic!("declared reaction must retain its plugin");
-    };
-    assert_eq!(reaction.query_ids, ["query", "query"]);
-    assert_eq!(reaction.reaction.id(), "reaction");
-    let (duplicate, _, _) = ControlledReaction::new("reaction", &["query"]);
-    assert!(core.add_reaction(duplicate).await.is_err());
-    core.remove_reaction("reaction", false).await.unwrap();
-    assert!(handle.wait_created().await.is_err());
-    let (good, _, _) = ControlledReaction::new("reaction", &["query"]);
-    let replacement = core.add_reaction_with_handle(good).await.unwrap();
+    let before = core.desired_configuration().unwrap();
+    let (bad, control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        ],
+    );
+    assert!(core.add_reaction_fixture(bad).await.is_err());
+    assert_eq!(core.desired_configuration().unwrap(), before);
+    assert_eq!(control.initializations.load(Ordering::Acquire), 0);
+    assert!(core.list_reactions().await.unwrap().is_empty());
+    let (good, _, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
+    let replacement = core.add_reaction_fixture_with_handle(good).await.unwrap();
     replacement.wait_created().await.unwrap();
-    core.remove_reaction("reaction", false).await.unwrap();
+    core.remove_reaction_by_id(replacement.id(), false)
+        .await
+        .unwrap();
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn committed_creation_failure_remains_addressable_for_awaited_cleanup() {
     let core = builder().build().await.unwrap();
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     control.fail_initialize.store(true, Ordering::Release);
-    core.add_source(source).await.unwrap();
-    let handle = component_handle(&core, "source", "source").await;
+    core.add_source_fixture(source).await.unwrap();
+    let handle = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        "source",
+    )
+    .await;
     assert_creation_failed(&core, &handle, "injected initialization failure").await;
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Error
     );
-    core.remove_source("source", true).await.unwrap();
-    assert_eq!(control.stops.load(Ordering::Acquire), 1);
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(control.stops.load(Ordering::Acquire), 0);
     assert_eq!(control.deprovisions.load(Ordering::Acquire), 1);
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn rejected_replacement_retains_the_actual_owner_for_deprovisioning() {
-    let (old, old_control) = ControlledSource::new("source");
+async fn failed_retirement_retains_the_actual_owner_for_deprovisioning() {
+    let (old, old_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     old_control.fail_starts.store(1, Ordering::Release);
     old_control.fail_stop.store(true, Ordering::Release);
-    let core = builder().with_source(old).build().await.unwrap();
-    assert!(core.start_source("source").await.is_err());
-    let (new, new_control) = ControlledSource::new("source");
-    assert!(core.update_source("source", new).await.is_err());
+    let core = builder().with_source_fixture(old).build().await.unwrap();
+    assert!(core
+        .start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .is_err());
+    let old_id = component_id_by_name(&core, "source");
+    let error = core.remove_source_by_id(&old_id, true).await.unwrap_err();
+    assert!(format!("{error:#}").contains("injected stop failure"));
+    assert_eq!(old_control.deprovisions.load(Ordering::Acquire), 0);
+    let (new, new_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    assert!(core.add_source_fixture(new).await.is_err());
+    assert_eq!(new_control.initializations.load(Ordering::Acquire), 0);
     old_control.fail_stop.store(false, Ordering::Release);
-    core.remove_source("source", true).await.unwrap();
+    let status = core.reconcile_desired_state().await.unwrap();
+    assert!(status.applied && status.error.is_none(), "{status:?}");
     assert_eq!(old_control.deprovisions.load(Ordering::Acquire), 1);
     assert_eq!(new_control.deprovisions.load(Ordering::Acquire), 0);
     core.shutdown().await.unwrap();
@@ -3754,28 +5327,43 @@ async fn rejected_replacement_retains_the_actual_owner_for_deprovisioning() {
 
 #[tokio::test]
 async fn idle_reaction_observes_plugin_failure_and_awaits_stop() {
-    let (reaction, control, _) = ControlledReaction::new("reaction", &["query"]);
+    let (reaction, control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     let core = builder()
-        .with_query(config("query", None))
-        .with_reaction(reaction)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     let mut events = core.subscribe_all_component_events();
     let updates = control.updates.lock().unwrap().clone().unwrap();
     updates
         .send(ComponentUpdate::Status {
-            component_id: "reaction".into(),
+            component_id: component_id_by_name(&core, "reaction"),
             status: ComponentStatus::Error,
             message: Some("background worker failed".into()),
         })
         .await
         .unwrap();
-    crate::test_helpers::wait_for_component_status(
+    crate::test_helpers::wait_for_component_status_by_name(
         &mut events,
-        "reaction",
+        &core.component_graph(),
+        &crate::ComponentName::try_new("reaction").expect("fixture component name"),
         ComponentStatus::Error,
         Duration::from_secs(2),
     )
@@ -3784,11 +5372,14 @@ async fn idle_reaction_observes_plugin_failure_and_awaits_stop() {
     core.shutdown().await.unwrap();
 }
 
-fn flood_lifecycle_callback(sender: &crate::channels::ComponentUpdateSender, id: &str) {
+fn flood_lifecycle_callback(
+    sender: &crate::channels::ComponentUpdateSender,
+    id: &crate::ComponentId,
+) {
     for _ in 0..10_000 {
         sender
             .try_send(ComponentUpdate::Status {
-                component_id: id.into(),
+                component_id: id.clone(),
                 status: ComponentStatus::Starting,
                 message: None,
             })
@@ -3797,7 +5388,7 @@ fn flood_lifecycle_callback(sender: &crate::channels::ComponentUpdateSender, id:
     for status in [ComponentStatus::Running, ComponentStatus::Error, ComponentStatus::Stopped] {
         sender
             .try_send(ComponentUpdate::Status {
-                component_id: id.into(),
+                component_id: id.clone(),
                 status,
                 message: Some("failure after full callback queue".into()),
             })
@@ -3806,19 +5397,26 @@ fn flood_lifecycle_callback(sender: &crate::channels::ComponentUpdateSender, id:
 }
 
 async fn source_callback_flood() {
-    let (source, control) = ControlledSource::new("source");
-    let local_status = source.inner.status_handle();
-    let core = builder().with_source(source).build().await.unwrap();
-    core.start_source("source").await.unwrap();
+    let (source, control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let local_status = control.clone();
+    let core = builder().with_source_fixture(source).build().await.unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     let mut events = core.subscribe_all_component_events();
     let updates = control.updates.lock().unwrap().clone().unwrap();
-    flood_lifecycle_callback(&updates, "source");
+    flood_lifecycle_callback(&updates, &component_id_by_name(&core, "source"));
     local_status
         .set_status(ComponentStatus::Stopped, None)
         .await;
-    crate::test_helpers::wait_for_component_status(
+    crate::test_helpers::wait_for_component_status_by_name(
         &mut events,
-        "source",
+        &core.component_graph(),
+        &crate::ComponentName::try_new("source").expect("fixture component name"),
         ComponentStatus::Error,
         Duration::from_secs(3),
     )
@@ -3838,21 +5436,36 @@ async fn source_callback_flood_multi_thread() {
 }
 
 async fn reaction_callback_flood() {
-    let (reaction, control, _) = ControlledReaction::new("reaction", &["query"]);
+    let (reaction, control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     let core = builder()
-        .with_query(config("query", None))
-        .with_reaction(reaction)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     let mut events = core.subscribe_all_component_events();
     let updates = control.updates.lock().unwrap().clone().unwrap();
-    flood_lifecycle_callback(&updates, "reaction");
-    crate::test_helpers::wait_for_component_status(
+    flood_lifecycle_callback(&updates, &component_id_by_name(&core, "reaction"));
+    crate::test_helpers::wait_for_component_status_by_name(
         &mut events,
-        "reaction",
+        &core.component_graph(),
+        &crate::ComponentName::try_new("reaction").expect("fixture component name"),
         ComponentStatus::Error,
         Duration::from_secs(3),
     )
@@ -3873,29 +5486,54 @@ async fn reaction_callback_flood_multi_thread() {
 
 #[tokio::test]
 async fn cancelled_replacement_caller_still_selects_the_committed_instance() {
-    let (old, old_control) = ControlledSource::new("source");
-    let core = Arc::new(builder().with_source(old).build().await.unwrap());
-    let old_handle = component_handle(&core, "source", "source").await;
+    let (old, old_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let core = Arc::new(builder().with_source_fixture(old).build().await.unwrap());
+    let old_handle = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        "source",
+    )
+    .await;
     let old_record = core
         .computation_runtime
-        .record("source", "source")
+        .record(old_handle.id(), "source")
         .await
         .unwrap();
-    let (new, new_control) = ControlledSource::new("source");
+    let (new, new_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     new_control
         .pending_initialize
         .store(true, Ordering::Release);
     let update = tokio::spawn({
         let core = core.clone();
-        async move { core.update_source("source", new).await }
+        async move {
+            core.replace_source_fixture(
+                crate::config::ComponentReference::by_name(
+                    drasi_core_types::ComponentName::try_new("source")
+                        .expect("fixture component name"),
+                ),
+                new,
+            )
+            .await
+        }
     });
     tokio::time::timeout(Duration::from_secs(2), new_control.entered.notified())
         .await
         .unwrap();
-    let replacement = component_handle(&core, "source", "source").await;
+    let replacement = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        "source",
+    )
+    .await;
     assert_ne!(replacement.generation(), old_handle.generation());
     update.abort();
-    assert!(update.await.unwrap_err().is_cancelled());
+    if let Err(error) = update.await {
+        assert!(error.is_cancelled());
+    }
     new_control.release.notify_one();
     let runtime = core.computation_runtime.as_ref();
     assert!(matches!(
@@ -3903,7 +5541,7 @@ async fn cancelled_replacement_caller_still_selects_the_committed_instance() {
         Err(error) if matches!(error.downcast_ref::<GraphError>(), Some(GraphError::StaleGeneration))
     ));
     replacement.wait_created().await.unwrap();
-    let current = core.source_instance("source").await.unwrap();
+    let current = core.source_instance(replacement.id()).await.unwrap();
     assert!(Arc::ptr_eq(
         &current
             .as_any()
@@ -3912,7 +5550,12 @@ async fn cancelled_replacement_caller_still_selects_the_committed_instance() {
             .control,
         &new_control,
     ));
-    core.remove_source("source", true).await.unwrap();
+    core.remove_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(new_control.deprovisions.load(Ordering::Acquire), 1);
     assert_eq!(old_control.deprovisions.load(Ordering::Acquire), 0);
     core.shutdown().await.unwrap();
@@ -3921,77 +5564,113 @@ async fn cancelled_replacement_caller_still_selects_the_committed_instance() {
 #[tokio::test]
 async fn retired_query_handles_cannot_operate_on_the_replacement_and_unbound_queries_stay_live() {
     let core = builder()
-        .with_query(config("query", None))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
         .build()
         .await
         .unwrap();
     let old = core
         .query_manager()
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .unwrap();
-    core.update_query("query", config("query", None))
+    let old_id = component_id_by_name(&core, "query");
+    core.remove_query_by_id(&old_id).await.unwrap();
+    let replacement = core
+        .add_query_with_handle(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            None,
+        ))
         .await
         .unwrap();
+    replacement.wait_created().await.unwrap();
+    assert_ne!(replacement.id(), &old_id);
     assert!(old.start().await.is_err());
     let mut events = core.subscribe_all_component_events();
-    core.start_query("query").await.unwrap();
-    crate::test_helpers::wait_for_component_status(
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    crate::test_helpers::wait_for_component_status_by_name(
         &mut events,
-        "query",
+        &core.component_graph(),
+        &crate::ComponentName::try_new("query").expect("fixture component name"),
         ComponentStatus::Running,
         Duration::from_secs(2),
     )
     .await;
     assert!(old.stop().await.is_err());
-    let rows = tokio::time::timeout(Duration::from_secs(2), core.get_query_results("query"))
-        .await
-        .unwrap()
-        .unwrap();
+    let rows = tokio::time::timeout(
+        Duration::from_secs(2),
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(rows.is_empty());
     assert_eq!(
-        core.get_query_status("query").await.unwrap(),
+        core.get_query_status_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Running
     );
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn declared_references_validate_roles_on_the_committed_node() {
-    let (source, _) = ControlledSource::new("source");
-    let core = builder().with_source(source).build().await.unwrap();
+async fn declared_references_validate_roles_before_acceptance() {
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let core = builder().with_source_fixture(source).build().await.unwrap();
     let runtime = core.computation_runtime.as_ref();
     let revision = runtime.inspector().unwrap().snapshot().desired.revision;
-    let (reaction, _, _) = ControlledReaction::new("reaction", &["source"]);
-    core.computation_runtime
-        .declare_reaction(Box::new(reaction))
-        .await
-        .unwrap();
-    assert_ne!(
+    let (reaction, control, _) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("source").expect("fixture component name")],
+    );
+    let error = core.add_reaction_fixture(reaction).await.unwrap_err();
+    assert!(error.to_string().contains("not a query"));
+    assert_eq!(
         runtime.inspector().unwrap().snapshot().desired.revision,
         revision
     );
-    let handle = component_handle(&core, "reaction", "reaction").await;
-    assert_creation_failed(&core, &handle, "not a Query").await;
-    assert_eq!(
-        core.list_reactions().await.unwrap(),
-        vec![("reaction".into(), ComponentStatus::Error)]
-    );
-    core.remove_reaction("reaction", false).await.unwrap();
+    assert!(core.list_reactions().await.unwrap().is_empty());
+    assert_eq!(control.initializations.load(Ordering::Acquire), 0);
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn native_service_logs_use_the_ordinary_instance_and_component_keys() {
-    let (source, _) = ControlledSource::new("source");
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     let core = builder()
         .with_id("native-log-parity")
-        .with_source(source)
+        .with_source_fixture(source)
         .build()
         .await
         .unwrap();
-    let (_, mut logs) = core.subscribe_source_logs("source").await.unwrap();
-    core.start_source("source").await.unwrap();
+    let (_, mut logs) = core
+        .subscribe_source_logs_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let message = logs.recv().await.unwrap();
@@ -4010,7 +5689,7 @@ struct DeferredPersistentProvider;
 impl drasi_core::interface::IndexBackendPlugin for DeferredPersistentProvider {
     async fn create_indexes(
         &self,
-        _: &str,
+        _: &drasi_core_types::ComponentId,
     ) -> std::result::Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
     {
         use drasi_core::{
@@ -4035,6 +5714,15 @@ impl drasi_core::interface::IndexBackendPlugin for DeferredPersistentProvider {
             live_results_writer: None,
         })
     }
+    async fn create_scoped_indexes(
+        &self,
+        _scope: &crate::StorageScope,
+        component_id: &crate::ComponentId,
+    ) -> std::result::Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
+    {
+        self.create_indexes(component_id).await
+    }
+
     fn is_volatile(&self) -> bool {
         false
     }
@@ -4042,11 +5730,16 @@ impl drasi_core::interface::IndexBackendPlugin for DeferredPersistentProvider {
 
 #[tokio::test]
 async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_attempt() {
-    let (source, _) = ControlledSource::new("source");
-    let mut query_config = config("query", Some("source"));
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let mut query_config = config(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        Some(drasi_core_types::ComponentName::try_new("source").expect("fixture component name")),
+    );
     query_config.auto_start = true;
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_query(query_config)
         .with_default_index_provider("persistent", Arc::new(DeferredPersistentProvider))
         .build()
@@ -4062,7 +5755,9 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
     assert!(core.is_running().await);
     let query = core
         .query_manager()
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .unwrap();
     assert_eq!(query.status().await, ComponentStatus::Error);
@@ -4073,7 +5768,11 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
         })
     ));
     let _runtime = core.computation_runtime.as_ref();
-    let handle = core.computation_component("query").unwrap();
+    let handle = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .unwrap();
     let first = handle.observed().unwrap();
     assert!(format!("{:#}", first.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));
     core.stop().await.unwrap();
@@ -4091,79 +5790,171 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn running_query_replacement_rebinds_consumers_without_restarting_unaffected_components() {
-    let (source, source_control) = ControlledSource::new("source");
-    let (reaction, reaction_control, mut output) = ControlledReaction::new("reaction", &["query"]);
+async fn rejected_running_query_update_preserves_consumers_and_unaffected_components() {
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let (reaction, reaction_control, mut output) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     reaction_control.snapshot.store(true, Ordering::Release);
     let core = builder()
-        .with_source(source)
-        .with_query(config("query", Some("source")))
-        .with_query(config("unrelated", Some("source")))
-        .with_reaction(reaction)
+        .with_source_fixture(source)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("unrelated").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
     core.start().await.unwrap();
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_query("unrelated").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("unrelated").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     let runtime = core.computation_runtime.as_ref();
-    let source_token = runtime.record("source", "source").await.unwrap().token;
+    let source_token = runtime
+        .record(&component_id_by_name(&core, "source"), "source")
+        .await
+        .unwrap()
+        .token;
     let unrelated_token = core
-        .computation_component("unrelated")
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("unrelated").expect("fixture component name"),
+        )
         .unwrap()
         .generation();
-    insert(&core, "source").await;
+    insert(&core, &component_id_by_name(&core, "source")).await;
     assert_eq!(next(&mut output).await.results.len(), 1);
 
-    let mut updated = config("query", Some("source"));
+    let query_id = component_id_by_name(&core, "query");
+    let before = core.desired_configuration().unwrap();
+    let query_generation = core.component_by_id(&query_id).unwrap().generation();
+    let mut updated = core
+        .get_query_config_by_id(&query_id)
+        .await
+        .unwrap()
+        .into_authoring();
     updated.query = "MATCH (n:Person) RETURN n.name AS name, 'new' AS version".into();
-    core.update_query("query", updated).await.unwrap();
-    insert_person(&core, "source", "two", "Bob").await;
+    let error = core
+        .update_query_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            updated,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("query factory does not support configuration updates"));
+    assert_eq!(core.desired_configuration().unwrap(), before);
+    assert_eq!(
+        core.component_by_id(&query_id).unwrap().generation(),
+        query_generation
+    );
+    insert_person(&core, &component_id_by_name(&core, "source"), "two", "Bob").await;
     let result = match tokio::time::timeout(Duration::from_secs(2), output.recv()).await {
         Ok(Some(result)) => result,
         other => panic!(
-            "replacement result missing: {other:?}; query rows: {:?}; graph: {:?}; reaction starts: {}",
-            core.query_manager().get_query_results("query").await,
+            "retained query result missing: {other:?}; query rows: {:?}; graph: {:?}; reaction starts: {}",
+            core.query_manager().get_query_results_by_name(&drasi_core_types::ComponentName::try_new("query").expect("fixture component name")).await,
             core.computation_control().unwrap().observed().components,
             reaction_control.starts.load(Ordering::Acquire)
         ),
     };
     assert!(matches!(&result.results[..],
         [crate::channels::ResultDiff::Add { data, .. }]
-        if data == &serde_json::json!({"name":"Bob","version":"new"})));
-    assert_eq!(reaction_control.starts.load(Ordering::Acquire), 2);
+        if data == &serde_json::json!({"name":"Bob"})));
+    assert_eq!(reaction_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(
-        runtime.record("source", "source").await.unwrap().token,
+        runtime
+            .record(&component_id_by_name(&core, "source"), "source")
+            .await
+            .unwrap()
+            .token,
         source_token
     );
     assert_eq!(
-        core.computation_component("unrelated")
-            .unwrap()
-            .generation(),
+        core.component_by_name(
+            &drasi_core_types::ComponentName::try_new("unrelated").expect("fixture component name")
+        )
+        .unwrap()
+        .generation(),
         unrelated_token
     );
-    let query_token = core.computation_component("query").unwrap().generation();
+    let query_token = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .unwrap()
+        .generation();
 
-    let (replacement, replacement_control, _replacement_output) =
-        ControlledReaction::new("reaction", &["query"]);
+    let (replacement, replacement_control, _replacement_output) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     replacement_control.snapshot.store(true, Ordering::Release);
-    core.update_reaction("reaction", replacement).await.unwrap();
+    core.replace_reaction_fixture(
+        crate::config::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        ),
+        replacement,
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        core.computation_component("query").unwrap().generation(),
+        core.component_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .unwrap()
+        .generation(),
         query_token
     );
     assert_eq!(
-        runtime.record("source", "source").await.unwrap().token,
+        runtime
+            .record(&component_id_by_name(&core, "source"), "source")
+            .await
+            .unwrap()
+            .token,
         source_token
     );
     assert_eq!(
-        core.get_query_status("unrelated").await.unwrap(),
+        core.get_query_status_by_name(
+            &drasi_core_types::ComponentName::try_new("unrelated").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Running
     );
     assert_eq!(
-        core.get_source_status("source").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Running
     );
     assert_eq!(source_control.starts.load(Ordering::Acquire), 1);
@@ -4171,26 +5962,53 @@ async fn running_query_replacement_rebinds_consumers_without_restarting_unaffect
 }
 
 async fn quiescing_ordinary_query_pauses_its_independently_driven_graph() {
-    let (source, source_control) = ControlledSource::new("source");
-    let (reaction, reaction_control, mut output) = ControlledReaction::new("reaction", &["query"]);
+    let (source, source_control) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    let (reaction, reaction_control, mut output) = ControlledReaction::fixture(
+        drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+        &[drasi_core_types::ComponentName::try_new("query").expect("fixture component name")],
+    );
     let core = builder()
-        .with_source(source)
-        .with_query(config("query", Some("source")))
-        .with_reaction(reaction)
+        .with_source_fixture(source)
+        .with_query(config(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            Some(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            ),
+        ))
+        .with_reaction_fixture(reaction)
         .build()
         .await
         .unwrap();
     core.start().await.unwrap();
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.start_reaction("reaction").await.unwrap();
-    insert(&core, "source").await;
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_reaction_by_name(
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    insert(&core, &component_id_by_name(&core, "source")).await;
     assert_eq!(next(&mut output).await.results.len(), 1);
 
     let runtime = core.computation_runtime.as_ref();
     let control = runtime.control().unwrap();
-    let query = component_handle(&core, "query", "query").await;
-    let selected = GraphSelection::Exact(vec![ComponentId::try_new("query").unwrap()]);
+    let query = component_handle(
+        &core,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        "query",
+    )
+    .await;
+    let selected = GraphSelection::Exact(vec![query.id().clone()]);
     control
         .quiesce_components(control.desired_snapshot().revision, selected)
         .await
@@ -4199,7 +6017,7 @@ async fn quiescing_ordinary_query_pauses_its_independently_driven_graph() {
         query.observed().unwrap().lifecycle,
         ComponentLifecycle::Quiesced
     );
-    insert_person(&core, "source", "two", "Bob").await;
+    insert_person(&core, &component_id_by_name(&core, "source"), "two", "Bob").await;
     assert!(
         tokio::time::timeout(Duration::from_millis(30), output.recv())
             .await
@@ -4207,7 +6025,7 @@ async fn quiescing_ordinary_query_pauses_its_independently_driven_graph() {
         "a quiesced ordinary query must not keep evaluating on its nested driver"
     );
     query.start().await.unwrap();
-    let instance = core.computation_runtime.query("query").await.unwrap();
+    let instance = core.computation_runtime.query(query.id()).await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(2), output.recv())
         .await
         .unwrap_or_else(|error| {

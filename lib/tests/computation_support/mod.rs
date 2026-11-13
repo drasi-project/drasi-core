@@ -143,8 +143,9 @@ pub fn values(envelope: &Envelope) -> Vec<u16> {
         .collect()
 }
 
-pub fn component(id: &str) -> ComponentId {
-    ComponentId::try_new(id).expect("component ID")
+/// Stable test identities, separate from fixture names and business namespaces.
+pub fn component(value: u128) -> ComponentId {
+    ComponentId::from_uuid(uuid::Uuid::from_u128(value))
 }
 
 pub fn port(id: &str) -> PortId {
@@ -155,15 +156,15 @@ pub fn stream(producer: &str) -> StreamId {
     StreamId::try_new(format!("{producer}/out")).expect("stream ID")
 }
 
-pub fn endpoint(id: &str, name: &str) -> Endpoint {
-    Endpoint::new(component(id), port(name))
+pub fn endpoint(id: &ComponentId, name: &str) -> Endpoint {
+    Endpoint::new(id.clone(), port(name))
 }
 
-pub fn edge(from: &str, to: &str) -> EdgeDefinition {
+pub fn edge(from: &ComponentId, to: &ComponentId) -> EdgeDefinition {
     EdgeDefinition::new(endpoint(from, "out"), endpoint(to, "in"))
 }
 
-pub fn descriptor(id: &str, inputs: &[&str], outputs: &[&str]) -> ComponentDescriptor {
+pub fn descriptor(id: &ComponentId, inputs: &[&str], outputs: &[&str]) -> ComponentDescriptor {
     let mut ports = Vec::new();
     for (names, direction) in [(inputs, PortDirection::Input), (outputs, PortDirection::Output)] {
         for name in names {
@@ -175,29 +176,29 @@ pub fn descriptor(id: &str, inputs: &[&str], outputs: &[&str]) -> ComponentDescr
             ));
         }
     }
-    ComponentDescriptor::try_new(component(id), ports).expect("component descriptor")
+    ComponentDescriptor::try_new(id.clone(), ports).expect("component descriptor")
 }
 
-pub fn annotation(id: &str) -> ContextEntry {
+pub fn annotation(id: &ComponentId, label: &str) -> ContextEntry {
     ContextEntry::try_new(
-        component(id),
+        id.clone(),
         "visited",
-        ContextValue::String(Arc::from(id)),
+        ContextValue::String(Arc::from(label)),
     )
     .expect("context contribution")
 }
 
-pub fn root(producer: &str, sequence: u64, readings: &[u16]) -> Envelope {
+pub fn root(producer: &ComponentId, namespace: &str, sequence: u64, readings: &[u16]) -> Envelope {
     // Deliberately opaque, non-UTF8 IDs, not the optional emission_id convention.
     let mut opaque_id = vec![0xff, 0, 0xfe];
     opaque_id.extend_from_slice(&sequence.to_le_bytes());
     let mut envelope = ChangeEnvelope::new(
-        EnvelopeId::try_new(producer, Bytes::from(opaque_id)).expect("opaque envelope ID"),
-        changes(producer, sequence, readings),
-        SystemMetadata::new(stream(producer), sequence),
+        EnvelopeId::try_new(namespace, Bytes::from(opaque_id)).expect("opaque envelope ID"),
+        changes(namespace, sequence, readings),
+        SystemMetadata::new(stream(namespace), sequence),
     );
     envelope
-        .append_annotation(annotation(producer))
+        .append_annotation(annotation(producer, namespace))
         .expect("source context");
     envelope
 }
@@ -209,14 +210,20 @@ pub fn output(envelope: Envelope) -> OutputEnvelope {
     }
 }
 
-pub fn derived(input: &Envelope, producer: &str, sequence: u64, changes: ChangeSetRef) -> Envelope {
+pub fn derived(
+    input: &Envelope,
+    producer: &ComponentId,
+    namespace: &str,
+    sequence: u64,
+    changes: ChangeSetRef,
+) -> Envelope {
     let mut envelope = input.derive(
-        emission_id(&stream(producer), sequence).expect("derived ID"),
+        emission_id(&stream(namespace), sequence).expect("derived ID"),
         changes,
-        SystemMetadata::new(stream(producer), sequence),
+        SystemMetadata::new(stream(namespace), sequence),
     );
     envelope
-        .append_annotation(annotation(producer))
+        .append_annotation(annotation(producer, namespace))
         .expect("branch context");
     envelope
 }
@@ -227,9 +234,9 @@ pub struct FiniteSource {
 }
 
 impl FiniteSource {
-    pub fn new(id: &str, outputs: Vec<OutputEnvelope>) -> Self {
+    pub fn new(id: ComponentId, outputs: Vec<OutputEnvelope>) -> Self {
         Self {
-            descriptor: descriptor(id, &[], &["out"]),
+            descriptor: descriptor(&id, &[], &["out"]),
             outputs: outputs.into(),
         }
     }
@@ -250,14 +257,14 @@ pub struct NativeTransform {
 
 impl NativeTransform {
     pub fn new(
-        id: &str,
+        id: ComponentId,
         transform: impl FnMut(InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>>
             + Send
             + Sync
             + 'static,
     ) -> Self {
         Self {
-            descriptor: descriptor(id, &["in"], &["out"]),
+            descriptor: descriptor(&id, &["in"], &["out"]),
             transform: Box::new(transform),
         }
     }
@@ -277,14 +284,21 @@ pub type Received = Arc<Mutex<Vec<InputEnvelope>>>;
 
 pub struct CollectSink {
     descriptor: ComponentDescriptor,
+    annotation_label: String,
     received: Received,
     annotate: bool,
 }
 
 impl CollectSink {
-    pub fn new(id: &str, inputs: &[&str], received: Received) -> Self {
+    pub fn new(
+        id: ComponentId,
+        annotation_label: &str,
+        inputs: &[&str],
+        received: Received,
+    ) -> Self {
         Self {
-            descriptor: descriptor(id, inputs, &[]),
+            descriptor: descriptor(&id, inputs, &[]),
+            annotation_label: annotation_label.to_owned(),
             received,
             annotate: false,
         }
@@ -345,7 +359,7 @@ impl EnvelopeSink for CollectSink {
         if self.annotate {
             input
                 .envelope
-                .append_annotation(annotation(self.descriptor.id().as_str()))?;
+                .append_annotation(annotation(self.descriptor.id(), &self.annotation_label))?;
         }
         self.received.lock().expect("sink lock").push(input);
         Ok(())

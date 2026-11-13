@@ -53,7 +53,7 @@ async fn row_graph(
 )> {
     let progress = Arc::new(QuerySourceProgress::new(
         ComponentBatch::GRAPH_ID,
-        ComponentId::try_new("query")?,
+        component_id(46),
     )?);
     let indexes: Arc<dyn ComputationIndexProvider> = match persistent {
         Some(path) => libraries::indexes(path)?,
@@ -62,7 +62,7 @@ async fn row_graph(
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: ComponentBatch::GRAPH_ID.into(),
-            id: ComponentId::try_new("query")?,
+            id: component_id(46),
             query: "MATCH (n:person) RETURN n.id AS id, n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("results")?,
@@ -84,15 +84,19 @@ async fn row_graph(
             })
             .context("row bootstrap factory")?;
         query = query.with_bootstrap(factory.create_provider(
-            ComponentId::try_new("query")?,
-            json!({"source":"source", "stream":"changes", "settings":database.config}),
+            component_id(46),
+            json!({
+                "source": component_id(77).to_string(),
+                "stream": "changes",
+                "settings": database.config
+            }),
             Some(libraries::scope(ComponentBatch::GRAPH_ID)),
             Some(progress.clone()),
         )?);
     }
     let results = query.results();
     let (sink, received) = drasi_reaction_application::NativeApplicationReaction::channel(
-        "sink",
+        component_id(101).clone(),
         QueryChangeCodec::schema().descriptor().clone(),
         size(8),
     )?;
@@ -109,9 +113,7 @@ async fn row_graph(
     let owner = ResourceId::try_new("progress")?;
     let settings = ResourceId::try_new("settings")?;
     let specification = ComponentSpecification {
-        descriptor: factory
-            .metadata()
-            .descriptor(ComponentId::try_new("source")?)?,
+        descriptor: factory.metadata().descriptor(component_id(77))?,
         role: ComponentRole::Source,
         completion: None,
         implementation: factory.descriptor().implementation.clone(),
@@ -169,21 +171,71 @@ async fn row_graph(
                 )))),
             ),
         )?
-        .component(specification, factory)
-        .transformer(Box::new(query))
-        .sink(Box::new(sink))
-        .bind_stream(endpoint("source", "out"), StreamId::try_new("changes")?)
-        .bind_stream(endpoint("query", "out"), StreamId::try_new("results")?)
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("source")
+                .expect("source component name"),
+            specification,
+            factory,
+        )
+        .transformer(
+            drasi_lib::computation::v1::ComponentName::try_new("query")
+                .expect("query component name"),
+            Box::new(query),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("sink")
+                .expect("sink component name"),
+            Box::new(sink),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            StreamId::try_new("changes")?,
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            StreamId::try_new("results")?,
+        )
         .connect(
-            EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+            EdgeDefinition::new(
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    "in",
+                ),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+            EdgeDefinition::new(
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                    "in",
+                ),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()?;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -205,7 +257,10 @@ async fn row_graph(
         for name in ["source", "query", "sink"] {
             tokio::time::timeout(
                 Duration::from_secs(10),
-                core.computation_component(name)?.wait_started(),
+                core.component_by_name(
+                    &ComponentName::try_new(name).expect("fixture component name"),
+                )?
+                .wait_started(),
             )
             .await??;
         }
@@ -235,6 +290,7 @@ async fn receive(receiver: &mut tokio::sync::mpsc::Receiver<InputEnvelope>) -> R
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn native_rows_support_ordinary_memory_queries_without_transaction_settings() -> Result<()> {
     for dynamic in [false, true] {
         let plugins = libraries::plugins(dynamic)?;
@@ -257,7 +313,7 @@ async fn native_rows_support_ordinary_memory_queries_without_transaction_setting
         assert!(!state.persistent);
         assert_eq!(state.transport_sequences[&StreamId::try_new("changes")?], 3);
         let position: RowPosition = serde_json::from_slice(
-            state.checkpoints[&SourceProgressKey::Source("source".into())]
+            state.checkpoints[&SourceProgressKey::Source(component_id(77).clone())]
                 .source_position
                 .as_ref()
                 .context("volatile row position")?,
@@ -287,6 +343,7 @@ async fn native_rows_support_ordinary_memory_queries_without_transaction_setting
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn native_rows_bootstrap_and_resume_ordinary_persistent_queries() -> Result<()> {
     let plugins = libraries::plugins(true)?;
     let database = Database::new().await?;
@@ -325,19 +382,17 @@ async fn native_rows_bootstrap_and_resume_ordinary_persistent_queries() -> Resul
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_suffix() -> Result<()>
 {
     let database = Database::new().await?;
     let path = tempfile::tempdir()?;
     for restart in [false, true] {
-        let progress = Arc::new(QuerySourceProgress::new(
-            "row-replay",
-            ComponentId::try_new("query")?,
-        )?);
+        let progress = Arc::new(QuerySourceProgress::new("row-replay", component_id(46))?);
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: "row-replay".into(),
-                id: ComponentId::try_new("query")?,
+                id: component_id(46),
                 query: "MATCH (n:person) RETURN n.id AS id,n.name AS name".into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new("results")?,
@@ -349,7 +404,7 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
         .with_source_progress(progress.clone())?;
         query.start().await?;
         let mut source = drasi_computation_source_postgres::PostgresTransactionSource::rows(
-            ComponentId::try_new("source")?,
+            component_id(77),
             StreamId::try_new("changes")?,
             database.config.clone(),
             SourceProgressReader::from(progress.clone()).read_only(),
@@ -384,7 +439,7 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
         assert_eq!(rows(&query).len(), expected as usize);
         let state = progress.snapshot();
         let position: RowPosition = serde_json::from_slice(
-            state.checkpoints[&SourceProgressKey::Source("source".into())]
+            state.checkpoints[&SourceProgressKey::Source(component_id(77).clone())]
                 .source_position
                 .as_ref()
                 .context("cursor")?,
@@ -403,18 +458,16 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_partial_cursor(
 ) -> Result<()> {
     let database = Database::new().await?;
     let path = tempfile::tempdir()?;
-    let progress = Arc::new(QuerySourceProgress::new(
-        "row-reconnect",
-        ComponentId::try_new("query")?,
-    )?);
+    let progress = Arc::new(QuerySourceProgress::new("row-reconnect", component_id(46))?);
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "row-reconnect".into(),
-            id: ComponentId::try_new("query")?,
+            id: component_id(46),
             query: "MATCH (n:person) RETURN n.id AS id,n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("results")?,
@@ -426,7 +479,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
     .with_source_progress(progress.clone())?;
     query.start().await?;
     let mut source = drasi_computation_source_postgres::PostgresTransactionSource::rows(
-        ComponentId::try_new("source")?,
+        component_id(77),
         StreamId::try_new("changes")?,
         database.config.clone(),
         SourceProgressReader::from(progress.clone()).read_only(),
@@ -523,7 +576,8 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
         }
         query.delivery_completed(&output).await?;
         if replayed_second
-            && progress.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence
+            && progress.snapshot().checkpoints[&SourceProgressKey::Source(component_id(77).clone())]
+                .sequence
                 == 3
         {
             break;
@@ -532,7 +586,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
     assert!(replayed_second);
     assert_eq!(rows(&query).len(), 3);
     let position: RowPosition = serde_json::from_slice(
-        progress.snapshot().checkpoints[&SourceProgressKey::Source("source".into())]
+        progress.snapshot().checkpoints[&SourceProgressKey::Source(component_id(77).clone())]
             .source_position
             .as_ref()
             .context("complete cursor")?,
@@ -545,6 +599,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -> Result<()> {
     let container = GenericImage::new("postgres", "16-alpine")
         .with_exposed_port(ContainerPort::Tcp(5432))
@@ -593,8 +648,12 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
         });
         let create = |settings: Value, graph: &str| {
             factory.create_provider(
-                ComponentId::try_new("query")?,
-                json!({"source":"external","stream":"external/out","settings":settings}),
+                component_id(46),
+                json!({
+                    "source": component_id(818).to_string(),
+                    "stream": "external/out",
+                    "settings": settings
+                }),
                 Some(libraries::scope(graph)),
                 None,
             )
@@ -627,7 +686,7 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
         settings["tables"] = json!(["initial"]);
         let provider = create(settings.clone(), ComponentBatch::GRAPH_ID)?;
         let query=ContinuousQueryTransformer::new(ContinuousQueryDefinition {
-            graph_id:ComponentBatch::GRAPH_ID.into(),id:ComponentId::try_new("query")?,
+            graph_id:ComponentBatch::GRAPH_ID.into(),id:component_id(46),
             query:"MATCH (n:initial) RETURN n.id AS id,n.label AS label,n.optional AS optional,n.items AS items,n.data AS data".into(),
             language:ComputationQueryLanguage::Cypher,output_stream:StreamId::try_new("results")?,outbox_capacity:size(8),
         },Arc::new(InMemoryComputationProvider)).await?.with_recovery_scope(INSTANCE)?.with_bootstrap(provider);
@@ -635,7 +694,7 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         let ingress = Ingress {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("external")?,
+                component_id(818),
                 vec![PortDescriptor::new(
                     PortId::try_new("out")?,
                     PortDirection::Output,
@@ -646,29 +705,75 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
             receiver,
         };
         let (sink, mut received) = drasi_reaction_application::NativeApplicationReaction::channel(
-            "sink",
+            component_id(101).clone(),
             QueryChangeCodec::schema().descriptor().clone(),
             size(1),
         )?;
         let batch = ComponentBatch::builder()
-            .source(Box::new(ingress))
-            .transformer(Box::new(query))
-            .sink(Box::new(sink))
+            .source(
+                drasi_lib::computation::v1::ComponentName::try_new("external")
+                    .expect("external component name"),
+                Box::new(ingress),
+            )
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("query")
+                    .expect("query component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("sink")
+                    .expect("sink component name"),
+                Box::new(sink),
+            )
             .bind_stream(
-                endpoint("external", "out"),
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000332")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
                 StreamId::try_new("external/out")?,
             )
-            .bind_stream(endpoint("query", "out"), StreamId::try_new("results")?)
+            .bind_stream(
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                StreamId::try_new("results")?,
+            )
             .connect(
-                EdgeDefinition::new(endpoint("external", "out"), endpoint("query", "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000332")
+                            .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                            .expect("fixture UUID"),
+                        "in",
+                    ),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                            .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                            .expect("fixture UUID"),
+                        "in",
+                    ),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()?;
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -688,7 +793,10 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
         core.start().await?;
         tokio::time::timeout(
             Duration::from_secs(10),
-            core.computation_component("query")?.wait_started(),
+            core.component_by_name(
+                &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+            )?
+            .wait_started(),
         )
         .await??;
         let snapshot = results.snapshot()?;
@@ -819,6 +927,7 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn temporary_exported_snapshot_preserves_configured_slot_and_imported_readers() -> Result<()>
 {
     use drasi_postgres_common::replication::{connect, field};

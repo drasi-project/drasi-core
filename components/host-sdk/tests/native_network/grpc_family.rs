@@ -5,6 +5,9 @@ use super::http_family::family_component;
 use super::*;
 use futures_util::FutureExt;
 
+const A_QUERY_ID: &str = "00000000-0000-0000-0000-000000000601";
+const B_QUERY_ID: &str = "00000000-0000-0000-0000-000000000602";
+
 #[derive(Default)]
 struct GrpcState {
     requests: Mutex<
@@ -102,7 +105,12 @@ async fn server() -> Result<Server> {
     })
 }
 
-fn input(query: &str, sequence: u64, routes: &[&str]) -> Result<InputEnvelope> {
+fn input(
+    query: &str,
+    component: &ComponentId,
+    sequence: u64,
+    routes: &[&str],
+) -> Result<InputEnvelope> {
     let results: Vec<_> = routes
         .iter()
         .enumerate()
@@ -122,13 +130,13 @@ fn input(query: &str, sequence: u64, routes: &[&str]) -> Result<InputEnvelope> {
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new(query)?,
+            component,
             SystemMetadata::new(stream(&format!("{query}/out")), sequence),
             &ResultNodeProjector::try_new(&format!("test/native-grpc-family/{query}/out"), None)?,
             &results,
             QueryOutputMetadata {
-                query_id: query.into(),
-                source_id: None,
+                query_id: component.clone(),
+                input_origin: None,
                 timestamp: chrono::Utc::now(),
                 metadata: HashMap::from([("tenant".into(), json!("test"))]),
                 profiling: None,
@@ -145,19 +153,20 @@ async fn native_grpc_stream_totals_preserve_the_consumer_contract_and_failed_pre
         let port = free_port()?;
         let mut source = family_component(
             GRPC_SOURCE,
-            "stream-counts",
+            NETWORK_SOURCE_ID,
             json!({
                 "stream":"facilities-db/out","host":"127.0.0.1","port":port,"ingressCapacity":4,
             }),
             linked,
         )?;
+        source.initialize().await?;
         source.start().await?;
         let mut client = source::source_service_client::SourceServiceClient::connect(format!(
             "http://127.0.0.1:{port}"
         ))
         .await?;
         let mut invalid = proto_event(3);
-        invalid.source_id = "wrong-source".into();
+        invalid.source_id = "00000000-0000-0000-0000-000000000607".into();
         let mut replies = client
             .stream_events(tokio_stream::iter([
                 proto_event(1),
@@ -196,6 +205,7 @@ async fn native_grpc_stream_totals_preserve_the_consumer_contract_and_failed_pre
             assert_eq!(source_value(&next(&mut source).await?)?, value);
         }
         source.stop().await?;
+        source.dispose().await?;
     }
     Ok(())
 }
@@ -206,9 +216,9 @@ async fn native_grpc_batches_preserve_templates_metadata_boundaries_and_typed_ro
     for linked in [true, false] {
         let mut sink = family_component(
             GRPC_SINK,
-            "routed",
+            NETWORK_SINK_ID,
             json!({
-                "outputs":{"a":{"component":"a","port":"out"},"b":{"component":"b","port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
+                "outputs":{"a":{"component":A_QUERY_ID,"port":"out"},"b":{"component":B_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
                 "batching":{"mode":"fixed","batchSize":3,"batchFlushTimeoutMs":30},
                 "outputTemplates":{"defaultTemplate":{"added":{
                     "template":"{\"alias\":\"{{output.alias}}\",\"port\":\"{{output.port}}\",\"sequence\":{{sequence}},\"key\":\"{{identity.id}}\"}",
@@ -217,15 +227,28 @@ async fn native_grpc_batches_preserve_templates_metadata_boundaries_and_typed_ro
             }),
             linked,
         )?;
+        sink.initialize().await?;
         sink.start().await?;
         let before = receiver.state.requests.lock().unwrap().len();
         sink.handle_batch(vec![
-            input("a", 1, &["same", "same"])?,
-            input("b", 1, &["same"])?,
+            input(
+                "a",
+                &ComponentId::try_new(A_QUERY_ID)?,
+                1,
+                &["same", "same"],
+            )?,
+            input("b", &ComponentId::try_new(B_QUERY_ID)?, 1, &["same"])?,
         ])
         .await?;
-        sink.handle(input("a", 2, &["left", "right"])?).await?;
+        sink.handle(input(
+            "a",
+            &ComponentId::try_new(A_QUERY_ID)?,
+            2,
+            &["left", "right"],
+        )?)
+        .await?;
         sink.stop().await?;
+        sink.dispose().await?;
         let requests = receiver.state.requests.lock().unwrap();
         let calls = &requests[before..];
         assert_eq!(
@@ -258,7 +281,14 @@ async fn native_grpc_batches_preserve_templates_metadata_boundaries_and_typed_ro
                 output.port
             );
             assert_eq!(output.port, "out");
-            assert_eq!(output.alias, output.component);
+            assert_eq!(
+                output.component,
+                match output.alias.as_str() {
+                    "a" => A_QUERY_ID,
+                    "b" => B_QUERY_ID,
+                    other => anyhow::bail!("unexpected output alias {other}"),
+                }
+            );
             assert_eq!(
                 headers.get("x-route").context("route header")?.to_str()?,
                 request.metadata["x-route"].as_str()
@@ -284,13 +314,14 @@ async fn native_grpc_retries_the_same_batch_and_requires_exact_acknowledgement()
     for linked in [true, false] {
         let mut sink = family_component(
             GRPC_SINK,
-            "retry-batch",
+            NETWORK_SINK_ID,
             json!({
-                "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
+                "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
                 "batchSize":3,"batchFlushTimeoutMs":25,"maxRetries":1,
             }),
             linked,
         )?;
+        sink.initialize().await?;
         sink.start().await?;
         receiver.state.failures.store(1, Ordering::SeqCst);
         let start = receiver.state.requests.lock().unwrap().len();
@@ -333,6 +364,64 @@ async fn native_grpc_retries_the_same_batch_and_requires_exact_acknowledgement()
             call.await?;
         }
         sink.stop().await?;
+        sink.dispose().await?;
+    }
+    receiver.stop().await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_grpc_failure_policy_defines_graph_retry_ownership() -> Result<()> {
+    let receiver = server().await?;
+    for linked in [true, false] {
+        let configuration = |failure_policy: &str| {
+            json!({
+                "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},
+                "endpoint":format!("grpc://{}",receiver.address),
+                "batchSize":1,
+                "batchFlushTimeoutMs":25,
+                "maxRetries":0,
+                "failurePolicy":failure_policy,
+            })
+        };
+
+        let mut strict =
+            family_component(GRPC_SINK, NETWORK_SINK_ID, configuration("strict"), linked)?;
+        strict.initialize().await?;
+        strict.start().await?;
+        receiver.state.failures.store(1, Ordering::SeqCst);
+        let start = receiver.state.requests.lock().unwrap().len();
+        assert!(strict.handle(result_input(1)?).await.is_err());
+        strict.handle(result_input(1)?).await?;
+        {
+            let requests = receiver.state.requests.lock().unwrap();
+            assert_eq!(requests.len() - start, 2);
+            assert_eq!(
+                requests[start].1,
+                requests[start + 1].1,
+                "the graph-owned retry must preserve the exact failed envelope"
+            );
+        }
+        strict.stop().await?;
+        strict.dispose().await?;
+
+        let mut skip = family_component(
+            GRPC_SINK,
+            "00000000-0000-0000-0000-000000000609",
+            configuration("skip"),
+            linked,
+        )?;
+        skip.initialize().await?;
+        skip.start().await?;
+        receiver.state.failures.store(1, Ordering::SeqCst);
+        let start = receiver.state.requests.lock().unwrap().len();
+        skip.handle(result_input(2)?).await?;
+        assert_eq!(
+            receiver.state.requests.lock().unwrap().len() - start,
+            1,
+            "skip deliberately acknowledges the failed envelope without retry"
+        );
+        skip.stop().await?;
+        skip.dispose().await?;
     }
     receiver.stop().await
 }
@@ -343,20 +432,28 @@ async fn native_grpc_adaptive_and_request_byte_limits_split_without_losing_items
     for linked in [true, false] {
         let mut sink = family_component(
             GRPC_SINK,
-            "adaptive",
+            NETWORK_SINK_ID,
             json!({
-                "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
+                "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
                 "batching":{"mode":"adaptive","adaptiveMinBatchSize":10,"adaptiveMaxBatchSize":10,
                     "adaptiveWindowSize":10,"adaptiveBatchTimeoutMs":40},
                 "maxRequestBytes":1800,"maxRetries":0,
             }),
             linked,
         )?;
+        sink.initialize().await?;
         sink.start().await?;
         assert_eq!(sink.batching()?.unwrap().max_operations, 10);
         let before = receiver.state.requests.lock().unwrap().len();
-        sink.handle(input("q", 1, &["route"; 10])?).await?;
+        sink.handle(input(
+            "q",
+            &ComponentId::try_new(RESULT_QUERY_ID)?,
+            1,
+            &["route"; 10],
+        )?)
+        .await?;
         sink.stop().await?;
+        sink.dispose().await?;
         let requests = receiver.state.requests.lock().unwrap();
         let calls = &requests[before..];
         assert!(
@@ -403,53 +500,67 @@ async fn native_grpc_source_query_and_batched_sink_execute_in_one_drasi_instance
                     .clone(),
             )
             .with_id("grpc-family")
+            .with_allow_external_component_ids(true)
             .build()
             .await?;
         let port = free_port()?;
         let result = async {
             let source = family_component(
                 GRPC_SOURCE,
-                "facilities-db",
+                NETWORK_SOURCE_ID,
                 json!({
                     "stream":"facilities-db/out","host":"127.0.0.1","port":port,
                 }),
                 linked,
             )?;
+            let source_id = source.descriptor().id().clone();
+            let query_id = ComponentId::try_new(RESULT_QUERY_ID)?;
             let output = Endpoint::new(
-                ComponentId::try_new("facilities-db")?,
+                source_id.clone(),
                 PortId::try_new("out")?,
             );
             core.add_components(
                 ComponentBatch::builder()
-                    .source(Box::new(source))
+                    .source(drasi_lib::computation::v1::ComponentName::try_new("facilities-db").expect("fixture component name"), Box::new(source))
                     .bind_stream(output.clone(), stream("facilities-db/out"))
                     .build()?,
             )
             .await?;
             let pipeline = core.computation_pipeline()?.native_source(output)?.query(
-                drasi_lib::Query::cypher("q")
+                drasi_lib::Query::cypher(drasi_core_types::ComponentName::try_new("q").expect("fixture component name"))
                     .query("MATCH (r:Room) RETURN r.value AS value")
-                    .from_input("facilities-db")
+                    .from_input_by_id(source_id)
                     .enable_bootstrap(false)
-                    .build(),
+                    .build()?
+                    .with_assigned_id(query_id.clone()),
             );
             core.add_components(pipeline.build()?).await?;
-            let sink = family_component(
-                GRPC_SINK,
-                "sink",
+            let query_port = PortId::try_new("out")?;
+            let query_stream = core.computation_control()?.desired_snapshot().nodes.iter()
+                .find(|node| node.descriptor.id() == &query_id)
+                .and_then(|node| node.output_streams.get(&query_port))
+                .cloned()
+                .context("actual query output stream")?;
+            let sink = http_family::family_plugin(GRPC_SINK, linked)?.factories()[0].create_component_with_inputs(
+                ComponentId::try_new(NETWORK_SINK_ID)?,
                 json!({
-                    "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}",receiver.address),"batchSize":3,
+                    "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}",receiver.address),"batchSize":3,
                     "batchFlushTimeoutMs":50,"maxRetries":0,
                 }),
-                linked,
+                vec![InputBinding {
+                    input_port: PortId::try_new("in")?,
+                    output: OutputEndpoint::new(query_id.clone(), query_port),
+                    stream: query_stream,
+                }],
             )?;
+            let sink_id = sink.descriptor().id().clone();
             core.add_components(
                 ComponentBatch::builder()
-                    .sink(Box::new(sink))
+                    .sink(drasi_lib::computation::v1::ComponentName::try_new("sink").expect("fixture component name"), Box::new(sink))
                     .connect(
                         EdgeDefinition::new(
-                            Endpoint::new(ComponentId::try_new("q")?, PortId::try_new("out")?),
-                            Endpoint::new(ComponentId::try_new("sink")?, PortId::try_new("in")?),
+                            Endpoint::new(query_id, PortId::try_new("out")?),
+                            Endpoint::new(sink_id, PortId::try_new("in")?),
                         ),
                         Box::new(BoundedPipeConfig { capacity: 8 }),
                     )
@@ -457,7 +568,7 @@ async fn native_grpc_source_query_and_batched_sink_execute_in_one_drasi_instance
             )
             .await?;
             core.start().await?;
-            tokio::time::timeout(DEADLINE, core.computation_component("sink")?.wait_started())
+            tokio::time::timeout(DEADLINE, core.component_by_name(&drasi_core_types::ComponentName::try_new("sink").expect("fixture component name"))?.wait_started())
                 .await??;
             let mut client = source::source_service_client::SourceServiceClient::connect(format!(
                 "http://127.0.0.1:{port}"
@@ -491,7 +602,7 @@ async fn native_grpc_source_query_and_batched_sink_execute_in_one_drasi_instance
                 }
             })
             .await??;
-            assert_eq!(core.get_query_results("q").await?.len(), 7);
+            assert_eq!(core.get_query_results_by_name(&drasi_core_types::ComponentName::try_new("q").expect("fixture component name")).await?.len(), 7);
             assert!(receiver
                 .state
                 .requests

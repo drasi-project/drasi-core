@@ -403,7 +403,7 @@ impl LinearTransaction {
             "transaction transformer requires persistent atomic storage"
         );
         let indexes = provider
-            .create_indexes(&definition.graph_id, definition.id.as_str())
+            .create_indexes(&definition.graph_id, &definition.id)
             .await?;
         let store = TransformStore::configured(
             indexes,
@@ -801,14 +801,29 @@ impl ComputationComponent for TransactionTransformer {
     fn requires_readiness_confirmation(&self) -> bool {
         self.processor().requires_readiness_confirmation()
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.processor_mut().initialize().await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.processor_mut().dispose().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.processor_mut().pause_processing().await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.processor_mut().resume_processing().await
+    }
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+        self.processor_mut().apply_update(context).await
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.processor_mut().start().await
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.processor_mut().stop().await
     }
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
-        self.processor_mut().deprovision().await
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        self.processor_mut().delete_owned_resources().await
     }
 }
 
@@ -856,6 +871,7 @@ impl Default for TransactionTransformerFactory {
                     fields: BTreeMap::from([(
                         Arc::from("transaction"),
                         ConfigurationField {
+                            constraint: None,
                             value_type: ConfigurationType::Object,
                             required: true,
                             secret: false,

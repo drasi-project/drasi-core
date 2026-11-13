@@ -48,6 +48,9 @@ pub struct EnvelopeCodec {
 }
 
 impl EnvelopeCodec {
+    /// UUID component identities; previous name-based envelopes are unsupported.
+    pub const VERSION: u32 = 3;
+
     pub fn new(max_bytes: NonZeroUsize) -> Self {
         Self {
             schemas: BTreeMap::new(),
@@ -114,7 +117,7 @@ impl EnvelopeCodec {
             .collect();
         annotations.reverse();
         let frame = Frame {
-            format: 1,
+            format: Self::VERSION,
             id: Identity::from_envelope(envelope.id()),
             change_set: Identity {
                 namespace: envelope.changes().id().namespace().to_owned(),
@@ -154,7 +157,7 @@ impl EnvelopeCodec {
             });
         }
         let frame: Frame = serde_json::from_slice(bytes)?;
-        if frame.format != 1 {
+        if frame.format != Self::VERSION {
             return Err(EnvelopeCodecError::Version(frame.format));
         }
         Lineage::validate_depth(frame.lineage.len())?;
@@ -474,7 +477,7 @@ enum Value {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Annotation {
-    contributor: String,
+    contributor: ComponentId,
     key: String,
     value: Value,
 }
@@ -498,7 +501,7 @@ impl From<ContextEntry> for Annotation {
 impl Annotation {
     fn decode(self) -> Result<ContextEntry, ContractError> {
         ContextEntry::try_new(
-            ComponentId::try_new(self.contributor)?,
+            self.contributor,
             self.key,
             match self.value {
                 Value::Bool(value) => ContextValue::Bool(value),
@@ -643,8 +646,21 @@ mod tests {
             "custom/history"
         );
         let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(value["format"], 1);
+        assert_eq!(value["format"], EnvelopeCodec::VERSION);
         assert!(value["system"]["control"].is_null());
+    }
+
+    #[test]
+    fn json_envelopes_reject_the_previous_identity_format() {
+        let codec = codec(4096);
+        let encoded = codec.encode(&envelope(None, None)).unwrap();
+        let mut frame: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(frame["format"], EnvelopeCodec::VERSION);
+        frame["format"] = serde_json::json!(1);
+        assert!(matches!(
+            codec.decode(&serde_json::to_vec(&frame).unwrap()),
+            Err(EnvelopeCodecError::Version(1))
+        ));
     }
 
     #[test]
@@ -745,7 +761,7 @@ mod tests {
             let encoded = codec.encode(&original).unwrap();
             let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
             let name = |ordering| serde_json::to_value(ordering).unwrap();
-            assert_eq!(value["format"], 1);
+            assert_eq!(value["format"], EnvelopeCodec::VERSION);
             assert_eq!(value["system"]["ordering"], name(current));
             assert_eq!(value["lineage"][0][1]["ordering"], name(historical));
             let decoded = codec.decode(&encoded).unwrap();

@@ -34,14 +34,14 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 /// Wait for a component to reach Running status via event notification.
-async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+async fn wait_for_running(drasi: &DrasiLib, component_id: drasi_core::ComponentId) {
     // Subscribe BEFORE checking to avoid missing events
     let mut rx = drasi.subscribe_all_component_events();
     let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()
-        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
+        .any(|n| n.id.component_id() == Some(&component_id) && n.status == ComponentStatus::Running)
     {
         return;
     }
@@ -79,15 +79,25 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
         properties: HashMap::new(),
         durability: None,
     };
-    let (app_source, app_handle) = ApplicationSource::new("test-app-source", config)?;
+    let (app_source, app_handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000142")
+            .expect("fixture UUID"),
+        config,
+    )?;
 
     // =========================================================================
     // Step 2: Create Application Reaction to capture results
     // =========================================================================
-    let (app_reaction, reaction_handle) = ApplicationReactionBuilder::new("test-app-reaction")
-        .with_query("relationship-test-query")
-        .with_auto_start(true)
-        .build();
+    let (app_reaction, reaction_handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000143")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("relationship-test-query")
+            .expect("fixture component name"),
+    )
+    .with_auto_start(true)
+    .build();
 
     // =========================================================================
     // Step 3: Define Query that tests relationship direction
@@ -95,18 +105,25 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     // This query will only return results if relationships are in correct direction:
     // (Alice)-[:KNOWS]->(Bob)
     // If direction is reversed, this would match (Bob)-[:KNOWS]->(Alice) instead
-    let relationship_query = Query::cypher("relationship-test-query")
-        .query(
-            r#"
+    let relationship_query = Query::cypher(
+        drasi_core::ComponentName::try_new("relationship-test-query")
+            .expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (a:Person)-[:KNOWS]->(b:Person)
             WHERE a.name = 'Alice'
             RETURN b.name AS friend_name
             "#,
-        )
-        .from_input("test-app-source")
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-app-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .build()
+    .expect("valid query configuration");
+    let relationship_query_name = relationship_query.name.clone();
 
     // =========================================================================
     // Step 4: Build DrasiLib with all components
@@ -114,22 +131,44 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     let drasi = Arc::new(
         lib_integration_tests::query_builder()
             .with_id("application-source-e2e-test")
-            .with_source(app_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("test-app-source")
+                    .expect("fixture component name"),
+                app_source,
+            )
             .with_query(relationship_query)
-            .with_reaction(app_reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("test-app-reaction")
+                    .expect("fixture component name"),
+                app_reaction,
+            )
             .build()
             .await?,
     );
 
     // Start DrasiLib to initialize all components
     drasi.start().await?;
+    let query_id = drasi
+        .component_by_name(&relationship_query_name)?
+        .id()
+        .clone();
 
     // =========================================================================
     // Step 5: Wait for components to be ready
     // =========================================================================
-    wait_for_running(&drasi, "test-app-source").await;
-    wait_for_running(&drasi, "relationship-test-query").await;
-    wait_for_running(&drasi, "test-app-reaction").await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000142")
+            .expect("fixture UUID"),
+    )
+    .await;
+    wait_for_running(&drasi, query_id.clone()).await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000143")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     // =========================================================================
     // Step 6: Subscribe to reaction results
@@ -186,7 +225,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
 
     let query_result = query_result.unwrap();
     assert_eq!(
-        query_result.query_id, "relationship-test-query",
+        query_result.query_id, query_id,
         "Received result from unexpected query"
     );
 
@@ -273,31 +312,56 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     // =========================================================================
     // Create a new query that looks for (Bob)-[:KNOWS]->(Alice)
     // This should NOT match if relationships are correctly directed
-    let reverse_query = Query::cypher("reverse-test-query")
-        .query(
-            r#"
+    let reverse_query = Query::cypher(
+        drasi_core::ComponentName::try_new("reverse-test-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (a:Person)-[:KNOWS]->(b:Person)
             WHERE a.name = 'Robert'
             RETURN b.name AS friend_name
             "#,
-        )
-        .from_input("test-app-source")
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-app-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .build()
+    .expect("valid query configuration");
 
-    drasi.add_query(reverse_query).await?;
+    let reverse_query_id = drasi
+        .add_query_with_handle(reverse_query)
+        .await?
+        .id()
+        .clone();
 
     // Add a second reaction for the reverse query
-    let (reverse_reaction, reverse_handle) = ApplicationReactionBuilder::new("reverse-reaction")
-        .with_query("reverse-test-query")
-        .with_auto_start(true)
-        .build();
+    let (reverse_reaction, reverse_handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000144")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("reverse-test-query").expect("fixture component name"),
+    )
+    .with_auto_start(true)
+    .build();
 
-    drasi.add_reaction(reverse_reaction).await?;
+    drasi
+        .add_reaction(
+            drasi_core::ComponentName::try_new("reverse-test-reaction")
+                .expect("fixture component name"),
+            reverse_reaction,
+        )
+        .await?;
 
-    wait_for_running(&drasi, "reverse-test-query").await;
-    wait_for_running(&drasi, "reverse-reaction").await;
+    wait_for_running(&drasi, reverse_query_id).await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000144")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let mut reverse_subscription = reverse_handle
         .subscribe_with_options(Default::default())
@@ -330,44 +394,78 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
         properties: HashMap::new(),
         durability: None,
     };
-    let (app_source, app_handle) = ApplicationSource::new("multi-rel-source", config)?;
+    let (app_source, app_handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000145")
+            .expect("fixture UUID"),
+        config,
+    )?;
 
     // Create reaction
-    let (app_reaction, reaction_handle) = ApplicationReactionBuilder::new("multi-rel-reaction")
-        .with_query("multi-rel-query")
-        .with_auto_start(true)
-        .build();
+    let (app_reaction, reaction_handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000146")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("multi-rel-query").expect("fixture component name"),
+    )
+    .with_auto_start(true)
+    .build();
 
     // Query to count outgoing KNOWS relationships from Alice
-    let count_query = Query::cypher("multi-rel-query")
-        .query(
-            r#"
+    let count_query = Query::cypher(
+        drasi_core::ComponentName::try_new("multi-rel-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(friend:Person)
             RETURN count(friend) AS friend_count, collect(friend.name) AS friend_names
             "#,
-        )
-        .from_input("multi-rel-source")
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("multi-rel-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .build()
+    .expect("valid query configuration");
+    let count_query_name = count_query.name.clone();
 
     // Build DrasiLib
     let drasi = Arc::new(
         lib_integration_tests::query_builder()
             .with_id("multi-relationship-test")
-            .with_source(app_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("multi-rel-source")
+                    .expect("fixture component name"),
+                app_source,
+            )
             .with_query(count_query)
-            .with_reaction(app_reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("multi-rel-reaction")
+                    .expect("fixture component name"),
+                app_reaction,
+            )
             .build()
             .await?,
     );
 
     // Start DrasiLib
     drasi.start().await?;
+    let query_id = drasi.component_by_name(&count_query_name)?.id().clone();
 
-    wait_for_running(&drasi, "multi-rel-source").await;
-    wait_for_running(&drasi, "multi-rel-query").await;
-    wait_for_running(&drasi, "multi-rel-reaction").await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000145")
+            .expect("fixture UUID"),
+    )
+    .await;
+    wait_for_running(&drasi, query_id.clone()).await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000146")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let mut subscription = reaction_handle
         .subscribe_with_options(Default::default())
@@ -419,7 +517,7 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
 
     while tokio::time::Instant::now() < deadline {
         if let Ok(Some(result)) = timeout(Duration::from_millis(500), subscription.recv()).await {
-            assert_eq!(result.query_id, "multi-rel-query");
+            assert_eq!(result.query_id, query_id);
 
             if let Some(row) = result.results.first() {
                 let data = match row {

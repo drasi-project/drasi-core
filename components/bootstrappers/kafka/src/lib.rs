@@ -93,7 +93,7 @@ impl KafkaBootstrapProvider {
     }
 
     /// Create a base consumer for bootstrap reading.
-    fn create_consumer(&self, source_id: &str) -> Result<StreamConsumer> {
+    fn create_consumer(&self, source_id: &drasi_lib::ComponentId) -> Result<StreamConsumer> {
         let group_id = format!("__drasi_bootstrap_{}_{}", source_id, uuid::Uuid::new_v4());
         let mut client_config = ClientConfig::new();
         client_config
@@ -134,7 +134,7 @@ impl KafkaBootstrapProvider {
         topic: &str,
         partition: usize,
         offset: i64,
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
     ) -> Result<SourceChange> {
         let context = serde_json::json!({
             "payload": payload,
@@ -150,11 +150,16 @@ impl KafkaBootstrapProvider {
             .find_matching_mapping(&self.mappings, &context, None)
             .ok_or_else(|| anyhow!("No matching mapping found for message"))?;
 
-        self.engine.process_mapping(mapping, &context, source_id)
+        self.engine
+            .process_mapping(mapping, &context, source_id.as_str())
     }
 
     /// Process a tombstone (null payload) as a Delete event.
-    fn process_tombstone(&self, key: &str, source_id: &str) -> Result<SourceChange> {
+    fn process_tombstone(
+        &self,
+        key: &str,
+        source_id: &drasi_lib::ComponentId,
+    ) -> Result<SourceChange> {
         if key.is_empty() {
             return Err(anyhow!(
                 "Tombstone message has no key; cannot determine element to delete"
@@ -163,7 +168,7 @@ impl KafkaBootstrapProvider {
 
         let metadata = drasi_core::models::ElementMetadata {
             reference: drasi_core::models::ElementReference {
-                source_id: Arc::from(source_id),
+                namespace: Arc::from(source_id.as_str()),
                 element_id: Arc::from(key),
             },
             labels: Arc::from(vec![Arc::from(self.config.node_label.as_str())]),
@@ -574,7 +579,15 @@ mod tests {
         let provider = test_provider();
         let payload = serde_json::json!({"name": "Widget", "price": 42});
         let result = provider
-            .process_message(&payload, "item-1", "test-topic", 0, 5, "src-1")
+            .process_message(
+                &payload,
+                "item-1",
+                "test-topic",
+                0,
+                5,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+            )
             .unwrap();
 
         match result {
@@ -593,12 +606,14 @@ mod tests {
     #[test]
     fn test_process_tombstone_valid_key() {
         let provider = test_provider();
-        let result = provider.process_tombstone("order-99", "src-1").unwrap();
+        let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+            .expect("fixture UUID");
+        let result = provider.process_tombstone("order-99", &source_id).unwrap();
 
         match result {
             SourceChange::Delete { metadata } => {
                 assert_eq!(&*metadata.reference.element_id, "order-99");
-                assert_eq!(&*metadata.reference.source_id, "src-1");
+                assert_eq!(&*metadata.reference.namespace, source_id.as_str());
                 assert_eq!(&*metadata.labels[0], "TestNode");
             }
             other => panic!("Expected Delete, got {other:?}"),
@@ -608,7 +623,11 @@ mod tests {
     #[test]
     fn test_process_tombstone_empty_key_returns_error() {
         let provider = test_provider();
-        let result = provider.process_tombstone("", "src-1");
+        let result = provider.process_tombstone(
+            "",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID"),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("no key"));
     }

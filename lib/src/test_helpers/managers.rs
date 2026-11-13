@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::test_helpers::creation::{CoreFixtures, ReactionFixture, SourceFixture};
 use crate::{
-    config::{DrasiLibConfig, RuntimeConfig},
+    config::{ComponentId, ComponentName, DrasiLibConfig, RuntimeConfig},
     DrasiLib, Source,
 };
 use std::{collections::HashMap, ops::Deref, sync::Arc};
@@ -28,6 +29,7 @@ pub(crate) async fn core(
     let mut config = RuntimeConfig::new(
         DrasiLibConfig {
             id: "test-instance".into(),
+            allow_external_component_ids: true,
             ..Default::default()
         },
         HashMap::new(),
@@ -73,38 +75,11 @@ impl Deref for SourceManager {
     }
 }
 impl SourceManager {
-    pub(crate) async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
-        match self.0.source_instance(id).await {
-            Ok(source) => Some(source),
-            Err(error)
-                if error
-                    .downcast_ref::<crate::error::ComponentNotFoundError>()
-                    .is_some() =>
-            {
-                None
-            }
-            Err(error) => panic!("source fixture lookup failed: {error:#}"),
-        }
-    }
-
-    pub(crate) async fn add(&self, source: impl Source + 'static) -> anyhow::Result<()> {
-        Ok(self.0.add_source(source).await?)
-    }
-    pub(crate) async fn delete(&self, id: &str, cleanup: bool) -> anyhow::Result<()> {
-        Ok(self.0.remove_source(id, cleanup).await?)
-    }
-    pub(crate) async fn start_source(&self, id: String) -> anyhow::Result<()> {
-        Ok(self.0.start_source(&id).await?)
-    }
-    pub(crate) async fn stop_source(&self, id: String) -> anyhow::Result<()> {
-        Ok(self.0.stop_source(&id).await?)
-    }
-    pub(crate) async fn update_source(
+    pub(crate) async fn add<S: Source + 'static>(
         &self,
-        id: String,
-        source: impl Source + 'static,
+        source: SourceFixture<S>,
     ) -> anyhow::Result<()> {
-        Ok(self.0.update_source(&id, source).await?)
+        Ok(self.0.add_source_fixture(source).await?)
     }
     pub(crate) async fn start_all(&self) -> anyhow::Result<()> {
         self.0.computation_runtime.start_kind("source").await
@@ -127,68 +102,47 @@ impl Deref for ReactionManager {
     }
 }
 impl ReactionManager {
-    pub(crate) async fn add(&self, reaction: impl crate::Reaction + 'static) -> anyhow::Result<()> {
-        self.0
-            .computation_runtime
-            .declare_reaction(Box::new(reaction))
-            .await
-    }
-    pub(crate) async fn delete(&self, id: &str, cleanup: bool) -> anyhow::Result<()> {
-        Ok(self.0.remove_reaction(id, cleanup).await?)
-    }
-    pub(crate) async fn start_reaction(&self, id: String) -> anyhow::Result<()> {
-        Ok(self.0.start_reaction(&id).await?)
-    }
-    pub(crate) async fn update_reaction(
+    pub(crate) async fn add(
         &self,
-        id: String,
-        reaction: impl crate::Reaction + 'static,
+        reaction: ReactionFixture<impl crate::Reaction + 'static>,
     ) -> anyhow::Result<()> {
-        Ok(self.0.update_reaction(&id, reaction).await?)
+        Ok(self.0.add_reaction_fixture(reaction).await?)
     }
     pub(crate) async fn start_all(&self) -> anyhow::Result<()> {
         self.0.computation_runtime.start_kind("reaction").await
     }
 }
 impl QueryManager {
-    pub(crate) async fn get_query_instance(
+    pub(crate) async fn get_query_instance_by_name(
         &self,
-        id: &str,
+        name: &ComponentName,
     ) -> anyhow::Result<Arc<dyn crate::queries::Query>> {
-        let query = self.0.computation_runtime.query(id).await?;
+        let query = self
+            .0
+            .query_manager()
+            .get_query_instance_by_name(name)
+            .await?;
         assert_query_implementation(&self.0, query.as_ref());
         Ok(query)
     }
-    pub(crate) async fn teardown_query(&self, id: String) -> anyhow::Result<()> {
-        Ok(self.0.remove_query(&id).await?)
-    }
     pub(crate) async fn declare(&self, config: crate::config::QueryConfig) -> anyhow::Result<()> {
-        self.0.computation_runtime.declare_query(config).await
+        Ok(self.0.add_query(config).await?)
     }
     pub(crate) async fn add(&self, config: crate::config::QueryConfig) -> anyhow::Result<()> {
         Ok(self.0.add_query(config).await?)
     }
-    pub(crate) async fn delete(&self, id: &str) -> anyhow::Result<()> {
-        Ok(self.0.remove_query(id).await?)
+    pub(crate) async fn start_query_and_wait_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> anyhow::Result<()> {
+        let handle = self.0.component_by_name(name)?;
+        self.start_query_and_wait_by_id(handle.id()).await
     }
-    pub(crate) async fn start_query(&self, id: String) -> anyhow::Result<()> {
-        Ok(self.0.start_query(&id).await?)
-    }
-    pub(crate) async fn start_query_and_wait(&self, id: String) -> anyhow::Result<()> {
-        self.0.start_query(&id).await?;
-        let handle = self.0.computation_component(&id)?;
+    pub(crate) async fn start_query_and_wait_by_id(&self, id: &ComponentId) -> anyhow::Result<()> {
+        self.0.start_query_by_id(id).await?;
+        let handle = self.0.component_by_id(id)?;
         tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_started()).await??;
         Ok(())
-    }
-    pub(crate) async fn stop_query(&self, id: String) -> anyhow::Result<()> {
-        Ok(self.0.stop_query(&id).await?)
-    }
-    pub(crate) async fn update_query(
-        &self,
-        id: String,
-        config: crate::config::QueryConfig,
-    ) -> anyhow::Result<()> {
-        Ok(self.0.update_query(&id, config).await?)
     }
 }
 

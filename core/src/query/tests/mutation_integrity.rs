@@ -675,9 +675,16 @@ const TAGGED: &str =
     "MATCH (n:Item) RETURN n.key AS key, n.value AS value, n.note AS note, n.tag AS tag";
 const OUTPUT: &str = "drasi.output/0123abcd";
 
+fn input_component() -> crate::ComponentId {
+    crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002d").unwrap()
+}
+
 impl Store {
     /// Pipeline `stamp` is registered only under `pipeline_key`.
-    async fn query_with_pipeline(&self, pipeline_key: &str) -> ComputationQuery {
+    async fn query_with_pipeline(
+        &self,
+        pipeline_key: crate::middleware::SourcePipelineKey,
+    ) -> ComputationQuery {
         let functions = Arc::new(FunctionRegistry::new());
         let mut registry = crate::middleware::MiddlewareTypeRegistry::new();
         registry.register(Arc::new(StampFactory));
@@ -688,8 +695,15 @@ impl Store {
                 kind: Arc::from("stamp"),
                 name: Arc::from("stamp"),
                 config: Default::default(),
-            }))
-            .with_source_pipeline(pipeline_key, &["stamp".to_string()]);
+            }));
+        let builder = match pipeline_key {
+            crate::middleware::SourcePipelineKey::Component(id) => {
+                builder.with_component_pipeline(id, &["stamp".to_string()])
+            }
+            crate::middleware::SourcePipelineKey::Namespace(namespace) => {
+                builder.with_namespace_pipeline(namespace, &["stamp".to_string()])
+            }
+        };
         let resources = ComputationIndexes::try_new(
             IndexSet {
                 element_index: self.elements.clone(),
@@ -711,9 +725,9 @@ impl Store {
 }
 
 async fn stamped_row(
-    pipeline_key: &str,
+    pipeline_key: crate::middleware::SourcePipelineKey,
     change: SourceChange,
-    scope: Option<&str>,
+    scope: Option<crate::ComponentId>,
 ) -> (Subject, Vec<QueryPartEvaluationContext>) {
     let store = Store::new();
     let query = store.query_with_pipeline(pipeline_key).await;
@@ -746,7 +760,12 @@ fn tag_of(results: &[QueryPartEvaluationContext]) -> VariableValue {
 #[tokio::test]
 async fn input_scope_selects_the_pipeline_without_changing_foreign_element_identity() {
     let change = insert(OUTPUT, "one", 10, 1);
-    let (subject, results) = stamped_row("upstream", change, Some("upstream")).await;
+    let (subject, results) = stamped_row(
+        crate::middleware::SourcePipelineKey::Component(input_component()),
+        change,
+        Some(input_component()),
+    )
+    .await;
     assert_eq!(tag_of(&results), VariableValue::from("ran"));
 
     let reference = ElementReference::new(OUTPUT, "one");
@@ -771,12 +790,22 @@ async fn input_scope_selects_the_pipeline_without_changing_foreign_element_ident
 
 #[tokio::test]
 async fn without_input_scope_the_element_namespace_still_selects_the_pipeline() {
-    let (subject, results) = stamped_row("upstream", insert("upstream", "one", 10, 1), None).await;
+    let (subject, results) = stamped_row(
+        crate::middleware::SourcePipelineKey::Namespace("upstream".into()),
+        insert("upstream", "one", 10, 1),
+        None,
+    )
+    .await;
     assert_eq!(tag_of(&results), VariableValue::from("ran"));
     subject.query.shutdown().await.unwrap();
 
     // The foreign namespace has no pipeline, so a named pipeline cannot run.
-    let (subject, results) = stamped_row("upstream", insert(OUTPUT, "one", 10, 1), None).await;
+    let (subject, results) = stamped_row(
+        crate::middleware::SourcePipelineKey::Namespace("upstream".into()),
+        insert(OUTPUT, "one", 10, 1),
+        None,
+    )
+    .await;
     assert_eq!(tag_of(&results), VariableValue::Null);
     subject.query.shutdown().await.unwrap();
 }
@@ -784,9 +813,9 @@ async fn without_input_scope_the_element_namespace_still_selects_the_pipeline() 
 #[tokio::test]
 async fn input_scope_without_a_pipeline_does_not_fall_back_to_the_element_namespace() {
     let (subject, results) = stamped_row(
-        "upstream",
+        crate::middleware::SourcePipelineKey::Namespace("upstream".into()),
         insert("upstream", "one", 10, 1),
-        Some("another-input"),
+        Some(input_component()),
     )
     .await;
     assert_eq!(tag_of(&results), VariableValue::Null);
@@ -796,9 +825,14 @@ async fn input_scope_without_a_pipeline_does_not_fall_back_to_the_element_namesp
 #[tokio::test]
 async fn input_scope_preserves_replace_removals_and_producer_sequence_ordering() {
     let store = Store::new();
-    let query = store.query_with_pipeline("upstream").await;
+    let query = store
+        .query_with_pipeline(crate::middleware::SourcePipelineKey::Component(
+            input_component(),
+        ))
+        .await;
     let run = |changes: Vec<SourceChange>, ordering| {
-        crate::computation::QueryInputBatch::new(changes, ordering).with_input_scope("upstream")
+        crate::computation::QueryInputBatch::new(changes, ordering)
+            .with_input_scope(input_component())
     };
     let element = |time: u64, properties: serde_json::Value| Element::Node {
         metadata: metadata(OUTPUT, "one", time),

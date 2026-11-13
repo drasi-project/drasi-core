@@ -13,14 +13,21 @@
 // limitations under the License.
 
 use anyhow::Result;
+use drasi_lib::{ComponentId, ComponentName};
 use drasi_reaction_sse::SseReaction;
 use shared_tests::recovery_test_helpers::exercise_autoskipgap_recovery;
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_sse_reaction_autoskipgap_recovery() -> Result<()> {
-    let reaction = SseReaction::builder("sse-autoskip")
+    let reaction = SseReaction::builder(ComponentId::generate())
+        .with_host("127.0.0.1")
         .with_port(0)
-        .with_query("q1")
+        .with_query_by_name(ComponentName::try_new("q1")?)
         .build()?;
-    exercise_autoskipgap_recovery("sse-autoskipgap", "sse-autoskip", reaction).await
+    exercise_autoskipgap_recovery(
+        "sse-autoskipgap",
+        &ComponentName::try_new("sse-autoskip")?,
+        reaction,
+    )
+    .await
 }

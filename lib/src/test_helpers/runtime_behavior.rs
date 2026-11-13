@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{managers, wait_for_component_status};
+use super::managers;
+use crate::test_helpers::creation::BuilderFixtures;
 use crate::{
     channels::{ComponentStatus, QueryResult, ResultDiff},
     queries::Query,
@@ -25,6 +26,13 @@ use drasi_core::models::{
 use futures::StreamExt;
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc, time::Duration};
+
+fn assigned_id(core: &DrasiLib, name: &str) -> crate::ComponentId {
+    core.component_by_name(&crate::ComponentName::try_new(name).unwrap())
+        .unwrap()
+        .id()
+        .clone()
+}
 
 async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>) {
     let core = Arc::new(
@@ -42,14 +50,21 @@ async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>
                     .clone(),
             )
             .with_id("runtime-parity")
-            .with_source(TestMockSource::new("source".into()).unwrap())
+            .with_source_fixture(TestMockSource::fixture("source", true))
             .with_query(
-                crate::Query::cypher("query")
-                    .query(text)
-                    .from_input("source")
-                    .enable_bootstrap(false)
-                    .with_dispatch_buffer_capacity(capacity)
-                    .build(),
+                crate::Query::cypher(
+                    drasi_core_types::ComponentName::try_new("query")
+                        .expect("fixture component name"),
+                )
+                .query(text)
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("source")
+                        .expect("fixture component name"),
+                )
+                .enable_bootstrap(false)
+                .with_dispatch_buffer_capacity(capacity)
+                .build()
+                .unwrap(),
             )
             .build()
             .await
@@ -57,15 +72,18 @@ async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>
     );
     let mut events = core.subscribe_all_component_events();
     core.start().await.unwrap();
-    wait_for_component_status(
+    crate::test_helpers::wait_for_component_status_by_name(
         &mut events,
-        "query",
+        &core.component_graph(),
+        &crate::ComponentName::try_new("query").expect("fixture component name"),
         ComponentStatus::Running,
         Duration::from_secs(5),
     )
     .await;
     let query = managers::QueryManager(core.clone())
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .unwrap();
 
@@ -73,7 +91,7 @@ async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>
         use crate::computation::{runtime::NativeQuery, v1::*};
         let native = query.as_any().downcast_ref::<NativeQuery>().unwrap();
         let snapshot = native.inspector().snapshot();
-        let id = ComponentId::try_new("query").unwrap();
+        let id = assigned_id(&core, "query");
         let specification = &snapshot.desired.specifications[&id];
         assert_eq!(specification.role, ComponentRole::Transformer);
         assert_eq!(
@@ -97,7 +115,10 @@ async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>
 }
 
 async fn insert(core: &DrasiLib, id: &str, name: &str) {
-    let source = core.source_instance("source").await.unwrap();
+    let source = core
+        .source_instance(&assigned_id(core, "source"))
+        .await
+        .unwrap();
     source
         .as_any()
         .downcast_ref::<TestMockSource>()
@@ -129,8 +150,21 @@ async fn receive(
 async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() {
     use std::collections::BTreeMap;
 
-    fn normalized(result: &QueryResult) -> serde_json::Value {
+    fn normalized(
+        result: &QueryResult,
+        query_id: &crate::ComponentId,
+        source_id: &crate::ComponentId,
+    ) -> serde_json::Value {
+        assert_eq!(&result.query_id, query_id);
+        assert_eq!(
+            result.metadata.get("input_origin"),
+            Some(&json!(crate::computation::v1::QueryInputOrigin::Source(
+                source_id.clone()
+            )))
+        );
         let mut value = serde_json::to_value(result).unwrap();
+        value["query_id"] = json!("<query-id>");
+        value["metadata"]["input_origin"] = json!({"Source": "<source-id>"});
         value["timestamp"] = json!("<wall-clock>");
         if let Some(profile) = value
             .get_mut("profiling")
@@ -163,8 +197,17 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
 
     async fn trace() -> serde_json::Value {
         let (core, query) = pipeline("MATCH (n:Person) RETURN n.name AS name", 8).await;
-        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
-        let source = core.source_instance("source").await.unwrap();
+        let query_id = assigned_id(&core, "query");
+        let source_id = assigned_id(&core, "source");
+        let mut output = query
+            .subscribe(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000365")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .receiver;
+        let source = core.source_instance(&source_id).await.unwrap();
         let source = source.as_any().downcast_ref::<TestMockSource>().unwrap();
         let changes = [
             SourceChange::Insert {
@@ -191,7 +234,7 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
             source.inject_event(change).await.unwrap();
             let result = receive(output.as_mut()).await;
             assert_eq!(result.sequence, index as u64 + 1);
-            assert_eq!(result.query_id, "query");
+            assert_eq!(result.query_id, query_id);
             assert_eq!(result.results.len(), 1);
             if index < 2 {
                 let ResultDiff::Add { row_signature, .. } = result.results[0] else {
@@ -231,7 +274,12 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
             assert_eq!(
                 result.metadata,
                 HashMap::from([
-                    ("source_id".into(), json!("source")),
+                    (
+                        "input_origin".into(),
+                        json!(crate::computation::v1::QueryInputOrigin::Source(
+                            source_id.clone()
+                        )),
+                    ),
                     ("processed_by".into(), json!("drasi-core")),
                     ("result_count".into(), json!(1)),
                 ])
@@ -241,7 +289,7 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
             assert!(profile.query_core_call_ns.is_some());
             assert!(profile.query_core_return_ns.is_some());
             assert!(profile.query_send_ns.is_some());
-            emissions.push(normalized(&result));
+            emissions.push(normalized(&result, &query_id, &source_id));
             let snapshot = query.fetch_snapshot().await.unwrap();
             assert_eq!(snapshot.as_of_sequence, result.sequence);
             let rows: BTreeMap<_, _> = snapshot.stream_keyed().collect().await;
@@ -262,7 +310,7 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
         let replay: Vec<_> = outbox
             .results
             .iter()
-            .map(|result| normalized(result))
+            .map(|result| normalized(result, &query_id, &source_id))
             .collect();
         assert_eq!(replay, emissions);
         core.shutdown().await.unwrap();
@@ -276,8 +324,24 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
 
 async fn bounded_fanout() {
     let (core, query) = pipeline("MATCH (n:Person) RETURN n.name AS name", 1).await;
-    let mut slow = query.subscribe("slow".into()).await.unwrap().receiver;
-    let mut fast = query.subscribe("fast".into()).await.unwrap().receiver;
+    let query_id = assigned_id(&core, "query");
+    let source_id = assigned_id(&core, "source");
+    let mut slow = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000366")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap()
+        .receiver;
+    let mut fast = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000367")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap()
+        .receiver;
     insert(&core, "1", "Alice").await;
     let first = receive(fast.as_mut()).await;
     insert(&core, "2", "Bob").await;
@@ -286,12 +350,17 @@ async fn bounded_fanout() {
     assert_eq!(first.sequence, 1);
     assert_eq!(second.sequence, 2);
     for result in [&first, &second] {
-        assert_eq!(result.query_id, "query");
+        assert_eq!(result.query_id, query_id);
         assert_eq!(result.results.len(), 1);
         assert_eq!(
             result.metadata,
             HashMap::from([
-                ("source_id".into(), json!("source")),
+                (
+                    "input_origin".into(),
+                    json!(crate::computation::v1::QueryInputOrigin::Source(
+                        source_id.clone()
+                    )),
+                ),
                 ("processed_by".into(), json!("drasi-core")),
                 ("result_count".into(), json!(1)),
             ])
@@ -326,8 +395,22 @@ async fn bounded_fanout_preserves_complete_results_multi_thread() {
 #[tokio::test]
 async fn native_slow_subscriber_does_not_block_other_deliveries() {
     let (core, query) = pipeline("MATCH (n:Person) RETURN n.name AS name", 1).await;
-    let mut slow = query.subscribe("slow".into()).await.unwrap().receiver;
-    let mut fast = query.subscribe("fast".into()).await.unwrap().receiver;
+    let mut slow = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000366")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap()
+        .receiver;
+    let mut fast = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000367")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap()
+        .receiver;
     insert(&core, "1", "Alice").await;
     assert_eq!(receive(fast.as_mut()).await.sequence, 1);
     insert(&core, "2", "Bob").await;
@@ -338,17 +421,24 @@ async fn native_slow_subscriber_does_not_block_other_deliveries() {
 }
 
 #[tokio::test]
-async fn scheduled_query_result_preserves_legacy_metadata_and_snapshot() {
+async fn scheduled_query_result_preserves_origin_metadata_and_snapshot() {
     let (core, query) = pipeline(
         "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name",
         1,
     )
     .await;
-    let mut receiver = query.subscribe("output".into()).await.unwrap().receiver;
+    let mut receiver = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000137")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap()
+        .receiver;
     let earliest = chrono::Utc::now();
     insert(&core, "1", "Alice").await;
     let result = receive(receiver.as_mut()).await;
-    assert_eq!(result.query_id, "query");
+    assert_eq!(result.query_id, assigned_id(&core, "query"));
     assert_eq!(result.sequence, 1);
     assert_eq!(result.results.len(), 1);
     let ResultDiff::Add {
@@ -362,7 +452,12 @@ async fn scheduled_query_result_preserves_legacy_metadata_and_snapshot() {
     assert_eq!(
         result.metadata,
         HashMap::from([
-            ("source_id".into(), json!("source")),
+            (
+                "input_origin".into(),
+                json!(crate::computation::v1::QueryInputOrigin::Scheduled(
+                    ElementReference::new("source", "1")
+                )),
+            ),
             ("processed_by".into(), json!("drasi-core")),
             ("result_count".into(), json!(1)),
         ])
@@ -394,11 +489,11 @@ async fn scheduled_query_result_preserves_legacy_metadata_and_snapshot() {
 
 #[tokio::test]
 async fn partially_started_native_instance_can_stop_its_successful_components() {
-    struct FailingSource;
+    struct FailingSource(drasi_core_types::ComponentId);
     #[async_trait::async_trait]
     impl crate::Source for FailingSource {
-        fn id(&self) -> &str {
-            "bad"
+        fn id(&self) -> &drasi_core_types::ComponentId {
+            &self.0
         }
         fn type_name(&self) -> &str {
             "failure"
@@ -406,7 +501,7 @@ async fn partially_started_native_instance_can_stop_its_successful_components() 
         fn properties(&self) -> HashMap<String, serde_json::Value> {
             HashMap::new()
         }
-        async fn initialize(&self, _: crate::SourceRuntimeContext) {}
+        async fn bind_runtime_context(&self, _: crate::SourceRuntimeContext) {}
         async fn start(&self) -> anyhow::Result<()> {
             anyhow::bail!("injected failure")
         }
@@ -439,39 +534,61 @@ async fn partially_started_native_instance_can_stop_its_successful_components() 
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(FailingSource)
-        .with_source(TestMockSource::new("good".into()).unwrap())
+        .with_source_factory(
+            drasi_core_types::ComponentName::try_new("bad").expect("fixture component name"),
+            true,
+            |id| Ok(FailingSource(id.clone())),
+        )
+        .with_source_fixture(TestMockSource::fixture("good", true))
         .with_query(
-            crate::Query::cypher("query")
-                .query("MATCH (n:Person) RETURN n.name AS name")
-                .from_input("good")
-                .enable_bootstrap(false)
-                .build(),
+            crate::Query::cypher(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .query("MATCH (n:Person) RETURN n.name AS name")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("good").expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .build()
+            .unwrap(),
         )
         .build()
         .await
         .unwrap();
     let mut events = core.subscribe_all_component_events();
     assert!(core.start().await.is_err());
-    wait_for_component_status(
+    crate::test_helpers::wait_for_component_status_by_name(
         &mut events,
-        "query",
+        &core.component_graph(),
+        &crate::ComponentName::try_new("query").expect("fixture component name"),
         ComponentStatus::Running,
         Duration::from_secs(5),
     )
     .await;
     assert_eq!(
-        core.get_source_status("good").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("good").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Running
     );
     assert!(core.is_running().await);
     core.stop().await.unwrap();
     assert_eq!(
-        core.get_source_status("good").await.unwrap(),
+        core.get_source_status_by_name(
+            &drasi_core_types::ComponentName::try_new("good").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Stopped
     );
     assert_eq!(
-        core.get_query_status("query").await.unwrap(),
+        core.get_query_status_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         ComponentStatus::Stopped
     );
     core.shutdown().await.unwrap();

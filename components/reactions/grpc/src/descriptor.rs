@@ -376,16 +376,16 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         let dto: GrpcReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let mut builder = GrpcReactionBuilder::new(id)
-            .with_queries(query_ids)
+        let mut builder = GrpcReactionBuilder::new(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start)
             .with_endpoint(mapper.resolve_string(&dto.endpoint).await?);
 
@@ -771,7 +771,13 @@ mod tests {
             "batching": { "mode": "adaptive", "adaptiveMinBatchSize": 2, "adaptiveMaxBatchSize": 20 }
         });
         let reaction = GrpcReactionDescriptor
-            .create_reaction("id", vec![], &cfg, true)
+            .create_reaction(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000da")
+                    .expect("fixture UUID"),
+                vec![],
+                &cfg,
+                true,
+            )
             .await
             .expect("adaptive create_reaction succeeds");
         // raw_config drives properties(), so the input batching mode is echoed
@@ -784,10 +790,20 @@ mod tests {
     async fn create_reaction_minimal_config_uses_defaults_and_auto_start_flag() {
         let cfg = serde_json::json!({ "endpoint": "grpc://h:1" });
         let reaction = GrpcReactionDescriptor
-            .create_reaction("id", vec![], &cfg, false)
+            .create_reaction(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000da")
+                    .expect("fixture UUID"),
+                vec![],
+                &cfg,
+                false,
+            )
             .await
             .expect("minimal create_reaction succeeds");
-        assert_eq!(reaction.id(), "id");
+        assert_eq!(
+            reaction.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000da")
+                .expect("fixture UUID")
+        );
         assert!(!reaction.auto_start(), "auto_start flag must be honored");
         assert_eq!(reaction.type_name(), "grpc");
     }
@@ -799,7 +815,15 @@ mod tests {
             "outputTemplates": { "defaultTemplate": { "added": { "template": "{{" } } }
         });
         let result = GrpcReactionDescriptor
-            .create_reaction("id", vec!["q1".into()], &cfg, true)
+            .create_reaction(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000da")
+                    .expect("fixture UUID"),
+                vec![ComponentReference::by_name(
+                    drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+                )],
+                &cfg,
+                true,
+            )
             .await;
         assert!(
             result.is_err(),
@@ -814,7 +838,15 @@ mod tests {
             "outputTemplates": { "routes": { "ghost": { "added": { "template": "{\"id\":1}" } } } }
         });
         let result = GrpcReactionDescriptor
-            .create_reaction("id", vec!["q1".into()], &cfg, true)
+            .create_reaction(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000da")
+                    .expect("fixture UUID"),
+                vec![ComponentReference::by_name(
+                    drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+                )],
+                &cfg,
+                true,
+            )
             .await;
         assert!(
             result.is_err(),
@@ -859,7 +891,13 @@ mod tests {
             "recoveryPolicy": "auto_skip_gap"
         });
         let reaction = GrpcReactionDescriptor
-            .create_reaction("id", vec![], &cfg, true)
+            .create_reaction(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000da")
+                    .expect("fixture UUID"),
+                vec![],
+                &cfg,
+                true,
+            )
             .await
             .expect("recoveryPolicy create_reaction succeeds");
         // raw_config drives properties(), so the input policy is echoed back —

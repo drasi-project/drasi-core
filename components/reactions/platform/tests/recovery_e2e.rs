@@ -19,10 +19,18 @@ use shared_tests::recovery_test_helpers::exercise_strict_gap_failure;
 #[tokio::test]
 #[ignore = "requires Redis connection"]
 async fn test_platform_reaction_strict_recovery() -> Result<()> {
-    let reaction = PlatformReaction::builder("platform-strict")
-        .with_redis_url("redis://localhost:6379")
-        .with_query("q1")
-        .build()?;
+    let reaction = PlatformReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001c")
+            .expect("fixture UUID"),
+    )
+    .with_redis_url("redis://localhost:6379")
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()?;
 
-    exercise_strict_gap_failure("platform-strict-recovery", "platform-strict", reaction).await
+    exercise_strict_gap_failure(
+        "platform-strict-recovery",
+        &drasi_core::ComponentName::try_new("platform-strict").expect("fixture component name"),
+        reaction,
+    )
+    .await
 }

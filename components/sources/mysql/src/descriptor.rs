@@ -224,7 +224,7 @@ impl SourcePluginDescriptor for MySqlSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -258,7 +258,7 @@ impl SourcePluginDescriptor for MySqlSourceDescriptor {
             .await?
             .into();
 
-        let mut builder = MySqlSourceBuilder::new(id)
+        let mut builder = MySqlSourceBuilder::new(id.clone())
             .with_auto_start(auto_start)
             .with_host(host)
             .with_port(port)

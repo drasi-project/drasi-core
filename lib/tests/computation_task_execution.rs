@@ -3,6 +3,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::{
@@ -18,6 +22,26 @@ use async_trait::async_trait;
 use computation_support::*;
 use drasi_lib::computation::v1::*;
 use tokio::sync::{mpsc, Notify};
+
+fn named_component(name: &str) -> ComponentId {
+    fixture_support::component_id(match name {
+        "held" => 1015,
+        "healthy" => 788,
+        "bad" => 453,
+        "bad-sink" => 1011,
+        "good" => 463,
+        "good-sink" => 6,
+        "sink" => 101,
+        "companion" => 1016,
+        "a" => 9,
+        "ta" => 10,
+        "sa" => 11,
+        "b" => 12,
+        "tb" => 13,
+        "sb" => 14,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
 
 macro_rules! both_flavors {
     ($name:ident, $scenario:ident) => {
@@ -82,7 +106,7 @@ struct Service {
 }
 
 impl Service {
-    fn new(id: &str) -> Self {
+    fn new(id: &drasi_core_types::ComponentId) -> Self {
         Self {
             descriptor: descriptor(id, &[], &[]),
             start: None,
@@ -122,24 +146,30 @@ impl ComputationService for Service {
 }
 
 fn selection(id: &str) -> GraphSelection {
-    GraphSelection::Exact(vec![component(id)])
+    GraphSelection::Exact(vec![named_component(id)])
 }
 
 async fn independent_start_and_stop() {
     for starting in [true, false] {
         let gate = Arc::new(Gate::default());
-        let mut held = Service::new("held");
+        let mut held = Service::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f7")
+                .expect("fixture UUID"),
+        );
         if starting {
             held.start = Some(gate.clone());
         } else {
             held.stop = Some(gate.clone());
         }
-        let healthy = Service::new("healthy");
+        let healthy = Service::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000314")
+                .expect("fixture UUID"),
+        );
         let healthy_starts = healthy.starts.clone();
         let healthy_stops = healthy.stops.clone();
         let mut graph = ComputationGraph::builder("independent-lifecycle")
-            .service(Box::new(held))
-            .service(Box::new(healthy))
+            .fixture_service(Box::new(held))
+            .fixture_service(Box::new(healthy))
             .build()
             .unwrap();
         let run = graph.run().unwrap();
@@ -319,26 +349,28 @@ async fn panic_is_local_and_retained() {
         let mut controls = Vec::new();
         let mut starts = Vec::new();
         for (source, sink) in [("bad", "bad-sink"), ("good", "good-sink")] {
+            let source_id = named_component(source);
+            let sink_id = named_component(sink);
             let (input, events) = mpsc::channel(4);
             let (output, result) = mpsc::channel(4);
             let control = Arc::new(Mutex::new(None));
             let started = Arc::new(AtomicUsize::new(0));
             builder = builder
-                .source(Box::new(Source {
-                    descriptor: descriptor(source, &[], &["out"]),
+                .fixture_source(Box::new(Source {
+                    descriptor: descriptor(&source_id, &[], &["out"]),
                     input: events,
                     control: control.clone(),
                     starts: started.clone(),
                 }))
-                .sink(Box::new(Sink {
-                    descriptor: descriptor(sink, &["in"], &[]),
+                .fixture_sink(Box::new(Sink {
+                    descriptor: descriptor(&sink_id, &["in"], &[]),
                     output,
                     gate: (control_panic && source == "bad").then(|| gate.clone()),
                     panic_control: control_panic && source == "bad",
                 }))
-                .bind_stream(endpoint(source, "out"), stream(source))
+                .bind_stream(endpoint(&source_id, "out"), stream(source))
                 .connect(
-                    edge(source, sink),
+                    edge(&source_id, &sink_id),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 );
             inputs.push(input);
@@ -357,10 +389,17 @@ async fn panic_is_local_and_retained() {
                 .await
                 .unwrap();
             let bad = if control_panic { "bad-sink" } else { "bad" };
-            let generation = control.observed().components[&component(bad)].generation;
+            let bad_id = named_component(bad);
+            let generation = control.observed().components[&bad_id].generation;
             if control_panic {
                 inputs[0]
-                    .send(Event::Output(output(root("bad", 1, &[7]))))
+                    .send(Event::Output(output(root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                            .expect("fixture UUID"),
+                        "bad",
+                        1,
+                        &[7],
+                    ))))
                     .await
                     .unwrap();
                 gate.entered.notified().await;
@@ -370,7 +409,7 @@ async fn panic_is_local_and_retained() {
                     .as_ref()
                     .unwrap()
                     .notify_neighbor(
-                        &component("bad-sink"),
+                        &component(1011),
                         ControlNotification::Custom {
                             kind: "panic".into(),
                             payload: serde_json::Value::Null,
@@ -390,7 +429,7 @@ async fn panic_is_local_and_retained() {
             let mut observed = control.subscribe_observed();
             let failed = observed
                 .wait_for(|state| {
-                    let node = &state.components[&component(bad)];
+                    let node = &state.components[&bad_id];
                     node.lifecycle == ComponentLifecycle::Failed
                         && node.failure.as_ref().is_some_and(|failure| {
                             failure.disposition == FailureDisposition::Terminal
@@ -398,7 +437,7 @@ async fn panic_is_local_and_retained() {
                 })
                 .await
                 .unwrap()
-                .components[&component(bad)]
+                .components[&bad_id]
                 .clone();
             assert_eq!(failed.lifecycle, ComponentLifecycle::Failed);
             assert_eq!(failed.generation, generation);
@@ -409,7 +448,7 @@ async fn panic_is_local_and_retained() {
             while let Some(error) = chain {
                 marker |= error.is::<ComponentPanic>();
                 if let Some(error) = error.downcast_ref::<ComponentUnwind>() {
-                    assert_eq!(error.component, component(bad));
+                    assert_eq!(error.component, bad_id);
                     assert_eq!(error.generation, generation);
                     assert_eq!(
                         error.phase,
@@ -437,12 +476,10 @@ async fn panic_is_local_and_retained() {
                 .unwrap();
             assert_eq!(restart.summary, OperationSummary::CompletedWithFailures);
             assert!(matches!(
-                restart.components[&component(bad)],
+                restart.components[&bad_id],
                 StartOutcome::StartFailed(_)
             ));
-            assert!(control.observed().components[&component(bad)]
-                .failure
-                .is_some());
+            assert!(control.observed().components[&bad_id].failure.is_some());
             assert_eq!(starts[0].load(Ordering::SeqCst), 1);
             if control_panic {
                 assert_eq!(
@@ -455,6 +492,8 @@ async fn panic_is_local_and_retained() {
             for sequence in 1..=3 {
                 inputs[1]
                     .send(Event::Output(output(root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                            .expect("fixture UUID"),
                         "good",
                         sequence,
                         &[sequence as u16],
@@ -475,7 +514,13 @@ async fn panic_is_local_and_retained() {
                 .await
                 .unwrap();
             inputs[1]
-                .send(Event::Output(output(root("good", 4, &[44]))))
+                .send(Event::Output(output(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                        .expect("fixture UUID"),
+                    "good",
+                    4,
+                    &[44],
+                ))))
                 .await
                 .unwrap();
             assert_eq!(values(&received[1].recv().await.unwrap()), [44]);
@@ -497,22 +542,47 @@ async fn independent_graceful_drain() {
     let (output_tx, mut output_rx) = mpsc::channel(4);
     let gate = Arc::new(Gate::default());
     let mut graph = ComputationGraph::builder("independent-drain")
-        .source(Box::new(Source {
-            descriptor: descriptor("source", &[], &["out"]),
+        .fixture_source(Box::new(Source {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             input: events,
             control: Arc::default(),
             starts: Arc::default(),
         }))
-        .sink(Box::new(Sink {
-            descriptor: descriptor("sink", &["in"], &[]),
+        .fixture_sink(Box::new(Sink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+                &[],
+            ),
             output: output_tx,
             gate: Some(gate.clone()),
             panic_control: false,
         }))
-        .service(Box::new(Service::new("healthy")))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .fixture_service(Box::new(Service::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000314")
+                .expect("fixture UUID"),
+        )))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -527,19 +597,25 @@ async fn independent_graceful_drain() {
             .await
             .unwrap();
         input
-            .send(Event::Output(output(root("source", 1, &[42]))))
+            .send(Event::Output(output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[42],
+            ))))
             .await
             .unwrap();
         gate.entered.notified().await;
         let stop = control.stop_components(
             revision,
-            GraphSelection::Exact(vec![component("source"), component("sink")]),
+            GraphSelection::Exact(vec![component(77), component(101)]),
         );
         tokio::pin!(stop);
         let mut observed = control.subscribe_observed();
         tokio::select! {
             result = &mut stop => panic!("drain completed before handling: {result:?}"),
-            result = observed.wait_for(|state| state.components[&component("source")].lifecycle == ComponentLifecycle::Quiesced) => { result.unwrap(); }
+            result = observed.wait_for(|state| state.components[&component(77)].lifecycle == ComponentLifecycle::Quiesced) => { result.unwrap(); }
         }
         let independent = async {
             control
@@ -588,26 +664,54 @@ async fn scoped_force_with_companion(idle_companion: bool) {
         ResourceHandle::new(ResourceRole::StateStore, Arc::new(0usize))
             .with_shared_identity(shared.clone())
     };
-    let healthy = Service::new("healthy");
+    let healthy = Service::new(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000314")
+            .expect("fixture UUID"),
+    );
     let healthy_starts = healthy.starts.clone();
     let mut graph = ComputationGraph::builder("scoped-force")
-        .source(Box::new(Source {
-            descriptor: descriptor("source", &[], &["out"]),
+        .fixture_source(Box::new(Source {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             input: events,
             control: Arc::default(),
             starts: Arc::default(),
         }))
-        .sink(Box::new(Sink {
-            descriptor: descriptor("sink", &["in"], &[]),
+        .fixture_sink(Box::new(Sink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+                &[],
+            ),
             output: output_tx,
             gate: Some(gate.clone()),
             panic_control: false,
         }))
-        .service(Box::new(Service::new("companion")))
-        .service(Box::new(healthy))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .fixture_service(Box::new(Service::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f8")
+                .expect("fixture UUID"),
+        )))
+        .fixture_service(Box::new(healthy))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -621,11 +725,7 @@ async fn scoped_force_with_companion(idle_companion: bool) {
             .start_components(
                 revision,
                 if idle_companion {
-                    GraphSelection::Exact(vec![
-                        component("source"),
-                        component("sink"),
-                        component("healthy"),
-                    ])
+                    GraphSelection::Exact(vec![component(77), component(101), component(788)])
                 } else {
                     GraphSelection::All
                 },
@@ -633,7 +733,7 @@ async fn scoped_force_with_companion(idle_companion: bool) {
             .await
             .unwrap();
         for id in ["sink", "companion"] {
-            let id = component(id);
+            let id = named_component(id);
             control
                 .observe_resources(
                     &id,
@@ -657,7 +757,13 @@ async fn scoped_force_with_companion(idle_companion: bool) {
             .unwrap();
         let revision = control.desired_snapshot().revision;
         input
-            .send(Event::Output(output(root("source", 1, &[42]))))
+            .send(Event::Output(output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[42],
+            ))))
             .await
             .unwrap();
         gate.entered.notified().await;
@@ -667,7 +773,7 @@ async fn scoped_force_with_companion(idle_companion: bool) {
             .unwrap_err();
         assert!(matches!(rejected, GraphError::Validation { ref source, .. }
             if source.downcast_ref::<ForceCancellationScopeError>().is_some_and(|scope|
-                scope.required.contains(&component("companion")))));
+                scope.required.contains(&component(1016)))));
         assert_eq!(gate.active.load(Ordering::SeqCst), 1);
         assert_eq!(gate.dropped.load(Ordering::SeqCst), 0);
         let graceful = control.stop_components(revision, selection("sink"));
@@ -675,13 +781,13 @@ async fn scoped_force_with_companion(idle_companion: bool) {
         tokio::select! {
             result = &mut graceful => panic!("handling was not drained: {result:?}"),
             result = observed.wait_for(|state|
-                state.components[&component("sink")].lifecycle == ComponentLifecycle::Quiescing) => { result.unwrap(); }
+                state.components[&component(101)].lifecycle == ComponentLifecycle::Quiescing) => { result.unwrap(); }
         }
         let forced = tokio::time::timeout(
             Duration::from_secs(1),
             control.force_cancel_components(
                 revision,
-                GraphSelection::Exact(vec![component("sink"), component("companion")]),
+                GraphSelection::Exact(vec![component(101), component(1016)]),
             ),
         )
         .await
@@ -691,12 +797,12 @@ async fn scoped_force_with_companion(idle_companion: bool) {
         assert_eq!(forced.cleanup.summary, OperationSummary::Completed);
         assert_eq!(forced.interrupted.len(), if idle_companion { 1 } else { 2 });
         assert_eq!(
-            forced.interrupted.contains_key(&component("companion")),
+            forced.interrupted.contains_key(&component(1016)),
             !idle_companion
         );
         if idle_companion {
             assert!(matches!(
-                forced.cleanup.components[&component("companion")],
+                forced.cleanup.components[&component(1016)],
                 StopOutcome::AlreadyStopped
             ));
             assert_eq!(
@@ -741,7 +847,7 @@ async fn scoped_force_with_companion(idle_companion: bool) {
         }
         assert_eq!(healthy_starts.load(Ordering::SeqCst), 3);
         assert_eq!(
-            control.observed().components[&component("healthy")].lifecycle,
+            control.observed().components[&component(788)].lifecycle,
             ComponentLifecycle::Running
         );
         control.cancel();
@@ -764,29 +870,48 @@ async fn reverse_registration_empty_pipeline_drains() {
     let (_input, events) = mpsc::channel(1);
     let (output, _received) = mpsc::channel(1);
     let mut graph = ComputationGraph::builder("reverse-registration")
-        .sink(Box::new(Sink {
-            descriptor: descriptor("sink", &["in"], &[]),
+        .fixture_sink(Box::new(Sink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+                &[],
+            ),
             output,
             gate: None,
             panic_control: false,
         }))
-        .source(Box::new(Source {
-            descriptor: descriptor("source", &[], &["out"]),
+        .fixture_source(Box::new(Source {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             input: events,
             control: Arc::default(),
             starts: Arc::default(),
         }))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
         .unwrap();
-    assert_eq!(
-        graph.snapshot().nodes[0].descriptor.id(),
-        &component("sink")
-    );
+    assert_eq!(graph.snapshot().nodes[0].descriptor.id(), &component(101));
     let run = graph.run().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
@@ -829,12 +954,15 @@ both_flavors!(
 
 async fn dropped_cleanup_keeps_the_actual_stop_task() {
     let gate = Arc::new(Gate::default());
-    let mut service = Service::new("service");
+    let mut service = Service::new(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b0")
+            .expect("fixture UUID"),
+    );
     service.stop = Some(gate.clone());
     let starts = service.starts.clone();
     let stops = service.stops.clone();
     let mut graph = ComputationGraph::builder("retained-cleanup")
-        .service(Box::new(service))
+        .fixture_service(Box::new(service))
         .build()
         .unwrap();
     let mut run = Box::pin(graph.start().unwrap());
@@ -879,14 +1007,20 @@ both_flavors!(
 
 async fn slow_cleanup_does_not_starve_independent_owners() {
     let gate = Arc::new(Gate::default());
-    let mut held = Service::new("held");
+    let mut held = Service::new(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f7")
+            .expect("fixture UUID"),
+    );
     held.stop = Some(gate.clone());
-    let healthy = Service::new("healthy");
+    let healthy = Service::new(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000314")
+            .expect("fixture UUID"),
+    );
     let healthy_stops = healthy.stops.clone();
     let mut graph = ComputationGraph::builder("fair-cleanup")
         .cleanup_timeout(Duration::from_millis(30))
-        .service(Box::new(held))
-        .service(Box::new(healthy))
+        .fixture_service(Box::new(held))
+        .fixture_service(Box::new(healthy))
         .build()
         .unwrap();
     let run = graph.run().unwrap();
@@ -929,6 +1063,7 @@ struct DestructorService {
     panic_bind: bool,
     panic_drop: bool,
     stops: Arc<AtomicUsize>,
+    disposals: Arc<AtomicUsize>,
 }
 impl Drop for DestructorService {
     fn drop(&mut self) {
@@ -950,6 +1085,10 @@ impl ComputationComponent for DestructorService {
         self.stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.disposals.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 #[async_trait]
 impl ComputationService for DestructorService {
@@ -960,14 +1099,24 @@ impl ComputationService for DestructorService {
 
 async fn synchronous_callbacks_and_retirement_are_contained() {
     let stops = Arc::new(AtomicUsize::new(0));
+    let disposals = Arc::new(AtomicUsize::new(0));
     let mut graph = ComputationGraph::builder("synchronous-faults")
-        .service(Box::new(DestructorService {
-            descriptor: descriptor("bad", &[], &[]),
+        .fixture_service(Box::new(DestructorService {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                    .expect("fixture UUID"),
+                &[],
+                &[],
+            ),
             panic_bind: true,
             panic_drop: true,
             stops: stops.clone(),
+            disposals: disposals.clone(),
         }))
-        .service(Box::new(Service::new("healthy")))
+        .fixture_service(Box::new(Service::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000314")
+                .expect("fixture UUID"),
+        )))
         .build()
         .unwrap();
     let run = graph.run().unwrap();
@@ -979,11 +1128,11 @@ async fn synchronous_callbacks_and_retirement_are_contained() {
             .await
             .unwrap();
         assert!(matches!(
-            report.components[&component("bad")],
+            report.components[&component(453)],
             StartOutcome::StartFailed(_)
         ));
         assert_eq!(
-            control.observed().components[&component("healthy")].lifecycle,
+            control.observed().components[&component(788)].lifecycle,
             ComponentLifecycle::Running
         );
         let preview = control
@@ -1004,11 +1153,16 @@ async fn synchronous_callbacks_and_retirement_are_contained() {
             removed.committed,
             "destructor failure must not falsely report an uncommitted topology"
         );
-        assert!(removed.removed.contains(&component("bad")));
+        assert!(removed.removed.contains(&component(453)));
         assert_eq!(
             stops.load(Ordering::SeqCst),
+            0,
+            "a never-activated object has nothing to stop"
+        );
+        assert_eq!(
+            disposals.load(Ordering::SeqCst),
             1,
-            "a binding panic must not bypass owned cleanup"
+            "binding failure must not bypass disposal"
         );
         assert_eq!(removed.summary, OperationSummary::CompletedWithFailures);
         assert!(removed
@@ -1085,45 +1239,59 @@ fn native_cpu_parallel_probe() {
         let received: Received = Arc::default();
         let mut builder = ComputationGraph::builder("cpu-parallel");
         for (source, transform, sink, value) in [("a", "ta", "sa", 7), ("b", "tb", "sb", 9)] {
+            let source_id = named_component(source);
+            let transform_id = named_component(transform);
+            let sink_id = named_component(sink);
+            let emitted_transform_id = transform_id.clone();
             let entered = entered.clone();
             let overlap = overlap.clone();
             let threads = threads.clone();
             builder = builder
-                .source(Box::new(FiniteSource::new(
-                    source,
-                    vec![output(root(source, 1, &[value]))],
+                .fixture_source(Box::new(FiniteSource::new(
+                    source_id.clone(),
+                    vec![output(root(&source_id, source, 1, &[value]))],
                 )))
-                .transformer(Box::new(NativeTransform::new(transform, move |input| {
-                    threads.lock().unwrap().push(std::thread::current().id());
-                    entered.fetch_add(1, Ordering::SeqCst);
-                    // Intentionally synchronous CPU work: only an external process
-                    // watchdog can diagnose a shared single-task scheduler here.
-                    while entered.load(Ordering::SeqCst) != 2 {
-                        std::hint::spin_loop();
-                    }
-                    overlap.store(true, Ordering::SeqCst);
-                    let mut checksum = values(&input.envelope)[0] as u64;
-                    for offset in 0..2_000_000u64 {
-                        checksum =
-                            std::hint::black_box(checksum.wrapping_mul(31).wrapping_add(offset));
-                    }
-                    std::hint::black_box(checksum);
-                    Ok(vec![output(derived(
-                        &input.envelope,
-                        transform,
-                        1,
-                        changes(transform, 1, &[value + 1]),
-                    ))])
-                })))
-                .sink(Box::new(CollectSink::new(sink, &["in"], received.clone())))
-                .bind_stream(endpoint(source, "out"), stream(source))
-                .bind_stream(endpoint(transform, "out"), stream(transform))
+                .fixture_transformer(Box::new(NativeTransform::new(
+                    transform_id.clone(),
+                    move |input| {
+                        threads.lock().unwrap().push(std::thread::current().id());
+                        entered.fetch_add(1, Ordering::SeqCst);
+                        // Intentionally synchronous CPU work: only an external process
+                        // watchdog can diagnose a shared single-task scheduler here.
+                        while entered.load(Ordering::SeqCst) != 2 {
+                            std::hint::spin_loop();
+                        }
+                        overlap.store(true, Ordering::SeqCst);
+                        let mut checksum = values(&input.envelope)[0] as u64;
+                        for offset in 0..2_000_000u64 {
+                            checksum = std::hint::black_box(
+                                checksum.wrapping_mul(31).wrapping_add(offset),
+                            );
+                        }
+                        std::hint::black_box(checksum);
+                        Ok(vec![output(derived(
+                            &input.envelope,
+                            &emitted_transform_id,
+                            transform,
+                            1,
+                            changes(transform, 1, &[value + 1]),
+                        ))])
+                    },
+                )))
+                .fixture_sink(Box::new(CollectSink::new(
+                    sink_id.clone(),
+                    sink,
+                    &["in"],
+                    received.clone(),
+                )))
+                .bind_stream(endpoint(&source_id, "out"), stream(source))
+                .bind_stream(endpoint(&transform_id, "out"), stream(transform))
                 .connect(
-                    edge(source, transform),
+                    edge(&source_id, &transform_id),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
                 .connect(
-                    edge(transform, sink),
+                    edge(&transform_id, &sink_id),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 );
         }

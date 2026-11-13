@@ -19,6 +19,7 @@ drasi-middleware = { workspace = true, features = ["decoder", "map", "parse_json
 bytes = "1"
 serde = "1.0.163"
 serde_json = "1.0.96"
+sha2 = "0.10.9"
 async-trait = "0.1.68"
 tokio = { version = "1.6", features = ["full"] }
 env_logger = "0.10.0"
@@ -36,6 +37,7 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["redis"] }
 # For test utilities that need to create test sources/queries
 drasi-lib.workspace = true
+drasi-core-types.workspace = true
 drasi-host-sdk.workspace = true
 drasi-computation-transformer-query = { path = "../components/computation-plugins/transformers/query" }
 

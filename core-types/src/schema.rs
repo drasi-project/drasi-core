@@ -132,21 +132,21 @@ pub struct GraphSchema {
     #[serde(default)]
     pub relations: BTreeMap<String, GraphRelationSchema>,
     #[serde(default)]
-    pub sources_without_schema: BTreeSet<String>,
+    pub sources_without_schema: BTreeSet<crate::ComponentId>,
 }
 
 impl GraphSchema {
     /// Merge a source-provided schema into the aggregate graph view.
-    pub fn merge_source_schema(&mut self, source_id: &str, schema: &SourceSchema) {
+    pub fn merge_source_schema(&mut self, source_id: &crate::ComponentId, schema: &SourceSchema) {
         for node in &schema.nodes {
             let entry = self.nodes.entry(node.label.clone()).or_default();
-            entry.sources.insert(source_id.to_string());
+            entry.sources.insert(source_id.clone());
             merge_properties(&mut entry.properties, &node.properties);
         }
 
         for relation in &schema.relations {
             let entry = self.relations.entry(relation.label.clone()).or_default();
-            entry.sources.insert(source_id.to_string());
+            entry.sources.insert(source_id.clone());
 
             if entry.from.is_none() {
                 entry.from = relation.from.clone();
@@ -170,30 +170,30 @@ impl GraphSchema {
     }
 
     /// Mark node labels as being referenced by a query.
-    pub fn mark_queried_nodes<'a, I>(&mut self, labels: I, query_id: &str)
+    pub fn mark_queried_nodes<'a, I>(&mut self, labels: I, query_id: &crate::ComponentId)
     where
         I: IntoIterator<Item = &'a str>,
     {
         for label in labels {
             let entry = self.nodes.entry(label.to_string()).or_default();
-            entry.queried_by.insert(query_id.to_string());
+            entry.queried_by.insert(query_id.clone());
         }
     }
 
     /// Mark relationship labels as being referenced by a query.
-    pub fn mark_queried_relations<'a, I>(&mut self, labels: I, query_id: &str)
+    pub fn mark_queried_relations<'a, I>(&mut self, labels: I, query_id: &crate::ComponentId)
     where
         I: IntoIterator<Item = &'a str>,
     {
         for label in labels {
             let entry = self.relations.entry(label.to_string()).or_default();
-            entry.queried_by.insert(query_id.to_string());
+            entry.queried_by.insert(query_id.clone());
         }
     }
 
     /// Record a source that exists but could not describe its schema.
-    pub fn record_source_without_schema(&mut self, source_id: &str) {
-        self.sources_without_schema.insert(source_id.to_string());
+    pub fn record_source_without_schema(&mut self, source_id: &crate::ComponentId) {
+        self.sources_without_schema.insert(source_id.clone());
     }
 }
 
@@ -202,9 +202,9 @@ impl GraphSchema {
 #[serde(rename_all = "camelCase")]
 pub struct GraphNodeSchema {
     #[serde(default)]
-    pub sources: BTreeSet<String>,
+    pub sources: BTreeSet<crate::ComponentId>,
     #[serde(default)]
-    pub queried_by: BTreeSet<String>,
+    pub queried_by: BTreeSet<crate::ComponentId>,
     #[serde(default)]
     pub properties: Vec<PropertySchema>,
 }
@@ -214,9 +214,9 @@ pub struct GraphNodeSchema {
 #[serde(rename_all = "camelCase")]
 pub struct GraphRelationSchema {
     #[serde(default)]
-    pub sources: BTreeSet<String>,
+    pub sources: BTreeSet<crate::ComponentId>,
     #[serde(default)]
-    pub queried_by: BTreeSet<String>,
+    pub queried_by: BTreeSet<crate::ComponentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

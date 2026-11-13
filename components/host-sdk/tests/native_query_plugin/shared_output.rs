@@ -40,6 +40,7 @@ async fn follow(
 async fn shared_output_lifecycle() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.continue_transform().await?.is_empty());
     let first = query
@@ -55,6 +56,7 @@ async fn shared_output_lifecycle() -> Result<()> {
     drop(query);
 
     let mut query = create(directory.path(), QUERY, 2)?;
+    query.initialize().await?;
     query.start().await?;
     let before_replay = observation(&query).await?;
     let replayed = query.continue_transform().await?;
@@ -120,6 +122,7 @@ async fn shared_query_output_follow_survives_replay_and_fences_stop_multi_thread
 async fn shared_query_output_reports_slow_followers_without_failing_processing() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.continue_transform().await?.is_empty());
     let (_, mut tail) = follow(&query, 1).await?;
@@ -150,13 +153,14 @@ async fn shared_query_output_history_reopens_and_capacity_is_operational() -> Re
     let factory = factory()?;
     let create = |capacity, generation| {
         factory.create_component_with_processing(
-            ComponentId::try_new(COMPONENT)?,
+            component_id()?,
             json!({"query":QUERY, "outbox_capacity":capacity}),
             scope(generation),
             provider(directory.path())?,
         )
     };
     let mut query = create(4, 1)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.continue_transform().await?.is_empty());
     for sequence in 1..=6 {
@@ -201,6 +205,7 @@ async fn shared_query_output_history_reopens_and_capacity_is_operational() -> Re
     drop(query);
 
     let mut query = create(6, 2)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.continue_transform().await?.is_empty());
     let readers = query.output_readers();
@@ -251,7 +256,7 @@ async fn shared_query_definition_scopes_same_named_results_and_preserves_labels(
     let directory = tempfile::tempdir()?;
     let mut datasets = Vec::new();
     for instance in ["first", "second"] {
-        let id = ComponentId::try_new("same")?;
+        let id = ComponentId::try_new("966a0c5c-4c70-51da-abaf-2b6b3d34be10")?;
         let mut query = factory()?.create_component_with_processing(
             id.clone(),
             json!({
@@ -265,6 +270,7 @@ async fn shared_query_definition_scopes_same_named_results_and_preserves_labels(
             },
             provider(&directory.path().join(instance))?,
         )?;
+        query.initialize().await?;
         query.start().await?;
         assert!(query.continue_transform().await?.is_empty());
         let output = query

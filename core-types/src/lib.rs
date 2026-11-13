@@ -4,6 +4,7 @@
 //! Shared graph elements, result values and failure-survival descriptions.
 //! There is no query evaluator, language parser, storage backend or runtime here.
 
+pub mod component_identity;
 pub mod data_value;
 pub mod evaluation;
 pub mod interface;
@@ -11,3 +12,7 @@ pub mod models;
 pub mod profiling;
 pub mod query;
 pub mod schema;
+pub mod storage_identity;
+
+pub use component_identity::{ComponentId, ComponentIdentityError, ComponentName, StreamId};
+pub use storage_identity::{CheckpointKey, OutputPartition, StorageScope, StorePartition};

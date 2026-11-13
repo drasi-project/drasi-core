@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
@@ -27,7 +31,7 @@ fn schema() -> Arc<Schema> {
 fn definition() -> SourceTimeMergeDefinition {
     SourceTimeMergeDefinition {
         graph_id: "merge-test".into(),
-        id: component("merge"),
+        id: component(459),
         sources: vec![stream("a"), stream("b")],
         output_stream: stream("merge"),
         late_output_stream: None,
@@ -44,6 +48,15 @@ fn time(value: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(value).expect("test source time")
 }
 
+fn source_id(source: &str) -> ComponentId {
+    fixture_support::component_id(match source {
+        "a" => 1,
+        "b" => 2,
+        "unknown" => 3,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
+
 fn event(source: &str, sequence: u64, timestamp: i64) -> ChangeEnvelope {
     let mut envelope = ChangeEnvelope::new(
         emission_id(&stream(source), sequence).expect("source emission identity"),
@@ -55,7 +68,7 @@ fn event(source: &str, sequence: u64, timestamp: i64) -> ChangeEnvelope {
         SystemMetadata::new(stream(source), sequence).with_timestamp(time(timestamp)),
     );
     envelope
-        .append_annotation(annotation(source))
+        .append_annotation(annotation(&source_id(source), source))
         .expect("source annotation");
     envelope
 }
@@ -422,7 +435,13 @@ async fn invalid_inputs_and_replays_do_not_change_admitted_state() {
     let mut merger = open(definition()).await;
     assert!(matches!(
         merger
-            .transform(input(root("a", 1, &[1])))
+            .transform(input(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                    .expect("fixture UUID"),
+                "a",
+                1,
+                &[1]
+            )))
             .await
             .unwrap_err()
             .downcast_ref(),
@@ -550,33 +569,73 @@ async fn finite_graph() {
     let observation = merger.subscribe();
     let received = Received::default();
     let mut graph = ComputationGraph::builder("merge-test")
-        .source(Box::new(FiniteSource::new(
-            "a",
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                .expect("fixture UUID"),
             vec![output(event("a", 1, 40)), output(event("a", 2, 10))],
         )))
-        .source(Box::new(FiniteSource::new(
-            "b",
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ca")
+                .expect("fixture UUID"),
             vec![output(event("b", 1, 30)), output(event("b", 2, 20))],
         )))
-        .transformer(Box::new(merger))
-        .sink(Box::new(CollectSink::new(
+        .fixture_transformer(Box::new(merger))
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             received.clone(),
         )))
-        .bind_stream(endpoint("a", "out"), stream("a"))
-        .bind_stream(endpoint("b", "out"), stream("b"))
-        .bind_stream(endpoint("merge", "out"), stream("merge"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("a"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ca")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("b"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cb")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("merge"),
+        )
         .connect(
-            edge("a", "merge"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cb")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("b", "merge"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ca")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cb")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("merge", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cb")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -629,7 +688,7 @@ async fn downstream_query_uses_merger_progress_not_reordered_source_sequences() 
     for (source, sequence, timestamp) in [("a", 1, 90), ("a", 2, 10), ("b", 1, 80), ("b", 2, 20)] {
         let envelope = GraphChangeCodec::encode_source_event(
             Arc::new(SourceEventWrapper {
-                source_id: source.into(),
+                source_id: source_id(source),
                 event: SourceEvent::Change(SourceChange::Insert {
                     element: Element::Node {
                         metadata: ElementMetadata {
@@ -647,7 +706,7 @@ async fn downstream_query_uses_merger_progress_not_reordered_source_sequences() 
                 source_position: Some(bytes::Bytes::copy_from_slice(&sequence.to_be_bytes())),
                 profiling: None,
             }),
-            &component(source),
+            &source_id(source),
             stream(source),
             sequence,
             None,
@@ -665,7 +724,7 @@ async fn downstream_query_uses_merger_progress_not_reordered_source_sequences() 
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "merge-test".into(),
-            id: component("query"),
+            id: component(46),
             query: "MATCH (n:Item) RETURN n.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("query"),
@@ -752,34 +811,85 @@ async fn quiet_graph_cancellation() {
     let mut observation = merger.subscribe();
     let entered = Arc::new(tokio::sync::Notify::new());
     let mut graph = ComputationGraph::builder("merge-test")
-        .source(Box::new(QuietSource {
-            descriptor: descriptor("a", &[], &["out"]),
+        .fixture_source(Box::new(QuietSource {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             outputs: (1..=10)
                 .map(|sequence| output(event("a", sequence, sequence as i64)))
                 .collect(),
         }))
-        .source(Box::new(QuietSource {
-            descriptor: descriptor("b", &[], &["out"]),
+        .fixture_source(Box::new(QuietSource {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ca")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             outputs: Default::default(),
         }))
-        .transformer(Box::new(merger))
-        .sink(Box::new(BlockedSink {
-            descriptor: descriptor("sink", &["in"], &[]),
+        .fixture_transformer(Box::new(merger))
+        .fixture_sink(Box::new(BlockedSink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+                &[],
+            ),
             entered: entered.clone(),
         }))
-        .bind_stream(endpoint("a", "out"), stream("a"))
-        .bind_stream(endpoint("b", "out"), stream("b"))
-        .bind_stream(endpoint("merge", "out"), stream("merge"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("a"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ca")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("b"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cb")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("merge"),
+        )
         .connect(
-            edge("a", "merge"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cb")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("b", "merge"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ca")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cb")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("merge", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cb")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -896,7 +1006,7 @@ async fn volatile_producer_incarnation_changes_are_not_new_input() {
         let identity = GraphProducerIdentity::volatile(
             "test".into(),
             "test".into(),
-            component("a"),
+            component(457),
             stream("a"),
         )
         .unwrap();

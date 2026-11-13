@@ -3,6 +3,8 @@
 
 //! Data and errors exchanged with providers; no storage implementation.
 
+pub use crate::storage_identity::{CheckpointKey, OutputPartition, StorageScope, StorePartition};
+
 mod checkpoint;
 mod checkpoint_store;
 pub mod durability;

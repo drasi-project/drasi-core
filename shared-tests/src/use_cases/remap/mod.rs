@@ -58,7 +58,7 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
         for mw in queries::middlewares() {
             builder = builder.with_source_middleware(mw);
         }
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline());
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline());
         builder.build().await
     };
 
@@ -236,7 +236,7 @@ pub async fn remap_invalid_config_fails(config: &(impl QueryTestConfig + Send)) 
         for mw in queries::invalid_middlewares() {
             builder = builder.with_source_middleware(mw);
         }
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline());
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline());
         builder.try_build().await
     };
 
@@ -272,7 +272,7 @@ pub async fn remap_incorrect_structure_fails(config: &(impl QueryTestConfig + Se
         for mw in queries::incorrect_structure_middlewares() {
             builder = builder.with_source_middleware(mw);
         }
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline());
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline());
         builder.try_build().await
     };
 

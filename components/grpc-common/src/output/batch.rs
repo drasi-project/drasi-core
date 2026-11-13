@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_computation_contracts::ComponentId;
 use std::collections::HashMap;
 
 use crate::reaction::QueryResultItem as ProtoQueryResultItem;
@@ -20,7 +21,7 @@ use prost::Message;
 pub fn request_overhead(key: &BatchKey) -> usize {
     crate::reaction::ProcessResultsRequest {
         results: Some(crate::reaction::QueryResult {
-            query_id: key.query_id.clone(),
+            query_id: key.query_id.to_string(),
             timestamp: Some(prost_types::Timestamp {
                 seconds: i64::MIN,
                 nanos: i32::MIN,
@@ -39,18 +40,15 @@ pub fn item_wire_size(item: &ProtoQueryResultItem) -> usize {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BatchKey {
-    pub query_id: String,
+    pub query_id: ComponentId,
     metadata: Vec<(String, String)>,
 }
 
 impl BatchKey {
-    pub fn new(query_id: impl Into<String>, metadata: HashMap<String, String>) -> Self {
+    pub fn new(query_id: ComponentId, metadata: HashMap<String, String>) -> Self {
         let mut metadata: Vec<(String, String)> = metadata.into_iter().collect();
         metadata.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-        Self {
-            query_id: query_id.into(),
-            metadata,
-        }
+        Self { query_id, metadata }
     }
 
     pub fn metadata_map(&self) -> HashMap<String, String> {
@@ -137,8 +135,16 @@ mod tests {
         // BatchKey sorts metadata internally so two keys with the same logical
         // content compare (and hash) equal regardless of insertion order —
         // this is what lets the runners coalesce items into one batch.
-        let a = BatchKey::new("q", meta(&[("x", "1"), ("y", "2")]));
-        let b = BatchKey::new("q", meta(&[("y", "2"), ("x", "1")]));
+        let a = BatchKey::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            meta(&[("x", "1"), ("y", "2")]),
+        );
+        let b = BatchKey::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            meta(&[("y", "2"), ("x", "1")]),
+        );
         assert_eq!(a, b);
 
         let mut set = std::collections::HashSet::new();
@@ -148,31 +154,76 @@ mod tests {
 
     #[test]
     fn batch_key_differs_on_query_id_or_metadata() {
-        let base = BatchKey::new("q", meta(&[("x", "1")]));
-        assert_ne!(base, BatchKey::new("other", meta(&[("x", "1")])));
-        assert_ne!(base, BatchKey::new("q", meta(&[("x", "2")])));
-        assert_ne!(base, BatchKey::new("q", HashMap::new()));
+        let base = BatchKey::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            meta(&[("x", "1")]),
+        );
+        assert_ne!(
+            base,
+            BatchKey::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000029a")
+                    .expect("fixture UUID"),
+                meta(&[("x", "1")])
+            )
+        );
+        assert_ne!(
+            base,
+            BatchKey::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
+                meta(&[("x", "2")])
+            )
+        );
+        assert_ne!(
+            base,
+            BatchKey::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
+                HashMap::new()
+            )
+        );
     }
 
     #[test]
     fn metadata_map_round_trips_the_normalized_entries() {
-        let key = BatchKey::new("q", meta(&[("b", "2"), ("a", "1")]));
+        let key = BatchKey::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            meta(&[("b", "2"), ("a", "1")]),
+        );
         assert_eq!(key.metadata_map(), meta(&[("a", "1"), ("b", "2")]));
     }
 
     #[test]
     fn pending_batch_starts_with_one_item_and_accepts_matching_key() {
-        let key = BatchKey::new("q", meta(&[("x", "1")]));
+        let key = BatchKey::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            meta(&[("x", "1")]),
+        );
         let batch = PendingBatch::new(key.clone(), item(), true);
         assert_eq!(batch.items.len(), 1);
         assert!(batch.can_accept(&key));
-        assert!(batch.can_accept(&BatchKey::new("q", meta(&[("x", "1")]))));
-        assert!(!batch.can_accept(&BatchKey::new("q", meta(&[("x", "2")]))));
+        assert!(batch.can_accept(&BatchKey::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            meta(&[("x", "1")])
+        )));
+        assert!(!batch.can_accept(&BatchKey::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            meta(&[("x", "2")])
+        )));
     }
 
     #[test]
     fn pending_batch_tracks_terminal_and_seen_sequences() {
-        let key = BatchKey::new("q", meta(&[("x", "1")]));
+        let key = BatchKey::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            meta(&[("x", "1")]),
+        );
         let mut item_a = item();
         item_a.sequence = 5;
         // First item is non-terminal at seq 5.

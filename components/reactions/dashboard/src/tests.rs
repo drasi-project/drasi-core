@@ -26,10 +26,17 @@ use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
 
 #[test]
 fn test_dashboard_builder_defaults() {
-    let reaction = DashboardReactionBuilder::new("dashboard-test")
-        .build()
-        .expect("builder should succeed");
-    assert_eq!(reaction.id(), "dashboard-test");
+    let reaction = DashboardReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008e")
+            .expect("fixture UUID"),
+    )
+    .build()
+    .expect("builder should succeed");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008e")
+            .expect("fixture UUID")
+    );
     assert_eq!(reaction.type_name(), "dashboard");
 
     let properties = reaction.properties();
@@ -49,18 +56,30 @@ fn test_dashboard_builder_defaults() {
 
 #[test]
 fn test_dashboard_builder_custom_values() {
-    let reaction = DashboardReaction::builder("dashboard-custom")
-        .with_query("q1")
-        .with_host("127.0.0.1")
-        .with_port(18000)
-        .with_heartbeat_interval_ms(5000)
-        .with_priority_queue_capacity(500)
-        .with_auto_start(false)
-        .build()
-        .expect("builder should succeed");
+    let reaction = DashboardReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008f")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_host("127.0.0.1")
+    .with_port(18000)
+    .with_heartbeat_interval_ms(5000)
+    .with_priority_queue_capacity(500)
+    .with_auto_start(false)
+    .build()
+    .expect("builder should succeed");
 
-    assert_eq!(reaction.id(), "dashboard-custom");
-    assert_eq!(reaction.query_ids(), vec!["q1".to_string()]);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008f")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+        )]
+    );
     assert!(!reaction.auto_start());
 
     let properties = reaction.properties();
@@ -436,12 +455,29 @@ async fn test_create_reaction_minimal_config() {
     let config = serde_json::json!({});
 
     let reaction = desc
-        .create_reaction("test-minimal", vec!["q1".into()], &config, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000090")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &config,
+            true,
+        )
         .await
         .expect("create_reaction with empty config should succeed");
 
-    assert_eq!(reaction.id(), "test-minimal");
-    assert_eq!(reaction.query_ids(), vec!["q1".to_string()]);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000090")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+        )]
+    );
     assert!(reaction.auto_start());
 
     let props = reaction.properties();
@@ -477,14 +513,38 @@ async fn test_create_reaction_full_config() {
     });
 
     let reaction = desc
-        .create_reaction("test-full", vec!["q1".into(), "q2".into()], &config, false)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000091")
+                .expect("fixture UUID"),
+            vec![
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+                ),
+                drasi_lib::config::ComponentReference::by_name(
+                    drasi_lib::ComponentName::try_new("q2").expect("fixture component name"),
+                ),
+            ],
+            &config,
+            false,
+        )
         .await
         .expect("create_reaction with full config should succeed");
 
-    assert_eq!(reaction.id(), "test-full");
     assert_eq!(
-        reaction.query_ids(),
-        vec!["q1".to_string(), "q2".to_string()]
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000091")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+            ),
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q2").expect("fixture component name")
+            )
+        ]
     );
     assert!(!reaction.auto_start());
 
@@ -504,7 +564,13 @@ async fn test_create_reaction_invalid_config_returns_error() {
     });
 
     let result = desc
-        .create_reaction("test-invalid", vec![], &config, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000092")
+                .expect("fixture UUID"),
+            vec![],
+            &config,
+            true,
+        )
         .await;
 
     assert!(result.is_err(), "invalid config should return an error");
@@ -520,7 +586,13 @@ async fn test_create_reaction_with_env_var_config_value() {
     });
 
     let reaction = desc
-        .create_reaction("test-env", vec![], &config, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000093")
+                .expect("fixture UUID"),
+            vec![],
+            &config,
+            true,
+        )
         .await
         .expect("env var config values with defaults should resolve");
 
@@ -691,9 +763,11 @@ use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use std::collections::HashMap;
 
-fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
+fn make_query_result(query_id: drasi_core::ComponentId, diffs: Vec<ResultDiff>) -> QueryResult {
     QueryResult {
-        query_id: query_id.to_string(),
+        query_name: None,
+        input_alias: None,
+        query_id,
         sequence: 0,
         timestamp: Utc::now(),
         results: diffs,
@@ -706,7 +780,8 @@ fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
 async fn test_snapshot_store_add_rows() {
     let store = QuerySnapshotStore::new();
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         vec![
             ResultDiff::Add {
                 data: serde_json::json!({"id": 1, "name": "Alice"}),
@@ -719,7 +794,12 @@ async fn test_snapshot_store_add_rows() {
         ],
     );
     store.apply(&qr).await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 2);
 }
 
@@ -727,7 +807,8 @@ async fn test_snapshot_store_add_rows() {
 async fn test_snapshot_store_aggregation_is_an_ordinary_row() {
     let store = QuerySnapshotStore::new();
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         vec![
             ResultDiff::Add {
                 data: serde_json::json!({"id": 1, "temp": 22.5}),
@@ -741,7 +822,12 @@ async fn test_snapshot_store_aggregation_is_an_ordinary_row() {
         ],
     );
     store.apply(&qr).await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(
         snapshot.rows.len(),
         2,
@@ -758,7 +844,8 @@ async fn test_snapshot_store_aggregation_update_replaces() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Aggregation {
                 before: None,
                 after: serde_json::json!({"count": 1}),
@@ -768,7 +855,8 @@ async fn test_snapshot_store_aggregation_update_replaces() {
         .await;
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Aggregation {
                 before: Some(serde_json::json!({"count": 1})),
                 after: serde_json::json!({"count": 2}),
@@ -776,7 +864,12 @@ async fn test_snapshot_store_aggregation_update_replaces() {
             }],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.rows[0].data, serde_json::json!({"count": 2}));
 }
@@ -786,16 +879,28 @@ async fn test_seeded_grouped_aggregates_update_and_delete_by_identity() {
     let store = QuerySnapshotStore::new();
     let row = serde_json::json!({"count": 1});
     store
-        .seed_rows("groups", vec![(11, row.clone()), (12, row.clone())])
+        .seed_rows(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000094")
+                .expect("fixture UUID"),
+            vec![(11, row.clone()), (12, row.clone())],
+        )
         .await;
     assert_eq!(
-        store.get_snapshot("groups").await.rows.len(),
+        store
+            .get_snapshot(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000094")
+                    .expect("fixture UUID")
+            )
+            .await
+            .rows
+            .len(),
         2,
         "equal-valued groups remain separate"
     );
     store
         .apply(&make_query_result(
-            "groups",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000094")
+                .expect("fixture UUID"),
             vec![ResultDiff::Aggregation {
                 before: Some(row.clone()),
                 after: serde_json::json!({"count": 2}),
@@ -803,7 +908,12 @@ async fn test_seeded_grouped_aggregates_update_and_delete_by_identity() {
             }],
         ))
         .await;
-    let snapshot = store.get_snapshot("groups").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000094")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 2);
     assert_eq!(snapshot.rows[0].row_signature, 11);
     assert_eq!(snapshot.rows[0].data["count"], 2);
@@ -811,7 +921,8 @@ async fn test_seeded_grouped_aggregates_update_and_delete_by_identity() {
     assert_eq!(snapshot.rows[1].data["count"], 1);
     store
         .apply(&make_query_result(
-            "groups",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000094")
+                .expect("fixture UUID"),
             vec![
                 ResultDiff::Delete {
                     data: row,
@@ -824,8 +935,22 @@ async fn test_seeded_grouped_aggregates_update_and_delete_by_identity() {
             ],
         ))
         .await;
-    assert!(!store.has_data("groups").await);
-    assert!(store.get_snapshot("groups").await.rows.is_empty());
+    assert!(
+        !store
+            .has_data(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000094")
+                    .expect("fixture UUID")
+            )
+            .await
+    );
+    assert!(store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000094")
+                .expect("fixture UUID")
+        )
+        .await
+        .rows
+        .is_empty());
 }
 
 #[tokio::test]
@@ -833,7 +958,8 @@ async fn test_snapshot_store_delete_row() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 1}),
@@ -848,14 +974,20 @@ async fn test_snapshot_store_delete_row() {
         .await;
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Delete {
                 data: serde_json::json!({"id": 1}),
                 row_signature: 0,
             }],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.rows[0].data["id"], 2);
 }
@@ -865,7 +997,8 @@ async fn test_snapshot_store_update_row() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": 1, "name": "Alice"}),
                 row_signature: 0,
@@ -874,7 +1007,8 @@ async fn test_snapshot_store_update_row() {
         .await;
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Update {
                 data: serde_json::json!({"id": 1, "name": "Alicia"}),
                 before: serde_json::json!({"id": 1, "name": "Alice"}),
@@ -884,7 +1018,12 @@ async fn test_snapshot_store_update_row() {
             }],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.rows[0].data["name"], "Alicia");
 }
@@ -894,7 +1033,8 @@ async fn test_snapshot_store_fifo_eviction_includes_aggregate_rows() {
     let store = QuerySnapshotStore::with_max_rows(2);
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 1}),
@@ -916,7 +1056,12 @@ async fn test_snapshot_store_fifo_eviction_includes_aggregate_rows() {
             ],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     // Keep the two newest result rows, including the aggregate.
     assert_eq!(snapshot.rows.len(), 2);
     assert_eq!(snapshot.rows[0].data["id"], 3);
@@ -926,17 +1071,30 @@ async fn test_snapshot_store_fifo_eviction_includes_aggregate_rows() {
 #[tokio::test]
 async fn test_snapshot_store_empty_query() {
     let store = QuerySnapshotStore::new();
-    let snapshot = store.get_snapshot("nonexistent").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000095")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert!(snapshot.rows.is_empty());
 }
 
 #[tokio::test]
 async fn test_snapshot_store_has_data() {
     let store = QuerySnapshotStore::new();
-    assert!(!store.has_data("q1").await);
+    assert!(
+        !store
+            .has_data(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+    );
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Aggregation {
                 before: None,
                 after: serde_json::json!({"count": 1}),
@@ -944,7 +1102,14 @@ async fn test_snapshot_store_has_data() {
             }],
         ))
         .await;
-    assert!(store.has_data("q1").await);
+    assert!(
+        store
+            .has_data(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+    );
 }
 
 #[tokio::test]
@@ -952,7 +1117,8 @@ async fn test_snapshot_serialization_format() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 1}),
@@ -966,7 +1132,12 @@ async fn test_snapshot_serialization_format() {
             ],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     let json = serde_json::to_value(&snapshot).unwrap();
     // Verify the JSON structure the frontend expects: rows are { k, v } envelopes
     // carrying the row_signature so the client can key by identity.
@@ -985,7 +1156,8 @@ async fn test_snapshot_store_add_upserts_by_row_signature() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"location": "Parking"}),
                 row_signature: 7777,
@@ -994,14 +1166,20 @@ async fn test_snapshot_store_add_upserts_by_row_signature() {
         .await;
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"location": "Curbside"}),
                 row_signature: 7777,
             }],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 1, "same signature must upsert");
     assert_eq!(snapshot.rows[0].data["location"], "Curbside");
     assert_eq!(snapshot.rows[0].row_signature, 7777);
@@ -1013,18 +1191,28 @@ async fn test_snapshot_store_seeded_signature_then_add_upserts() {
     // though the rows carry no `id` column (the #605 plugin scenario).
     let store = QuerySnapshotStore::new();
     store
-        .seed_rows("q1", vec![(42, serde_json::json!({"location": "Parking"}))])
+        .seed_rows(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![(42, serde_json::json!({"location": "Parking"}))],
+        )
         .await;
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"location": "Curbside"}),
                 row_signature: 42,
             }],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.rows[0].data["location"], "Curbside");
 }
@@ -1034,7 +1222,8 @@ async fn test_snapshot_store_distinct_signatures_append() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"v": 1}),
@@ -1047,7 +1236,12 @@ async fn test_snapshot_store_distinct_signatures_append() {
             ],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 2);
 }
 
@@ -1063,7 +1257,8 @@ async fn test_snapshot_store_add_upserts_existing_id() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": "A1234", "location": "Parking"}),
                 row_signature: 0,
@@ -1072,7 +1267,8 @@ async fn test_snapshot_store_add_upserts_existing_id() {
         .await;
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": "A1234", "location": "Curbside"}),
                 row_signature: 0,
@@ -1080,7 +1276,12 @@ async fn test_snapshot_store_add_upserts_existing_id() {
         ))
         .await;
 
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 1, "duplicate row was appended");
     assert_eq!(snapshot.rows[0].data["location"], "Curbside");
 }
@@ -1090,7 +1291,8 @@ async fn test_snapshot_store_add_appends_distinct_ids() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"id": "A", "v": 1}),
@@ -1103,7 +1305,12 @@ async fn test_snapshot_store_add_appends_distinct_ids() {
             ],
         ))
         .await;
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 2);
 }
 
@@ -1112,7 +1319,8 @@ async fn test_snapshot_store_seed_rows_populates_store() {
     let store = QuerySnapshotStore::new();
     store
         .seed_rows(
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 (0, serde_json::json!({"id": "A1234", "location": "Parking"})),
                 (0, serde_json::json!({"id": "B5678", "location": "Parking"})),
@@ -1120,9 +1328,21 @@ async fn test_snapshot_store_seed_rows_populates_store() {
         )
         .await;
 
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 2);
-    assert!(store.has_data("q1").await);
+    assert!(
+        store
+            .has_data(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+    );
 }
 
 #[tokio::test]
@@ -1132,13 +1352,15 @@ async fn test_snapshot_store_seeded_row_then_add_upserts() {
     let store = QuerySnapshotStore::new();
     store
         .seed_rows(
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![(0, serde_json::json!({"id": "A1234", "location": "Parking"}))],
         )
         .await;
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": "A1234", "location": "Curbside"}),
                 row_signature: 0,
@@ -1146,7 +1368,12 @@ async fn test_snapshot_store_seeded_row_then_add_upserts() {
         ))
         .await;
 
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.rows[0].data["location"], "Curbside");
 }
@@ -1157,7 +1384,8 @@ async fn test_snapshot_store_seed_rows_does_not_overwrite_existing() {
     let store = QuerySnapshotStore::new();
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": "A1234", "location": "Curbside"}),
                 row_signature: 0,
@@ -1166,7 +1394,8 @@ async fn test_snapshot_store_seed_rows_does_not_overwrite_existing() {
         .await;
     store
         .seed_rows(
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 (0, serde_json::json!({"id": "A1234", "location": "Parking"})),
                 (0, serde_json::json!({"id": "B5678", "location": "Parking"})),
@@ -1174,7 +1403,12 @@ async fn test_snapshot_store_seed_rows_does_not_overwrite_existing() {
         )
         .await;
 
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(snapshot.rows.len(), 2);
     let a = snapshot
         .rows
@@ -1196,13 +1430,15 @@ async fn test_snapshot_store_sig0_seed_then_real_signature_upserts() {
     let store = QuerySnapshotStore::new();
     store
         .seed_rows(
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![(0, serde_json::json!({"id": "A1234", "location": "Parking"}))],
         )
         .await;
     store
         .apply(&make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": "A1234", "location": "Curbside"}),
                 row_signature: 42,
@@ -1210,7 +1446,12 @@ async fn test_snapshot_store_sig0_seed_then_real_signature_upserts() {
         ))
         .await;
 
-    let snapshot = store.get_snapshot("q1").await;
+    let snapshot = store
+        .get_snapshot(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert_eq!(
         snapshot.rows.len(),
         1,

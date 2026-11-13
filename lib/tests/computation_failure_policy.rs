@@ -3,12 +3,18 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use async_trait::async_trait;
 use computation_support::*;
+use drasi_core_types::ComponentName;
 use drasi_lib::{computation::v1::*, DrasiLib};
 use std::{
+    future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -107,6 +113,12 @@ impl EnvelopeSink for Sink {
     }
 }
 
+async fn step<T>(phase: &str, work: impl Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(2), work)
+        .await
+        .unwrap_or_else(|_| panic!("native failure scenario stalled during {phase}"))
+}
+
 async fn scenario(invalid_emission: bool) {
     let mut builder = ComponentBatch::builder();
     let mut inputs = Vec::new();
@@ -117,25 +129,44 @@ async fn scenario(invalid_emission: bool) {
         calls: AtomicUsize::new(0),
         handled: Notify::new(),
     });
-    for (name, target) in [("bad", "bad-sink"), ("good", "good-sink")] {
+    for (name, name_id, target, target_id) in [
+        (
+            "bad",
+            fixture_support::component_id(453),
+            "bad-sink",
+            fixture_support::component_id(2),
+        ),
+        (
+            "good",
+            fixture_support::component_id(463),
+            "good-sink",
+            fixture_support::component_id(727),
+        ),
+    ] {
         let (input, receiver) = mpsc::channel(8);
         let (output, received) = mpsc::channel(8);
         let sender = Arc::new(Mutex::new(None));
         builder = builder
-            .source(Box::new(Source {
-                descriptor: descriptor(name, &[], &["out"]),
-                input: receiver,
-                control: sender.clone(),
-                starts: starts.clone(),
-            }))
-            .sink(Box::new(Sink {
-                descriptor: descriptor(target, &["in"], &[]),
-                output,
-                handler: handler.clone(),
-            }))
-            .bind_stream(endpoint(name, "out"), stream(name))
+            .source(
+                ComponentName::try_new(name).unwrap(),
+                Box::new(Source {
+                    descriptor: descriptor(&name_id, &[], &["out"]),
+                    input: receiver,
+                    control: sender.clone(),
+                    starts: starts.clone(),
+                }),
+            )
+            .sink(
+                ComponentName::try_new(target).unwrap(),
+                Box::new(Sink {
+                    descriptor: descriptor(&target_id, &["in"], &[]),
+                    output,
+                    handler: handler.clone(),
+                }),
+            )
+            .bind_stream(endpoint(&name_id, "out"), stream(name))
             .connect(
-                edge(name, target),
+                edge(&name_id, &target_id),
                 Box::new(BoundedPipeConfig { capacity: 2 }),
             );
         inputs.push(input);
@@ -143,6 +174,7 @@ async fn scenario(invalid_emission: bool) {
         senders.push(sender);
     }
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -159,19 +191,40 @@ async fn scenario(invalid_emission: bool) {
         .build()
         .await
         .unwrap();
-    drasi.start().await.unwrap();
+    step("initial start", drasi.start()).await.unwrap();
     let control = drasi.computation_control().unwrap();
     inputs[1]
-        .send(Event::Data(output(root("good", 1, &[10]))))
+        .send(Event::Data(output(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                .expect("fixture UUID"),
+            "good",
+            1,
+            &[10],
+        ))))
         .await
         .unwrap();
-    assert_eq!(values(&outputs[1].recv().await.unwrap()), [10]);
-    let generation = control.observed().components[&component("bad")].generation;
+    let first = tokio::time::timeout(Duration::from_secs(2), outputs[1].recv())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "initial healthy output stalled (invalid_emission={invalid_emission}): {:?}",
+                control.observed()
+            )
+        })
+        .unwrap();
+    assert_eq!(values(&first), [10]);
+    let generation = control.observed().components[&component(453)].generation;
     if invalid_emission {
         inputs[0]
             .send(Event::Data(OutputEnvelope {
                 port: port("undeclared"),
-                envelope: root("bad", 1, &[1]),
+                envelope: root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                        .expect("fixture UUID"),
+                    "bad",
+                    1,
+                    &[1],
+                ),
             }))
             .await
             .unwrap();
@@ -179,12 +232,14 @@ async fn scenario(invalid_emission: bool) {
         inputs[0].send(Event::Fail).await.unwrap();
     }
     let mut observed = control.subscribe_observed();
-    observed
-        .wait_for(|state| state.components[&component("bad")].failure.is_some())
-        .await
-        .unwrap();
+    step(
+        "source failure publication",
+        observed.wait_for(|state| state.components[&component(453)].failure.is_some()),
+    )
+    .await
+    .unwrap();
     let state = control.observed();
-    let failed = &state.components[&component("bad")];
+    let failed = &state.components[&component(453)];
     assert_eq!(failed.lifecycle, ComponentLifecycle::Failed);
     assert_eq!(failed.generation, generation);
     assert_eq!(
@@ -203,12 +258,25 @@ async fn scenario(invalid_emission: bool) {
         .desired_snapshot()
         .nodes
         .iter()
-        .any(|node| node.descriptor.id() == &component("bad")));
+        .any(|node| node.descriptor.id() == &component(453)));
     inputs[1]
-        .send(Event::Data(output(root("good", 2, &[20]))))
+        .send(Event::Data(output(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                .expect("fixture UUID"),
+            "good",
+            2,
+            &[20],
+        ))))
         .await
         .unwrap();
-    assert_eq!(values(&outputs[1].recv().await.unwrap()), [20]);
+    assert_eq!(
+        values(
+            &step("healthy output after sibling failure", outputs[1].recv())
+                .await
+                .unwrap()
+        ),
+        [20]
+    );
     assert_eq!(
         starts.load(Ordering::SeqCst),
         2,
@@ -217,51 +285,70 @@ async fn scenario(invalid_emission: bool) {
 
     let peer = senders[1].lock().unwrap().clone().unwrap();
     peer.notify_neighbor(
-        &component("good-sink"),
+        &component(727),
         ControlNotification::Custom {
             kind: "first".into(),
             payload: serde_json::Value::Null,
         },
     )
     .unwrap();
-    observed
-        .wait_for(|state| {
-            state.components[&component("good-sink")]
+    step(
+        "control failure publication",
+        observed.wait_for(|state| {
+            state.components[&component(727)]
                 .failure
                 .as_ref()
                 .is_some_and(|failure| failure.phase == FailurePhase::Control)
-        })
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     peer.notify_neighbor(
-        &component("good-sink"),
+        &component(727),
         ControlNotification::Custom {
             kind: "second".into(),
             payload: serde_json::Value::Null,
         },
     )
     .unwrap();
-    handler.handled.notified().await;
+    step("control handler retry", handler.handled.notified()).await;
     assert_eq!(
         handler.calls.load(Ordering::SeqCst),
         2,
         "one rejected notification cannot close the inbox"
     );
 
-    let handle = drasi.computation_component("bad").unwrap();
-    handle.stop().await.unwrap();
-    handle.start().await.unwrap();
+    let handle = drasi
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("bad").expect("fixture component name"),
+        )
+        .unwrap();
+    step("failed source stop", handle.stop()).await.unwrap();
+    step("failed source restart", handle.start()).await.unwrap();
     inputs[0]
-        .send(Event::Data(output(root("bad", 2, &[42]))))
+        .send(Event::Data(output(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                .expect("fixture UUID"),
+            "bad",
+            2,
+            &[42],
+        ))))
         .await
         .unwrap();
-    assert_eq!(values(&outputs[0].recv().await.unwrap()), [42]);
     assert_eq!(
-        control.observed().components[&component("bad")].generation,
+        values(
+            &step("restarted source output", outputs[0].recv())
+                .await
+                .unwrap()
+        ),
+        [42]
+    );
+    assert_eq!(
+        control.observed().components[&component(453)].generation,
         generation
     );
-    drasi.stop().await.unwrap();
-    drasi.shutdown().await.unwrap();
+    step("instance stop", drasi.stop()).await.unwrap();
+    step("instance shutdown", drasi.shutdown()).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]

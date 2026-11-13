@@ -71,9 +71,18 @@ pub fn build_context(
 ) -> Option<(OperationType, Map<String, Value>)> {
     let mut context = Map::new();
 
-    let query_name = Value::String(query_result.query_id.clone());
-    context.insert("query_name".to_string(), query_name.clone());
-    context.insert("query_id".to_string(), query_name);
+    context.insert(
+        "query_name".to_string(),
+        serde_json::json!(query_result.query_name),
+    );
+    context.insert(
+        "query_id".to_string(),
+        serde_json::json!(query_result.query_id),
+    );
+    context.insert(
+        "input_alias".to_string(),
+        serde_json::json!(query_result.input_alias),
+    );
     context.insert(
         "timestamp".to_string(),
         Value::String(query_result.timestamp.to_rfc3339()),
@@ -271,30 +280,31 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
-    fn query_result(query_id: &str, diff: ResultDiff) -> QueryResult {
-        QueryResult::new(
-            query_id.to_string(),
-            1,
-            chrono::Utc::now(),
-            vec![diff],
-            HashMap::new(),
-        )
+    fn query_result(query_id: drasi_core_types::ComponentId, diff: ResultDiff) -> QueryResult {
+        QueryResult::new(query_id, 1, chrono::Utc::now(), vec![diff], HashMap::new())
     }
 
     #[test]
     fn add_context_has_after_and_standard_keys() {
-        let qr = query_result(
-            "source.sensors",
+        let mut qr = query_result(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003b3")
+                .expect("fixture UUID"),
             ResultDiff::Add {
                 data: json!({"id": "s1", "temp": 20.5}),
                 row_signature: 0,
             },
         );
+        qr.query_name = Some(
+            drasi_core_types::ComponentName::try_new("source.sensors").expect("fixture query name"),
+        );
         let (op, ctx) = build_context(&qr, &qr.results[0]).unwrap();
         assert_eq!(op, OperationType::Add);
         assert_eq!(ctx["operation"], json!("ADD"));
         assert_eq!(ctx["query_name"], json!("source.sensors"));
-        assert_eq!(ctx["query_id"], json!("source.sensors"));
+        assert_eq!(
+            ctx["query_id"],
+            json!("00000000-0000-0000-0000-0000000003b3")
+        );
         assert_eq!(ctx["after"], json!({"id": "s1", "temp": 20.5}));
         assert!(ctx.contains_key("timestamp"));
         assert!(ctx.contains_key("metadata"));
@@ -304,7 +314,8 @@ mod tests {
     #[test]
     fn update_context_has_before_after_data() {
         let qr = query_result(
-            "q",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             ResultDiff::Update {
                 data: json!({"op": "u"}),
                 before: json!({"id": 1, "v": "old"}),
@@ -324,7 +335,8 @@ mod tests {
     #[test]
     fn delete_context_has_before() {
         let qr = query_result(
-            "q",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             ResultDiff::Delete {
                 data: json!({"id": 7}),
                 row_signature: 0,
@@ -338,14 +350,19 @@ mod tests {
 
     #[test]
     fn noop_context_is_none() {
-        let qr = query_result("q", ResultDiff::Noop);
+        let qr = query_result(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            ResultDiff::Noop,
+        );
         assert!(build_context(&qr, &qr.results[0]).is_none());
     }
 
     #[test]
     fn aggregation_with_before_has_before_after_and_no_data() {
         let qr = query_result(
-            "q",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             ResultDiff::Aggregation {
                 before: Some(json!({"key": "a", "count": 1})),
                 after: json!({"key": "a", "count": 2}),
@@ -365,7 +382,8 @@ mod tests {
     #[test]
     fn aggregation_without_before_omits_before_key() {
         let qr = query_result(
-            "q",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             ResultDiff::Aggregation {
                 before: None,
                 after: json!({"key": "a", "count": 1}),
@@ -387,7 +405,8 @@ mod tests {
     fn render_binds_positional_params_in_order() {
         let ctx = build_context(
             &query_result(
-                "q",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
                 ResultDiff::Add {
                     data: json!({"id": 42, "name": "Alice", "email": "a@example.com"}),
                     row_signature: 0,
@@ -414,7 +433,8 @@ mod tests {
     fn render_repeated_param_binds_each_occurrence() {
         let (_op, ctx) = build_context(
             &query_result(
-                "q",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
                 ResultDiff::Add {
                     data: json!({"id": 1, "name": "Bob"}),
                     row_signature: 0,
@@ -440,7 +460,8 @@ mod tests {
     fn render_json_helper_embeds_object() {
         let (_op, ctx) = build_context(
             &query_result(
-                "q",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
                 ResultDiff::Add {
                     data: json!({"id": 1, "tags": ["a", "b"]}),
                     row_signature: 0,
@@ -463,7 +484,8 @@ mod tests {
     fn render_missing_field_errors_in_strict_mode() {
         let (_op, ctx) = build_context(
             &query_result(
-                "q",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
                 ResultDiff::Add {
                     data: json!({"id": 1}),
                     row_signature: 0,
@@ -484,7 +506,8 @@ mod tests {
     fn render_json_missing_field_errors_in_strict_mode() {
         let (_op, ctx) = build_context(
             &query_result(
-                "q",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
                 ResultDiff::Add {
                     data: json!({"id": 1}),
                     row_signature: 0,
@@ -520,7 +543,8 @@ mod tests {
             "nested": {"values": [1, "two"]}
         });
         let mut result = query_result(
-            "source.query",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000037c")
+                .expect("fixture UUID"),
             ResultDiff::Add {
                 data: data.clone(),
                 row_signature: 7,

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Build the components separately before running:
-//! make build-native-standard-plugins build-native-sqlite-plugins
+//! make build-test-plugins
 //! CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test --offline -p drasi-host-sdk --test native_computation_pipeline
 //!
 //! There is deliberately no Rust dependency on these component crates here.
@@ -79,7 +79,7 @@ fn plugin_path(name: &str) -> PathBuf {
     };
     let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| target.join("debug"));
+        .unwrap_or_else(|| target.join("debug/plugins"));
     directory.join(format!(
         "{}{}{}",
         std::env::consts::DLL_PREFIX,
@@ -135,7 +135,37 @@ fn directory() -> Result<tempfile::TempDir> {
         .tempdir_in(root)?)
 }
 fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("test component ID")
+    // Explicit fixture identities stay stable across reconstruction and crash children.
+    let uuid = match name {
+        "capture" => "00000000-0000-4000-8000-000000000001",
+        "consumer" => "00000000-0000-4000-8000-000000000002",
+        "counter" => "00000000-0000-4000-8000-000000000003",
+        "delivery" => "00000000-0000-4000-8000-000000000004",
+        "failed" => "00000000-0000-4000-8000-000000000005",
+        "first" => "00000000-0000-4000-8000-000000000006",
+        "host" => "00000000-0000-4000-8000-000000000007",
+        "invalid" => "00000000-0000-4000-8000-000000000008",
+        "left" => "00000000-0000-4000-8000-000000000009",
+        "middleware" => "00000000-0000-4000-8000-00000000000a",
+        "observer" => "00000000-0000-4000-8000-00000000000b",
+        "query" => "00000000-0000-4000-8000-00000000000c",
+        "right" => "00000000-0000-4000-8000-00000000000d",
+        "second" => "00000000-0000-4000-8000-00000000000e",
+        "sink" => "00000000-0000-4000-8000-00000000000f",
+        "source" => "00000000-0000-4000-8000-000000000010",
+        "spare" => "00000000-0000-4000-8000-000000000011",
+        "stable" => "00000000-0000-4000-8000-000000000012",
+        "stateful" => "00000000-0000-4000-8000-000000000013",
+        "step" => "00000000-0000-4000-8000-000000000014",
+        "terminal" => "00000000-0000-4000-8000-000000000015",
+        "transaction" => "00000000-0000-4000-8000-000000000016",
+        "transformer" => "00000000-0000-4000-8000-000000000017",
+        _ => panic!("missing explicit fixture component ID for {name}"),
+    };
+    ComponentId::try_new(uuid).expect("fixture UUID")
+}
+fn name(value: &str) -> ComponentName {
+    ComponentName::try_new(value).expect("test component name")
 }
 fn stream(name: &str) -> StreamId {
     StreamId::try_new(name).expect("test stream ID")
@@ -164,6 +194,7 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
     let sink = factory(&plugin, CAPTURE)?;
     let graph = ComputationGraph::builder("managed-native")
         .component(
+            name("counter"),
             source.specification(
                 id("counter"),
                 json!({
@@ -173,6 +204,7 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
             source,
         )
         .component(
+            name("capture"),
             sink.specification(id("capture"), json!({"path":output_path}))?,
             sink,
         )
@@ -225,6 +257,7 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
         None,
     )?);
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -273,6 +306,7 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
         .await?;
     core.shutdown().await?;
     let restored = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -291,11 +325,78 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
         .with_management_resources(resources)
         .build()
         .await?;
-    assert_eq!(restored.desired_configuration()?.revision, receipt.revision);
+    let target = restored.desired_configuration()?;
+    assert_eq!(target.revision, receipt.revision);
+    let control = restored.computation_control()?;
+    let mut changes = control.subscribe_observed();
+    let mut latest = None;
+    let ready: Result<()> = async {
+        tokio::time::timeout(DEFAULT_CONSTRUCTION_TIMEOUT, async {
+            let status = restored.management_status().await?;
+            latest = Some(status.clone());
+            anyhow::ensure!(
+                status.revision == target.revision && status.applied && status.error.is_none(),
+                "restored configuration was not applied: {status:?}"
+            );
+            for node in &target.desired.topology.components {
+                restored
+                    .component_by_id(node.descriptor.id())?
+                    .wait_created()
+                    .await?;
+            }
+            loop {
+                changes.borrow_and_update();
+                let status = restored.management_status().await?;
+                latest = Some(status.clone());
+                let current = restored.desired_configuration()?;
+                anyhow::ensure!(
+                    current.revision == target.revision
+                        && current.desired == target.desired
+                        && status.revision == target.revision,
+                    "configuration changed while awaiting restored factories"
+                );
+                anyhow::ensure!(
+                    status.applied && status.error.is_none() && status.resource_errors.is_empty(),
+                    "restored factory completion failed: {status:?}"
+                );
+                if status.converged() {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                let observed = control.observed();
+                anyhow::ensure!(
+                    target.desired.topology.relationships.iter().all(|edge| {
+                        observed
+                            .relationships
+                            .get(&edge.definition)
+                            .is_none_or(|state| state.failure.is_none())
+                    }),
+                    "restored relationship binding failed: {observed:?}"
+                );
+                changes.changed().await?;
+            }
+        })
+        .await
+        .context("restored factories exceeded the existing construction budget")?
+    }
+    .await;
+    if let Err(error) = ready {
+        let observed = control.observed();
+        let cleanup = restored.shutdown().await;
+        return Err(error.context(format!(
+            "configuration revision {}; last status: {latest:?}; pre-cleanup graph: {observed:?}; cleanup: {cleanup:?}",
+            target.revision
+        )));
+    }
     assert!(restored.management_status().await?.converged());
     assert_eq!(
-        restored.computation_control()?.observed().components.len(),
-        3
+        restored
+            .computation_control()?
+            .observed()
+            .components
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [id("counter"), id("capture")].into_iter().collect()
     );
     assert!(restored
         .load_configuration_snapshot("running-definition")
@@ -451,14 +552,25 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
         })?
         .resource_configuration(indexes, json!({"kind":"memoryIndexes"}))?
         .component(
+            name("counter"),
             source.specification(
                 id("counter"),
                 json!({"stream":"counter/out","count":3,"start":2,"step":2,"interval_ms":2}),
             )?,
             source,
         )
-        .component(query_spec, query)
-        .component(sink_spec, sink.clone())
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            query_spec,
+            query,
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
+                .expect("fixture component name"),
+            sink_spec,
+            sink.clone(),
+        )
         .bind_stream(endpoint("counter", "out"), stream("counter/out"))
         .bind_stream(endpoint("query", "out"), stream("query/out"))
         .connect(
@@ -487,6 +599,7 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
         [17; 32],
     )?);
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -588,7 +701,7 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
     let summary = scan_plugin_metadata(&path).context("native metadata-only scan")?;
     assert_eq!(summary.plugin_id, qualified_id);
     assert_eq!(summary.abi_family.as_deref(), Some("computation"));
-    assert_eq!(summary.abi_version.as_deref(), Some("1.0.0"));
+    assert_eq!(summary.abi_version.as_deref(), Some("3.0.0"));
     assert_eq!(summary.version, shared.metadata().plugin.version.as_ref());
 
     // Restrict discovery to the existing build artifact: copying a process-pinned
@@ -662,6 +775,7 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
     let sink = factory(&direct, CAPTURE)?;
     let desired = ComputationGraph::builder("shared-family")
         .component(
+            name("counter"),
             source.specification(
                 id("counter"),
                 json!({"stream":"counter/out","count":2,"start":7}),
@@ -669,6 +783,7 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
             source,
         )
         .component(
+            name("capture"),
             sink.specification(id("capture"), json!({"path":capture_path}))?,
             sink,
         )
@@ -704,6 +819,7 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
         storage(&directory.path().join("registered-transactions")),
     )
     .await?;
+    transaction.initialize().await?;
     transaction.start().await?;
     let output = transaction.transform(insert(1, 3)?).await?;
     assert_eq!(transaction_row(&output)?, (20, 1, 1));
@@ -776,8 +892,8 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
     );
     assert!(plugin
         .iter()
-        .all(|plugin| plugin.metadata().abi_version == "1.0.0"));
-    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.17.0");
+        .all(|plugin| plugin.metadata().abi_version == "3.0.0"));
+    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.19.0");
     assert_eq!(plugin.len(), 4);
     assert!(plugin.iter().all(|plugin| plugin.factories().len() == 1));
     let source = factory(&plugin, COUNTER)?;
@@ -794,21 +910,25 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
     let stopped = Arc::new(AtomicBool::new(false));
     let mut graph = ComputationGraph::builder("native-pipeline")
         .component(
+            name("counter"),
             source.specification(id("counter"), source_config.clone())?,
             source,
         )
         .component(
+            name("middleware"),
             middleware.specification(id("middleware"), middleware_config.clone())?,
             middleware,
         )
         .component(
+            name("capture"),
             sink.specification(id("capture"), json!({"path":path}))?,
             sink,
         )
-        .sink(Box::new(HostCapture::new(
-            host_outputs.clone(),
-            stopped.clone(),
-        )))
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(HostCapture::new(host_outputs.clone(), stopped.clone())),
+        )
         .connect(
             edge("counter", "middleware"),
             Box::new(BoundedPipeConfig { capacity: 1 }),
@@ -902,8 +1022,19 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
         plugin.register_factories(&mut bindings.factories)?;
     }
     let restored_outputs = Arc::new(Mutex::new(Vec::new()));
+    let host_binding = match &decoded
+        .topology
+        .components
+        .iter()
+        .find(|component| component.descriptor.id() == &id("host"))
+        .context("host definition")?
+        .construction
+    {
+        ComponentConstruction::External { binding } => binding.clone(),
+        ComponentConstruction::Factory(_) => anyhow::bail!("host must remain externally bound"),
+    };
     bindings.components.insert(
-        "host".into(),
+        host_binding,
         ConstructedComponent::sink(Box::new(HostCapture::new(
             restored_outputs.clone(),
             Arc::new(AtomicBool::new(false)),
@@ -974,6 +1105,7 @@ async fn actual_library_rejects_bad_configuration_ports_schemas_and_failed_lifec
     let bad_path = directory.path().join("missing-parent/capture.jsonl");
     let mut failed = sink.create_component(id("failed"), json!({"path":bad_path}))?;
     assert!(!bad_path.exists(), "constructor must not open files");
+    failed.initialize().await?;
     assert!(failed.start().await.is_err());
     assert_eq!(
         failed.configuration()?,
@@ -984,6 +1116,7 @@ async fn actual_library_rejects_bad_configuration_ports_schemas_and_failed_lifec
     let path = directory.path().join("sink.jsonl");
     let mut capture = sink.create_component(id("sink"), json!({"path":path}))?;
     assert!(capture.handle(insert(1, 3)?).await.is_err());
+    capture.initialize().await?;
     capture.start().await?;
     let mut bad_port = insert(1, 3)?;
     bad_port.port = PortId::try_new("not-in")?;
@@ -1035,6 +1168,7 @@ async fn control_and_configuration_progress_while_native_next_is_pending_and_can
         let path = directory.path().join("controlled.jsonl");
         let mut graph = ComputationGraph::builder("controlled")
             .component(
+                name("counter"),
                 source.specification(
                     id("counter"),
                     json!({
@@ -1044,6 +1178,7 @@ async fn control_and_configuration_progress_while_native_next_is_pending_and_can
                 source,
             )
             .component(
+                name("capture"),
                 sink.specification(id("capture"), json!({"path":path}))?,
                 sink,
             )
@@ -1076,7 +1211,7 @@ async fn control_and_configuration_progress_while_native_next_is_pending_and_can
                     control.cancel();
                 } else {
                     control
-                        .component_handle(&id("capture"))?
+                        .component_handle_by_id(&id("capture"))?
                         .control()?
                         .notify_upstream(ControlNotification::Custom {
                             kind: "drasi.counter.resume".into(),
@@ -1154,6 +1289,7 @@ async fn transaction(plugin: &[Arc<NativePlugin>], root: &Path) -> Result<Transa
         storage(root),
     )
     .await?;
+    value.initialize().await?;
     value.start().await?;
     Ok(value)
 }
@@ -1289,14 +1425,15 @@ struct FaultProvider {
 impl IndexBackendPlugin for FaultProvider {
     async fn create_indexes(
         &self,
-        query_id: &str,
+        query_id: &drasi_core_types::ComponentId,
     ) -> std::result::Result<CreatedIndexes, IndexError> {
-        self.create_scoped_indexes(query_id, query_id).await
+        self.create_scoped_indexes(&drasi_core_types::StorageScope::default(), query_id)
+            .await
     }
     async fn create_scoped_indexes(
         &self,
-        scope: &str,
-        query_id: &str,
+        scope: &drasi_core_types::StorageScope,
+        query_id: &drasi_core_types::ComponentId,
     ) -> std::result::Result<CreatedIndexes, IndexError> {
         let mut indexes = self.inner.create_scoped_indexes(scope, query_id).await?;
         indexes.set.element_index = Arc::new(FaultElements {
@@ -1408,6 +1545,7 @@ async fn fault_transaction(
         provider,
     )
     .await?;
+    subject.initialize().await?;
     subject.start().await?;
     Ok(subject)
 }
@@ -1563,7 +1701,7 @@ async fn restore_retained(recipe: &Value) -> Result<ResourceHandle> {
         kind: String,
         path: PathBuf,
         graph_id: String,
-        component_id: String,
+        component_id: ComponentId,
         key: String,
         capacity: NonZeroUsize,
         retention: RetentionPolicy,
@@ -1608,7 +1746,7 @@ async fn persistent_resource_recipe_and_native_transaction_configuration_roundtr
     let recipe =
         json!({"kind":"rocksdbIndexes","path":root,"enable_archive":false,"direct_io":false});
     let journal_recipe = json!({"kind":"indexedEnvelopeStore","path":journal_root,"graph_id":"native-transactions",
-        "component_id":"delivery","key":"delivery","capacity":8,"retention":"Backpressure",
+        "component_id":id("delivery"),"key":"delivery","capacity":8,"retention":"Backpressure",
         "schemas":[GraphChangeCodec::schema().descriptor()]});
     let specification =
         definition.specification(&registry, participants.clone(), indexes.clone())?;
@@ -1642,12 +1780,18 @@ async fn persistent_resource_recipe_and_native_transaction_configuration_roundtr
         })?
         .resource_configuration(retained.clone(), journal_recipe.clone())?
         .provide_resource(retained.clone(), restore_retained(&journal_recipe).await?)?
-        .source(Box::new(StableSource::new()?))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(StableSource::new()?),
+        )
         .component(
+            name("transaction"),
             specification,
             Arc::new(TransactionTransformerFactory::default()),
         )
         .component(
+            name("capture"),
             capture.specification(id("capture"), json!({"path":output_path,"append":true}))?,
             capture,
         )
@@ -1703,7 +1847,19 @@ async fn persistent_resource_recipe_and_native_transaction_configuration_roundtr
         restore_retained(&decoded.topology.resource_configurations[&retained]).await?,
     );
     bindings.components.insert(
-        "stable".into(),
+        match &decoded
+            .topology
+            .components
+            .iter()
+            .find(|component| component.descriptor.id() == &id("stable"))
+            .context("stable definition")?
+            .construction
+        {
+            ComponentConstruction::External { binding } => binding.clone(),
+            ComponentConstruction::Factory(_) => {
+                anyhow::bail!("stable source must remain externally bound")
+            }
+        },
         ConstructedComponent::source(Box::new(StableSource::new()?)),
     );
     let mut restored = decoded.topology.build(bindings)?;
@@ -1778,6 +1934,7 @@ async fn managed_qos_recipes_replay_real_native_records_and_isolate_instances() 
         id("counter"),
         json!({"stream":"counter/out","count":1,"start":7,"step":1,"interval_ms":1}),
     )?;
+    source.initialize().await?;
     source.start().await?;
     let envelope = source
         .next()

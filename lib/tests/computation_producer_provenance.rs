@@ -1,6 +1,9 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use std::{num::NonZeroUsize, sync::Arc};
 
 use bytes::Bytes;
@@ -29,14 +32,17 @@ fn change(id: &str, label: &str, value: i64) -> SourceChange {
 fn raw(emission: u64) -> ChangeEnvelope {
     GraphChangeCodec::encode_source_event(
         Arc::new(SourceEventWrapper {
-            source_id: "postgres".into(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-0000000002d8",
+            )
+            .expect("fixture UUID"),
             event: SourceEvent::Change(change("raw", "Raw", 1)),
             timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp"),
             sequence: 42,
             source_position: Some(Bytes::from_static(b"source-position")),
             profiling: None,
         }),
-        &ComponentId::try_new("postgres").expect("source"),
+        &fixture_support::component_id(728),
         StreamId::try_new("postgres/out").expect("stream"),
         emission,
         None,
@@ -44,14 +50,18 @@ fn raw(emission: u64) -> ChangeEnvelope {
     .expect("raw source event")
 }
 
-async fn query(id: &str, text: &str) -> anyhow::Result<ContinuousQueryTransformer> {
+async fn query(
+    id: ComponentId,
+    stream: StreamId,
+    text: &str,
+) -> anyhow::Result<ContinuousQueryTransformer> {
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "provenance-diamond".into(),
-            id: ComponentId::try_new(id)?,
+            id,
             query: text.into(),
             language: ComputationQueryLanguage::Cypher,
-            output_stream: StreamId::try_new(format!("{id}/out"))?,
+            output_stream: stream,
             outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
         },
         Arc::new(InMemoryComputationProvider),
@@ -79,9 +89,18 @@ async fn apply(
 async fn raw_and_derived_diamond_inputs_keep_distinct_progress_without_losing_provenance(
 ) -> anyhow::Result<()> {
     for marker in ["none", "immediate-volatile", "ancestor-volatile"] {
-        let mut upstream = query("upstream", "MATCH (n:Raw) RETURN n.value AS value").await?;
-        let mut downstream =
-            query("downstream", "MATCH (n:Derived) RETURN n.value AS value").await?;
+        let mut upstream = query(
+            fixture_support::component_id(45),
+            StreamId::try_new("upstream/out")?,
+            "MATCH (n:Raw) RETURN n.value AS value",
+        )
+        .await?;
+        let mut downstream = query(
+            fixture_support::component_id(46),
+            StreamId::try_new("downstream/out")?,
+            "MATCH (n:Derived) RETURN n.value AS value",
+        )
+        .await?;
         let source = raw(1);
         let provenance = GraphChangeCodec::source_metadata(&source)?;
         assert!(apply(&mut downstream, source.clone()).await?.is_empty());
@@ -92,7 +111,7 @@ async fn raw_and_derived_diamond_inputs_keep_distinct_progress_without_losing_pr
             let identity = GraphProducerIdentity::volatile(
                 "scope".into(),
                 "provenance-diamond".into(),
-                ComponentId::try_new("upstream")?,
+                fixture_support::component_id(45),
                 StreamId::try_new("upstream/out")?,
             )?;
             GraphProducerProgress::annotate(&mut cause, &identity, 1)?;
@@ -100,7 +119,7 @@ async fn raw_and_derived_diamond_inputs_keep_distinct_progress_without_losing_pr
         let identity = GraphProducerIdentity::volatile(
             "scope".into(),
             "provenance-diamond".into(),
-            ComponentId::try_new("derived")?,
+            fixture_support::component_id(729),
             StreamId::try_new("derived/out")?,
         )?;
         let mut first = None;

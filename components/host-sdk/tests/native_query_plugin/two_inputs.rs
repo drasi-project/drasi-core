@@ -77,7 +77,7 @@ impl Upstream {
         sequence: u64,
         gate: Option<Arc<SnapshotGate>>,
     ) -> Result<Self> {
-        let id = ComponentId::try_new(name)?;
+        let id = ComponentId::generate();
         let stream = StreamId::try_new(format!("{name}/data"))?;
         let producer = GraphProducerIdentity::volatile(
             "bootstrap-test".into(),
@@ -107,15 +107,18 @@ impl Upstream {
         let handle = fixture
             .core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::source(Box::new(SnapshotSource {
-                    descriptor: ComponentDescriptor::try_new(
-                        id.clone(),
-                        vec![port("data", PortDirection::Output)?],
-                    )?,
-                    snapshot: provider,
-                    events,
-                    emitted: Some(emitted),
-                })))
+                ComponentAddition::new(
+                    ComponentName::try_new(name)?,
+                    ConstructedComponent::source(Box::new(SnapshotSource {
+                        descriptor: ComponentDescriptor::try_new(
+                            id.clone(),
+                            vec![port("data", PortDirection::Output)?],
+                        )?,
+                        snapshot: provider,
+                        events,
+                        emitted: Some(emitted),
+                    })),
+                )
                 .auto_start(false)
                 .bind_stream(PortId::try_new("data")?, stream.clone()),
             )
@@ -175,15 +178,19 @@ struct TwoInputs {
 }
 
 impl TwoInputs {
-    fn configuration(reverse: bool) -> serde_json::Value {
+    fn configuration(
+        reverse: bool,
+        orders: &ComponentId,
+        customers: &ComponentId,
+    ) -> serde_json::Value {
         let mut outputs = vec![
-            json!({"component": "orders", "port": "data"}),
-            json!({"component": "customers", "port": "data"}),
+            json!({"component": orders, "port": "data"}),
+            json!({"component": customers, "port": "data"}),
         ];
         if reverse {
             outputs.reverse();
         }
-        json!({"query": QUERY, "volatile": true, "bootstrap": outputs})
+        json!({"query": QUERY, "volatile": true, "stream": "joined/out", "bootstrap": outputs})
     }
 
     async fn new(reverse: bool) -> Result<Self> {
@@ -199,17 +206,21 @@ impl TwoInputs {
         )
         .await?;
         let query = fixture.query_with_inputs(
-            "joined",
-            Self::configuration(reverse),
+            ComponentId::generate(),
+            Self::configuration(reverse, orders.handle.id(), customers.handle.id()),
             vec![orders.binding.clone(), customers.binding.clone()],
         )?;
         let reader = snapshot_reader(&query)?;
         let query = fixture
             .core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::transformer(Box::new(query)))
-                    .auto_start(false)
-                    .bind_stream(PortId::try_new("out")?, StreamId::try_new("joined/out")?),
+                ComponentAddition::new(
+                    drasi_lib::computation::v1::ComponentName::try_new("joined")
+                        .expect("fixture component name"),
+                    ConstructedComponent::transformer(Box::new(query)),
+                )
+                .auto_start(false)
+                .bind_stream(PortId::try_new("out")?, StreamId::try_new("joined/out")?),
             )
             .await?;
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -217,14 +228,18 @@ impl TwoInputs {
         let capture = fixture
             .core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new("joined-results")?,
-                        vec![port("in", PortDirection::Input)?],
-                    )?,
-                    received: received.clone(),
-                    notification: notification.clone(),
-                })))
+                ComponentAddition::new(
+                    drasi_lib::computation::v1::ComponentName::try_new("joined-results")
+                        .expect("fixture component name"),
+                    ConstructedComponent::sink(Box::new(Sink {
+                        descriptor: ComponentDescriptor::try_new(
+                            ComponentId::try_new("d4de56bf-4243-5537-a770-211e26517bd1")?,
+                            vec![port("in", PortDirection::Input)?],
+                        )?,
+                        received: received.clone(),
+                        notification: notification.clone(),
+                    })),
+                )
                 .auto_start(false),
             )
             .await?;
@@ -433,25 +448,32 @@ async fn bootstrap_list_requires_complete_unique_unambiguous_input_bindings() ->
         inputs.orders.binding.clone(),
         inputs.customers.binding.clone(),
     ];
+    let orders = inputs.orders.handle.id();
+    let customers = inputs.customers.handle.id();
+    let missing = ComponentId::generate();
     for bootstrap in [
         json!([]),
-        json!([{"component":"orders","port":"data"}]),
-        json!([{"component":"orders","port":"data"},{"component":"orders","port":"data"}]),
-        json!([{"component":"orders","port":"data"},{"component":"missing","port":"data"}]),
-        json!({"component":"orders","port":"data"}),
+        json!([{"component":orders,"port":"data"}]),
+        json!([{"component":orders,"port":"data"},{"component":orders,"port":"data"}]),
+        json!([{"component":orders,"port":"data"},{"component":missing,"port":"data"}]),
+        json!({"component":orders,"port":"data"}),
     ] {
-        let mut configuration = TwoInputs::configuration(false);
+        let mut configuration = TwoInputs::configuration(false, orders, customers);
         configuration["bootstrap"] = bootstrap;
         assert!(inputs
             .fixture
-            .query_with_inputs("invalid", configuration, bindings.clone())
+            .query_with_inputs(ComponentId::generate(), configuration, bindings.clone())
             .is_err());
     }
     let mut ambiguous = bindings;
     ambiguous[1].stream = ambiguous[0].stream.clone();
     assert!(inputs
         .fixture
-        .query_with_inputs("invalid", TwoInputs::configuration(false), ambiguous)
+        .query_with_inputs(
+            ComponentId::generate(),
+            TwoInputs::configuration(false, orders, customers),
+            ambiguous
+        )
         .is_err());
     inputs.fixture.core.shutdown().await?;
     Ok(())

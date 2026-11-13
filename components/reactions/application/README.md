@@ -74,19 +74,22 @@ initialized, not-yet-started instance with a native source named `source`:
 ```rust,ignore
 use drasi_lib::{Query, computation::v1::*};
 
+let application = ComponentId::try_new("f3575e54-d6d6-4b5c-90de-44858521dbe0")?;
+let query = ComponentId::derive_owned(&application, "q1")?;
+let source = drasi.component_by_name("source")?;
 let pipeline = drasi.computation_pipeline()?
     .native_source(Endpoint::new(
-        ComponentId::try_new("source")?,
+        source.id().clone(),
         PortId::try_new("out")?,
     ))?
     .query(Query::cypher("q1")
         .query("MATCH (p:Person) RETURN p.name AS name")
         .from_input("source")
         .enable_bootstrap(false)
-        .build())
+        .build()?
+        .with_assigned_id(query))
     .build()?;
-let report = drasi.add_components(pipeline).await?;
-anyhow::ensure!(report.committed, "{report:?}");
+drasi.add_components(pipeline).await?;
 ```
 
 Create the native reaction with `QueryChangeCodec::schema().descriptor().clone()`.

@@ -52,40 +52,33 @@ impl std::fmt::Debug for MySqlStoredProcReaction {
 
 impl MySqlStoredProcReaction {
     /// Create a builder for MySqlStoredProcReaction
-    pub fn builder(id: impl Into<String>) -> MySqlStoredProcReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> MySqlStoredProcReactionBuilder {
         MySqlStoredProcReactionBuilder::new(id)
     }
 
     /// Create a new MySQL stored procedure reaction
     pub async fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: MySqlStoredProcReactionConfig,
     ) -> Result<Self> {
-        Self::create_internal(id.into(), queries, config, None, true).await
+        Self::create_internal(id.clone(), queries, config, None, true).await
     }
 
     /// Create a new MySQL stored procedure reaction with custom priority queue capacity
     pub async fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: MySqlStoredProcReactionConfig,
         priority_queue_capacity: usize,
     ) -> Result<Self> {
-        Self::create_internal(
-            id.into(),
-            queries,
-            config,
-            Some(priority_queue_capacity),
-            true,
-        )
-        .await
+        Self::create_internal(id, queries, config, Some(priority_queue_capacity), true).await
     }
 
     /// Create from builder (internal method)
     pub(crate) async fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: MySqlStoredProcReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -95,8 +88,8 @@ impl MySqlStoredProcReaction {
 
     /// Internal constructor
     async fn create_internal(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: MySqlStoredProcReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -104,7 +97,7 @@ impl MySqlStoredProcReaction {
         // Validate configuration
         config.validate()?;
         // Reject route keys that don't match a subscribed query.
-        config.validate_routes(&queries)?;
+        config.validate_routes(&drasi_lib::reactions::common::input_aliases(&queries))?;
 
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -132,7 +125,7 @@ impl MySqlStoredProcReaction {
     /// Guide §11: `query_id`/`query_name`, `operation`, `timestamp`,
     /// `metadata`, and the operation-appropriate `before`/`after`/`data`.
     fn build_context(
-        query_id: &str,
+        emission: &drasi_lib::channels::QueryResult,
         operation: OperationType,
         timestamp: &str,
         metadata: &HashMap<String, Value>,
@@ -141,7 +134,7 @@ impl MySqlStoredProcReaction {
         data: Option<&Value>,
     ) -> Value {
         drasi_mysql_common::storedproc::build_context(
-            query_id,
+            emission,
             &operation.as_str().to_uppercase(),
             timestamp,
             metadata,
@@ -191,7 +184,7 @@ impl MySqlStoredProcReaction {
                             OperationType::Add,
                             "ADD",
                             Self::build_context(
-                                &query_result.query_id,
+                                query_result,
                                 OperationType::Add,
                                 &timestamp,
                                 &query_result.metadata,
@@ -209,7 +202,7 @@ impl MySqlStoredProcReaction {
                             OperationType::Update,
                             "UPDATE",
                             Self::build_context(
-                                &query_result.query_id,
+                                query_result,
                                 OperationType::Update,
                                 &timestamp,
                                 &query_result.metadata,
@@ -222,7 +215,7 @@ impl MySqlStoredProcReaction {
                             OperationType::Delete,
                             "DELETE",
                             Self::build_context(
-                                &query_result.query_id,
+                                query_result,
                                 OperationType::Delete,
                                 &timestamp,
                                 &query_result.metadata,
@@ -235,7 +228,7 @@ impl MySqlStoredProcReaction {
                             OperationType::Update,
                             "AGGREGATION",
                             Self::build_context(
-                                &query_result.query_id,
+                                query_result,
                                 OperationType::Update,
                                 &timestamp,
                                 &query_result.metadata,
@@ -248,8 +241,7 @@ impl MySqlStoredProcReaction {
                     };
 
                     // Resolve the command template for this query/operation.
-                    let Some(template) =
-                        config.resolve_command_template(&query_result.query_id, operation)
+                    let Some(template) = config.resolve_command_template(query_result, operation)
                     else {
                         debug!(
                             "[{reaction_id}] No command configured for {result_type} operation, skipping"
@@ -297,7 +289,7 @@ impl MySqlStoredProcReaction {
 
 #[async_trait]
 impl Reaction for MySqlStoredProcReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -346,7 +338,7 @@ impl Reaction for MySqlStoredProcReaction {
         self.base.properties_or_serialize(&dto)
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -354,8 +346,8 @@ impl Reaction for MySqlStoredProcReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -443,8 +435,8 @@ impl Reaction for MySqlStoredProcReaction {
 
 /// Builder for MySqlStoredProcReaction
 pub struct MySqlStoredProcReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     config: MySqlStoredProcReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
@@ -452,9 +444,9 @@ pub struct MySqlStoredProcReactionBuilder {
 
 impl MySqlStoredProcReactionBuilder {
     /// Create a new builder with the given reaction ID
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             config: MySqlStoredProcReactionConfig::default(),
             priority_queue_capacity: None,
@@ -543,21 +535,57 @@ impl MySqlStoredProcReactionBuilder {
         self
     }
 
-    /// Add a query to subscribe to
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
         self
     }
 
-    /// Add a query to subscribe to (alias for [`with_query`](Self::with_query)).
-    pub fn from_query(self, query_id: impl Into<String>) -> Self {
-        self.with_query(query_id)
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
+        self
     }
 
-    /// Set all queries to subscribe to
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Add a query input by its current name.
+    pub fn from_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
         self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn from_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
+        self
+    }
+
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
+        self
+    }
+
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
     }
 
     /// Set the command timeout in milliseconds
@@ -635,12 +663,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_recovery_trait_defaults() {
-        let reaction = MySqlStoredProcReaction::builder("test-mysql")
-            .with_connection("localhost", 3306, "testdb", "testuser", "testpass")
-            .with_stored_procedure("test_proc")
-            .build()
-            .await
-            .unwrap();
+        let reaction = MySqlStoredProcReaction::builder(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000016c")
+                .expect("fixture UUID"),
+        )
+        .with_connection("localhost", 3306, "testdb", "testuser", "testpass")
+        .with_stored_procedure("test_proc")
+        .build()
+        .await
+        .unwrap();
 
         assert!(!reaction.is_durable());
         assert!(!reaction.needs_snapshot_on_fresh_start());

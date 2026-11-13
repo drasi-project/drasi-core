@@ -24,6 +24,8 @@ use tokio::sync::oneshot;
 
 use super::super::ProcessingBinding;
 
+const PROCESSOR: &str = "284677c6-f7b2-5605-85ac-6843dce04152";
+
 struct Clock(AtomicU64);
 impl PhysicalClock for Clock {
     fn now(&self) -> anyhow::Result<u64> {
@@ -42,7 +44,8 @@ fn binding(path: &Path, clock: Arc<Clock>) -> anyhow::Result<ProcessingBinding> 
             ),
         )),
         "scheduled-contract".into(),
-        "processor".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
     )
     .with_committed_input_progress(Some(PortId::try_new("in")?))?
     .with_scheduling(true, Some(clock))
@@ -287,7 +290,8 @@ async fn scheduled_service_rejects_unnegotiated_requests_and_volatile_storage() 
     let memory = ProcessingBinding::new(
         Arc::new(InMemoryComputationProvider),
         "graph".into(),
-        "processor".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
     )
     .with_committed_input_progress(Some(PortId::try_new("in")?))?
     .with_scheduling(true, None);
@@ -307,7 +311,8 @@ async fn scheduled_service_rejects_unnegotiated_requests_and_volatile_storage() 
             ),
         )),
         "unnegotiated".into(),
-        "processor".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
     );
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
     assert!(service.scheduling().is_none());

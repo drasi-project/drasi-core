@@ -17,8 +17,9 @@ impl Child {
             graph_id: graph.core.output_catalogue()?.graph_id().to_string(),
             generation: 1,
         };
-        let mut query = factory()?.create_component_with_processing(ComponentId::try_new("downstream")?,
-            json!({"query":"MATCH (n) RETURN sum(n.total) AS total", "bootstrap":true, "recovery":"auto_reset"}),
+        let mut query = factory()?.create_component_with_processing(ComponentId::try_new("8badba5d-be28-5339-a4de-413fc739c325")?,
+            json!({"query":"MATCH (n) RETURN sum(n.total) AS total", "bootstrap":true, "recovery":"auto_reset",
+                "stream":"downstream/out"}),
             scope, provider(path)?)?;
         let progress = query
             .processing_progress_owner()
@@ -36,12 +37,16 @@ impl Child {
         let handle = graph
             .core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::transformer(Box::new(query)))
-                    .auto_start(false)
-                    .bind_stream(
-                        PortId::try_new("out")?,
-                        StreamId::try_new("downstream/out")?,
-                    ),
+                ComponentAddition::new(
+                    drasi_lib::computation::v1::ComponentName::try_new("downstream")
+                        .expect("fixture component name"),
+                    ConstructedComponent::transformer(Box::new(query)),
+                )
+                .auto_start(false)
+                .bind_stream(
+                    PortId::try_new("out")?,
+                    StreamId::try_new("downstream/out")?,
+                ),
             )
             .await?;
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -49,14 +54,18 @@ impl Child {
         let sink = graph
             .core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new("child-results")?,
-                        vec![port_descriptor("in", PortDirection::Input)?],
-                    )?,
-                    received: received.clone(),
-                    notification: changed.clone(),
-                })))
+                ComponentAddition::new(
+                    drasi_lib::computation::v1::ComponentName::try_new("downstream-results")
+                        .expect("fixture component name"),
+                    ConstructedComponent::sink(Box::new(Sink {
+                        descriptor: ComponentDescriptor::try_new(
+                            ComponentId::try_new("6f9b567b-37a1-5cf5-ba29-fa86ef698e32")?,
+                            vec![port_descriptor("in", PortDirection::Input)?],
+                        )?,
+                        received: received.clone(),
+                        notification: changed.clone(),
+                    })),
+                )
                 .auto_start(false),
             )
             .await?;

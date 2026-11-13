@@ -234,20 +234,20 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         log::info!(
-            "[{id}] Creating MCP reaction (queries: {query_ids:?}, auto_start: {auto_start})"
+            "[{id}] Creating MCP reaction (query inputs: {query_inputs:?}, auto_start: {auto_start})"
         );
 
         let dto: McpReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let mut builder = McpReactionBuilder::new(id)
-            .with_queries(query_ids)
+        let mut builder = McpReactionBuilder::new(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start);
 
         if let Some(ref host) = dto.host {

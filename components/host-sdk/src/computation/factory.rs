@@ -31,12 +31,15 @@ pub(crate) fn runtime_configuration_schema(
                             ConfigType::Boolean => ConfigurationType::Boolean,
                             ConfigType::Integer => ConfigurationType::Integer,
                             ConfigType::String => ConfigurationType::String,
+                            ConfigType::ComponentId => ConfigurationType::ComponentId,
+                            ConfigType::ComponentName => ConfigurationType::ComponentName,
                             ConfigType::Object => ConfigurationType::Object,
                             ConfigType::Array => ConfigurationType::Array,
                             ConfigType::Json => ConfigurationType::Json,
                         },
                         required: field.required,
                         secret: field.secret,
+                        constraint: field.constraint.clone(),
                     },
                 )
             })
@@ -87,6 +90,14 @@ pub struct NativeFactory {
 }
 unsafe impl Send for NativeFactory {}
 unsafe impl Sync for NativeFactory {}
+
+#[derive(Default)]
+pub(super) struct ProcessingCreation {
+    pub(super) owner: Option<Arc<QuerySourceProgress>>,
+    pub(super) replacement: bool,
+    pub(super) update_directive: Option<wire::UpdateDirective>,
+}
+
 impl NativeFactory {
     pub(super) unsafe fn new(
         metadata: FactoryMetadata,
@@ -99,7 +110,10 @@ impl NativeFactory {
     ) -> anyhow::Result<Self> {
         let table = unsafe { checked_table(raw.vtable)? };
         anyhow::ensure!(
-            !raw.state.is_null() && table.create.is_some() && table.release.is_some(),
+            !raw.state.is_null()
+                && table.create.is_some()
+                && table.plan_update.is_some()
+                && table.release.is_some(),
             "incomplete native factory table"
         );
         let mut descriptor = runtime_descriptor(&metadata);
@@ -179,6 +193,53 @@ impl NativeFactory {
     pub fn metadata(&self) -> &FactoryMetadata {
         &self.metadata
     }
+
+    /// Ask the actual plugin factory to assess a change without constructing or
+    /// mutating an instance. A plan does not authorize discarding retained work.
+    pub fn plan_update_request(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::UpdateRequest,
+    ) -> anyhow::Result<drasi_computation_contracts::ComponentUpdatePlan> {
+        anyhow::ensure!(
+            !self.metadata.capabilities.update_modes.is_empty(),
+            "native factory does not support managed updates"
+        );
+        anyhow::ensure!(
+            request.current.id == request.proposed.id,
+            "an update cannot change the component UUID"
+        );
+        anyhow::ensure!(
+            request.proposed.implementation == self.metadata.implementation
+                && request.proposed.configuration_version == self.metadata.configuration_version,
+            "native update targets a different factory or configuration version"
+        );
+        self.validate_configuration(&request.proposed.configuration)?;
+        let payload = serde_json::to_vec(request)?;
+        anyhow::ensure!(
+            payload.len() <= abi::MAX_MESSAGE_BYTES,
+            "native update request exceeds size limit"
+        );
+        let table = unsafe { checked_table(self.raw.vtable)? };
+        let response = unsafe {
+            drasi_computation_plugin_sdk::transport::take_reply(table
+                .plan_update
+                .expect("validated factory planner")(
+                self.raw.state,
+                abi::BorrowedBytes::new(&payload),
+            ))?
+        };
+        anyhow::ensure!(
+            response.len() <= abi::MAX_MESSAGE_BYTES,
+            "native update plan exceeds size limit"
+        );
+        let plan: drasi_computation_contracts::ComponentUpdatePlan =
+            serde_json::from_slice(&response)?;
+        anyhow::ensure!(
+            self.metadata.capabilities.update_modes.contains(&plan.mode),
+            "native factory returned an undeclared update mode"
+        );
+        Ok(plan)
+    }
     pub(super) fn with_activation_credentials(
         mut self,
         extension: Option<abi::activation_credentials::PluginActivationCredentialsV1>,
@@ -236,6 +297,7 @@ impl NativeFactory {
                 configuration,
                 scope: None,
                 activation_credentials_bound: false,
+                update_directive: None,
             },
             None,
             None,
@@ -332,6 +394,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs: Vec::new(),
                 activation_credentials_bound: identity.is_some(),
+                update_directive: None,
                 id,
                 configuration,
                 scope: Some(scope),
@@ -496,27 +559,37 @@ impl NativeFactory {
         options: DeliveryOptions,
         inputs: Vec<InputBinding>,
     ) -> anyhow::Result<super::NativeConsumerProxy> {
-        let (mode, extension) = self
-            .consumer
-            .ok_or_else(|| anyhow::anyhow!("native factory has no consumer service"))?;
-        let component = self.construct_bound(
+        self.create_consumer_request(
             CreateRequest {
                 inputs,
                 activation_credentials_bound: false,
+                update_directive: None,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
                 configuration,
-                scope: Some(scope.clone()),
+                scope: Some(scope),
             },
-            None,
-            None,
-            true,
-            None,
-            None,
-            None,
-            None,
-        )?;
+            provider,
+            options,
+        )
+        .await
+    }
+
+    async fn create_consumer_request(
+        &self,
+        request: CreateRequest,
+        provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>,
+        options: DeliveryOptions,
+    ) -> anyhow::Result<super::NativeConsumerProxy> {
+        let scope = request
+            .scope
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("native consumer requires its construction scope"))?;
+        let (mode, extension) = self
+            .consumer
+            .ok_or_else(|| anyhow::anyhow!("native factory has no consumer service"))?;
+        let component = self.construct_bound(request, None, None, true, None, None, None, None)?;
         let response = unsafe {
             drasi_computation_plugin_sdk::transport::take_reply(extension
                 .inspect
@@ -553,6 +626,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs: Vec::new(),
                 activation_credentials_bound: false,
+                update_directive: None,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -604,7 +678,16 @@ impl NativeFactory {
         publication: drasi_lib::computation::v1::QueryPublicationMode,
     ) -> anyhow::Result<NativeComponentProxy> {
         let resource = super::NativeProcessingResource::new(provider).with_publication(publication);
-        self.create_processing_component(id, configuration, scope, &resource, owner)
+        self.create_processing_component(
+            id,
+            configuration,
+            scope,
+            &resource,
+            ProcessingCreation {
+                owner,
+                ..Default::default()
+            },
+        )
     }
 
     /// Construct with the same processing resource used by graph factory wiring,
@@ -616,30 +699,37 @@ impl NativeFactory {
         scope: Scope,
         resource: &super::NativeProcessingResource,
     ) -> anyhow::Result<NativeComponentProxy> {
-        self.create_processing_component(id, configuration, scope, resource, None)
+        self.create_processing_component(
+            id,
+            configuration,
+            scope,
+            resource,
+            ProcessingCreation::default(),
+        )
     }
 
-    fn create_processing_component(
+    pub(super) fn create_processing_component(
         &self,
         id: ComponentId,
         configuration: serde_json::Value,
         scope: Scope,
         resource: &super::NativeProcessingResource,
-        owner: Option<Arc<QuerySourceProgress>>,
+        creation: ProcessingCreation,
     ) -> anyhow::Result<NativeComponentProxy> {
         let processing = super::processing::ProcessingBinding::new(
             resource.provider().clone(),
             scope.graph_id.clone(),
-            id.to_string(),
+            id.clone(),
         )
         .with_volatile_processing(self.metadata.capabilities.volatile_processing)
+        .with_replacement(creation.replacement)
         .with_publication(
             resource.publication(),
             self.metadata.capabilities.non_atomic_publication,
         )?
         .with_committed_input_progress_owner(
             self.metadata.capabilities.committed_input_progress.clone(),
-            owner,
+            creation.owner,
         )?
         .with_durable_output(
             self.metadata.capabilities.durable_output,
@@ -653,6 +743,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs: Vec::new(),
                 activation_credentials_bound: false,
+                update_directive: creation.update_directive,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -682,6 +773,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs: Vec::new(),
                 activation_credentials_bound: false,
+                update_directive: None,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -708,6 +800,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs,
                 activation_credentials_bound: false,
+                update_directive: None,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -732,6 +825,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs,
                 activation_credentials_bound: false,
+                update_directive: None,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -762,6 +856,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs: Vec::new(),
                 activation_credentials_bound: false,
+                update_directive: None,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -794,6 +889,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs: Vec::new(),
                 activation_credentials_bound: false,
+                update_directive: None,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -824,6 +920,7 @@ impl NativeFactory {
             CreateRequest {
                 inputs: Vec::new(),
                 activation_credentials_bound: false,
+                update_directive: None,
                 id,
                 implementation: self.metadata.implementation.clone(),
                 configuration_version: self.metadata.configuration_version,
@@ -874,7 +971,7 @@ impl NativeFactory {
 
     fn construct(
         &self,
-        request: CreateRequest,
+        mut request: CreateRequest,
         admission: Option<Arc<SourceAdmission>>,
         progress: Option<Arc<QuerySourceProgress>>,
     ) -> anyhow::Result<NativeComponentProxy> {
@@ -999,13 +1096,8 @@ impl NativeFactory {
                 Ok((resource, endpoint))
             })
             .transpose()?;
-        let bytes = if activation_identity.is_some() {
-            drasi_computation_plugin_sdk::activation_credentials::encode_bound_create_request(
-                &request,
-            )?
-        } else {
-            wire::encode(&request)?
-        };
+        request.activation_credentials_bound = activation_identity.is_some();
+        let bytes = wire::encode_create_request(&request)?;
         let table = unsafe { &*self.raw.vtable };
         let mut component = abi::ComponentHandle::null();
         let output_snapshots = output_snapshots
@@ -1150,7 +1242,7 @@ impl NativeFactory {
             NativeComponentProxy::new(
                 component,
                 self.metadata.for_configuration(&request.configuration)?,
-                &request.id,
+                &request,
                 self.codec.clone(),
                 self.schemas.clone(),
                 self._plugin.clone(),
@@ -1167,7 +1259,6 @@ impl NativeFactory {
             None => Ok(component),
         }?;
         component
-            .with_scope(request.scope.clone())
             .with_identity(activation_identity)
             .with_processing(processing)
             .with_output_snapshots(output_snapshots)
@@ -1205,6 +1296,40 @@ impl ComponentFactory for NativeFactory {
     fn record_schemas(&self) -> Vec<Arc<Schema>> {
         self.schemas.clone()
     }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        self.validate(proposed)?;
+        anyhow::ensure!(
+            !self.metadata.capabilities.binds_inputs,
+            "native update planning requires the factory's actual input bindings"
+        );
+        anyhow::ensure!(
+            current.descriptor == proposed.descriptor
+                && current.role == proposed.role
+                && current.completion == proposed.completion
+                && current.dependencies == proposed.dependencies,
+            "native configuration updates cannot change ports, role or resource bindings"
+        );
+        let request = |specification: &ComponentSpecification| -> anyhow::Result<CreateRequest> {
+            Ok(CreateRequest {
+                id: specification.descriptor.id().clone(),
+                implementation: specification.implementation.clone(),
+                configuration_version: specification.configuration_version,
+                configuration: literal_configuration(specification)?,
+                scope: None,
+                inputs: Vec::new(),
+                activation_credentials_bound: false,
+                update_directive: None,
+            })
+        };
+        self.plan_update_request(&wire::UpdateRequest {
+            current: request(current)?,
+            proposed: request(proposed)?,
+        })
+    }
     fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()> {
         anyhow::ensure!(
             specification.implementation == self.metadata.implementation
@@ -1224,6 +1349,7 @@ impl ComponentFactory for NativeFactory {
                         "consumer_progress" => {
                             self.consumer_progress.is_some() && resources.len() == 1
                         }
+
                         "consumer" => self.consumer.is_some() && resources.len() == 1,
                         "output_snapshots" => self.output_snapshots.is_some(),
                         "identity" => {
@@ -1350,6 +1476,7 @@ impl ComponentFactory for NativeFactory {
     ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
         self.validate(&context.specification)
             .map_err(ComponentCreationError::terminal)?;
+        let directive = context.update_directive().map(update_directive);
         if self.consumer.is_some() {
             let resource = context
                 .resources::<super::NativeConsumerResource>("consumer")
@@ -1373,17 +1500,23 @@ impl ComponentFactory for NativeFactory {
                 Vec::new()
             };
             let proxy = self
-                .create_consumer_with_inputs(
-                    context.component_id,
-                    configuration,
-                    Scope {
-                        instance_id: context.instance_id.to_string(),
-                        graph_id: context.graph_id.to_string(),
-                        generation: context.generation.0,
+                .create_consumer_request(
+                    CreateRequest {
+                        id: context.component_id,
+                        implementation: context.specification.implementation.clone(),
+                        configuration_version: context.specification.configuration_version,
+                        configuration,
+                        inputs,
+                        activation_credentials_bound: false,
+                        update_directive: directive,
+                        scope: Some(Scope {
+                            instance_id: context.instance_id.to_string(),
+                            graph_id: context.graph_id.to_string(),
+                            generation: context.generation.0,
+                        }),
                     },
                     resource.provider.clone(),
                     resource.options.clone(),
-                    inputs,
                 )
                 .await
                 .map_err(ComponentCreationError::terminal)?;
@@ -1526,9 +1659,10 @@ impl ComponentFactory for NativeFactory {
                 super::processing::ProcessingBinding::new(
                     resource.provider().clone(),
                     context.graph_id.to_string(),
-                    context.component_id.to_string(),
+                    context.component_id.clone(),
                 )
                 .with_volatile_processing(self.metadata.capabilities.volatile_processing)
+                .with_replacement(context.is_replacement() && context.update_directive().is_none())
                 .with_publication(
                     resource.publication(),
                     self.metadata.capabilities.non_atomic_publication,
@@ -1590,6 +1724,7 @@ impl ComponentFactory for NativeFactory {
                         Vec::new()
                     },
                     activation_credentials_bound: false,
+                    update_directive: directive,
                     id: context.component_id,
                     implementation: context.specification.implementation.clone(),
                     configuration_version: context.specification.configuration_version,
@@ -1642,6 +1777,31 @@ impl ComponentFactory for NativeFactory {
             ComponentRole::Sink => ConstructedComponent::sink(Box::new(proxy)),
             ComponentRole::Service => ConstructedComponent::service(Box::new(proxy)),
         })
+    }
+}
+
+pub(super) fn literal_configuration(
+    specification: &ComponentSpecification,
+) -> anyhow::Result<serde_json::Value> {
+    specification
+        .configuration
+        .iter()
+        .map(|(name, value)| {
+            let ConfigurationValue::Literal(value) = value else {
+                anyhow::bail!(
+                    "native update assessment requires literal configuration; unresolved references cannot be assessed"
+                );
+            };
+            Ok((name.to_string(), value.clone()))
+        })
+        .collect::<anyhow::Result<serde_json::Map<_, _>>>()
+        .map(serde_json::Value::Object)
+}
+
+pub(super) fn update_directive(directive: &ComponentUpdateDirective) -> wire::UpdateDirective {
+    wire::UpdateDirective {
+        operation_id: directive.operation_id.to_string(),
+        plan: directive.plan,
     }
 }
 

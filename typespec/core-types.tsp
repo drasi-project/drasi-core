@@ -281,7 +281,7 @@ union SerializedElement {
 model ElementPropertyMap is Record<ElementValue>;
 
 /**
- * Reference to a graph element by source and element ID.
+ * Reference to a graph element by data namespace and element ID.
  *
  * Uniquely identifies an element across all sources in the system.
  *
@@ -289,10 +289,10 @@ model ElementPropertyMap is Record<ElementValue>;
  */
 @jsonSchema
 model ElementReference {
-  /** ID of the source that owns this element */
-  source_id: string;
+  /** Data namespace, independent of component IDs and component names */
+  namespace: string;
 
-  /** Unique ID of the element within the source */
+  /** Unique ID of the element within the data namespace */
   element_id: string;
 }
 

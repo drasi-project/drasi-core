@@ -55,8 +55,8 @@ fn register_json_helper(handlebars: &mut handlebars::Handlebars) {
 
 /// Builder for MCP reaction.
 pub struct McpReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     host: String,
     port: u16,
     bearer_token: Option<String>,
@@ -69,10 +69,10 @@ pub struct McpReactionBuilder {
 
 impl McpReactionBuilder {
     /// Create a new MCP reaction builder with the given ID.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         let defaults = McpReactionConfig::default();
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             host: defaults.host,
             port: defaults.port,
@@ -85,15 +85,42 @@ impl McpReactionBuilder {
         }
     }
 
-    /// Set the query IDs to subscribe to.
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
         self
     }
 
-    /// Add a query ID to subscribe to.
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
+    }
+
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
+        self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
     }
 
@@ -191,13 +218,23 @@ mod tests {
             routes: HashMap::new(),
         };
 
-        let reaction = McpReaction::builder("test-reaction")
-            .with_queries(vec!["query1".to_string()])
-            .with_config(config)
-            .build()
-            .unwrap();
+        let reaction = McpReaction::builder(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+        )
+        .with_queries_by_name(vec![
+            drasi_lib::ComponentName::try_new("query1").expect("fixture component name")
+        ])
+        .with_config(config)
+        .build()
+        .unwrap();
 
-        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+        assert_eq!(
+            reaction.query_inputs(),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_lib::ComponentName::try_new("query1").unwrap(),
+            )]
+        );
         assert_eq!(reaction.config().port, 4242);
         assert_eq!(reaction.config().host, "127.0.0.1");
         assert_eq!(reaction.config().bearer_token.as_deref(), Some("token"));
@@ -206,15 +243,20 @@ mod tests {
 
     #[test]
     fn test_builder_fallback_produces_camel_case() {
-        let reaction = McpReactionBuilder::new("mcp-fallback")
-            .with_host("127.0.0.1")
-            .with_port(9090)
-            .with_bearer_token("secret-token")
-            .with_max_sessions(50)
-            .with_session_channel_capacity(512)
-            .with_queries(vec!["q1".to_string()])
-            .build()
-            .unwrap();
+        let reaction = McpReactionBuilder::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000057")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(9090)
+        .with_bearer_token("secret-token")
+        .with_max_sessions(50)
+        .with_session_channel_capacity(512)
+        .with_queries_by_name(vec![
+            drasi_lib::ComponentName::try_new("q1").expect("fixture component name")
+        ])
+        .build()
+        .unwrap();
 
         let props = reaction.properties();
 

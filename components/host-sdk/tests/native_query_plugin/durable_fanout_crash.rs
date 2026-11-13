@@ -70,7 +70,7 @@ async fn partial_fanout() -> Result<()> {
     );
     let owner = ComputationTransaction::try_new(
         provider(&root.join("query"))?
-            .create_indexes(GRAPH, COMPONENT)
+            .create_indexes(GRAPH, &component_id()?)
             .await?,
     )?;
     let bindings = OutputBindings::load(
@@ -78,7 +78,7 @@ async fn partial_fanout() -> Result<()> {
             .resources()
             .checkpoint_store()
             .expect("actual checkpoint store")
-            .read_checkpoint(OUTPUT_BINDINGS_CHECKPOINT)
+            .read_checkpoint(&metadata_checkpoint(OUTPUT_BINDINGS_CHECKPOINT))
             .await?
             .as_ref(),
     )?;
@@ -86,6 +86,7 @@ async fn partial_fanout() -> Result<()> {
     owner.shutdown().await?;
     drop(owner);
     let mut pending = create(&root.join("query"), QUERY, 2)?;
+    pending.initialize().await?;
     pending.start().await?;
     assert!(
         pending
@@ -131,6 +132,7 @@ async fn partial_fanout() -> Result<()> {
     stopped?;
     drop(recovered);
     let mut confirmed = create(&root.join("query"), QUERY, 3)?;
+    confirmed.initialize().await?;
     confirmed.start().await?;
     confirmed
         .bind_output_destinations(&OutputBindings::default())

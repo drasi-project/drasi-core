@@ -44,6 +44,8 @@ use std::{
 use tokio::sync::mpsc;
 
 const GRAPH: &str = "native-input-crash";
+const INPUT_ID: &str = "36bbff64-a43d-5834-93f0-396c286c5ee9";
+const PROCESSOR_ID: &str = "c9bf8e0e-d052-578e-a23d-c3b99fa9aacd";
 const WORKER: &str = "native_input_crash_worker";
 const TOTAL: u64 = 12;
 const PREFIX: u64 = 3;
@@ -53,11 +55,8 @@ fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("nonzero fixture capacity")
 }
 
-fn endpoint(component: &str, port: &str) -> Result<Endpoint> {
-    Ok(Endpoint::new(
-        ComponentId::try_new(component)?,
-        PortId::try_new(port)?,
-    ))
+fn endpoint(component: &ComponentId, port: &str) -> Result<Endpoint> {
+    Ok(Endpoint::new(component.clone(), PortId::try_new(port)?))
 }
 
 fn codec() -> Result<EnvelopeCodec> {
@@ -129,8 +128,12 @@ struct ArmingOutbox {
 }
 
 impl ArmingOutbox {
-    fn arm(&self, key: &str, sequence: u64) {
-        if key == "query" && sequence == PREFIX + 1 {
+    fn arm(&self, key: &drasi_core::interface::OutputPartition, sequence: u64) {
+        let query_id = drasi_core::ComponentId::try_new("9b47ad15-fa80-57d2-bfbf-891f9710a675")
+            .expect("fixture UUID");
+        if key == &drasi_core::interface::OutputPartition::Component(query_id)
+            && sequence == PREFIX + 1
+        {
             self.fault.mode.store(self.mode, Ordering::SeqCst);
         }
     }
@@ -138,14 +141,19 @@ impl ArmingOutbox {
 
 #[async_trait]
 impl OutboxWriter for ArmingOutbox {
-    async fn append(&self, key: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
         self.inner.append(key, sequence, data).await?;
         self.arm(key, sequence);
         Ok(())
     }
     async fn append_and_trim(
         &self,
-        key: &str,
+        key: &drasi_core::interface::OutputPartition,
         sequence: u64,
         data: &[u8],
         floor: u64,
@@ -157,27 +165,42 @@ impl OutboxWriter for ArmingOutbox {
         self.arm(key, sequence);
         Ok(result)
     }
-    async fn read_from(&self, key: &str, after: u64) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_from(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        after: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.inner.read_from(key, after).await
     }
     async fn read_page(
         &self,
-        key: &str,
+        key: &drasi_core::interface::OutputPartition,
         after: u64,
         limits: OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.inner.read_page(key, after, limits).await
     }
-    async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_latest_sequence(key).await
     }
-    async fn trim_before(&self, key: &str, floor: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        floor: u64,
+    ) -> Result<usize, IndexError> {
         self.inner.trim_before(key, floor).await
     }
-    async fn trim_to_capacity(&self, key: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
         self.inner.trim_to_capacity(key, capacity).await
     }
-    async fn clear(&self, key: &str) -> Result<(), IndexError> {
+    async fn clear(&self, key: &drasi_core::interface::OutputPartition) -> Result<(), IndexError> {
         self.inner.clear(key).await
     }
 }
@@ -193,7 +216,7 @@ impl ComputationIndexProvider for QueryProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        id: &str,
+        id: &drasi_core::ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         let original = FaultProvider {
             inner: self.inner.clone(),
@@ -403,7 +426,7 @@ impl QueryInput {
             let progress =
                 GraphProducerProgress::from_envelope(&envelope)?.context("processor identity")?;
             assert_eq!(progress.sequence(), sequence);
-            assert_eq!(progress.identity().component_id().as_str(), "processor");
+            assert_eq!(progress.identity().component_id().as_str(), PROCESSOR_ID);
             assert_eq!(progress.identity().stream().as_str(), "processor/out");
             assert!(progress.identity().persistent());
             if let Some(identity) = &identity {
@@ -435,6 +458,9 @@ async fn fixture(
     profile: Profile,
     paged: bool,
 ) -> Result<Fixture> {
+    let input_id = ComponentId::try_new(INPUT_ID)?;
+    let query_id = ComponentId::try_new("9b47ad15-fa80-57d2-bfbf-891f9710a675")?;
+    let capture_id = ComponentId::try_new("af9cd036-12b2-5134-bc41-0aba8131163e")?;
     let input_provider = FaultProvider {
         inner: provider(&path.join("input")),
         fault: input_fault,
@@ -463,7 +489,11 @@ async fn fixture(
             ]),
         },
         input_provider
-            .create_indexes(GRAPH, "input-journal")
+            .create_indexes(
+                GRAPH,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000132")
+                    .expect("fixture UUID"),
+            )
             .await?,
         codec()?,
         "application",
@@ -471,7 +501,7 @@ async fn fixture(
             recovery: Some(QosRecoveryOptions::Admission(AdmissionOptions {
                 construction_scope: GRAPH.into(),
                 graph_id: GRAPH.into(),
-                component_id: ComponentId::try_new("input")?,
+                component_id: input_id.clone(),
                 failure_scope: FailureMode::ProcessRestart,
                 max_producers: size(2),
                 receipts_per_producer: size(TOTAL as usize),
@@ -482,15 +512,12 @@ async fn fixture(
     )
     .await?;
     let admission = SourceAdmission::new(journal.clone(), PortId::try_new("out")?).await?;
-    let source = NativeApplicationSource::durable("input", admission.clone())?;
-    let progress = Arc::new(QuerySourceProgress::new(
-        GRAPH,
-        ComponentId::try_new("query")?,
-    )?);
+    let source = NativeApplicationSource::durable(input_id.clone(), admission.clone())?;
+    let progress = Arc::new(QuerySourceProgress::new(GRAPH, query_id.clone())?);
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: GRAPH.into(),
-            id: ComponentId::try_new("query")?,
+            id: query_id.clone(),
             query: "MATCH (n:Item) RETURN n.id AS id, n.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -517,33 +544,45 @@ async fn fixture(
             binding: "native-input".into(),
         })?
         .provide_resource(journal_resource.clone(), journal.resource())?
-        .source(Box::new(source))
-        .transformer(Box::new(query))
-        .sink(Box::new(Capture {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("capture")?,
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?,
-            seen: sender,
-            file: OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path.join("outputs.jsonl"))?,
-        }))
-        .bind_stream(endpoint("input", "out")?, StreamId::try_new("input/out")?)
-        .bind_stream(endpoint("query", "out")?, StreamId::try_new("query/out")?)
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(source),
+        )
+        .transformer(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                .expect("fixture component name"),
+            Box::new(query),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(Capture {
+                descriptor: ComponentDescriptor::try_new(
+                    capture_id.clone(),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?,
+                seen: sender,
+                file: OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path.join("outputs.jsonl"))?,
+            }),
+        )
+        .bind_stream(endpoint(&input_id, "out")?, StreamId::try_new("input/out")?)
+        .bind_stream(endpoint(&query_id, "out")?, StreamId::try_new("query/out")?)
         .connect(
-            EdgeDefinition::new(endpoint("query", "out")?, endpoint("capture", "in")?),
+            EdgeDefinition::new(endpoint(&query_id, "out")?, endpoint(&capture_id, "in")?),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         );
     let (query_input, shared) = if profile == Profile::Admission {
         builder = builder.connect(
-            EdgeDefinition::new(endpoint("input", "out")?, endpoint("query", "in")?),
+            EdgeDefinition::new(endpoint(&input_id, "out")?, endpoint(&query_id, "in")?),
             Box::new(journal.definition().pipe(journal_resource, "query")),
         );
         (QueryInput::Qos(journal.clone(), None), None)
@@ -551,18 +590,23 @@ async fn fixture(
         let storage = ResourceId::try_new("processor-storage")?;
         let registry = ResourceId::try_new("middleware-registry")?;
         let definition = MiddlewareTransformerDefinition {
-            id: ComponentId::try_new("processor")?,
+            id: ComponentId::try_new(PROCESSOR_ID)?,
             output_stream: StreamId::try_new("processor/out")?,
             middleware: vec![],
             pipeline: vec![],
         };
+        let processor_id = definition.id.clone();
         let processor_provider = provider(&path.join("processor"));
         let group = if profile == Profile::Shared {
             Some(SharedStorageGroup::new(
                 GRAPH,
-                ComponentId::try_new("processor")?,
+                processor_id.clone(),
                 processor_provider
-                    .create_indexes(GRAPH, "processor")
+                    .create_indexes(
+                        GRAPH,
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000133")
+                            .expect("fixture UUID"),
+                    )
                     .await?,
             )?)
         } else {
@@ -599,6 +643,7 @@ async fn fixture(
                 ),
             )?
             .component(
+                ComponentName::try_new("processor")?,
                 definition.durable_specification(
                     registry,
                     storage.clone(),
@@ -610,11 +655,11 @@ async fn fixture(
                 Arc::new(MiddlewareTransformerFactory::default()),
             )
             .bind_stream(
-                endpoint("processor", "out")?,
+                endpoint(&processor_id, "out")?,
                 StreamId::try_new("processor/out")?,
             )
             .connect(
-                EdgeDefinition::new(endpoint("input", "out")?, endpoint("processor", "in")?),
+                EdgeDefinition::new(endpoint(&input_id, "out")?, endpoint(&processor_id, "in")?),
                 Box::new(journal.definition().pipe(journal_resource, "processor")),
             );
         let input_resource = ResourceId::try_new("query-input")?;
@@ -661,7 +706,11 @@ async fn fixture(
         } else {
             let store = Arc::new(IndexedEnvelopeStore::try_new_with_options(
                 provider(&path.join("retained"))
-                    .create_indexes(GRAPH, "retained-input")
+                    .create_indexes(
+                        GRAPH,
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000134")
+                            .expect("fixture UUID"),
+                    )
                     .await?,
                 Arc::new(codec()?),
                 "processor-output",
@@ -696,7 +745,7 @@ async fn fixture(
             })?
             .provide_resource(input_resource, handle)?
             .connect(
-                EdgeDefinition::new(endpoint("processor", "out")?, endpoint("query", "in")?),
+                EdgeDefinition::new(endpoint(&processor_id, "out")?, endpoint(&query_id, "in")?),
                 pipe,
             );
         (query_input, group)
@@ -811,7 +860,7 @@ async fn audit(journal: &Arc<QosChannel>, session: &ProducerSession) -> Result<(
             .context("admitted producer identity")?;
         assert_eq!(producer.sequence(), sequence);
         assert_eq!(producer.identity().incarnation(), session.incarnation);
-        assert_eq!(producer.identity().component_id().as_str(), "input");
+        assert_eq!(producer.identity().component_id().as_str(), INPUT_ID);
         assert_eq!(producer.identity().graph_id(), GRAPH);
         assert_eq!(producer.identity().construction_scope(), GRAPH);
         assert!(producer.identity().persistent());
@@ -879,7 +928,7 @@ async fn worker(path: &Path, phase: &str, plan: Plan) -> Result<()> {
         let result = async {
             control.startup_report().await?;
             admission.wait_active().await?;
-            let session = admission.register_producer(ComponentId::try_new("client")?).await?;
+            let session = admission.register_producer(ComponentId::try_new("c07f5e7b-6fda-54c3-b3fe-a973235d8bad")?).await?;
             if restoring {
                 assert_eq!(session, read_json::<ProducerSession>(&path.join("session.json"))?);
                 for sequence in 1..=TOTAL {
@@ -1000,16 +1049,35 @@ async fn worker(path: &Path, phase: &str, plan: Plan) -> Result<()> {
     drop(admission);
     drop(journal);
     // Successful awaited cleanup must release the actual provider lock, too.
-    let mut stores = vec![("input", "input-journal"), ("query", "query")];
+    let mut stores = vec![
+        (
+            "input",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000132")?,
+        ),
+        (
+            "query",
+            drasi_core::ComponentId::try_new("9b47ad15-fa80-57d2-bfbf-891f9710a675")?,
+        ),
+    ];
     if plan.profile != Profile::Admission {
-        stores.push(("processor", "processor"));
+        stores.push((
+            "processor",
+            drasi_core::ComponentId::try_new(if plan.profile == Profile::Shared {
+                "00000000-0000-0000-0000-000000000133"
+            } else {
+                "c9bf8e0e-d052-578e-a23d-c3b99fa9aacd"
+            })?,
+        ));
     }
     if plan.profile == Profile::Retained {
-        stores.push(("retained", "retained-input"));
+        stores.push((
+            "retained",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000134")?,
+        ));
     }
     for (directory, id) in stores {
         let indexes = provider(&path.join(directory))
-            .create_indexes(GRAPH, id)
+            .create_indexes(GRAPH, &id)
             .await?;
         indexes
             .cleanup()
@@ -1022,28 +1090,36 @@ async fn worker(path: &Path, phase: &str, plan: Plan) -> Result<()> {
 
 async fn verify_committed_crash_state(path: &Path, plan: Plan) -> Result<()> {
     let expected = PREFIX + u64::from(matches!(plan.boundary, Boundary::QueryAfterCommit));
+    let query_id = drasi_core::ComponentId::try_new("9b47ad15-fa80-57d2-bfbf-891f9710a675")?;
     let indexes = provider(&path.join("query"))
-        .create_indexes(GRAPH, "query")
+        .create_indexes(GRAPH, &query_id)
         .await?;
     let checkpoints = indexes
         .checkpoint_store()
         .context("persistent query checkpoints")?;
     assert_eq!(
-        checkpoints.read_result_sequence("query").await?,
+        checkpoints
+            .read_result_sequence(&drasi_core::interface::OutputPartition::Component(
+                query_id.clone(),
+            ))
+            .await?,
         Some(expected)
     );
     let input_checkpoints = checkpoints
         .read_all_checkpoints()
         .await?
         .into_iter()
-        .filter(|(key, _)| key.starts_with("computation:input:"))
+        .filter(|(key, _)| key.is_progress())
         .collect::<Vec<_>>();
     assert_eq!(input_checkpoints.len(), 1);
     assert_eq!(input_checkpoints[0].1.sequence, expected);
     let outbox = indexes
         .outbox_writer()
         .context("persistent query outbox")?
-        .read_from("query", 0)
+        .read_from(
+            &drasi_core::interface::OutputPartition::Component(query_id.clone()),
+            0,
+        )
         .await?;
     assert_eq!(outbox.len(), expected as usize);
     let mut expected_live = Vec::new();
@@ -1069,7 +1145,7 @@ async fn verify_committed_crash_state(path: &Path, plan: Plan) -> Result<()> {
     let mut live = indexes
         .live_results_writer()
         .context("persistent projection")?
-        .read_snapshot("query")
+        .read_snapshot(&query_id)
         .await?
         .into_iter()
         .map(|(_, bytes)| bytes)
@@ -1085,16 +1161,29 @@ async fn verify_committed_crash_state(path: &Path, plan: Plan) -> Result<()> {
     drop(indexes);
     if plan.profile == Profile::Retained {
         let indexes = provider(&path.join("retained"))
-            .create_indexes(GRAPH, "retained-input")
+            .create_indexes(
+                GRAPH,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000134")
+                    .expect("fixture UUID"),
+            )
             .await?;
         let checkpoints = indexes.checkpoint_store().context("retained checkpoints")?;
         assert_eq!(
-            checkpoints.read_result_sequence("processor-output").await?,
+            checkpoints
+                .read_result_sequence(&drasi_core::interface::OutputPartition::Journal(
+                    "processor-output".to_owned(),
+                ))
+                .await?,
             Some(TOTAL)
         );
         assert_eq!(
             checkpoints
-                .read_checkpoint("computation-pipe-consumer:processor-output")
+                .read_checkpoint(&drasi_core::interface::CheckpointKey::Journal {
+                    journal: drasi_core::interface::OutputPartition::Journal(
+                        "processor-output".to_owned(),
+                    ),
+                    key: "computation-pipe-consumer".to_owned(),
+                })
                 .await?
                 .context("retained consumer cursor")?
                 .sequence,

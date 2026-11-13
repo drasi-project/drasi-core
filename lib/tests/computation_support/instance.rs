@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::Result;
 use drasi_lib::{computation::v1::*, DrasiLib};
@@ -13,17 +13,18 @@ pub struct InstalledComponents {
 
 impl InstalledComponents {
     pub async fn add(core: &DrasiLib, batch: ComponentBatch) -> Result<Self> {
-        let ids = batch
+        let ids: Vec<_> = batch
             .definition
             .components
             .iter()
             .map(|node| node.descriptor.id().clone())
             .collect();
-        let report = core.add_components(batch).await?;
-        anyhow::ensure!(
-            report.committed,
-            "component declaration was not committed: {report:?}"
-        );
+        core.add_components(batch).await?;
+        let status = core.reconcile_desired_state().await?;
+        anyhow::ensure!(status.applied && status.error.is_none(), "{status:?}");
+        for id in &ids {
+            core.component_by_id(id)?.wait_created().await?;
+        }
         Ok(Self {
             control: core.computation_control()?,
             ids,
@@ -47,30 +48,19 @@ impl InstalledComponents {
             .filter(|(id, node)| self.ids.contains(id) && node.exhausted)
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        if !exhausted.is_empty() {
-            let preview = self
-                .control
-                .preview(
-                    self.control.desired_snapshot().revision,
-                    vec![DesiredMutation::Restart(GraphSelection::Exact(exhausted))],
-                )
-                .await?;
-            let report = self
-                .control
-                .reconcile(preview, TopologyBindings::default())
-                .await?;
-            anyhow::ensure!(
-                report.summary == OperationSummary::Completed,
-                "component restart failed: {report:?}"
-            );
-        }
-        Ok(self
-            .control
-            .start_requested(
-                self.control.desired_snapshot().revision,
-                GraphSelection::Exact(self.ids.clone()),
-            )
-            .await?)
+        anyhow::ensure!(
+            exhausted.is_empty(),
+            "this managed fixture requires non-finite components; exhausted: {exhausted:?}"
+        );
+        let members = self
+            .ids
+            .iter()
+            .map(|id| {
+                let handle = self.control.component_handle_by_id(id)?;
+                Ok((id.clone(), handle.generation()))
+            })
+            .collect::<GraphResult<BTreeMap<_, _>>>()?;
+        Ok(self.control.start_members(members).await?)
     }
 
     pub async fn stop(&self) -> Result<StopReport> {

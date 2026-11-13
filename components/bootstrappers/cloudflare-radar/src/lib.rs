@@ -567,7 +567,7 @@ fn query_requests_any(
 }
 
 async fn send_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     event_tx: &BootstrapEventSender,
     sequence_counter: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     changes: Vec<drasi_core::models::SourceChange>,
@@ -582,7 +582,7 @@ async fn send_changes(
         }
         let sequence = sequence_counter.fetch_add(1, Ordering::SeqCst);
         let event = BootstrapEvent {
-            source_id: source_id.to_string(),
+            source_id: source_id.clone(),
             change,
             timestamp: Utc::now(),
             sequence,

@@ -95,7 +95,7 @@ impl ComputationIndexProvider for FaultProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        id: &str,
+        id: &drasi_core_types::ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         let original = self.inner.create_indexes(graph, id).await?;
         let set = original.indexes();

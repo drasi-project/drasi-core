@@ -52,7 +52,7 @@ pub enum ChildIntent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildObservation {
-    pub component: String,
+    pub component: drasi_lib::ComponentId,
     pub instance_id: String,
     pub manifest_fingerprint: String,
     pub generation: Option<Uuid>,
@@ -89,12 +89,12 @@ enum Action {
 
 enum Request {
     Register {
-        component: String,
+        component: drasi_lib::ComponentId,
         config: Box<HostConfig>,
         reply: oneshot::Sender<Result<Registration>>,
     },
     Action {
-        component: String,
+        component: drasi_lib::ComponentId,
         registration: Option<Uuid>,
         generation: Option<Uuid>,
         action: Action,
@@ -104,7 +104,7 @@ enum Request {
 
 #[derive(Clone)]
 struct Registration {
-    component: String,
+    component: drasi_lib::ComponentId,
     token: Uuid,
     observed: watch::Receiver<ChildObservation>,
 }
@@ -131,7 +131,7 @@ struct Slot {
 }
 
 struct Shared {
-    observations: Mutex<BTreeMap<String, ChildObservation>>,
+    observations: Mutex<BTreeMap<drasi_lib::ComponentId, ChildObservation>>,
     leases: Mutex<Vec<Arc<dyn std::any::Any + Send + Sync>>>,
     closing: AtomicBool,
     finished: AtomicBool,
@@ -237,7 +237,11 @@ impl ChildSupervisor {
             .collect()
     }
 
-    async fn register(&self, component: String, config: HostConfig) -> Result<Registration> {
+    async fn register(
+        &self,
+        component: drasi_lib::ComponentId,
+        config: HostConfig,
+    ) -> Result<Registration> {
         let (reply, receive) = oneshot::channel();
         self.0
             .requests
@@ -254,7 +258,7 @@ impl ChildSupervisor {
 
     async fn action(
         &self,
-        component: &str,
+        component: &drasi_lib::ComponentId,
         registration: Option<Uuid>,
         generation: Option<Uuid>,
         action: Action,
@@ -280,24 +284,36 @@ impl ChildSupervisor {
             .map_err(anyhow::Error::msg)
     }
 
-    pub async fn stop(&self, component: &str, generation: Uuid) -> Result<ChildObservation> {
+    pub async fn stop(
+        &self,
+        component: &drasi_lib::ComponentId,
+        generation: Uuid,
+    ) -> Result<ChildObservation> {
         self.action(component, None, Some(generation), Action::Stop)
             .await
     }
 
-    pub async fn force(&self, component: &str, generation: Uuid) -> Result<ChildObservation> {
+    pub async fn force(
+        &self,
+        component: &drasi_lib::ComponentId,
+        generation: Uuid,
+    ) -> Result<ChildObservation> {
         self.action(component, None, Some(generation), Action::Force)
             .await
     }
 
-    pub async fn repair(&self, component: &str, generation: Uuid) -> Result<ChildObservation> {
+    pub async fn repair(
+        &self,
+        component: &drasi_lib::ComponentId,
+        generation: Uuid,
+    ) -> Result<ChildObservation> {
         self.action(component, None, Some(generation), Action::Repair)
             .await
     }
 
     pub(crate) async fn confirm_previous_exit(
         &self,
-        component: &str,
+        component: &drasi_lib::ComponentId,
         generation: Uuid,
     ) -> Result<ChildObservation> {
         self.action(
@@ -349,7 +365,7 @@ struct Worker {
     directory: PathBuf,
     instance_id: String,
     budget: RuntimeBudget,
-    slots: BTreeMap<String, Slot>,
+    slots: BTreeMap<drasi_lib::ComponentId, Slot>,
     shared: Arc<Shared>,
 }
 
@@ -456,14 +472,17 @@ impl Worker {
         }
     }
 
-    fn register(&mut self, component: String, config: HostConfig) -> Result<Registration> {
+    fn register(
+        &mut self,
+        component: drasi_lib::ComponentId,
+        config: HostConfig,
+    ) -> Result<Registration> {
         config.validate()?;
         ensure!(
             config.instance_id != self.instance_id
                 && Some(config.state_dir.as_path()) != self.directory.parent(),
             "an owned child must have a distinct instance and state namespace"
         );
-        ComponentId::try_new(component.clone())?;
         let fingerprint = config.fingerprint()?;
         let previous = self.slots.get(&component);
         ensure!(
@@ -482,7 +501,7 @@ impl Worker {
                 "another owned child has this instance identity or state namespace"
             );
         }
-        let key = crate::config::digest(component.as_bytes());
+        let key = crate::config::digest(component.as_str().as_bytes());
         let directory = self.directory.join(key);
         state::private_directory(&directory)?;
         let path = directory.join("observation.json");
@@ -1032,6 +1051,7 @@ impl SupervisorFactory {
                     fields: BTreeMap::from([(
                         "manifest".into(),
                         ConfigurationField {
+                            constraint: None,
                             value_type: ConfigurationType::Object,
                             required: true,
                             secret: false,
@@ -1120,7 +1140,7 @@ impl ComponentFactory for SupervisorFactory {
                     .context("supervisor owner resource is unavailable")?
             };
             let registration = supervisor
-                .register(context.component_id.to_string(), manifest)
+                .register(context.component_id.clone(), manifest)
                 .await?;
             Ok::<_, anyhow::Error>(ConstructedComponent::service(Box::new(SupervisorService {
                 descriptor: context.specification.descriptor.clone(),
@@ -1192,7 +1212,7 @@ impl ComputationComponent for SupervisorService {
         Ok(())
     }
 
-    async fn deprovision(&mut self) -> Result<()> {
+    async fn delete_owned_resources(&mut self) -> Result<()> {
         self.stop().await
     }
 }

@@ -12,7 +12,7 @@ use super::Runtime;
 use crate::{
     channels::{ChangeReceiver, QueryResult, QuerySubscriptionResponse},
     computation::v1::*,
-    config::QueryConfig,
+    config::AssignedQueryConfig as QueryConfig,
     metrics::QueryOutputMetrics,
     queries::{FetchError, OutboxResponse, Query, SnapshotResponse},
     ComponentStatus,
@@ -73,26 +73,10 @@ pub(crate) fn query_members(
         .collect()
 }
 
-fn member_needs_stop(observed: &ObservedComponent) -> bool {
-    super::needs_stop(observed) || observed.lifecycle == ComponentLifecycle::Stopping
-}
-
 pub(super) fn query_needs_stop(publication: &GraphRegistrySnapshot, id: &ComponentId) -> bool {
     query_members(publication, id)
         .keys()
-        .any(|member| member_needs_stop(&publication.observed.components[member]))
-}
-
-pub(super) fn query_activation_requested(
-    publication: &GraphRegistrySnapshot,
-    id: &ComponentId,
-) -> bool {
-    let state = &publication.observed.components[id];
-    super::is_active(state)
-        || !publication.activation_is_deferred(id)
-            && state.failure.is_none()
-            && !state.waiting_for.is_empty()
-            && (state.lifecycle_requested || publication.desired.lifecycle_policies[id].auto_start)
+        .any(|member| super::needs_stop(&publication.observed.components[member]))
 }
 
 pub(super) async fn start_query(
@@ -103,6 +87,18 @@ pub(super) async fn start_query(
     if let Some(report) = request_query_start(control, id, expected).await? {
         if report.summary != OperationSummary::Completed {
             let observed = control.observed();
+            let native_declaration = control
+                .desired_snapshot()
+                .specifications
+                .get(id)
+                .is_some_and(|spec| !spec.dependencies.contains_key("declaration"));
+            if native_declaration
+                && observed.components.get(id).is_some_and(|node| {
+                    node.realization != RealizationState::Created && node.failure.is_none()
+                })
+            {
+                return super::accept_waiting_start(report, &observed);
+            }
             let waiting: BTreeSet<_> = report
                 .components
                 .keys()
@@ -145,9 +141,7 @@ async fn request_query_start(
     anyhow::ensure!(
         !matches!(
             state.lifecycle,
-            ComponentLifecycle::Starting
-                | ComponentLifecycle::Running
-                | ComponentLifecycle::Stopping
+            ComponentLifecycle::Running | ComponentLifecycle::Stopping
         ),
         "Query '{id}' cannot start while it is {:?}",
         state.lifecycle
@@ -244,9 +238,9 @@ pub(super) async fn stop_query(
     if state.lifecycle != ComponentLifecycle::Stopped
         || !members
             .keys()
-            .any(|member| member_needs_stop(&publication.observed.components[member]))
+            .any(|member| super::needs_stop(&publication.observed.components[member]))
     {
-        super::ensure_stoppable("query", id.as_str(), state)?;
+        super::ensure_stoppable("query", id, state)?;
     }
     let report = control.stop_members(members).await?;
     if report.summary != OperationSummary::Completed {
@@ -422,190 +416,40 @@ pub(super) fn query_resource_changes(
     Ok(changes)
 }
 
-pub(super) struct NativeQueryUpdate {
-    pub(super) members: BTreeMap<ComponentId, ComponentGeneration>,
-    pub(super) changes: Vec<DesiredMutation>,
-    pub(super) bindings: TopologyBindings,
-    pub(super) running: bool,
-}
-
-impl NativeQueryUpdate {
-    pub(super) fn merge(&mut self, other: Self) -> anyhow::Result<()> {
-        for (id, generation) in other.members {
-            if let Some(existing) = self.members.insert(id, generation) {
-                anyhow::ensure!(existing == generation, GraphError::StaleGeneration);
-            }
-        }
-        self.changes.extend(other.changes);
-        self.bindings.merge(other.bindings)?;
-        Ok(())
-    }
+pub(crate) struct NativeQueryUpdate {
+    pub(crate) members: BTreeMap<ComponentId, ComponentGeneration>,
+    pub(crate) changes: Vec<DesiredMutation>,
+    pub(crate) bindings: TopologyBindings,
 }
 
 impl Runtime {
-    pub(super) async fn remove_native_component(
+    pub(crate) async fn native_query_update_plan(
         &self,
-        id: &str,
-        kind: &str,
-        cleanup: bool,
-    ) -> anyhow::Result<()> {
-        let control = self.control()?;
-        let publication = control.registry_snapshot();
-        let kind = match kind {
-            "source" => "source",
-            "query" => "query",
-            "reaction" => "reaction",
-            _ => anyhow::bail!("unsupported component kind {kind}"),
-        };
-        let observation = self.component_observation_at(&publication, id, kind)?;
-        let log_key = self.component_log_key(&publication, id)?;
-        let query = ComponentId::try_new(id)?;
-        let members = if kind == "query" {
-            query_members(&publication, &query)
-        } else {
-            BTreeMap::from([(query.clone(), observation.generation)])
-        };
-        let selected: BTreeSet<_> = members.keys().cloned().collect();
-        let outlet = QueryResultsOutletFactory::default()
-            .descriptor()
-            .implementation
-            .clone();
-        let shared_outlets: BTreeSet<_> = publication
-            .desired
-            .edges
-            .iter()
-            .filter(|edge| kind == "query" && edge.definition.from.component == query)
-            .filter_map(|edge| {
-                let target = &edge.definition.to.component;
-                publication
-                    .desired
-                    .specifications
-                    .get(target)
-                    .is_some_and(|spec| spec.implementation == outlet)
-                    .then(|| target.clone())
-            })
-            .collect();
-        let dependents: BTreeSet<_> = selected
-            .iter()
-            .flat_map(|id| publication.desired.data_dependents(id))
-            .filter(|id| !selected.contains(id) && !shared_outlets.contains(id))
-            .collect();
-        anyhow::ensure!(
-            dependents.is_empty(),
-            "Depended on by: {}",
-            dependents
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let candidates = publication
-            .desired
-            .select(GraphSelection::Exact(selected.iter().cloned().collect()))?
-            .resources;
-        let mut target = publication.desired.select(GraphSelection::All)?;
-        let mut changes = Vec::new();
-        target.relationships.retain(|edge| {
-            if selected.contains(&edge.definition.from.component)
-                || selected.contains(&edge.definition.to.component)
-            {
-                changes.push(DesiredMutation::Unbind {
-                    edge: edge.definition.clone(),
-                    policy: RemovalPolicy::Reject,
-                });
-                false
-            } else {
-                true
-            }
-        });
-        target.boundary_relationships.retain(|edge| {
-            !selected.contains(&edge.definition.from.component)
-                && !selected.contains(&edge.definition.to.component)
-        });
-        target
-            .components
-            .retain(|node| !selected.contains(node.descriptor.id()));
-        target
-            .component_resources
-            .retain(|id, _| !selected.contains(id));
-        changes.push(DesiredMutation::RemoveComponents {
-            selection: GraphSelection::Exact(selected.iter().cloned().collect()),
-            policy: RemovalPolicy::Reject,
-        });
-        let infrastructure = self.infrastructure_resources(&publication, &BTreeSet::new())?;
-        changes.extend(remove_unused_resources(
-            &mut target,
-            candidates,
-            &infrastructure,
-        )?);
-        let report = control
-            .mutate_members(
-                members,
-                changes,
-                TopologyBindings::default(),
-                if cleanup {
-                    BTreeSet::from([query])
-                } else {
-                    BTreeSet::new()
-                },
-            )
-            .await?;
-        anyhow::ensure!(
-            report.committed && report.summary == OperationSummary::Completed,
-            "{kind} removal is incomplete: {report:?}"
-        );
-        self.logs.remove_component_by_key(&log_key).await;
-        self.notify();
-        Ok(())
-    }
-
-    pub(super) async fn update_native_query(
-        self: &Arc<Self>,
-        id: &str,
-        config: QueryConfig,
-    ) -> anyhow::Result<()> {
-        let plan = self.native_query_update_plan(id, config).await?;
-        let resume = self.pause_consumers(&[id.to_owned()]).await?;
-        let control = self.control()?;
-        let report = control
-            .mutate_members(plan.members, plan.changes, plan.bindings, BTreeSet::new())
-            .await?;
-        anyhow::ensure!(
-            report.committed && report.summary == OperationSummary::Completed,
-            "query replacement is incomplete: {report:?}"
-        );
-        if plan.running {
-            if let Some(started) =
-                request_query_start(&control, &ComponentId::try_new(id)?, None).await?
-            {
-                super::accept_waiting_start(started, &control.observed())?;
-            }
-        }
-        self.resume_records(resume).await
-    }
-
-    pub(super) async fn native_query_update_plan(
-        &self,
-        id: &str,
-        config: QueryConfig,
+        id: &ComponentId,
+        mut config: QueryConfig,
     ) -> anyhow::Result<NativeQueryUpdate> {
         anyhow::ensure!(
-            config.id == id,
+            &config.id == id,
             "New query ID '{}' does not match existing query ID '{id}'",
             config.id
         );
         let control = self.control()?;
         let publication = control.registry_snapshot();
+        let waiting = super::query_assembly::bind_inputs(&mut config, &publication);
+        anyhow::ensure!(
+            waiting.is_empty(),
+            "native query replacement requires resolved input names"
+        );
         self.query_observation_at(&publication, id)?;
         if self
             .ordinary_queries_at(&publication)?
-            .contains_key(&ComponentId::try_new(id)?)
+            .contains_key(&id.clone())
         {
             return self
-                .ordinary_query_update_plan(&publication, id, config, true)
+                .ordinary_query_update_plan(&publication, id, config)
                 .await;
         }
-        let query_id = ComponentId::try_new(id)?;
+        let query_id = id.clone();
         let original = publication
             .desired
             .specifications
@@ -624,6 +468,39 @@ impl Runtime {
             Some(ConfigurationValue::Literal(value)) => serde_json::from_value(value.clone())?,
             _ => anyhow::bail!("query '{id}' has explicit graph inputs; update its factory configuration and connections through the computation API"),
         };
+        let waiting_declaration = original_config.inputs.iter().all(|input| {
+            input.component.as_id().is_some_and(|source| {
+                !publication
+                    .desired
+                    .nodes
+                    .iter()
+                    .any(|node| node.descriptor.id() == source)
+            })
+        }) && publication
+            .query_api(id)
+            .map(|api| api.native_activation_recorded())
+            .transpose()?
+            .is_none_or(|activated| !activated);
+        anyhow::ensure!(
+            !publication
+                .observed
+                .components
+                .get(id)
+                .is_some_and(|node| matches!(
+                    node.realization,
+                    RealizationState::Created | RealizationState::Creating
+                ))
+                || config.inputs == original_config.inputs
+                || waiting_declaration,
+            "initialized query reconstruction cannot change live inputs"
+        );
+        if config == original_config {
+            return Ok(NativeQueryUpdate {
+                members: query_members(&publication, id),
+                changes: Vec::new(),
+                bindings: TopologyBindings::default(),
+            });
+        }
         let catalog_id = dependency(original, "catalog")?;
         let middleware_id = dependency(original, "middleware")?;
         let catalog = publication
@@ -696,10 +573,9 @@ impl Runtime {
             }
             let mut native_input = None;
             for (rank, input) in original_config.inputs.iter().enumerate() {
-                let pending =
-                    ComputationPipelineBuilder::pending_native_endpoint(id, &input.component)?;
-                if input.component == edge.from.component.as_str() || edge.from == pending {
-                    native_input = Some((rank, &input.component, edge.from != pending));
+                let pending = ComputationPipelineBuilder::pending_native_endpoint(id, input.id()?)?;
+                if input.component.as_id() == Some(&edge.from.component) || edge.from == pending {
+                    native_input = Some((rank, input.id()?, edge.from != pending));
                     break;
                 }
             }
@@ -718,7 +594,8 @@ impl Runtime {
                                 ..Default::default()
                             })
                 {
-                    native_sources.insert(component.clone(), resolved.then(|| edge.from.clone()));
+                    native_sources
+                        .insert(component.to_owned(), resolved.then(|| edge.from.clone()));
                     continue;
                 }
             }
@@ -747,9 +624,9 @@ impl Runtime {
             .map(|output| output.component.clone())
             .collect();
         for source in &config.inputs {
-            if let Some(output) = native_sources.remove(&source.component) {
-                let component = ComponentId::try_new(source.component.as_str())?;
-                let explicit = source.port.as_deref().map(PortId::try_new).transpose()?;
+            if let Some(output) = native_sources.remove(source.id()?) {
+                let component = source.id()?.clone();
+                let explicit = source.port.clone();
                 let output = if publication
                     .desired
                     .nodes
@@ -764,12 +641,12 @@ impl Runtime {
                 };
                 builder = match output {
                     Some(output) => builder.native_source(output)?,
-                    None => builder.pending_native_source(&source.component)?,
+                    None => builder.pending_native_source(source.id()?)?,
                 };
                 continue;
             }
             let native_output = publication.desired.nodes.iter().any(|node| {
-                node.descriptor.id().as_str() == source.component
+                source.component.as_id() == Some(node.descriptor.id())
                     && node
                         .descriptor
                         .ports()
@@ -777,21 +654,21 @@ impl Runtime {
                         .any(|port| port.direction() == PortDirection::Output)
             });
             if native_output || native_only {
-                let component = ComponentId::try_new(source.component.as_str())?;
-                let explicit = source.port.as_deref().map(PortId::try_new).transpose()?;
+                let component = source.id()?.clone();
+                let explicit = source.port.clone();
                 builder = match (native_output, explicit) {
                     (false, Some(port)) => builder.native_source(Endpoint::new(component, port))?,
-                    (false, None) => builder.pending_native_source(&source.component)?,
+                    (false, None) => builder.pending_native_source(source.id()?)?,
                     (true, explicit) => builder.native_source(
                         publication.output_endpoint(&component, explicit.as_ref())?,
                     )?,
                 };
                 continue;
             }
-            let (mut host, options) = match sources.remove(&source.component) {
+            let (mut host, options) = match sources.remove(source.id()?) {
                 Some(existing) => existing,
                 None => (
-                    self.source_host(&source.component).await?,
+                    self.source_host(source.id()?).await?,
                     SourceSubscriptionOptions {
                         borrowed_recovery: true,
                         allow_broadcast_loss: true,
@@ -803,9 +680,9 @@ impl Runtime {
                 .desired
                 .subscriptions
                 .iter()
-                .any(|(from, to)| from.as_str() == source.component && to == &query_id)
+                .any(|(from, to)| source.component.as_id() == Some(from) && to == &query_id)
             {
-                host = self.source_host(&source.component).await?;
+                host = self.source_host(source.id()?).await?;
             }
             builder = builder.source(host, options)?;
         }
@@ -847,10 +724,23 @@ impl Runtime {
         let ComponentConstruction::Factory(generated_spec) = &generated_query.construction else {
             anyhow::bail!("replacement query requires its factory");
         };
-        let remapped = BTreeMap::from([
+        let mut remapped = BTreeMap::from([
             (dependency(generated_spec, "catalog")?, catalog_id),
             (dependency(generated_spec, "middleware")?, middleware_id),
         ]);
+        for key in ["bootstrap", "indexes"] {
+            if let (Some(old), Some(new)) = (
+                original.dependencies.get(key).and_then(|ids| ids.first()),
+                generated_spec
+                    .dependencies
+                    .get(key)
+                    .and_then(|ids| ids.first()),
+            ) {
+                if publication.desired.resources[old].ownership == ResourceOwnership::Borrowed {
+                    remapped.insert(new.clone(), old.clone());
+                }
+            }
+        }
         let outlets: BTreeSet<_> = batch.definition.components.iter()
             .filter(|node| matches!(&node.construction, ComponentConstruction::Factory(spec) if spec.implementation == outlet))
             .map(|node| node.descriptor.id().clone()).collect();
@@ -876,12 +766,6 @@ impl Runtime {
                     if let Some(existing) = remapped.get(resource) {
                         *resource = existing.clone();
                     }
-                }
-                if node.descriptor.id() == &query_id {
-                    spec.configuration.insert(
-                        "reset_configuration".into(),
-                        ConfigurationValue::Literal(true.into()),
-                    );
                 }
             }
         }
@@ -998,7 +882,6 @@ impl Runtime {
             candidates,
             &BTreeSet::new(),
         )?);
-        let was_running = query_activation_requested(&publication, &query_id);
         batch.bindings.defer_activation = true;
         for (source, _) in &batch.definition.subscriptions {
             if let Some(observed) = publication.observed.components.get(source) {
@@ -1025,7 +908,6 @@ impl Runtime {
             members,
             changes,
             bindings: batch.bindings,
-            running: was_running,
         })
     }
 }
@@ -1428,7 +1310,7 @@ impl Query for NativeQuery {
             })
             .count()
     }
-    async fn subscribe(&self, _: String) -> anyhow::Result<QuerySubscriptionResponse> {
+    async fn subscribe(&self, _: ComponentId) -> anyhow::Result<QuerySubscriptionResponse> {
         let receiver = self.subscribe_native().await?;
         let as_of_sequence = receiver.receiver.head()?.sequence;
         Ok(QuerySubscriptionResponse {

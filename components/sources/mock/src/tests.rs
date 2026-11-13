@@ -32,10 +32,13 @@ mod construction {
 
     #[test]
     fn test_builder_with_valid_config() {
-        let source = MockSourceBuilder::new("test-source")
-            .with_data_type(DataType::Counter)
-            .with_interval_ms(1000)
-            .build();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_interval_ms(1000)
+        .build();
 
         assert!(source.is_ok());
     }
@@ -47,21 +50,35 @@ mod construction {
             interval_ms: 500,
         };
 
-        let source = MockSource::new("sensor-source", config).unwrap();
-        assert_eq!(source.id(), "sensor-source");
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000010f")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000010f")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_with_dispatch_creates_source() {
         let config = MockSourceConfig::default();
         let source = MockSource::with_dispatch(
-            "dispatch-source",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009b")
+                .expect("fixture UUID"),
             config,
             Some(drasi_lib::channels::DispatchMode::Channel),
             Some(1000),
         );
         assert!(source.is_ok());
-        assert_eq!(source.unwrap().id(), "dispatch-source");
+        assert_eq!(
+            source.unwrap().id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009b")
+                .expect("fixture UUID")
+        );
     }
 }
 
@@ -75,22 +92,39 @@ mod properties {
 
     #[test]
     fn test_id_returns_correct_value() {
-        let source = MockSourceBuilder::new("my-mock-source").build().unwrap();
-        assert_eq!(source.id(), "my-mock-source");
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a0")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a0")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_type_name_returns_mock() {
-        let source = MockSourceBuilder::new("test").build().unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
         assert_eq!(source.type_name(), "mock");
     }
 
     #[test]
     fn test_properties_contains_data_type() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::sensor_reading(5))
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::sensor_reading(5))
+        .build()
+        .unwrap();
         let props = source.properties();
 
         let data_type = props.get("dataType").expect("dataType should be present");
@@ -102,10 +136,13 @@ mod properties {
 
     #[test]
     fn test_properties_contains_interval_ms() {
-        let source = MockSourceBuilder::new("test")
-            .with_interval_ms(2000)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_interval_ms(2000)
+        .build()
+        .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -116,10 +153,13 @@ mod properties {
 
     #[test]
     fn test_properties_contains_sensor_count_for_sensor_reading() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::sensor_reading(10))
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::sensor_reading(10))
+        .build()
+        .unwrap();
         let props = source.properties();
 
         let data_type = props.get("dataType").expect("dataType should be present");
@@ -128,10 +168,13 @@ mod properties {
 
     #[test]
     fn test_properties_no_sensor_count_for_counter() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::Counter)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .build()
+        .unwrap();
         let props = source.properties();
 
         let data_type = props.get("dataType").expect("dataType should be present");
@@ -140,10 +183,13 @@ mod properties {
 
     #[test]
     fn test_properties_no_sensor_count_for_generic() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::Generic)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Generic)
+        .build()
+        .unwrap();
         let props = source.properties();
 
         let data_type = props.get("dataType").expect("dataType should be present");
@@ -152,19 +198,25 @@ mod properties {
 
     #[test]
     fn test_auto_start_returns_configured_value_true() {
-        let source = MockSourceBuilder::new("test")
-            .with_auto_start(true)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_auto_start(true)
+        .build()
+        .unwrap();
         assert!(source.auto_start());
     }
 
     #[test]
     fn test_describe_schema_matches_sensor_reading_shape() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::sensor_reading(5))
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::sensor_reading(5))
+        .build()
+        .unwrap();
 
         let schema = source
             .describe_schema()
@@ -193,10 +245,13 @@ mod properties {
 
     #[test]
     fn test_describe_schema_includes_connected_to_when_mesh() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::sensor_reading_mesh(5))
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::sensor_reading_mesh(5))
+        .build()
+        .unwrap();
 
         let schema = source
             .describe_schema()
@@ -215,10 +270,13 @@ mod properties {
 
     #[test]
     fn test_describe_schema_matches_counter_shape() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::Counter)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .build()
+        .unwrap();
 
         let schema = source
             .describe_schema()
@@ -239,10 +297,13 @@ mod properties {
 
     #[test]
     fn test_describe_schema_matches_generic_shape() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::Generic)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Generic)
+        .build()
+        .unwrap();
 
         let schema = source
             .describe_schema()
@@ -267,16 +328,24 @@ mod properties {
 
     #[test]
     fn test_auto_start_returns_configured_value_false() {
-        let source = MockSourceBuilder::new("test")
-            .with_auto_start(false)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_auto_start(false)
+        .build()
+        .unwrap();
         assert!(!source.auto_start());
     }
 
     #[test]
     fn test_as_any_allows_downcast() {
-        let source = MockSourceBuilder::new("test").build().unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
         let any = source.as_any();
         assert!(any.downcast_ref::<MockSource>().is_some());
     }
@@ -298,7 +367,12 @@ mod lifecycle {
             interval_ms: 1000,
         };
 
-        let source = MockSource::new("test", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         assert_eq!(source.status().await, ComponentStatus::Stopped);
     }
 
@@ -309,7 +383,12 @@ mod lifecycle {
             interval_ms: 1000,
         };
 
-        let source = MockSource::new("test-status", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a1")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
 
         // Initial status
         assert_eq!(source.status().await, ComponentStatus::Stopped);
@@ -335,7 +414,12 @@ mod builder {
 
     #[test]
     fn test_builder_defaults() {
-        let source = MockSourceBuilder::new("test").build().unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
         let props = source.properties();
 
         let data_type = props.get("dataType").expect("dataType should be present");
@@ -350,11 +434,14 @@ mod builder {
 
     #[test]
     fn test_builder_with_all_options() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::sensor_reading(10))
-            .with_interval_ms(1000)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::sensor_reading(10))
+        .with_interval_ms(1000)
+        .build()
+        .unwrap();
         let props = source.properties();
 
         let data_type = props.get("dataType").expect("dataType should be present");
@@ -371,11 +458,14 @@ mod builder {
 
     #[test]
     fn test_builder_chaining() {
-        let source = MockSourceBuilder::new("test")
-            .with_data_type(DataType::Counter)
-            .with_data_type(DataType::sensor_reading(5)) // Override
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_data_type(DataType::sensor_reading(5)) // Override
+        .build()
+        .unwrap();
         let props = source.properties();
 
         let data_type = props.get("dataType").expect("dataType should be present");
@@ -387,12 +477,19 @@ mod builder {
 
     #[test]
     fn test_builder_id() {
-        let source = MockSourceBuilder::new("my-mock-source")
-            .with_data_type(DataType::Counter)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a0")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "my-mock-source");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a0")
+                .expect("fixture UUID")
+        );
     }
 }
 
@@ -414,7 +511,12 @@ mod event_generation {
             interval_ms: 100,
         };
 
-        let source = MockSource::new("test-counter", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a2")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         // Start the source
@@ -448,7 +550,12 @@ mod event_generation {
             interval_ms: 50,
         };
 
-        let source = MockSource::new("test-counter-schema", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a3")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -502,7 +609,12 @@ mod event_generation {
             interval_ms: 50,
         };
 
-        let source = MockSource::new("test-counter-seq", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a4")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -547,7 +659,12 @@ mod event_generation {
             interval_ms: 20,
         };
 
-        let source = MockSource::new("test-counter-monotonic-seq", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a5")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -579,7 +696,12 @@ mod event_generation {
             interval_ms: 50,
         };
 
-        let source = MockSource::new("test-counter-insert", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a6")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -609,7 +731,12 @@ mod event_generation {
             interval_ms: 100,
         };
 
-        let source = MockSource::new("test-sensor", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a7")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         // Start the source
@@ -641,7 +768,12 @@ mod event_generation {
             interval_ms: 50,
         };
 
-        let source = MockSource::new("test-sensor-schema", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a8")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -724,7 +856,12 @@ mod event_generation {
             interval_ms: 30,
         };
 
-        let source = MockSource::new("test-sensor-update", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002a9")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -777,7 +914,12 @@ mod event_generation {
             interval_ms: 30,
         };
 
-        let source = MockSource::new("test-sensor-count", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002aa")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -829,7 +971,12 @@ mod event_generation {
             interval_ms: 20,
         };
 
-        let source = MockSource::new("test-sensor-mesh", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ab")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
         source.start().await.unwrap();
 
@@ -889,7 +1036,12 @@ mod event_generation {
             interval_ms: 15,
         };
 
-        let source = MockSource::new("test-sensor-no-mesh", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ac")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
         source.start().await.unwrap();
 
@@ -928,7 +1080,12 @@ mod event_generation {
             interval_ms: 100,
         };
 
-        let source = MockSource::new("test-generic", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ad")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         // Start the source
@@ -960,7 +1117,12 @@ mod event_generation {
             interval_ms: 50,
         };
 
-        let source = MockSource::new("test-generic-schema", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ae")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -1025,7 +1187,12 @@ mod event_generation {
             interval_ms: 50,
         };
 
-        let source = MockSource::new("test-generic-insert", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002af")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
@@ -1199,25 +1366,36 @@ mod validation {
             interval_ms: 1000,
         };
 
-        assert!(MockSource::new("test", config).is_err());
+        assert!(MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            config
+        )
+        .is_err());
     }
 
     #[test]
     fn test_builder_rejects_zero_interval() {
-        let result = MockSourceBuilder::new("test")
-            .with_data_type(DataType::Counter)
-            .with_interval_ms(0)
-            .build();
+        let result = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_interval_ms(0)
+        .build();
 
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_rejects_zero_sensor_count() {
-        let result = MockSourceBuilder::new("test")
-            .with_data_type(DataType::sensor_reading(0))
-            .with_interval_ms(1000)
-            .build();
+        let result = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::sensor_reading(0))
+        .with_interval_ms(1000)
+        .build();
 
         assert!(result.is_err());
     }
@@ -1229,7 +1407,13 @@ mod validation {
             interval_ms: 0,
         };
 
-        let result = MockSource::with_dispatch("test", config, None, None);
+        let result = MockSource::with_dispatch(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            config,
+            None,
+            None,
+        );
         assert!(result.is_err());
     }
 }
@@ -1254,7 +1438,12 @@ mod inject_event {
             interval_ms: 10000, // Long interval so no auto-generated events interfere
         };
 
-        let source = MockSource::new("test-inject", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b0")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         // Create a custom element to inject
@@ -1311,7 +1500,12 @@ mod inject_event {
             interval_ms: 10000,
         };
 
-        let source = MockSource::new("test-inject-update", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b1")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         // Create an Update event
@@ -1360,7 +1554,12 @@ mod inject_event {
             interval_ms: 10000,
         };
 
-        let source = MockSource::new("test-inject-delete", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b2")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         // Create a Delete event (Delete only takes metadata, not element)
@@ -1402,65 +1601,95 @@ mod builder_advanced {
 
     #[test]
     fn test_builder_with_dispatch_mode_channel() {
-        let source = MockSourceBuilder::new("test-dispatch-channel")
-            .with_data_type(DataType::Counter)
-            .with_dispatch_mode(DispatchMode::Channel)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b3")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_dispatch_mode(DispatchMode::Channel)
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "test-dispatch-channel");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b3")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_builder_with_dispatch_mode_broadcast() {
-        let source = MockSourceBuilder::new("test-dispatch-broadcast")
-            .with_data_type(DataType::Counter)
-            .with_dispatch_mode(DispatchMode::Broadcast)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b4")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_dispatch_mode(DispatchMode::Broadcast)
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "test-dispatch-broadcast");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b4")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_builder_with_dispatch_buffer_capacity() {
-        let source = MockSourceBuilder::new("test-buffer")
-            .with_data_type(DataType::Counter)
-            .with_dispatch_buffer_capacity(5000)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b5")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_dispatch_buffer_capacity(5000)
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "test-buffer");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b5")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_builder_with_auto_start_true() {
-        let source = MockSourceBuilder::new("test-auto-start-true")
-            .with_data_type(DataType::Counter)
-            .with_auto_start(true)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b6")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_auto_start(true)
+        .build()
+        .unwrap();
 
         assert!(source.auto_start());
     }
 
     #[test]
     fn test_builder_with_auto_start_false() {
-        let source = MockSourceBuilder::new("test-auto-start-false")
-            .with_data_type(DataType::Counter)
-            .with_auto_start(false)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b7")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_auto_start(false)
+        .build()
+        .unwrap();
 
         assert!(!source.auto_start());
     }
 
     #[test]
     fn test_builder_auto_start_default_is_true() {
-        let source = MockSourceBuilder::new("test-auto-start-default")
-            .with_data_type(DataType::Counter)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b8")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .build()
+        .unwrap();
 
         assert!(source.auto_start());
     }
@@ -1468,13 +1697,20 @@ mod builder_advanced {
     #[test]
     fn test_builder_static_method() {
         // Test that MockSource::builder() works the same as MockSourceBuilder::new()
-        let source = MockSource::builder("test-static-builder")
-            .with_data_type(DataType::Generic)
-            .with_interval_ms(2000)
-            .build()
-            .unwrap();
+        let source = MockSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b9")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Generic)
+        .with_interval_ms(2000)
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "test-static-builder");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002b9")
+                .expect("fixture UUID")
+        );
         let props = source.properties();
         let data_type = props.get("dataType").expect("dataType should be present");
         assert_eq!(data_type.get("type"), Some(&serde_json::json!("generic")));
@@ -1486,16 +1722,23 @@ mod builder_advanced {
 
     #[test]
     fn test_builder_with_all_dispatch_options() {
-        let source = MockSourceBuilder::new("test-all-dispatch")
-            .with_data_type(DataType::sensor_reading(10))
-            .with_interval_ms(500)
-            .with_dispatch_mode(DispatchMode::Channel)
-            .with_dispatch_buffer_capacity(2000)
-            .with_auto_start(false)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ba")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::sensor_reading(10))
+        .with_interval_ms(500)
+        .with_dispatch_mode(DispatchMode::Channel)
+        .with_dispatch_buffer_capacity(2000)
+        .with_auto_start(false)
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "test-all-dispatch");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ba")
+                .expect("fixture UUID")
+        );
         assert!(!source.auto_start());
     }
 }
@@ -1516,7 +1759,12 @@ mod lifecycle_advanced {
             interval_ms: 100,
         };
 
-        let source = MockSource::new("test-cycles", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002bb")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
 
         // Cycle 1
         assert_eq!(source.status().await, ComponentStatus::Stopped);
@@ -1548,7 +1796,12 @@ mod lifecycle_advanced {
             interval_ms: 1000,
         };
 
-        let source = MockSource::new("test-stop-stopped", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002bc")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
 
         // Source is already stopped, stop again should not error
         let result = source.stop().await;
@@ -1563,7 +1816,12 @@ mod lifecycle_advanced {
             interval_ms: 50,
         };
 
-        let source = MockSource::new("test-gen-stops", config).unwrap();
+        let source = MockSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002bd")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let mut rx = source.test_subscribe().await;
 
         // Start and collect some events
@@ -1647,16 +1905,21 @@ mod source_trait {
 
     #[tokio::test]
     async fn test_subscribe_returns_subscription_response() {
-        let source = MockSourceBuilder::new("test-subscribe")
-            .with_data_type(DataType::Counter)
-            .with_interval_ms(10000)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002be")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_interval_ms(10000)
+        .build()
+        .unwrap();
 
         let settings = SourceSubscriptionSettings {
-            source_id: "test-subscribe".to_string(),
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002be")
+                .expect("fixture UUID"),
             enable_bootstrap: false,
-            query_id: "test-query".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from: None,
@@ -1669,16 +1932,23 @@ mod source_trait {
 
         let response = result.unwrap();
         // Verify we got a valid response with expected source_id
-        assert_eq!(response.source_id, "test-subscribe");
+        assert_eq!(
+            response.source_id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002be")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn test_set_bootstrap_provider_after_construction() {
-        let source = MockSourceBuilder::new("test-bootstrap")
-            .with_data_type(DataType::Counter)
-            .with_interval_ms(10000)
-            .build()
-            .unwrap();
+        let source = MockSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002bf")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_interval_ms(10000)
+        .build()
+        .unwrap();
 
         // Create a simple test bootstrap provider
         struct TestBootstrapProvider {
@@ -1708,7 +1978,11 @@ mod source_trait {
         source.set_bootstrap_provider(Box::new(provider)).await;
 
         // Verify the source still works
-        assert_eq!(source.id(), "test-bootstrap");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002bf")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
@@ -1728,14 +2002,21 @@ mod source_trait {
             }
         }
 
-        let source = MockSource::builder("test-with-bootstrap")
-            .with_data_type(DataType::Counter)
-            .with_interval_ms(1000)
-            .with_bootstrap_provider(SimpleBootstrapProvider)
-            .build();
+        let source = MockSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c0")
+                .expect("fixture UUID"),
+        )
+        .with_data_type(DataType::Counter)
+        .with_interval_ms(1000)
+        .with_bootstrap_provider(SimpleBootstrapProvider)
+        .build();
 
         assert!(source.is_ok());
         let source = source.unwrap();
-        assert_eq!(source.id(), "test-with-bootstrap");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c0")
+                .expect("fixture UUID")
+        );
     }
 }

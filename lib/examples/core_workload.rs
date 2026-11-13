@@ -119,10 +119,12 @@ impl Options {
         matches!(self.workload.as_str(), "aggregate" | "persistent-aggregate")
     }
 
-    fn query_config(&self, id: &str) -> QueryConfig {
+    fn query_config(&self, id: drasi_core_types::ComponentName) -> Result<QueryConfig> {
         let mut query = Query::cypher(id)
             .query(self.query())
-            .from_input("input")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+            )
             .enable_bootstrap(false);
         if self.workload == "join" {
             query = query.with_joins(vec![QueryJoinConfig {
@@ -258,11 +260,9 @@ async fn exercise(
                     .await
                     .context("output stalled")?
                     .context("output closed")?;
-                let query: usize = result
-                    .query_id
-                    .strip_prefix("query-")
-                    .context("unexpected query ID")?
-                    .parse()?;
+                let query = (0..options.queries)
+                    .find(|index| query_component_id(*index) == result.query_id)
+                    .context("unexpected query ID")?;
                 ensure!(query < options.queries, "unexpected query index");
                 if options.workload == "join" && result.results.is_empty() {
                     continue;
@@ -333,25 +333,39 @@ async fn exercise(
 
 async fn ordinary(options: &Options) -> Result<Value> {
     let (source, input) = ApplicationSource::new(
-        "input",
+        component_id(113).clone(),
         ApplicationSourceConfig {
             properties: Default::default(),
             durability: None,
         },
     )?;
-    let ids: Vec<_> = (0..options.queries)
-        .map(|index| format!("query-{index}"))
-        .collect();
-    let (reaction, output) = ApplicationReaction::new("output", ids.clone());
+    let ids: Vec<_> = (0..options.queries).map(query_name).collect();
+    let (reaction, output) = ApplicationReaction::new(
+        component_id(311),
+        ids.iter()
+            .cloned()
+            .map(drasi_lib::config::ComponentReference::by_name)
+            .collect(),
+    );
     let receiver = output.take_receiver().await.context("output receiver")?;
     let mut builder = DrasiLib::builder()
         .with_query_factory(Arc::new(ContinuousQueryFactory::default()))
+        .with_allow_external_component_ids(true)
         .with_id("core-workload")
-        .with_source(source);
+        .with_source(
+            drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+            source,
+        );
     for id in ids {
-        builder = builder.with_query(options.query_config(&id));
+        builder = builder.with_query(options.query_config(id)?);
     }
-    let core = builder.with_reaction(reaction).build().await?;
+    let core = builder
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("output").expect("fixture component name"),
+            reaction,
+        )
+        .build()
+        .await?;
     core.start().await?;
     let measured = exercise(options, Input::Ordinary(input), receiver).await;
     let stop = Instant::now();
@@ -423,6 +437,32 @@ impl EnvelopeSink for NativeSink {
     }
 }
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
+fn query_name(index: usize) -> drasi_core_types::ComponentName {
+    drasi_core_types::ComponentName::try_new(format!("query-{index}"))
+        .expect("generated query name")
+}
+
+fn query_component_id(index: usize) -> ComponentId {
+    component_id(index as u128 + 1_000)
+}
+
+fn named_component_id(name: &str) -> ComponentId {
+    if name == "input" {
+        return component_id(113);
+    }
+    if let Some(index) = name.strip_prefix("query-") {
+        return query_component_id(index.parse().expect("query index"));
+    }
+    if let Some(index) = name.strip_prefix("sink-") {
+        return component_id(index.parse::<u128>().expect("sink index") + 2_000);
+    }
+    panic!("missing explicit workload component ID for {name}");
+}
+
 fn descriptor(
     id: &str,
     port: &str,
@@ -430,7 +470,7 @@ fn descriptor(
     schema: SchemaDescriptor,
 ) -> Result<ComponentDescriptor> {
     Ok(ComponentDescriptor::try_new(
-        ComponentId::try_new(id)?,
+        named_component_id(id),
         vec![PortDescriptor::new(
             PortId::try_new(port)?,
             direction,
@@ -442,7 +482,7 @@ fn descriptor(
 
 fn endpoint(id: &str, port: &str) -> Result<Endpoint> {
     Ok(Endpoint::new(
-        ComponentId::try_new(id)?,
+        named_component_id(id),
         PortId::try_new(port)?,
     ))
 }
@@ -480,30 +520,36 @@ async fn native(options: &Options) -> Result<Value> {
     let (input, receiver) = mpsc::channel(options.window);
     let (output, results) = mpsc::channel(options.window * options.queries);
     let mut builder = ComputationGraph::builder("core-workload")
-        .source(Box::new(NativeSource {
-            descriptor: descriptor(
-                "input",
-                "out",
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor().clone(),
-            )?,
-            receiver,
-            sequence: 0,
-        }))
+        .source(
+            ComponentName::try_new("input")?,
+            Box::new(NativeSource {
+                descriptor: descriptor(
+                    "input",
+                    "out",
+                    PortDirection::Output,
+                    GraphChangeCodec::schema().descriptor().clone(),
+                )?,
+                receiver,
+                sequence: 0,
+            }),
+        )
         .bind_stream(endpoint("input", "out")?, StreamId::try_new("input")?);
     for index in 0..options.queries {
         let id = format!("query-{index}");
         let sink = format!("sink-{index}");
         let stream = StreamId::try_new(format!("{id}/out"))?;
         let settings = if options.workload == "join" {
-            QueryExecutionSettings::from_legacy_config(&options.query_config(&id))
+            let config = options
+                .query_config(query_name(index))?
+                .with_assigned_id(query_component_id(index));
+            QueryExecutionSettings::from_configuration(&config)?
         } else {
             QueryExecutionSettings::default()
         };
         let query = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: "core-workload".into(),
-                id: ComponentId::try_new(id.as_str())?,
+                id: query_component_id(index),
                 query: options.query().into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: stream.clone(),
@@ -516,16 +562,19 @@ async fn native(options: &Options) -> Result<Value> {
         )
         .await?;
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(NativeSink {
-                descriptor: descriptor(
-                    &sink,
-                    "in",
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                )?,
-                output: output.clone(),
-            }))
+            .transformer(ComponentName::try_new(id.as_str())?, Box::new(query))
+            .sink(
+                ComponentName::try_new(sink.as_str())?,
+                Box::new(NativeSink {
+                    descriptor: descriptor(
+                        &sink,
+                        "in",
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                    )?,
+                    output: output.clone(),
+                }),
+            )
             .bind_stream(endpoint(&id, "out")?, stream)
             .connect(
                 EdgeDefinition::new(endpoint("input", "out")?, endpoint(&id, "in")?),

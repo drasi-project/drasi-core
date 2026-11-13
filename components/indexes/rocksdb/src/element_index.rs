@@ -941,7 +941,7 @@ pub type ReferenceHash = [u8; 16];
 
 fn hash_element_ref(element_ref: &ElementReference) -> ReferenceHash {
     let bytes = element_ref
-        .source_id
+        .namespace
         .as_bytes()
         .iter()
         .chain(element_ref.element_id.as_bytes())

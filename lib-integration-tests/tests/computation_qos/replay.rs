@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[path = "shared.rs"]
 mod shared;
 
+const LEFT_SINK_ID: &str = "00000000-0000-0000-0000-000000000411";
+const RIGHT_SINK_ID: &str = "00000000-0000-0000-0000-000000000412";
+
 pub(super) fn options() -> ReplayOptions {
     ReplayOptions {
         failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
@@ -24,7 +27,9 @@ pub(super) async fn admitted_output(path: &Path) -> Result<ChangeEnvelope> {
     source.enable_admission(admission_options()?).await?;
     assert!(source.enable_replay(options()).await.is_err());
     let session = source
-        .register_producer(ComponentId::try_new("client")?)
+        .register_producer(ComponentId::try_new(
+            "b7554736-47db-576f-806e-990e1d21b1ea",
+        )?)
         .await?;
     source.admit(&session, 1, &event(1)?).await?;
     let mut connection = endpoint(&source, &definition, "fast", false)?;
@@ -235,7 +240,7 @@ async fn unstarted_query(path: &Path, options: QueryOptions) -> Result<Continuou
     ContinuousQueryTransformer::new_with_options(
         ContinuousQueryDefinition {
             graph_id: "query-graph".into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new("8d90832b-f5a9-52ab-a4f8-c504ebb666de")?,
             query: "MATCH (n:Item) RETURN n".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -252,7 +257,13 @@ async fn output_channel(path: &Path, definition: QosChannelDefinition) -> Result
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false)));
     let channel = QosChannel::persistent(
         definition,
-        provider.create_indexes("qos", "channel").await?,
+        provider
+            .create_indexes(
+                "qos",
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000129")
+                    .expect("fixture UUID"),
+            )
+            .await?,
         codec()?,
         "journal",
     )
@@ -291,18 +302,37 @@ async fn retained_query_output_recovers_partial_separate_store_handoff_without_d
     let mut producer = query(&directory.path().join("producer")).await?;
     let left = output_channel(&directory.path().join("left"), definition.clone()).await?;
     let right = output_channel(&directory.path().join("right"), definition.clone()).await?;
-    let bindings =
-        OutputBindings::try_new([("left", &left), ("right", &right)].into_iter().flat_map(
-            |(side, channel)| {
-                ["fast", "slow"].map(move |subscriber| OutputDestination {
+    let bindings = OutputBindings::try_new(
+        [
+            (
+                &left,
+                [
+                    "00000000-0000-0000-0000-000000000421",
+                    "00000000-0000-0000-0000-000000000422",
+                ],
+            ),
+            (
+                &right,
+                [
+                    "00000000-0000-0000-0000-000000000423",
+                    "00000000-0000-0000-0000-000000000424",
+                ],
+            ),
+        ]
+        .into_iter()
+        .flat_map(|(channel, consumers)| {
+            ["fast", "slow"]
+                .into_iter()
+                .zip(consumers)
+                .map(move |(subscriber, consumer)| OutputDestination {
                     output: PortId::try_new("out").unwrap(),
-                    consumer: ComponentId::try_new(format!("{side}-{subscriber}")).unwrap(),
+                    consumer: ComponentId::try_new(consumer).expect("fixture UUID"),
                     input: PortId::try_new("in").unwrap(),
                     journal: channel.output_journal_identity().unwrap(),
                     subscriber: subscriber.into(),
                 })
-            },
-        ))?;
+        }),
+    )?;
     producer.bind_output_destinations(&bindings).await?;
     let output = producer
         .transform(InputEnvelope {
@@ -389,6 +419,8 @@ impl ComputationBootstrapProvider for BindingBootstrap {
 async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() -> Result<()> {
     const MEMBERSHIP: &str = "\0computation:output-bindings:v1";
     const DELIVERED: &str = "\0computation:query-delivered:v1";
+    let membership = drasi_core::interface::CheckpointKey::Metadata(MEMBERSHIP.to_owned());
+    let delivered = drasi_core::interface::CheckpointKey::Metadata(DELIVERED.to_owned());
     for corruption in [
         "missing-membership",
         "missing-fingerprint",
@@ -401,7 +433,7 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
         let directory = tempfile::tempdir()?;
         let bindings = OutputBindings::try_new([OutputDestination {
             output: PortId::try_new("out")?,
-            consumer: ComponentId::try_new("consumer")?,
+            consumer: ComponentId::try_new("38ad346b-0dde-5e83-aaed-ce74fd19dacc")?,
             input: PortId::try_new("in")?,
             journal: "00000000-0000-0000-0000-000000000001".parse()?,
             subscriber: "subscriber".into(),
@@ -422,11 +454,17 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
             false,
             false,
         )));
-        let indexes = provider.create_indexes("query-graph", "query").await?;
+        let indexes = provider
+            .create_indexes(
+                "query-graph",
+                &drasi_core::ComponentId::try_new("8d90832b-f5a9-52ab-a4f8-c504ebb666de")
+                    .expect("fixture UUID"),
+            )
+            .await?;
         let checkpoint = indexes.checkpoint_store().expect("checkpoints").clone();
         let mut saved = checkpoint.read_all_checkpoints().await?;
         assert_eq!(
-            saved[DELIVERED]
+            saved[&delivered]
                 .source_position
                 .as_ref()
                 .expect("fingerprint")
@@ -435,18 +473,18 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
         );
         match corruption {
             "missing-membership" => {
-                saved.remove(MEMBERSHIP);
+                saved.remove(&membership);
             }
             "missing-progress" => {
-                saved.remove(DELIVERED);
+                saved.remove(&delivered);
             }
-            "missing-fingerprint" => saved.get_mut(DELIVERED).unwrap().source_position = None,
+            "missing-fingerprint" => saved.get_mut(&delivered).unwrap().source_position = None,
             "changed-fingerprint" => {
-                saved.get_mut(DELIVERED).unwrap().source_position =
+                saved.get_mut(&delivered).unwrap().source_position =
                     Some(Bytes::from_static(b"wrong"))
             }
             "changed-membership" => {
-                let record = saved.get_mut(MEMBERSHIP).unwrap();
+                let record = saved.get_mut(&membership).unwrap();
                 let mut content: serde_json::Value =
                     serde_json::from_slice(record.source_position.as_ref().unwrap())?;
                 content["destinations"][0]["consumer"] = "different".into();
@@ -457,7 +495,9 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
         }
         if corruption != "disabled-tracking" {
             saved.insert(
-                "\0computation:query-bootstrap:v1".into(),
+                drasi_core::interface::CheckpointKey::Metadata(
+                    "\0computation:query-bootstrap:v1".to_owned(),
+                ),
                 drasi_core::interface::SourceCheckpoint::new(0, None),
             );
         }
@@ -525,7 +565,13 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
         }
         producer.stop().await?;
         drop(producer);
-        let indexes = provider.create_indexes("query-graph", "query").await?;
+        let indexes = provider
+            .create_indexes(
+                "query-graph",
+                &drasi_core::ComponentId::try_new("8d90832b-f5a9-52ab-a4f8-c504ebb666de")
+                    .expect("fixture UUID"),
+            )
+            .await?;
         let actual = indexes
             .checkpoint_store()
             .unwrap()
@@ -535,11 +581,11 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
         for (key, record) in saved {
             assert_eq!(
                 actual[&key].sequence, record.sequence,
-                "{corruption}: {key}"
+                "{corruption}: {key:?}"
             );
             assert_eq!(
                 actual[&key].source_position, record.source_position,
-                "{corruption}: {key}"
+                "{corruption}: {key:?}"
             );
         }
         let owner = drasi_core::computation::ComputationTransaction::try_new(indexes)?;
@@ -627,16 +673,13 @@ async fn binding_graph(
     url: &str,
     seen: Arc<BindingObservations>,
 ) -> Result<ComputationGraph> {
-    let ep = |component: &str, port: &str| -> Result<Endpoint> {
-        Ok(Endpoint::new(
-            ComponentId::try_new(component)?,
-            PortId::try_new(port)?,
-        ))
+    let ep = |component: &ComponentId, port: &str| -> Result<Endpoint> {
+        Ok(Endpoint::new(component.clone(), PortId::try_new(port)?))
     };
     let describe =
-        |id: &str, port: &str, direction, schema: &Schema| -> Result<ComponentDescriptor> {
+        |id: ComponentId, port: &str, direction, schema: &Schema| -> Result<ComponentDescriptor> {
             Ok(ComponentDescriptor::try_new(
-                ComponentId::try_new(id)?,
+                id,
                 vec![PortDescriptor::new(
                     PortId::try_new(port)?,
                     direction,
@@ -646,28 +689,44 @@ async fn binding_graph(
             )?)
         };
     let producer = query(producer_path).await?;
+    let producer_id = producer.descriptor().id().clone();
+    let source_id = ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?;
     let mut builder = ComputationGraph::builder("query-graph")
-        .source(Box::new(BindingSource {
-            descriptor: describe(
-                "source",
-                "out",
-                PortDirection::Output,
-                &GraphChangeCodec::schema(),
-            )?,
-            events: if fresh {
-                [event(1)?].into()
-            } else {
-                Default::default()
-            },
-        }))
-        .transformer(Box::new(producer))
-        .bind_stream(ep("source", "out")?, StreamId::try_new("source/out")?)
-        .bind_stream(ep("query", "out")?, StreamId::try_new("query/out")?)
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(BindingSource {
+                descriptor: describe(
+                    source_id.clone(),
+                    "out",
+                    PortDirection::Output,
+                    &GraphChangeCodec::schema(),
+                )?,
+                events: if fresh {
+                    [event(1)?].into()
+                } else {
+                    Default::default()
+                },
+            }),
+        )
+        .transformer(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                .expect("fixture component name"),
+            Box::new(producer),
+        )
+        .bind_stream(ep(&source_id, "out")?, StreamId::try_new("source/out")?)
+        .bind_stream(ep(&producer_id, "out")?, StreamId::try_new("query/out")?)
         .connect(
-            EdgeDefinition::new(ep("source", "out")?, ep("query", "in")?),
+            EdgeDefinition::new(ep(&source_id, "out")?, ep(&producer_id, "in")?),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         );
-    for (side, channel) in ["left", "right"].into_iter().zip(channels) {
+    for ((side, id), channel) in [
+        ("left", ComponentId::try_new(LEFT_SINK_ID)?),
+        ("right", ComponentId::try_new(RIGHT_SINK_ID)?),
+    ]
+    .into_iter()
+    .zip(channels)
+    {
         let resource = ResourceId::try_new(side)?;
         builder = builder
             .declare_resource(ResourceSpecification {
@@ -677,18 +736,22 @@ async fn binding_graph(
                 binding: side.into(),
             })?
             .provide_resource(resource.clone(), channel.resource())?
-            .sink(Box::new(BindingSink {
-                descriptor: describe(
-                    side,
-                    "in",
-                    PortDirection::Input,
-                    &QueryChangeCodec::schema(),
-                )?,
-                destination_url: url.into(),
-                seen: seen.clone(),
-            }))
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new(side)
+                    .expect("fixture component name"),
+                Box::new(BindingSink {
+                    descriptor: describe(
+                        id.clone(),
+                        "in",
+                        PortDirection::Input,
+                        &QueryChangeCodec::schema(),
+                    )?,
+                    destination_url: url.into(),
+                    seen: seen.clone(),
+                }),
+            )
             .connect(
-                EdgeDefinition::new(ep("query", "out")?, ep(side, "in")?),
+                EdgeDefinition::new(ep(&producer_id, "out")?, ep(&id, "in")?),
                 Box::new(channel.definition().pipe(resource, "target")),
             );
     }
@@ -782,7 +845,7 @@ async fn graph_pending_output_follows_replacement_but_rejects_a_different_journa
     drop((graph, channels, left, right, replacement));
     assert_eq!(
         *seen.rows.lock().unwrap(),
-        [("left".into(), "old-url".into(), 1)]
+        [(LEFT_SINK_ID.into(), "old-url".into(), 1)]
     );
 
     let left = output_channel(&directory.path().join("left"), definition.clone()).await?;
@@ -799,8 +862,8 @@ async fn graph_pending_output_follows_replacement_but_rejects_a_different_journa
     assert_eq!(
         *seen.rows.lock().unwrap(),
         [
-            ("left".into(), "old-url".into(), 1),
-            ("right".into(), "new-url".into(), 1),
+            (LEFT_SINK_ID.into(), "old-url".into(), 1),
+            (RIGHT_SINK_ID.into(), "new-url".into(), 1),
         ]
     );
     assert_eq!(left.progress().await?.accepted, 1);

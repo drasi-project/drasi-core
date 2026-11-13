@@ -19,8 +19,12 @@ use std::{
 const GRAPH: &str = "native-recovery";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).unwrap()
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
+fn id(value: u128) -> ComponentId {
+    component_id(value)
 }
 fn stream(value: &str) -> StreamId {
     StreamId::try_new(value).unwrap()
@@ -29,7 +33,7 @@ fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
 }
 fn owner() -> Arc<QuerySourceProgress> {
-    Arc::new(QuerySourceProgress::new(GRAPH, id("query")).unwrap())
+    Arc::new(QuerySourceProgress::new(GRAPH, id(46)).unwrap())
 }
 fn limits() -> SourceTransactionLimits {
     SourceTransactionLimits {
@@ -42,7 +46,8 @@ fn request(factory: &NativeFactory, configuration: serde_json::Value) -> CreateR
     CreateRequest {
         inputs: Vec::new(),
         activation_credentials_bound: false,
-        id: id("source"),
+        update_directive: None,
+        id: id(77),
         implementation: factory.metadata.implementation.clone(),
         configuration_version: factory.metadata.configuration_version,
         configuration,
@@ -52,6 +57,15 @@ fn request(factory: &NativeFactory, configuration: serde_json::Value) -> CreateR
             generation: 1,
         }),
     }
+}
+
+fn named_id(value: &str) -> ComponentId {
+    id(match value {
+        "source" => 77,
+        "query" => 46,
+        "sink" => 78,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 pub(crate) fn sqlite_plugin() -> Result<Arc<super::super::NativePlugin>> {
@@ -68,7 +82,10 @@ pub(crate) fn sqlite_plugin() -> Result<Arc<super::super::NativePlugin>> {
             Some(path) => workspace.join(path),
             None => workspace.join("target"),
         };
-        target.join("debug/examples").join(format!(
+        let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| target.join("debug/plugins"));
+        directory.join("examples").join(format!(
             "{}native_recovery{}",
             std::env::consts::DLL_PREFIX,
             std::env::consts::DLL_SUFFIX
@@ -76,7 +93,7 @@ pub(crate) fn sqlite_plugin() -> Result<Arc<super::super::NativePlugin>> {
     };
     anyhow::ensure!(
         path.is_file(),
-        "missing fixture {}; first run CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo build -p drasi-host-sdk --example native_recovery",
+        "missing fixture {}; first run make build-test-plugins",
         path.display()
     );
     super::super::load(path)
@@ -99,7 +116,7 @@ async fn query(
     ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: GRAPH.into(),
-            id: id("query"),
+            id: id(46),
             query: "MATCH (n:items) RETURN n.id AS id, n.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("results"),
@@ -128,7 +145,7 @@ async fn query(
 }
 fn command(kind: &str, payload: serde_json::Value) -> Result<Vec<u8>> {
     wire::encode(&sdk::ControlMessage {
-        from: id("query"),
+        from: id(46),
         generation: 1,
         direction: sdk::ControlDirection::Upstream,
         notification: sdk::ControlNotification::Custom {
@@ -166,6 +183,7 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         None,
         Some(progress.clone()),
     )?;
+    source.initialize().await?;
     assert!(Arc::ptr_eq(&source.recovery_progress().unwrap(), &progress));
     assert!(source.admission().is_none());
     source.start().await?;
@@ -219,6 +237,7 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         None,
         Some(progress.clone()),
     )?;
+    source.initialize().await?;
     source.start().await?;
     let replay = next(&mut source).await?;
     assert_eq!(
@@ -287,6 +306,7 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         None,
         Some(progress),
     )?;
+    source.initialize().await?;
     source.start().await?;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), source.next())
@@ -335,7 +355,7 @@ impl EnvelopeSink for Sink {
 }
 fn sink(name: &str, schema: Arc<Schema>) -> Result<Sink> {
     Ok(Sink(ComponentDescriptor::try_new(
-        id(name),
+        named_id(name),
         vec![PortDescriptor::new(
             PortId::try_new("in")?,
             PortDirection::Input,
@@ -345,7 +365,7 @@ fn sink(name: &str, schema: Arc<Schema>) -> Result<Sink> {
     )?))
 }
 fn endpoint(component: &str, port: &str) -> Endpoint {
-    Endpoint::new(id(component), PortId::try_new(port).unwrap())
+    Endpoint::new(named_id(component), PortId::try_new(port).unwrap())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -366,9 +386,15 @@ async fn native_recovery_graph_requires_the_actual_host_owner_not_matching_names
             Some(bound),
         )?;
         let graph = ComputationGraph::builder(GRAPH)
-            .source(Box::new(source))
-            .transformer(Box::new(query(directory.path(), progress).await?))
-            .sink(Box::new(sink("sink", QueryChangeCodec::schema())?))
+            .source(ComponentName::try_new("source")?, Box::new(source))
+            .transformer(
+                ComponentName::try_new("query")?,
+                Box::new(query(directory.path(), progress).await?),
+            )
+            .sink(
+                ComponentName::try_new("sink")?,
+                Box::new(sink("sink", QueryChangeCodec::schema())?),
+            )
             .bind_stream(endpoint("source", "out"), stream("changes"))
             .bind_stream(endpoint("query", "out"), stream("results"))
             .connect(
@@ -381,7 +407,7 @@ async fn native_recovery_graph_requires_the_actual_host_owner_not_matching_names
             )
             .build()?;
         let report = graph.recovery_report(&RecoveryRequirement {
-            consumer: id("query"),
+            consumer: id(46),
             scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
             guarantees: [RecoveryGuarantee::Replay].into(),
         })?;
@@ -405,13 +431,14 @@ async fn native_recovery_cancelled_start_retains_no_sqlite_worker_and_rejects_ab
     let factory = &plugin.factories()[0];
     let directory = tempfile::tempdir()?;
     assert!(factory
-        .create_component(id("source"), sqlite_configuration(directory.path()))
+        .create_component(id(77), sqlite_configuration(directory.path()))
         .is_err());
     let mut source = factory.construct(
         request(factory, sqlite_configuration(directory.path())),
         None,
         Some(owner()),
     )?;
+    source.initialize().await?;
     let mut starting = Box::pin(source.start());
     assert!(poll!(starting.as_mut()).is_pending());
     drop(starting);
@@ -435,6 +462,7 @@ impl Factory for ProbeFactory {
                 fields: [(
                     "mode".into(),
                     sdk::ConfigField {
+                        constraint: None,
                         value_type: sdk::ConfigType::String,
                         required: true,
                         secret: false,
@@ -534,9 +562,9 @@ impl sdk::NativeSource for Probe {
             Some((
                 StorageDurability::LOCAL_POWER_LOSS,
                 id(if self.mode == "wrong-consumer" {
-                    "another"
+                    1091
                 } else {
-                    "query"
+                    46
                 }),
             ))
         }
@@ -602,8 +630,7 @@ async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_chang
         factory.descriptor.dependencies["source_progress"].maximum,
         Some(1)
     );
-    let mut specification =
-        factory.specification(id("source"), serde_json::json!({"mode":"valid"}))?;
+    let mut specification = factory.specification(id(77), serde_json::json!({"mode":"valid"}))?;
     specification.dependencies.insert(
         "source_progress".into(),
         vec![ResourceId::try_new("owner")?],
@@ -643,8 +670,9 @@ async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_chang
             None,
             Some(owner()),
         )?;
+        source.initialize().await?;
         let captured = captured().lock().unwrap().take().unwrap();
-        assert_eq!(captured.reader().component_id(), &id("query"));
+        assert_eq!(captured.reader().component_id(), &id(46));
         assert!(captured.reader().snapshot().is_ok());
         assert_eq!(
             source.recovery_contract().replay_retention().is_some(),
@@ -656,7 +684,8 @@ async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_chang
         assert!(captured.reader().snapshot().is_err());
     }
     let mut fast =
-        old.factories()[0].create_component(id("source"), serde_json::json!({"mode":"valid"}))?;
+        old.factories()[0].create_component(id(77), serde_json::json!({"mode":"valid"}))?;
+    fast.initialize().await?;
     assert!(fast.recovery_progress().is_none());
     fast.start().await?;
     assert!(fast.next().await?.is_none());
@@ -672,7 +701,7 @@ async fn native_recovery_graph_factory_resolves_typed_resources_and_revokes_afte
     for graph_id in [GRAPH, "wrong-graph"] {
         let factory = plugin.factories()[0].clone();
         let mut specification =
-            factory.specification(id("source"), serde_json::json!({"mode":"retentionless"}))?;
+            factory.specification(id(77), serde_json::json!({"mode":"retentionless"}))?;
         let resource = ResourceId::try_new("progress")?;
         specification
             .dependencies
@@ -692,8 +721,11 @@ async fn native_recovery_graph_factory_resolves_typed_resources_and_revokes_afte
                     Arc::new(QuerySourceProgressResource(progress.clone())),
                 ),
             )?
-            .component(specification, factory)
-            .sink(Box::new(sink("query", GraphChangeCodec::schema())?))
+            .component(ComponentName::try_new("source")?, specification, factory)
+            .sink(
+                ComponentName::try_new("query")?,
+                Box::new(sink("query", GraphChangeCodec::schema())?),
+            )
             .bind_stream(endpoint("source", "out"), stream("changes"))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
@@ -717,7 +749,7 @@ async fn native_recovery_graph_factory_resolves_typed_resources_and_revokes_afte
                     let report = control.startup_report().await.unwrap();
                     assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
                     let observed = control.observed();
-                    let failure = observed.components[&id("source")].failure.as_ref().unwrap();
+                    let failure = observed.components[&id(77)].failure.as_ref().unwrap();
                     assert_eq!(failure.disposition, FailureDisposition::Terminal);
                     assert_eq!(failure.phase, FailurePhase::Creation);
                     assert_eq!(control.state(), GraphState::Running);
@@ -725,7 +757,7 @@ async fn native_recovery_graph_factory_resolves_typed_resources_and_revokes_afte
                         .desired_snapshot()
                         .nodes
                         .iter()
-                        .any(|node| node.descriptor.id() == &id("source")));
+                        .any(|node| node.descriptor.id() == &id(77)));
                     control.cancel();
                 })
             })

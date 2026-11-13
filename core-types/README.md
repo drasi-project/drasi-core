@@ -4,6 +4,19 @@ This package owns graph elements, source changes, query values, projected result
 changes, storage-survival descriptions and indexed-state contracts. It does not
 evaluate queries, parse query languages, run components or open storage.
 
+`ComponentId` and `ComponentName` are defined together in `component_identity`
+and re-exported at the crate root. Component owners and selectors carry these
+types, not text: UUID parsing and name validation occur at input boundaries.
+Names are case-sensitive, reject empty/whitespace/control characters, and never
+implicitly select an ID. The contracts, engine and runtime share these exact
+types.
+
+The optional `openapi` feature exposes their canonical string schemas: UUID
+format for `ComponentId`, and the same nonempty/name constraints used by
+`ComponentName` validation. Storage APIs use `StorageScope`, `StorePartition`,
+`OutputPartition`, and `CheckpointKey` to keep ownership separate from physical
+keys, data namespaces, and framework metadata.
+
 The existing implementations are shared rather than copied. `drasi-core` exposes
 the same types through its existing model and value paths, while native component
 contracts can use them without depending on the query engine. The query AST

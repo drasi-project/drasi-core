@@ -43,7 +43,7 @@ impl Drop for QueryOperationTimer {
 /// as zero progress.
 #[derive(Debug, Clone)]
 pub struct QueryProgressMetricsSnapshot {
-    pub query_id: String,
+    pub query_id: crate::ComponentId,
     pub component_generation: u64,
     pub component_operation: u64,
     pub output_generation: u64,

@@ -16,7 +16,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use drasi_core::{
+    interface::{
+        CheckpointKey, CheckpointStore, IndexError, OutputPartition, SourceCheckpoint, StorageScope,
+    },
+    ComponentId,
+};
 use redis::aio::MultiplexedConnection;
 
 use crate::{GarnetCheckpointStore, GarnetSessionState};
@@ -27,12 +32,13 @@ pub(super) struct ComputationCheckpointStore {
 
 impl ComputationCheckpointStore {
     pub(super) fn new(
-        partition: &str,
+        partition: &StorageScope,
+        component_id: &ComponentId,
         connection: MultiplexedConnection,
         session: Arc<GarnetSessionState>,
     ) -> Self {
         Self {
-            inner: GarnetCheckpointStore::new(partition, connection, session),
+            inner: GarnetCheckpointStore::new(partition, component_id, connection, session),
         }
     }
 }
@@ -45,7 +51,7 @@ impl CheckpointStore for ComputationCheckpointStore {
 
     async fn stage_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
         sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
@@ -56,12 +62,14 @@ impl CheckpointStore for ComputationCheckpointStore {
 
     async fn read_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
     ) -> Result<Option<SourceCheckpoint>, IndexError> {
         self.inner.read_checkpoint(source_id).await
     }
 
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
         self.inner.read_all_checkpoints().await
     }
 
@@ -81,21 +89,32 @@ impl CheckpointStore for ComputationCheckpointStore {
         self.inner.read_config_hash().await
     }
 
-    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         self.inner.stage_result_sequence(query_id, sequence).await
     }
 
-    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn write_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         self.inner.write_result_sequence(query_id, sequence).await
     }
 
-    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_result_sequence(query_id).await
     }
 
     async fn write_output_generation(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         generation: u64,
     ) -> Result<(), IndexError> {
         self.inner
@@ -103,7 +122,10 @@ impl CheckpointStore for ComputationCheckpointStore {
             .await
     }
 
-    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_output_generation(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_output_generation(query_id).await
     }
 }

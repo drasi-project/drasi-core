@@ -109,7 +109,7 @@ impl SourcePluginDescriptor for RisLiveSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -152,7 +152,7 @@ impl SourcePluginDescriptor for RisLiveSourceDescriptor {
                 StartFrom::Now
             };
 
-        let source = RisLiveSourceBuilder::new(id)
+        let source = RisLiveSourceBuilder::new(id.clone())
             .with_websocket_url(websocket_url)
             .with_optional_client_name(client_name)
             .with_optional_host(host)

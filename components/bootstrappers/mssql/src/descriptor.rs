@@ -211,7 +211,7 @@ impl BootstrapPluginDescriptor for MsSqlBootstrapDescriptor {
             start_position: Default::default(),
         };
 
-        let provider = MsSqlBootstrapProvider::new("mssql-bootstrap", config);
+        let provider = MsSqlBootstrapProvider::new(config);
         Ok(Box::new(provider))
     }
 }

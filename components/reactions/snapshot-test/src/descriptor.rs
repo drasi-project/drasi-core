@@ -52,13 +52,13 @@ impl ReactionPluginDescriptor for SnapshotTestReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         _auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         let config: SnapshotTestConfig = serde_json::from_value(config_json.clone())?;
-        let (mut reaction, _report) = SnapshotTestReaction::new(id, query_ids);
+        let (mut reaction, _report) = SnapshotTestReaction::new(id, query_inputs);
         reaction.panic_on_initialize = config.panic_on_initialize;
         Ok(Box::new(reaction))
     }

@@ -45,7 +45,7 @@ pub struct GtfsRtSource {
 
 #[async_trait]
 impl Source for GtfsRtSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -189,8 +189,8 @@ impl Source for GtfsRtSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -205,12 +205,12 @@ impl Source for GtfsRtSource {
 /// framework allocator supplies a monotonic `sequence` for each event (issue #828).
 async fn dispatch_changes(
     base: &SourceBase,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     changes: Vec<drasi_core::models::SourceChange>,
 ) {
     for change in changes {
         let wrapper = SourceEventWrapper::new(
-            source_id.to_string(),
+            source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
             base.next_sequence(),
@@ -224,7 +224,7 @@ async fn dispatch_changes(
 
 async fn should_baseline_on_startup(
     state_store: Option<&Arc<dyn StateStoreProvider>>,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &GtfsRtSourceConfig,
 ) -> bool {
     let Some(store) = state_store else {
@@ -241,7 +241,13 @@ async fn should_baseline_on_startup(
     let mut all_have_cursors = true;
     for (feed_type, _) in &configured {
         let key = cursor_key(*feed_type);
-        match store.get(source_id, &key).await {
+        match store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                &key,
+            )
+            .await
+        {
             Ok(Some(_)) => {}
             Ok(None) => {
                 all_have_cursors = false;
@@ -262,7 +268,7 @@ async fn should_baseline_on_startup(
 
 async fn persist_feed_cursors(
     state_store: Option<&Arc<dyn StateStoreProvider>>,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     feed_types: &[GtfsRtFeedType],
 ) -> Result<()> {
     let Some(store) = state_store else {
@@ -272,11 +278,18 @@ async fn persist_feed_cursors(
     for feed_type in feed_types {
         let key = cursor_key(*feed_type);
         // Store a presence marker so we know this feed was successfully polled.
-        store.set(source_id, &key, vec![1u8]).await.map_err(|err| {
-            anyhow::anyhow!(
-                "failed to persist cursor for source '{source_id}' and key '{key}': {err}"
+        store
+            .set(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                &key,
+                vec![1u8],
             )
-        })?;
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to persist cursor for source '{source_id}' and key '{key}': {err}"
+                )
+            })?;
     }
 
     Ok(())
@@ -288,7 +301,7 @@ fn cursor_key(feed_type: GtfsRtFeedType) -> String {
 
 /// Fluent builder for `GtfsRtSource`.
 pub struct GtfsRtSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     trip_updates_url: Option<String>,
     vehicle_positions_url: Option<String>,
     alerts_url: Option<String>,
@@ -304,9 +317,9 @@ pub struct GtfsRtSourceBuilder {
 }
 
 impl GtfsRtSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             trip_updates_url: None,
             vehicle_positions_url: None,
             alerts_url: None,
@@ -425,7 +438,7 @@ impl GtfsRtSourceBuilder {
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()?;
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -445,7 +458,7 @@ impl GtfsRtSourceBuilder {
 }
 
 impl GtfsRtSource {
-    pub fn builder(id: impl Into<String>) -> GtfsRtSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> GtfsRtSourceBuilder {
         GtfsRtSourceBuilder::new(id)
     }
 }
@@ -481,7 +494,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_changes_stamps_monotonic_sequence() {
         let source_id = "gtfs-seq-source";
-        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c6")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let mut rx = base.test_subscribe().await;
 
         let changes = vec![
@@ -491,7 +508,13 @@ mod tests {
         ];
         let expected = changes.len() as u64;
 
-        dispatch_changes(&base, source_id, changes).await;
+        dispatch_changes(
+            &base,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c6")
+                .expect("fixture UUID"),
+            changes,
+        )
+        .await;
 
         let mut sequences = Vec::new();
         for _ in 0..expected {

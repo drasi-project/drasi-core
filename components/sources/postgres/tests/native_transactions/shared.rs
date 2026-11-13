@@ -173,8 +173,8 @@ impl EnvelopeSink for Collect {
     }
 }
 
-fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("test component ID")
+fn id(value: u128) -> ComponentId {
+    component_id(value)
 }
 fn stream() -> StreamId {
     StreamId::try_new("changes").expect("test stream")
@@ -198,7 +198,7 @@ fn factory_for(plugins: &libraries::Plugins, output: SharedOutput) -> Result<Arc
         .context("shared PostgreSQL factory")
 }
 fn position(owner: &QuerySourceProgress) -> Result<Option<RowPosition>> {
-    drasi_postgres_common::replication::rows::row_position(&owner.snapshot(), &id("source"))
+    drasi_postgres_common::replication::rows::row_position(&owner.snapshot(), &id(77))
 }
 async fn wait_until(label: &str, mut condition: impl FnMut() -> Result<bool>) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -216,6 +216,17 @@ async fn ordinary_query(
     owner: Arc<QuerySourceProgress>,
 ) -> Result<ContinuousQueryTransformer> {
     processing_query(name, path, owner, SharedOutput::Rows).await
+}
+
+fn named_id(name: &str) -> ComponentId {
+    id(match name {
+        "fast" => 1,
+        "slow" => 2,
+        "fast-sink" => 3,
+        "slow-sink" => 4,
+        "late" => 450,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 async fn processing_query(
@@ -244,7 +255,7 @@ async fn processing_query_recovery(
     };
     let definition = ContinuousQueryDefinition {
         graph_id: ComponentBatch::GRAPH_ID.into(),
-        id: id(name),
+        id: named_id(name),
         query: "MATCH (n:person) RETURN n.id AS id,n.name AS name".into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new(format!("{name}-results"))?,
@@ -313,13 +324,13 @@ async fn build_graph_mode(
         .map(|name| {
             Ok(Arc::new(QuerySourceProgress::new(
                 ComponentBatch::GRAPH_ID,
-                id(name),
+                named_id(name),
             )?))
         })
         .collect::<Result<Vec<_>>>()?;
     let progress = Arc::new(ConsumerProgressSet::new(
         ComponentBatch::GRAPH_ID,
-        id("source"),
+        id(77),
         owners.clone(),
     )?);
     let resource = ResourceId::try_new("consumers")?;
@@ -351,7 +362,7 @@ async fn build_graph_mode(
         }
     }
     let specification = ComponentSpecification {
-        descriptor: factory.metadata().descriptor(id("source"))?,
+        descriptor: factory.metadata().descriptor(id(77))?,
         role: ComponentRole::Source,
         completion: None,
         implementation: factory.descriptor().implementation.clone(),
@@ -385,8 +396,20 @@ async fn build_graph_mode(
                 )))),
             ),
         )?
-        .component(specification, factory)
-        .bind_stream(endpoint("source", "out"), stream());
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("source")
+                .expect("source component name"),
+            specification,
+            factory,
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream(),
+        );
     let mut result = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut accepted_logs = Vec::new();
     for (index, name) in ["fast", "slow"].into_iter().enumerate() {
@@ -405,8 +428,12 @@ async fn build_graph_mode(
                 })
                 .context("shared PostgreSQL bootstrap factory")?;
             let provider = factory.create_provider(
-                id(name),
-                json!({"source":"source","stream":"changes","settings":database.config}),
+                named_id(name),
+                json!({
+                    "source": id(77).to_string(),
+                    "stream": "changes",
+                    "settings": database.config
+                }),
                 Some(libraries::scope(ComponentBatch::GRAPH_ID)),
                 Some(owners[index].clone()),
             )?;
@@ -422,25 +449,40 @@ async fn build_graph_mode(
         let gate = Arc::new(Semaphore::new(if index == 0 { 128 } else { slow_permits }));
         let sink = format!("{name}-sink");
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Collect {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&sink),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                events: output.clone(),
-            }))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new(name)
+                    .expect("query component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new(sink.as_str())
+                    .expect("sink component name"),
+                Box::new(Collect {
+                    descriptor: ComponentDescriptor::try_new(
+                        named_id(&sink),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    events: output.clone(),
+                }),
+            )
             .bind_stream(
-                endpoint(name, "out"),
+                endpoint(&named_id(name), "out"),
                 StreamId::try_new(format!("{name}-results"))?,
             )
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(&named_id(name), "in"),
+                ),
                 Box::new(GateProvider {
                     gate: gate.clone(),
                     inputs: input.clone(),
@@ -448,7 +490,10 @@ async fn build_graph_mode(
                 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink, "in")),
+                EdgeDefinition::new(
+                    endpoint(&named_id(name), "out"),
+                    endpoint(&named_id(&sink), "in"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 32 }),
             );
         result.1.push(input);
@@ -457,6 +502,7 @@ async fn build_graph_mode(
         accepted_logs.push(accepted);
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -490,7 +536,12 @@ async fn start_graph(graph: &SharedGraph) -> Result<()> {
         for name in ["source", "fast", "slow", "fast-sink", "slow-sink"] {
             tokio::time::timeout(
                 Duration::from_secs(10),
-                graph.core.computation_component(name)?.wait_started(),
+                graph
+                    .core
+                    .component_by_name(
+                        &ComponentName::try_new(name).expect("fixture component name"),
+                    )?
+                    .wait_started(),
             )
             .await??;
         }
@@ -498,12 +549,27 @@ async fn start_graph(graph: &SharedGraph) -> Result<()> {
     }
     .await;
     if let Err(error) = started {
+        let failures = graph
+            .core
+            .computation_control()?
+            .observed()
+            .components
+            .iter()
+            .filter_map(|(id, component)| {
+                component
+                    .failure
+                    .as_ref()
+                    .map(|failure| format!("{id}: {:#}", failure.cause))
+            })
+            .collect::<Vec<_>>();
         graph
             .core
             .shutdown()
             .await
             .context("shared PostgreSQL graph cleanup")?;
-        return Err(error);
+        return Err(error.context(format!(
+            "shared PostgreSQL component failures: {failures:?}"
+        )));
     }
     Ok(())
 }
@@ -569,11 +635,13 @@ async fn memory_snapshot_fanout() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn shared_snapshot_memory_current_thread_static_and_dynamic() -> Result<()> {
     memory_snapshot_fanout().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn shared_snapshot_memory_multi_thread_static_and_dynamic() -> Result<()> {
     memory_snapshot_fanout().await
 }
@@ -629,11 +697,13 @@ async fn memory_fanout() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn shared_memory_current_thread_static_and_dynamic() -> Result<()> {
     memory_fanout().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn shared_memory_multi_thread_static_and_dynamic() -> Result<()> {
     memory_fanout().await
 }
@@ -648,7 +718,7 @@ fn renumber(row: &OutputEnvelope, logical: u64, transport: u64) -> Result<Output
         .next()
         .context("row change")?;
     let event = SourceEventWrapper::new(
-        "source".into(),
+        id(77).clone(),
         SourceEvent::Change(change),
         row.envelope.system().timestamp().context("timestamp")?,
         logical,
@@ -658,7 +728,7 @@ fn renumber(row: &OutputEnvelope, logical: u64, transport: u64) -> Result<Output
         port: row.port.clone(),
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(event),
-            &id("source"),
+            &id(77),
             stream(),
             transport,
             None,
@@ -672,7 +742,9 @@ async fn seed_different_progress(
     path: &Path,
 ) -> Result<()> {
     let owners = ["fast", "slow"].map(|name| {
-        Arc::new(QuerySourceProgress::new(ComponentBatch::GRAPH_ID, id(name)).expect("test owner"))
+        Arc::new(
+            QuerySourceProgress::new(ComponentBatch::GRAPH_ID, named_id(name)).expect("test owner"),
+        )
     });
     let mut fast = ordinary_query("fast", Some(path), owners[0].clone()).await?;
     let mut slow = ordinary_query("slow", Some(path), owners[1].clone()).await?;
@@ -680,11 +752,11 @@ async fn seed_different_progress(
     slow.start().await?;
     let consumers = Arc::new(ConsumerProgressSet::new(
         ComponentBatch::GRAPH_ID,
-        id("source"),
+        id(77),
         owners.clone(),
     )?);
     let mut source = factory(plugins)?.create_component_with_consumer_progress(
-        id("source"),
+        id(77),
         json!({
             "stream":"changes", "settings":database.config, "persistent":true,
             "auto_create_slot":false,"start_from_slot":false,
@@ -692,6 +764,7 @@ async fn seed_different_progress(
         libraries::scope(ComponentBatch::GRAPH_ID),
         consumers,
     )?;
+    source.initialize().await?;
     source.start().await?;
     database
         .client()
@@ -729,6 +802,7 @@ async fn seed_different_progress(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn shared_persistent_replay_uses_wal_minimum_and_maximum_of_all_counters() -> Result<()> {
     for dynamic in [false, true] {
         let plugins = libraries::plugins(dynamic)?;
@@ -780,6 +854,7 @@ async fn shared_persistent_replay_uses_wal_minimum_and_maximum_of_all_counters()
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Result<()> {
     for (dynamic, slow_permits) in [(false, 0), (true, 0), (false, 1), (true, 1)] {
         let plugins = libraries::plugins(dynamic)?;

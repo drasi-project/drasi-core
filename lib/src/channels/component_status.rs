@@ -21,12 +21,13 @@ use std::{
 use tokio::sync::{mpsc, RwLock};
 
 use super::ComponentStatus;
+use crate::ComponentId;
 
 /// A status update delivered to the host's selected runtime observer.
 #[derive(Debug, Clone)]
 pub enum ComponentUpdate {
     Status {
-        component_id: String,
+        component_id: ComponentId,
         status: ComponentStatus,
         message: Option<String>,
     },
@@ -52,7 +53,7 @@ enum ComponentUpdateTransport {
 }
 
 struct PendingComponentUpdates {
-    component_id: String,
+    component_id: ComponentId,
     updates: VecDeque<ComponentUpdate>,
 }
 
@@ -136,7 +137,7 @@ impl std::fmt::Debug for ComponentUpdateSender {
 }
 
 impl ComponentUpdateSender {
-    pub(crate) fn observed(component_id: &str) -> (Self, ComponentUpdateObserver) {
+    pub(crate) fn observed(component_id: &ComponentId) -> (Self, ComponentUpdateObserver) {
         let pending = Arc::new(Mutex::new(PendingComponentUpdates {
             component_id: component_id.to_owned(),
             updates: VecDeque::with_capacity(MAX_COMPONENT_OBSERVATIONS + 1),
@@ -224,17 +225,17 @@ pub type ComponentUpdateReceiver = mpsc::Receiver<ComponentUpdate>;
 /// make the plugin's local status the native controller's lifecycle authority.
 #[derive(Clone)]
 pub struct ComponentStatusHandle {
-    component_id: String,
+    component_id: ComponentId,
     status: Arc<RwLock<ComponentStatus>>,
     update_tx: Arc<RwLock<Option<ComponentUpdateSender>>>,
     status_watch_tx: Arc<tokio::sync::watch::Sender<ComponentStatus>>,
 }
 
 impl ComponentStatusHandle {
-    pub fn new(component_id: impl Into<String>) -> Self {
+    pub fn new(component_id: ComponentId) -> Self {
         let (watch_tx, _) = tokio::sync::watch::channel(ComponentStatus::Stopped);
         Self {
-            component_id: component_id.into(),
+            component_id,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             update_tx: Arc::new(RwLock::new(None)),
             status_watch_tx: Arc::new(watch_tx),
@@ -242,12 +243,12 @@ impl ComponentStatusHandle {
     }
 
     pub fn new_wired(
-        component_id: impl Into<String>,
+        component_id: ComponentId,
         update_tx: impl Into<ComponentUpdateSender>,
     ) -> Self {
         let (watch_tx, _) = tokio::sync::watch::channel(ComponentStatus::Stopped);
         Self {
-            component_id: component_id.into(),
+            component_id,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             update_tx: Arc::new(RwLock::new(Some(update_tx.into()))),
             status_watch_tx: Arc::new(watch_tx),
@@ -306,13 +307,23 @@ mod tests {
 
     #[tokio::test]
     async fn rewiring_status_handle_replaces_a_revoked_observer() {
-        let (old, old_observer) = ComponentUpdateSender::observed("component");
-        let handle = ComponentStatusHandle::new_wired("component", old.clone());
+        let (old, old_observer) = ComponentUpdateSender::observed(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000033")
+                .expect("fixture UUID"),
+        );
+        let handle = ComponentStatusHandle::new_wired(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000033")
+                .expect("fixture UUID"),
+            old.clone(),
+        );
         let reporter = handle.clone();
         drop(old_observer);
         assert!(old.is_closed());
 
-        let (current, mut observer) = ComponentUpdateSender::observed("component");
+        let (current, mut observer) = ComponentUpdateSender::observed(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000033")
+                .expect("fixture UUID"),
+        );
         handle.wire(current).await;
         reporter
             .set_status(ComponentStatus::Error, Some("current failure".into()))
@@ -324,9 +335,13 @@ mod tests {
         );
     }
 
-    fn update(component_id: &str, status: ComponentStatus, message: &str) -> ComponentUpdate {
+    fn update(
+        component_id: drasi_core_types::ComponentId,
+        status: ComponentStatus,
+        message: &str,
+    ) -> ComponentUpdate {
         ComponentUpdate::Status {
-            component_id: component_id.to_owned(),
+            component_id,
             status,
             message: Some(message.to_owned()),
         }
@@ -342,21 +357,44 @@ mod tests {
 
     #[tokio::test]
     async fn observed_flood_preserves_readiness_first_failure_and_latest_status() {
-        let (sender, mut receiver) = ComponentUpdateSender::observed("source");
+        let (sender, mut receiver) = ComponentUpdateSender::observed(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         sender
-            .try_send(update("source", ComponentStatus::Running, "ready"))
+            .try_send(update(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                ComponentStatus::Running,
+                "ready",
+            ))
             .unwrap();
         sender
-            .try_send(update("source", ComponentStatus::Error, "first failure"))
+            .try_send(update(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                ComponentStatus::Error,
+                "first failure",
+            ))
             .unwrap();
         for index in 0..10_000 {
             sender
-                .try_send(update("source", ComponentStatus::Error, &index.to_string()))
+                .try_send(update(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    ComponentStatus::Error,
+                    &index.to_string(),
+                ))
                 .unwrap();
             assert!(receiver.pending.lock().unwrap().updates.len() <= MAX_COMPONENT_OBSERVATIONS);
         }
         sender
-            .try_send(update("source", ComponentStatus::Stopped, "last status"))
+            .try_send(update(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                ComponentStatus::Stopped,
+                "last status",
+            ))
             .unwrap();
         assert_update(
             receiver.recv().await.unwrap().unwrap(),
@@ -380,28 +418,49 @@ mod tests {
 
     #[tokio::test]
     async fn observed_wrong_component_status_cannot_be_hidden_by_later_updates() {
-        let (sender, mut receiver) = ComponentUpdateSender::observed("source");
+        let (sender, mut receiver) = ComponentUpdateSender::observed(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         sender
             .try_send(update(
-                "another-source",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000135")
+                    .expect("fixture UUID"),
                 ComponentStatus::Stopped,
                 "wrong id",
             ))
             .unwrap();
         for _ in 0..1_000 {
             sender
-                .try_send(update("source", ComponentStatus::Starting, "latest"))
+                .try_send(update(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    ComponentStatus::Starting,
+                    "latest",
+                ))
                 .unwrap();
         }
         let ComponentUpdate::Status { component_id, .. } = receiver.recv().await.unwrap().unwrap();
-        assert_eq!(component_id, "another-source");
+        assert_eq!(
+            component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000135")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn observed_reset_discards_only_prior_pending_updates() {
-        let (sender, mut receiver) = ComponentUpdateSender::observed("source");
+        let (sender, mut receiver) = ComponentUpdateSender::observed(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         sender
-            .try_send(update("source", ComponentStatus::Error, "old"))
+            .try_send(update(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                ComponentStatus::Error,
+                "old",
+            ))
             .unwrap();
         receiver.reset().unwrap();
         {
@@ -410,7 +469,12 @@ mod tests {
             assert!(futures::poll!(&mut read).is_pending());
         }
         sender
-            .try_send(update("source", ComponentStatus::Running, "new"))
+            .try_send(update(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                ComponentStatus::Running,
+                "new",
+            ))
             .unwrap();
         assert_update(
             receiver.recv().await.unwrap().unwrap(),
@@ -421,13 +485,21 @@ mod tests {
 
     #[tokio::test]
     async fn closing_observer_revokes_all_callback_clones() {
-        let (sender, receiver) = ComponentUpdateSender::observed("source");
+        let (sender, receiver) = ComponentUpdateSender::observed(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         let callback = sender.clone();
         drop(receiver);
         sender.closed().await;
         assert!(callback.is_closed());
         let error = callback
-            .try_send(update("source", ComponentStatus::Error, "late callback"))
+            .try_send(update(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                ComponentStatus::Error,
+                "late callback",
+            ))
             .unwrap_err();
         assert_update(error.into_inner(), ComponentStatus::Error, "late callback");
     }
@@ -436,13 +508,23 @@ mod tests {
     async fn asynchronous_observed_flood_yields_to_other_current_thread_work() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let (sender, _receiver) = ComponentUpdateSender::observed("source");
+        let (sender, _receiver) = ComponentUpdateSender::observed(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         let other_work_ran = AtomicBool::new(false);
         tokio::join!(
             async {
                 for index in 0..4_096 {
                     sender
-                        .send(update("source", ComponentStatus::Starting, "busy"))
+                        .send(update(
+                            drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            ComponentStatus::Starting,
+                            "busy",
+                        ))
                         .await
                         .unwrap();
                     if index == 1_024 {
@@ -456,7 +538,10 @@ mod tests {
 
     #[tokio::test]
     async fn poisoned_observation_mailbox_fails_explicitly() {
-        let (sender, mut receiver) = ComponentUpdateSender::observed("source");
+        let (sender, mut receiver) = ComponentUpdateSender::observed(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         let pending = receiver.pending.clone();
         assert!(std::thread::spawn(move || {
             let _guard = pending.lock().unwrap();
@@ -465,7 +550,12 @@ mod tests {
         .join()
         .is_err());
         assert!(sender
-            .try_send(update("source", ComponentStatus::Error, "failed"))
+            .try_send(update(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                ComponentStatus::Error,
+                "failed"
+            ))
             .is_err());
         assert!(receiver
             .recv()
@@ -477,13 +567,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_handle_new_defaults_to_stopped() {
-        let handle = ComponentStatusHandle::new("comp-1");
+        let handle = ComponentStatusHandle::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID"),
+        );
         assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
     }
 
     #[tokio::test]
     async fn test_status_handle_set_and_get() {
-        let handle = ComponentStatusHandle::new("comp-1");
+        let handle = ComponentStatusHandle::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID"),
+        );
         handle.set_status(ComponentStatus::Running, None).await;
         assert_eq!(handle.get_status().await, ComponentStatus::Running);
     }
@@ -491,7 +587,11 @@ mod tests {
     #[tokio::test]
     async fn test_status_handle_new_wired_sends_update() {
         let (tx, mut rx) = mpsc::channel(16);
-        let handle = ComponentStatusHandle::new_wired("comp-1", tx);
+        let handle = ComponentStatusHandle::new_wired(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID"),
+            tx,
+        );
         assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
         handle
             .set_status(ComponentStatus::Running, Some("started".into()))
@@ -502,14 +602,21 @@ mod tests {
             status,
             message,
         } = rx.try_recv().unwrap();
-        assert_eq!(component_id, "comp-1");
+        assert_eq!(
+            component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID")
+        );
         assert_eq!(status, ComponentStatus::Running);
         assert_eq!(message.as_deref(), Some("started"));
     }
 
     #[tokio::test]
     async fn test_status_handle_unwired_does_not_send() {
-        let handle = ComponentStatusHandle::new("comp-1");
+        let handle = ComponentStatusHandle::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID"),
+        );
         handle.set_status(ComponentStatus::Error, None).await;
         assert_eq!(handle.get_status().await, ComponentStatus::Error);
     }
@@ -517,7 +624,10 @@ mod tests {
     #[tokio::test]
     async fn test_status_handle_wire_after_creation() {
         let (tx, mut rx) = mpsc::channel(16);
-        let handle = ComponentStatusHandle::new("comp-1");
+        let handle = ComponentStatusHandle::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID"),
+        );
         handle.wire(tx).await;
         handle.set_status(ComponentStatus::Starting, None).await;
         let ComponentUpdate::Status {
@@ -525,7 +635,11 @@ mod tests {
             status,
             ..
         } = rx.try_recv().unwrap();
-        assert_eq!(component_id, "comp-1");
+        assert_eq!(
+            component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID")
+        );
         assert_eq!(status, ComponentStatus::Starting);
     }
 
@@ -533,7 +647,10 @@ mod tests {
     async fn test_status_handle_wire_only_first_call_takes_effect() {
         let (tx1, mut rx1) = mpsc::channel(16);
         let (tx2, mut rx2) = mpsc::channel(16);
-        let handle = ComponentStatusHandle::new("comp-1");
+        let handle = ComponentStatusHandle::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID"),
+        );
         handle.wire(tx1).await;
         handle.wire(tx2).await;
         handle.set_status(ComponentStatus::Running, None).await;
@@ -543,7 +660,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_handle_clone_shares_state() {
-        let handle = ComponentStatusHandle::new("comp-1");
+        let handle = ComponentStatusHandle::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001df")
+                .expect("fixture UUID"),
+        );
         let clone = handle.clone();
         handle.set_status(ComponentStatus::Running, None).await;
         assert_eq!(clone.get_status().await, ComponentStatus::Running);

@@ -27,9 +27,16 @@ enum Base {
 impl Base {
     fn cases() -> [Self; 2] {
         [
-            Self::Source(SourceBase::new(SourceBaseParams::new("source")).expect("source base")),
+            Self::Source(
+                SourceBase::new(SourceBaseParams::new(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                ))
+                .expect("source base"),
+            ),
             Self::Reaction(ReactionBase::new(ReactionBaseParams::new(
-                "reaction",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                    .expect("fixture UUID"),
                 vec![],
             ))),
         ]
@@ -172,7 +179,11 @@ async fn worker_panic_is_typed_and_cleanup_can_be_retried() {
 }
 
 async fn joined_forwarders() {
-    let base = ReactionBase::new(ReactionBaseParams::new("forwarders", vec![]));
+    let base = ReactionBase::new(ReactionBaseParams::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ae")
+            .expect("fixture UUID"),
+        vec![],
+    ));
     let exited = Arc::new(AtomicUsize::new(0));
     for _ in 0..8 {
         let (started, ready) = oneshot::channel();

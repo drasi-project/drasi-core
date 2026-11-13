@@ -18,7 +18,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use drasi_computation_contracts::{ComponentDescriptor, OutputEnvelope};
+use drasi_computation_contracts::{ComponentDescriptor, ComponentId, OutputEnvelope};
 use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -170,7 +170,11 @@ async fn submit_events(
             0,
         );
     }
-    if source != ingress.config.source_id {
+    let source = match ComponentId::try_new(source) {
+        Ok(id) => id,
+        Err(error) => return failure(StatusCode::BAD_REQUEST, error, 0),
+    };
+    if source != ingress.source_id {
         return failure(StatusCode::BAD_REQUEST, "source ID mismatch", 0);
     }
     let events = match events

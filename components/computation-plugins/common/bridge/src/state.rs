@@ -5,6 +5,7 @@
 //! acknowledged pipe retains ownership until the remote receipt is saved.
 
 use drasi_core::computation::{ComputationIndexes, ComputationTransaction};
+use drasi_core_types::OutputPartition;
 use drasi_lib::computation::v1::{
     decode_bounded_messagepack, encode_bounded_messagepack, DeliveryBatchIdentity, DeliveryScope,
     InputEnvelope, ProducerSession,
@@ -134,15 +135,17 @@ impl SenderState {
             return Ok(());
         }
         if let Some(transaction) = &self.transaction {
+            let partition =
+                OutputPartition::Component(self.contract.sender_endpoint.clone()).metadata(KEY);
             let outbox = transaction
                 .resources()
                 .outbox_writer()
                 .expect("validated transaction");
             let (head, records) = transaction
                 .run(async {
-                    let head = outbox.read_latest_sequence(KEY).await?;
+                    let head = outbox.read_latest_sequence(&partition).await?;
                     let records = if head == Some(1) {
-                        outbox.read_from(KEY, 0).await?
+                        outbox.read_from(&partition, 0).await?
                     } else {
                         Vec::new()
                     };
@@ -215,13 +218,15 @@ impl SenderState {
         self.validate(&ledger)?;
         let bytes = encode_bounded_messagepack(&ledger, self.byte_limit())?;
         if let Some(transaction) = &self.transaction {
+            let partition =
+                OutputPartition::Component(self.contract.sender_endpoint.clone()).metadata(KEY);
             let outbox = transaction
                 .resources()
                 .outbox_writer()
                 .expect("validated transaction");
             transaction
                 .run(async {
-                    outbox.append(KEY, 1, &bytes).await?;
+                    outbox.append(&partition, 1, &bytes).await?;
                     Ok(())
                 })
                 .await?;

@@ -9,9 +9,9 @@ use std::{
 };
 
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, ComponentRole, ComponentSemanticKind, ImplementationIdentity,
-    OutputProgress, PluginIdentity, PortDescriptor, PortDirection, PortFormatAlternative, PortId,
-    PortPrimaries, SchemaDescriptor, SinkCompletion,
+    ComponentDescriptor, ComponentId, ComponentName, ComponentRole, ComponentSemanticKind,
+    ComponentUpdateMode, ImplementationIdentity, OutputProgress, PluginIdentity, PortDescriptor,
+    PortDirection, PortFormatAlternative, PortId, PortPrimaries, SchemaDescriptor, SinkCompletion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +25,8 @@ pub enum ConfigType {
     Boolean,
     Integer,
     String,
+    ComponentId,
+    ComponentName,
     Object,
     Array,
     Json,
@@ -36,6 +38,12 @@ impl ConfigType {
             Self::Boolean => value.is_boolean(),
             Self::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
             Self::String => value.is_string(),
+            Self::ComponentId => value
+                .as_str()
+                .is_some_and(|text| ComponentId::try_new(text).is_ok()),
+            Self::ComponentName => value
+                .as_str()
+                .is_some_and(|text| ComponentName::try_new(text).is_ok()),
             Self::Object => value.is_object(),
             Self::Array => value.is_array(),
             Self::Json => true,
@@ -50,6 +58,18 @@ pub struct ConfigField {
     pub required: bool,
     /// Host construction requires an unresolved secret reference, never a literal.
     pub secret: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<drasi_computation_contracts::ConfigurationConstraint>,
+}
+
+impl ConfigField {
+    pub(crate) fn accepts(&self, value: &Value) -> bool {
+        self.value_type.accepts(value)
+            && self
+                .constraint
+                .as_ref()
+                .is_none_or(|constraint| constraint.accepts(value))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,12 +92,25 @@ impl ConfigSchema {
                             value_type,
                             required,
                             secret: false,
+                            constraint: None,
                         },
                     )
                 })
                 .collect(),
             allow_additional: false,
         }
+    }
+
+    pub fn constrain(
+        &mut self,
+        field: &str,
+        constraint: drasi_computation_contracts::ConfigurationConstraint,
+    ) -> anyhow::Result<()> {
+        self.fields
+            .get_mut(field)
+            .ok_or_else(|| anyhow::anyhow!("constraint names unknown configuration field {field}"))?
+            .constraint = Some(constraint);
+        Ok(())
     }
 
     pub fn validate(&self, configuration: &Value) -> anyhow::Result<()> {
@@ -91,10 +124,10 @@ impl ConfigSchema {
             );
         }
         for (name, value) in object {
-            ComponentId::try_new(name.as_str())?;
+            drasi_computation_contracts::validate_identifier("configuration field", name)?;
             match self.fields.get(name) {
                 Some(field) => anyhow::ensure!(
-                    field.value_type.accepts(value),
+                    field.accepts(value),
                     "native configuration field {name} has an incompatible type"
                 ),
                 None => anyhow::ensure!(
@@ -182,10 +215,15 @@ pub struct Capabilities {
     /// start and processing, without requiring construction-time bindings.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub input_binding_updates: bool,
-    /// The transformer implements retryable, explicit deletion of its own
-    /// state after successful cleanup. Other roles cannot declare this.
+    /// Retryable, explicit permanent deletion of owned state/resources after
+    /// positive cleanup. Never implies permission to delete borrowed/shared state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub deprovision: bool,
+    pub delete_owned_resources: bool,
+    /// Strategies the factory's pure planner can return. Empty means unsupported.
+    /// Every retained-object mode requires NativeComponent::supports_apply_update;
+    /// Recreate alone does not. These declarations are not storage/data proofs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update_modes: Vec<ComponentUpdateMode>,
     /// The transformer requires the host-owned indexed processing service.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub indexed_processing: bool,
@@ -280,8 +318,7 @@ impl FactoryMetadata {
         plugin: &PluginIdentity,
         schemas: &[SchemaDescriptor],
     ) -> anyhow::Result<()> {
-        ComponentId::try_new(self.implementation.name.as_ref())?;
-        ComponentId::try_new(self.implementation.version.as_ref())?;
+        self.implementation.validate()?;
         anyhow::ensure!(
             self.implementation.plugin.as_ref() == Some(plugin),
             "native factory plugin provenance does not match its manifest"
@@ -291,9 +328,11 @@ impl FactoryMetadata {
             "invalid native configuration version"
         );
         for name in self.configuration.fields.keys() {
-            ComponentId::try_new(name.as_str())?;
+            drasi_computation_contracts::validate_identifier("configuration field", name)?;
         }
-        self.descriptor(ComponentId::try_new("validation")?)?;
+        self.descriptor(ComponentId::try_new(
+            "00000000-0000-0000-0000-000000000000",
+        )?)?;
         let inputs = self
             .ports
             .iter()
@@ -359,10 +398,13 @@ impl FactoryMetadata {
                 || matches!(self.role, ComponentRole::Sink | ComponentRole::Transformer),
             "input-binding updates require a native sink or transformer"
         );
-        anyhow::ensure!(
-            !c.deprovision || self.role == ComponentRole::Transformer,
-            "native deprovision currently requires a transformer"
-        );
+        let mut update_modes = BTreeSet::new();
+        for mode in &c.update_modes {
+            anyhow::ensure!(
+                update_modes.insert(mode),
+                "duplicate native update mode {mode:?}"
+            );
+        }
         anyhow::ensure!(
             !c.indexed_processing || (self.role == ComponentRole::Transformer && !c.transactional),
             "native indexed processing requires a non-participant transformer"
@@ -535,8 +577,8 @@ impl PluginMetadata {
             self.abi_version == abi::ABI_VERSION && self.wire_version == abi::WIRE_VERSION,
             "unsupported native plugin ABI or wire format"
         );
-        ComponentId::try_new(self.plugin.id.as_ref())?;
-        ComponentId::try_new(self.plugin.version.as_ref())?;
+        drasi_computation_contracts::validate_identifier("plugin", &self.plugin.id)?;
+        drasi_computation_contracts::validate_identifier("plugin version", &self.plugin.version)?;
         let mut schema_ids = BTreeSet::new();
         for schema in &self.schemas {
             anyhow::ensure!(

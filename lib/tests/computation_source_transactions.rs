@@ -14,6 +14,10 @@
 
 #![cfg(feature = "computation-rocksdb-tests")]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::{
@@ -69,7 +73,7 @@ fn provider(path: &Path) -> Arc<dyn ComputationIndexProvider> {
 fn definition() -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: "source-transactions".into(),
-        id: ComponentId::try_new("query").expect("query id"),
+        id: fixture_support::component_id(46),
         query: "MATCH (n:Person) RETURN n.name AS name".into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("query-output").expect("stream"),
@@ -80,7 +84,7 @@ fn definition() -> ContinuousQueryDefinition {
 fn change(id: &str, name: &str, update: bool, time: u64) -> SourceChange {
     let element = Element::Node {
         metadata: ElementMetadata {
-            reference: ElementReference::new("source", id),
+            reference: ElementReference::new(fixture_support::component_id(77).as_str(), id),
             labels: Arc::from([Arc::from("Person")]),
             effective_from: time,
         },
@@ -94,7 +98,9 @@ fn change(id: &str, name: &str, update: bool, time: u64) -> SourceChange {
 }
 
 fn envelope(sequence: u64, changes: Vec<SourceChange>) -> ChangeEnvelope {
-    let mut builder = SourceTransactionBuilder::new("source", limits(16, 5000)).expect("assembly");
+    let mut builder =
+        SourceTransactionBuilder::new(&fixture_support::component_id(77), limits(16, 5000))
+            .expect("assembly");
     for change in changes {
         builder.push(change).expect("admission");
     }
@@ -382,7 +388,7 @@ async fn transaction_applies_removal_replacement_and_updates_in_commit_order() {
     let directory = tempfile::tempdir().expect("directory");
     let person = |time: u64, properties: serde_json::Value| Element::Node {
         metadata: ElementMetadata {
-            reference: ElementReference::new("source", "one"),
+            reference: ElementReference::new(fixture_support::component_id(77).as_str(), "one"),
             labels: Arc::from([Arc::from("Person")]),
             effective_from: time,
         },
@@ -457,18 +463,31 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
     let mut registry = MiddlewareTypeRegistry::new();
     registry.register(Arc::new(WaitFactory(gate.clone())));
     let registry = Arc::new(registry);
-    let config = drasi_lib::Query::cypher("query")
-        .query(definition().query)
-        .from_input_with_pipeline("source", vec!["waiting".into()])
-        .with_middleware(SourceMiddlewareConfig::new(
-            "wait",
-            "waiting",
-            Default::default(),
-        ))
-        .build();
-    let mut settings = QueryExecutionSettings::from_legacy_config(&config);
+    let config = drasi_lib::Query::cypher(
+        drasi_lib::config::ComponentName::try_new("query").expect("query name"),
+    )
+    .query(definition().query)
+    .from_input_with_pipeline_by_id(fixture_support::component_id(77), vec!["waiting".into()])
+    .with_middleware(SourceMiddlewareConfig::new(
+        "wait",
+        "waiting",
+        Default::default(),
+    ))
+    .build()
+    .expect("query configuration")
+    .with_assigned_id(definition().id);
+    let mut settings =
+        QueryExecutionSettings::from_configuration(&config).expect("execution settings");
     settings.source_transactions = Some(limits(1, 25));
     let event = envelope(1, vec![change("one", "one", false, 1000)]);
+    let bindings = [InputBinding {
+        input_port: PortId::try_new("in").expect("input"),
+        output: OutputEndpoint::new(
+            fixture_support::component_id(77),
+            PortId::try_new("out").expect("output"),
+        ),
+        stream: StreamId::try_new("source-output").expect("stream"),
+    }];
     {
         let mut query = ContinuousQueryTransformer::new_configured(
             definition(),
@@ -479,6 +498,10 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
         )
         .await
         .expect("query");
+        query
+            .bind_inputs(&bindings)
+            .await
+            .expect("source input binding");
         query.start().await.expect("start");
         let error = query
             .transform(input(event.clone()))
@@ -509,6 +532,10 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
     .await
     .expect("replacement");
     query
+        .bind_inputs(&bindings)
+        .await
+        .expect("replacement source input binding");
+    query
         .start()
         .await
         .expect("recover unchanged semantic configuration");
@@ -529,14 +556,12 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
 async fn transaction_replay_advances_transport_without_reapplying_committed_logical_input() {
     let directory = tempfile::tempdir().unwrap();
     let progress = Arc::new(
-        QuerySourceProgress::new(
-            "source-transactions",
-            ComponentId::try_new("query").unwrap(),
-        )
-        .unwrap(),
+        QuerySourceProgress::new("source-transactions", fixture_support::component_id(46)).unwrap(),
     );
     let replay = |transport| {
-        let mut assembly = SourceTransactionBuilder::new("source", limits(2, 5000)).unwrap();
+        let mut assembly =
+            SourceTransactionBuilder::new(&fixture_support::component_id(77), limits(2, 5000))
+                .unwrap();
         assembly.push(change("one", "final", false, 1000)).unwrap();
         assembly
             .commit(
@@ -563,7 +588,8 @@ async fn transaction_replay_advances_transport_without_reapplying_committed_logi
         assert_eq!(names(&query), ["final"]);
         let snapshot = progress.snapshot();
         assert_eq!(
-            snapshot.checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+            snapshot.checkpoints[&SourceProgressKey::Source(fixture_support::component_id(77))]
+                .sequence,
             42
         );
         assert_eq!(
@@ -643,11 +669,8 @@ impl EnvelopeSink for Sink {
     }
 }
 
-fn endpoint(id: &str, port: &str) -> Endpoint {
-    Endpoint::new(
-        ComponentId::try_new(id).expect("component"),
-        PortId::try_new(port).expect("port"),
-    )
+fn endpoint(id: ComponentId, port: &str) -> Endpoint {
+    Endpoint::new(id, PortId::try_new(port).expect("port"))
 }
 
 #[tokio::test]
@@ -657,7 +680,7 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
         let results = Arc::new(Mutex::new(Vec::new()));
         let source = Source {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("source").unwrap(),
+                fixture_support::component_id(77),
                 vec![PortDescriptor::new(
                     PortId::try_new("out").unwrap(),
                     PortDirection::Output,
@@ -677,7 +700,7 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
         };
         let sink = Sink {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("sink").unwrap(),
+                fixture_support::component_id(101),
                 vec![PortDescriptor::new(
                     PortId::try_new("in").unwrap(),
                     PortDirection::Input,
@@ -689,8 +712,8 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
             results: results.clone(),
         };
         let graph = ComputationGraph::builder("source-transactions")
-            .source(Box::new(source))
-            .sink(Box::new(sink));
+            .fixture_source(Box::new(source))
+            .fixture_sink(Box::new(sink));
         let graph = if factory_created {
             let factory = Arc::new(ContinuousQueryFactory::default());
             let indexes = ResourceId::try_new("indexes").unwrap();
@@ -741,25 +764,31 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
                     ),
                 )
                 .unwrap()
-                .component(specification, factory)
+                .component(fixture_support::component_name(), specification, factory)
         } else {
-            graph.transformer(Box::new(query(directory.path(), 3).await))
+            graph.fixture_transformer(Box::new(query(directory.path(), 3).await))
         };
         let mut graph = graph
             .bind_stream(
-                endpoint("source", "out"),
+                endpoint(fixture_support::component_id(77), "out"),
                 StreamId::try_new("source-output").unwrap(),
             )
             .bind_stream(
-                endpoint("query", "out"),
+                endpoint(definition().id, "out"),
                 StreamId::try_new("query-output").unwrap(),
             )
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+                EdgeDefinition::new(
+                    endpoint(fixture_support::component_id(77), "out"),
+                    endpoint(definition().id, "in"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+                EdgeDefinition::new(
+                    endpoint(definition().id, "out"),
+                    endpoint(fixture_support::component_id(101), "in"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()

@@ -27,6 +27,7 @@ impl Default for SupervisorFactory {
                     fields: BTreeMap::from([(
                         "manifest".into(),
                         ConfigurationField {
+                            constraint: None,
                             value_type: ConfigurationType::Object,
                             required: true,
                             secret: false,

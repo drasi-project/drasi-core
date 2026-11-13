@@ -17,6 +17,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use drasi_lib::channels::{QueryResult, ResultDiff};
+use drasi_lib::ComponentId;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
 use log::{debug, warn};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -56,8 +57,8 @@ fn deserialize_row_signature<'de, D: Deserializer<'de>>(deserializer: D) -> Resu
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    Subscribe { query_ids: Vec<String> },
-    Unsubscribe { query_ids: Vec<String> },
+    Subscribe { query_ids: Vec<ComponentId> },
+    Unsubscribe { query_ids: Vec<ComponentId> },
 }
 
 /// Result item emitted to dashboard clients.
@@ -87,7 +88,7 @@ pub struct WebSocketResultDiff {
 /// Query result payload sent to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryResultPayload {
-    pub query_id: String,
+    pub query_id: ComponentId,
     #[serde(
         serialize_with = "serialize_row_signature",
         deserialize_with = "deserialize_row_signature"
@@ -102,7 +103,7 @@ pub struct QueryResultPayload {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     QueryResult {
-        query_id: String,
+        query_id: ComponentId,
         #[serde(
             serialize_with = "serialize_row_signature",
             deserialize_with = "deserialize_row_signature"
@@ -112,7 +113,7 @@ pub enum ServerMessage {
         results: Vec<WebSocketResultDiff>,
     },
     QuerySnapshot {
-        query_id: String,
+        query_id: ComponentId,
         #[serde(
             serialize_with = "serialize_row_signature",
             deserialize_with = "deserialize_row_signature"
@@ -281,7 +282,7 @@ pub struct QuerySnapshot {
 /// Clients can fetch the current state to populate widgets on first load.
 #[derive(Clone)]
 pub struct QuerySnapshotStore {
-    snapshots: Arc<RwLock<HashMap<String, QuerySnapshot>>>,
+    snapshots: Arc<RwLock<HashMap<ComponentId, QuerySnapshot>>>,
     max_rows_per_query: usize,
 }
 
@@ -382,12 +383,12 @@ impl QuerySnapshotStore {
     /// match them by identity. To avoid clobbering newer live data that may have
     /// already arrived, this only inserts rows whose identity is not already
     /// present; existing rows are left untouched. Respects `max_rows_per_query`.
-    pub async fn seed_rows(&self, query_id: &str, rows: Vec<(u64, Value)>) {
+    pub async fn seed_rows(&self, query_id: &ComponentId, rows: Vec<(u64, Value)>) {
         if rows.is_empty() {
             return;
         }
         let mut snapshots = self.snapshots.write().await;
-        let snapshot = snapshots.entry(query_id.to_string()).or_default();
+        let snapshot = snapshots.entry(query_id.clone()).or_default();
 
         for (row_signature, data) in rows {
             if find_row_index(&snapshot.rows, row_signature, &data).is_none() {
@@ -406,13 +407,13 @@ impl QuerySnapshotStore {
     }
 
     /// Get the current accumulated snapshot for a query.
-    pub async fn get_snapshot(&self, query_id: &str) -> QuerySnapshot {
+    pub async fn get_snapshot(&self, query_id: &ComponentId) -> QuerySnapshot {
         let snapshots = self.snapshots.read().await;
         snapshots.get(query_id).cloned().unwrap_or_default()
     }
 
     /// Check whether there are any result rows for a query.
-    pub async fn has_data(&self, query_id: &str) -> bool {
+    pub async fn has_data(&self, query_id: &ComponentId) -> bool {
         let snapshots = self.snapshots.read().await;
         snapshots
             .get(query_id)
@@ -478,7 +479,7 @@ pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     hub: WebSocketHub,
     snapshot_store: QuerySnapshotStore,
-    query_ids: Vec<String>,
+    query_ids: Vec<ComponentId>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, hub, snapshot_store, query_ids, shutdown_rx))
@@ -514,8 +515,8 @@ impl QueryCursor {
 async fn send_snapshots(
     sender: &mut SplitSink<WebSocket, Message>,
     store: &QuerySnapshotStore,
-    query_ids: &[String],
-    cursors: &mut HashMap<String, QueryCursor>,
+    query_ids: &[ComponentId],
+    cursors: &mut HashMap<ComponentId, QueryCursor>,
 ) -> anyhow::Result<()> {
     for query_id in query_ids {
         let snapshot = store.get_snapshot(query_id).await;
@@ -539,14 +540,14 @@ async fn handle_socket(
     socket: WebSocket,
     hub: WebSocketHub,
     snapshot_store: QuerySnapshotStore,
-    query_ids: Vec<String>,
+    query_ids: Vec<ComponentId>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let (mut sender, mut receiver) = socket.split();
     // Register before taking snapshots. Revisions exclude buffered deltas that
     // the snapshots already contain, without losing updates during transmission.
     let mut hub_receiver = hub.subscribe();
-    let allowed_query_ids: HashSet<String> = query_ids.iter().cloned().collect();
+    let allowed_query_ids: HashSet<ComponentId> = query_ids.iter().cloned().collect();
     let session = async {
         let mut cursors = HashMap::new();
         // Keep the existing default subscription to all reaction queries.
@@ -616,24 +617,34 @@ mod tests {
 
     #[test]
     fn test_parse_client_subscribe_message() {
-        let parsed = parse_client_message(r#"{"type":"subscribe","query_ids":["q1","q2"]}"#)
+        let parsed = parse_client_message(r#"{"type":"subscribe","query_ids":["00000000-0000-0000-0000-00000000002b","00000000-0000-0000-0000-00000000002c"]}"#)
             .expect("valid subscribe message");
         assert_eq!(
             parsed,
             ClientMessage::Subscribe {
-                query_ids: vec!["q1".to_string(), "q2".to_string()]
+                query_ids: vec![
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                        .expect("fixture UUID")
+                ]
             }
         );
     }
 
     #[test]
     fn test_parse_client_unsubscribe_message() {
-        let parsed = parse_client_message(r#"{"type":"unsubscribe","query_ids":["q3"]}"#)
-            .expect("valid unsubscribe message");
+        let parsed = parse_client_message(
+            r#"{"type":"unsubscribe","query_ids":["00000000-0000-0000-0000-00000000008d"]}"#,
+        )
+        .expect("valid unsubscribe message");
         assert_eq!(
             parsed,
             ClientMessage::Unsubscribe {
-                query_ids: vec!["q3".to_string()]
+                query_ids: vec![drasi_core::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000008d"
+                )
+                .expect("fixture UUID")]
             }
         );
     }
@@ -641,7 +652,12 @@ mod tests {
     #[test]
     fn test_query_result_message_serialization() {
         let query_result = QueryResult {
-            query_id: "test-query".to_string(),
+            query_name: Some(
+                drasi_core::ComponentName::try_new("test-query").expect("fixture query name"),
+            ),
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: Utc::now(),
             results: vec![
@@ -672,7 +688,7 @@ mod tests {
             serde_json::from_str(&serialized).expect("serialized server message should be json");
 
         assert_eq!(parsed["type"], "query_result");
-        assert_eq!(parsed["query_id"], "test-query");
+        assert_eq!(parsed["query_id"], query_result.query_id.to_string());
         assert_eq!(parsed["revision"], "12345678901234567890");
         assert_eq!(parsed["results"][0]["op"], "add");
         assert_eq!(parsed["results"][1]["op"], "update");
@@ -704,7 +720,10 @@ mod tests {
 
     fn result(diff: ResultDiff) -> QueryResult {
         QueryResult {
-            query_id: "q".into(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             sequence: 0,
             timestamp: Utc::now(),
             results: vec![diff],
@@ -737,7 +756,12 @@ mod tests {
         let hub = WebSocketHub::new(8);
         let mut receiver = hub.subscribe();
         store.apply_and_broadcast(&add(1), &hub).await.unwrap();
-        let snapshot = store.get_snapshot("q").await;
+        let snapshot = store
+            .get_snapshot(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
+            )
+            .await;
         let mut cursor = QueryCursor::after_snapshot(snapshot.revision);
         let HubMessage::QueryResult(overlap) = receiver.recv().await.unwrap() else {
             panic!("expected query result")
@@ -758,11 +782,17 @@ mod tests {
             )
             .await
             .unwrap();
-        let empty = store.get_snapshot("q").await;
+        let empty = store
+            .get_snapshot(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
+            )
+            .await;
         assert!(empty.rows.is_empty());
         assert_eq!(empty.revision, 3);
         let message = ServerMessage::QuerySnapshot {
-            query_id: "q".into(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             revision: empty.revision,
             rows: empty.rows,
         };
@@ -791,7 +821,12 @@ mod tests {
             panic!("expected second query result")
         };
         assert_eq!((a.revision, b.revision), (1, 2));
-        let snapshot = store.get_snapshot("q").await;
+        let snapshot = store
+            .get_snapshot(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID"),
+            )
+            .await;
         assert_eq!(snapshot.revision, b.revision);
         assert_eq!(Some(&snapshot.rows[0].data), b.results[0].data.as_ref());
     }
@@ -802,14 +837,22 @@ mod tests {
         let hub = WebSocketHub::new(1);
         let mut receiver = hub.subscribe();
         store.snapshots.write().await.insert(
-            "q".into(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             QuerySnapshot {
                 rows: vec![],
                 revision: u64::MAX,
             },
         );
         assert!(store.apply_and_broadcast(&add(1), &hub).await.is_err());
-        assert!(store.get_snapshot("q").await.rows.is_empty());
+        assert!(store
+            .get_snapshot(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                    .expect("fixture UUID")
+            )
+            .await
+            .rows
+            .is_empty());
         assert!(matches!(
             receiver.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
@@ -835,7 +878,12 @@ mod tests {
                     upgrade,
                     socket_hub.clone(),
                     socket_store.clone(),
-                    vec!["q".into(), "empty".into()],
+                    vec![
+                        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                            .expect("fixture UUID"),
+                        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a9")
+                            .expect("fixture UUID"),
+                    ],
                     socket_shutdown.clone(),
                 )
             }),
@@ -865,21 +913,25 @@ mod tests {
         }
         let snapshot = read(&mut socket).await;
         assert_eq!(snapshot["type"], "query_snapshot");
+        assert_eq!(snapshot["query_id"], "00000000-0000-0000-0000-000000000081");
         assert_eq!(snapshot["revision"], "1");
         assert_eq!(snapshot["rows"][0]["v"]["value"], 1);
         let empty = read(&mut socket).await;
-        assert_eq!(empty["query_id"], "empty");
+        assert_eq!(empty["query_id"], "00000000-0000-0000-0000-0000000003a9");
         assert_eq!(empty["rows"], serde_json::json!([]));
         socket
             .send(tungstenite::Message::Text(
-                r#"{"type":"subscribe","query_ids":["q"]}"#.into(),
+                r#"{"type":"subscribe","query_ids":["00000000-0000-0000-0000-000000000081"]}"#
+                    .into(),
             ))
             .await
             .unwrap();
-        assert_eq!(read(&mut socket).await["revision"], "1");
+        let replacement = read(&mut socket).await;
+        assert_eq!(replacement, snapshot);
         store.apply_and_broadcast(&add(2), &hub).await.unwrap();
         let delta = read(&mut socket).await;
         assert_eq!(delta["type"], "query_result");
+        assert_eq!(delta["query_id"], snapshot["query_id"]);
         assert_eq!(delta["revision"], "2");
         assert_eq!(delta["results"][0]["data"]["value"], 2);
         // A gap cannot be silently accepted: the reader must reconnect.

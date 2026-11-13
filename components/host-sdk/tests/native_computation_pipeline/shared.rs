@@ -48,7 +48,7 @@ async fn group(
     barrier: Arc<CommitBarrier>,
 ) -> Result<(Arc<SharedStorageGroup>, [Arc<QosChannel>; 2])> {
     let original = storage(root)
-        .create_indexes("native-transactions", "transaction")
+        .create_indexes("native-transactions", &id("transaction"))
         .await?;
     let control: Arc<dyn SessionControl> = Arc::new(HeldCommit {
         inner: original.indexes().session_control.clone(),
@@ -198,11 +198,16 @@ fn graph_with_sinks(
                 Arc::new(TransactionalTransformerRegistryResource(registry.clone())),
             ),
         )?
-        .source(Box::new(ReleasedSource {
-            inner: source,
-            release,
-        }))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(ReleasedSource {
+                inner: source,
+                release,
+            }),
+        )
         .component(
+            name("transaction"),
             definition.specification(&registry, participants, indexes.clone())?,
             Arc::new(TransactionTransformerFactory::default()),
         )
@@ -228,7 +233,7 @@ fn graph_with_sinks(
                 binding: name.into(),
             })?
             .provide_resource(resource.clone(), channel.resource())?
-            .sink(sink)
+            .sink(super::name(name), sink)
             .connect(edge("transaction", name), Box::new(pipe));
     }
     Ok(builder.build()?)
@@ -243,7 +248,10 @@ pub(super) fn consumer_plugin() -> Result<Arc<NativePlugin>> {
                 Some(path) => workspace().join(path),
                 None => workspace().join("target"),
             };
-            target.join("debug/examples").join(format!(
+            let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| target.join("debug/plugins"));
+            directory.join("examples").join(format!(
                 "{}native_recovery{}",
                 std::env::consts::DLL_PREFIX,
                 std::env::consts::DLL_SUFFIX,
@@ -269,15 +277,16 @@ async fn separately_loaded_transformer_removes_only_its_owned_state_case() -> Re
 
     let mut transformer =
         factory.create_component(id("stateful"), json!({"state_file": state_file}))?;
+    transformer.initialize().await?;
     transformer.start().await?;
-    assert!(transformer.deprovision().await.is_err());
+    assert!(transformer.delete_owned_resources().await.is_err());
     assert!(state_file.exists());
     transformer.stop().await?;
     assert!(state_file.exists(), "ordinary stop must preserve state");
-    transformer.deprovision().await?;
+    transformer.delete_owned_resources().await?;
     assert!(!state_file.exists());
     assert_eq!(std::fs::read(&unrelated)?, b"unrelated");
-    transformer.deprovision().await?;
+    transformer.delete_owned_resources().await?;
     assert!(transformer.start().await.is_err());
     Ok(())
 }
@@ -313,7 +322,7 @@ async fn delivery_channels(
     let mut channels = Vec::new();
     for name in ["left", "right"] {
         let indexes = storage(&root.join("journals"))
-            .create_indexes("native-transactions", name)
+            .create_indexes("native-transactions", &id(name))
             .await?;
         let channel = QosChannel::persistent(
             QosChannelDefinition {
@@ -367,13 +376,21 @@ fn multi_operation_input() -> Result<ChangeEnvelope> {
         seed.system().sequence(),
     )?)
 }
-async fn consumer_state(root: &Path, name: &str) -> Result<Option<ElementValue>> {
+async fn consumer_state(
+    root: &Path,
+    consumer: &drasi_core_types::ComponentId,
+) -> Result<Option<ElementValue>> {
     let transaction = drasi_core::computation::ComputationTransaction::try_new(
         storage(root)
-            .create_indexes("native-transactions", name)
+            .create_indexes("native-transactions", consumer)
             .await?,
     )?;
-    let prefix: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+    // Transaction state encodes the canonical UUID text, not its raw UUID bytes.
+    let prefix: String = consumer
+        .as_str()
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let reference = ElementReference::new(&format!("transaction-step/{prefix}/values"), "count");
     let element = transaction
         .run(async {
@@ -496,7 +513,7 @@ async fn native_consumers_resume_partial_fanout_with_shared_and_separate_journal
             for name in ["left", "right"] {
                 if mode == ConsumerMode::Transactional {
                     assert_eq!(
-                        consumer_state(&root.join("consumers"), name).await?,
+                        consumer_state(&root.join("consumers"), &id(name)).await?,
                         Some(ElementValue::Integer(3))
                     );
                 } else {

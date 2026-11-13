@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
+use drasi_core::{interface::StorageScope, ComponentId};
 use redis::aio::MultiplexedConnection;
 use redis::{cmd, AsyncCommands};
 
@@ -41,19 +42,16 @@ pub struct GarnetLiveResultsWriter {
 }
 
 impl GarnetLiveResultsWriter {
-    pub fn new(query_id: &str, connection: MultiplexedConnection) -> Self {
+    pub fn new(
+        scope: &StorageScope,
+        component_id: &ComponentId,
+        connection: MultiplexedConnection,
+    ) -> Self {
         Self {
-            scope: OutputScope::new(query_id),
+            scope: OutputScope::new(scope, component_id),
             connection,
             session_state: None,
         }
-    }
-
-    /// Bind the primary logical query ID to the constructor's storage scope.
-    /// Other IDs use isolated namespaces without changing the primary keys.
-    pub fn with_query_id(mut self, query_id: &str) -> Self {
-        self.scope.bind_query_id(query_id);
-        self
     }
 
     /// Attach shared session state so `apply_mutations` stages into the active
@@ -66,8 +64,8 @@ impl GarnetLiveResultsWriter {
     }
 
     /// Redis key for the live results hash (hash-tagged for cluster).
-    fn live_key(&self, query_id: &str) -> String {
-        self.scope.key("live", query_id)
+    fn live_key(&self, query_id: &ComponentId) -> String {
+        self.scope.component_key("live", query_id)
     }
 }
 
@@ -75,7 +73,7 @@ impl GarnetLiveResultsWriter {
 impl LiveResultsWriter for GarnetLiveResultsWriter {
     async fn apply_mutations(
         &self,
-        query_id: &str,
+        query_id: &ComponentId,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         let live_key = self.live_key(query_id);
@@ -117,7 +115,10 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
         Ok(())
     }
 
-    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_snapshot(
+        &self,
+        query_id: &ComponentId,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         let mut con = self.connection.clone();
         let live_key = self.live_key(query_id);
 
@@ -141,7 +142,7 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
         Ok(entries)
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &ComponentId) -> Result<(), IndexError> {
         let live_key = self.live_key(query_id);
         if let Some(session) = &self.session_state {
             if session
@@ -160,7 +161,7 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
         Ok(())
     }
 
-    async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
+    async fn row_count(&self, query_id: &ComponentId) -> Result<usize, IndexError> {
         let mut con = self.connection.clone();
         let live_key = self.live_key(query_id);
 

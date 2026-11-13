@@ -58,7 +58,7 @@ pub async fn relabel(config: &(impl QueryTestConfig + Send)) {
         for mw in queries::middlewares() {
             builder = builder.with_source_middleware(mw);
         }
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline());
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline());
         builder.build().await
     };
 

@@ -13,15 +13,19 @@
 // limitations under the License.
 
 use anyhow::Result;
-use drasi_reaction_profiler::{ProfilerReaction, ProfilerReactionConfig};
+use drasi_lib::{ComponentId, ComponentName};
+use drasi_reaction_profiler::ProfilerReaction;
 use shared_tests::recovery_test_helpers::exercise_autoskipgap_recovery;
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_profiler_reaction_autoskipgap_recovery() -> Result<()> {
-    let reaction = ProfilerReaction::new(
-        "profiler-autoskip",
-        vec!["q1".to_string()],
-        ProfilerReactionConfig::default(),
-    );
-    exercise_autoskipgap_recovery("profiler-autoskipgap", "profiler-autoskip", reaction).await
+    let reaction = ProfilerReaction::builder(ComponentId::generate())
+        .with_query_by_name(ComponentName::try_new("q1")?)
+        .build()?;
+    exercise_autoskipgap_recovery(
+        "profiler-autoskipgap",
+        &ComponentName::try_new("profiler-autoskip")?,
+        reaction,
+    )
+    .await
 }

@@ -105,7 +105,7 @@ impl Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
                     element_id: self.id.into(),
-                    source_id: self.source_id.into(),
+                    namespace: self.source_id.into(),
                 },
                 labels: Arc::from(
                     self.labels
@@ -158,7 +158,7 @@ impl Relation {
             metadata: ElementMetadata {
                 reference: ElementReference {
                     element_id: self.id.into(),
-                    source_id: Arc::from(self.source_id.as_str()),
+                    namespace: Arc::from(self.source_id.as_str()),
                 },
                 labels: Arc::from(
                     self.labels
@@ -170,11 +170,11 @@ impl Relation {
             },
             in_node: ElementReference {
                 element_id: self.from_id.into(),
-                source_id: Arc::from(self.source_id.as_str()),
+                namespace: Arc::from(self.source_id.as_str()),
             },
             out_node: ElementReference {
                 element_id: self.to_id.into(),
-                source_id: Arc::from(self.source_id.as_str()),
+                namespace: Arc::from(self.source_id.as_str()),
             },
             properties: ElementPropertyMap::new(),
         }

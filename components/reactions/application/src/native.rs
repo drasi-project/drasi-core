@@ -76,9 +76,13 @@ enum Delivery {
 /// The external receiver/callback binding is deliberately not reconstructible
 /// from a configuration snapshot and never crosses a plugin ABI.
 ///
+/// This preconstructed sink requires a `DrasiLib` built with
+/// `with_allow_external_component_ids(true)`. Its generated UUID is independent
+/// of the validated name supplied at admission.
+///
 /// ```no_run
 /// use std::num::NonZeroUsize;
-/// use drasi_lib::{DrasiLib, computation::v1::*};
+/// use drasi_lib::{ComponentName, DrasiLib, computation::v1::*};
 /// use drasi_reaction_application::NativeApplicationReaction;
 ///
 /// async fn connect(
@@ -86,11 +90,12 @@ enum Delivery {
 ///     query_output: Endpoint,
 /// ) -> anyhow::Result<(ComponentHandle, tokio::sync::mpsc::Receiver<InputEnvelope>)> {
 ///     let (reaction, receiver) = NativeApplicationReaction::channel(
-///         "application", QueryChangeCodec::schema().descriptor().clone(),
+///         ComponentId::generate(), QueryChangeCodec::schema().descriptor().clone(),
 ///         NonZeroUsize::new(64).unwrap(),
 ///     )?;
 ///     let input = reaction.input();
 ///     let component = drasi.add_computation_component(ComponentAddition::new(
+///         ComponentName::try_new("application")?,
 ///         ConstructedComponent::sink(Box::new(reaction)),
 ///     )).await?;
 ///     let report = drasi.computation_control()?.connect(
@@ -120,7 +125,7 @@ impl ApplicationReaction {
     /// queue; close/drain it explicitly when the application no longer needs it.
     /// Cancelling a send before capacity is available publishes nothing.
     pub fn channel(
-        id: impl Into<String>,
+        id: ComponentId,
         schema: SchemaDescriptor,
         capacity: NonZeroUsize,
     ) -> Result<(Self, mpsc::Receiver<InputEnvelope>)> {
@@ -154,7 +159,7 @@ impl ApplicationReaction {
     /// Callbacks must cooperate with the async runtime and must not spawn
     /// unowned work. Returning after queuing work does not confirm that work.
     pub fn callback<F, Fut>(
-        id: impl Into<String>,
+        id: ComponentId,
         schema: SchemaDescriptor,
         mut handler: F,
     ) -> Result<Self>
@@ -187,12 +192,9 @@ impl ApplicationReaction {
         )
     }
 
-    fn descriptor_for(
-        id: impl Into<String>,
-        schema: SchemaDescriptor,
-    ) -> Result<ComponentDescriptor> {
+    fn descriptor_for(id: ComponentId, schema: SchemaDescriptor) -> Result<ComponentDescriptor> {
         Ok(ComponentDescriptor::try_new(
-            ComponentId::try_new(id.into())?,
+            id,
             vec![PortDescriptor::new(
                 PortId::try_new(INPUT_PORT)?,
                 PortDirection::Input,

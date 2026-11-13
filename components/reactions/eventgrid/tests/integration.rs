@@ -41,7 +41,7 @@ const TEST_KEY: &str = "test-access-key";
 const PIPELINE_WARMUP: Duration = Duration::from_millis(100);
 
 fn make_source(
-    id: &str,
+    id: drasi_core::ComponentId,
 ) -> (
     ApplicationSource,
     drasi_source_application::ApplicationSourceHandle,
@@ -92,20 +92,32 @@ async fn eventgrid_end_to_end_unpacked_cloudevents() -> Result<()> {
         .mount(&server)
         .await;
 
-    let (source, handle) = make_source("test-source");
-    let query = Query::cypher("people-query")
-        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
-    let reaction = EventGridReaction::builder("eventgrid-e2e")
-        .with_endpoint(format!("{}/api/events", server.uri()))
-        .with_allow_http(true)
-        .with_access_key(TEST_KEY)
-        .with_schema(EventGridSchema::CloudEvents)
-        .with_format(OutputFormat::Unpacked)
-        .with_query("people-query")
-        .build()?;
+    let (source, handle) = make_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()?;
+    let reaction = EventGridReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000002")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(format!("{}/api/events", server.uri()))
+    .with_allow_http(true)
+    .with_access_key(TEST_KEY)
+    .with_schema(EventGridSchema::CloudEvents)
+    .with_format(OutputFormat::Unpacked)
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .build()?;
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -122,9 +134,16 @@ async fn eventgrid_end_to_end_unpacked_cloudevents() -> Result<()> {
                     .clone(),
             )
             .with_id("eventgrid-e2e-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("test-source").unwrap(),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("eventgrid-e2e")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
@@ -200,20 +219,32 @@ async fn eventgrid_end_to_end_eventgrid_schema_insert() -> Result<()> {
         .mount(&server)
         .await;
 
-    let (source, handle) = make_source("test-source");
-    let query = Query::cypher("people-query")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
-    let reaction = EventGridReaction::builder("eventgrid-native")
-        .with_endpoint(format!("{}/api/events", server.uri()))
-        .with_allow_http(true)
-        .with_access_key(TEST_KEY)
-        .with_schema(EventGridSchema::EventGrid)
-        .with_format(OutputFormat::Unpacked)
-        .with_query("people-query")
-        .build()?;
+    let (source, handle) = make_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()?;
+    let reaction = EventGridReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000003")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(format!("{}/api/events", server.uri()))
+    .with_allow_http(true)
+    .with_access_key(TEST_KEY)
+    .with_schema(EventGridSchema::EventGrid)
+    .with_format(OutputFormat::Unpacked)
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .build()?;
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -230,9 +261,16 @@ async fn eventgrid_end_to_end_eventgrid_schema_insert() -> Result<()> {
                     .clone(),
             )
             .with_id("eventgrid-native-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("test-source").unwrap(),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("eventgrid-native")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
@@ -275,12 +313,19 @@ async fn eventgrid_template_metadata_becomes_extension_attributes() -> Result<()
         .mount(&server)
         .await;
 
-    let (source, handle) = make_source("test-source");
-    let query = Query::cypher("people-query")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
+    let (source, handle) = make_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()?;
 
     let template = EventGridQueryConfig {
         added: Some(EventGridTemplateSpec::with_extension(
@@ -292,15 +337,20 @@ async fn eventgrid_template_metadata_becomes_extension_attributes() -> Result<()
         ..Default::default()
     };
 
-    let reaction = EventGridReaction::builder("eventgrid-template")
-        .with_endpoint(format!("{}/api/events", server.uri()))
-        .with_allow_http(true)
-        .with_access_key(TEST_KEY)
-        .with_schema(EventGridSchema::CloudEvents)
-        .with_format(OutputFormat::Template)
-        .with_query("people-query")
-        .with_query_template("people-query", template)
-        .build()?;
+    let reaction = EventGridReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000004")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(format!("{}/api/events", server.uri()))
+    .with_allow_http(true)
+    .with_access_key(TEST_KEY)
+    .with_schema(EventGridSchema::CloudEvents)
+    .with_format(OutputFormat::Template)
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .with_query_template("people-query", template)
+    .build()?;
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -317,9 +367,16 @@ async fn eventgrid_template_metadata_becomes_extension_attributes() -> Result<()
                     .clone(),
             )
             .with_id("eventgrid-template-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("test-source").unwrap(),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("eventgrid-template")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
@@ -356,19 +413,31 @@ async fn eventgrid_publish_failure_keeps_reaction_running() -> Result<()> {
         .mount(&server)
         .await;
 
-    let (source, handle) = make_source("test-source");
-    let query = Query::cypher("people-query")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
-    let reaction = EventGridReaction::builder("eventgrid-fail")
-        .with_endpoint(format!("{}/api/events", server.uri()))
-        .with_allow_http(true)
-        .with_access_key("wrong-key")
-        .with_format(OutputFormat::Unpacked)
-        .with_query("people-query")
-        .build()?;
+    let (source, handle) = make_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()?;
+    let reaction = EventGridReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000005")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(format!("{}/api/events", server.uri()))
+    .with_allow_http(true)
+    .with_access_key("wrong-key")
+    .with_format(OutputFormat::Unpacked)
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .build()?;
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -385,9 +454,16 @@ async fn eventgrid_publish_failure_keeps_reaction_running() -> Result<()> {
                     .clone(),
             )
             .with_id("eventgrid-fail-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("test-source").unwrap(),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("eventgrid-fail")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );

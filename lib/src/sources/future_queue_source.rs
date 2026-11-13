@@ -27,10 +27,8 @@ use crate::channels::{
     ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher, SourceControl, SourceEvent,
     SourceEventWrapper,
 };
+use crate::ComponentId;
 use tracing::Instrument;
-
-/// Internal source ID for the future queue source (used for lifecycle management only)
-pub const FUTURE_QUEUE_SOURCE_ID: &str = "__future_queue__";
 
 /// Status of the future queue source
 #[derive(Debug, Clone, PartialEq)]
@@ -51,7 +49,7 @@ pub struct FutureQueueSource {
     /// Task handle for the polling loop
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Query ID for logging
-    query_id: String,
+    query_id: ComponentId,
     /// Dispatcher for sending events to subscribers
     dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
     /// Monotonic sequence counter for the control events this source emits.
@@ -62,7 +60,7 @@ pub struct FutureQueueSource {
 
 impl FutureQueueSource {
     /// Create a new FutureQueueSource
-    pub fn new(future_queue: Arc<dyn FutureQueue>, query_id: String) -> Self {
+    pub fn new(future_queue: Arc<dyn FutureQueue>, query_id: ComponentId) -> Self {
         Self {
             future_queue,
             status: Arc::new(RwLock::new(FutureQueueSourceStatus::Stopped)),
@@ -166,7 +164,7 @@ impl FutureQueueSource {
                         break;
                     };
                     let event_wrapper = SourceEventWrapper::new(
-                        FUTURE_QUEUE_SOURCE_ID.to_string(),
+                        query_id.clone(),
                         SourceEvent::Control(SourceControl::FuturesDue),
                         timestamp,
                         sequence,
@@ -281,53 +279,70 @@ mod tests {
         }
     }
 
-    fn make_source(query_id: &str) -> FutureQueueSource {
+    fn make_source(query_id: drasi_core_types::ComponentId) -> FutureQueueSource {
         let fq = Arc::new(MockFutureQueue);
-        FutureQueueSource::new(fq, query_id.to_string())
+        FutureQueueSource::new(fq, query_id)
     }
 
     #[test]
     fn new_creates_source_with_correct_query_id() {
-        let source = make_source("test-query-1");
-        assert_eq!(source.query_id, "test-query-1");
-    }
-
-    #[test]
-    fn source_id_constant_has_expected_value() {
-        assert_eq!(FUTURE_QUEUE_SOURCE_ID, "__future_queue__");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000276")
+                .expect("fixture UUID"),
+        );
+        assert_eq!(
+            source.query_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000276")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn initial_status_is_stopped() {
-        let source = make_source("status-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000413")
+                .expect("fixture UUID"),
+        );
         let status = source.status.read().await;
         assert_eq!(*status, FutureQueueSourceStatus::Stopped);
     }
 
     #[tokio::test]
     async fn initial_task_handle_is_none() {
-        let source = make_source("handle-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000414")
+                .expect("fixture UUID"),
+        );
         let handle = source.task_handle.read().await;
         assert!(handle.is_none());
     }
 
     #[tokio::test]
     async fn initial_dispatcher_is_none() {
-        let source = make_source("dispatcher-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000415")
+                .expect("fixture UUID"),
+        );
         let dispatcher = source.dispatcher.read().await;
         assert!(dispatcher.is_none());
     }
 
     #[tokio::test]
     async fn subscribe_returns_receiver() {
-        let source = make_source("subscribe-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000416")
+                .expect("fixture UUID"),
+        );
         let result = source.subscribe().await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn subscribe_sets_dispatcher() {
-        let source = make_source("subscribe-dispatch-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000417")
+                .expect("fixture UUID"),
+        );
         let _ = source.subscribe().await.unwrap();
         let dispatcher = source.dispatcher.read().await;
         assert!(dispatcher.is_some());
@@ -335,7 +350,10 @@ mod tests {
 
     #[tokio::test]
     async fn start_sets_status_to_running() {
-        let source = make_source("start-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000418")
+                .expect("fixture UUID"),
+        );
         let _ = source.subscribe().await.unwrap();
         source.start().await.unwrap();
         {
@@ -347,7 +365,10 @@ mod tests {
 
     #[tokio::test]
     async fn start_when_already_running_returns_error() {
-        let source = make_source("double-start-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000419")
+                .expect("fixture UUID"),
+        );
         let _ = source.subscribe().await.unwrap();
         source.start().await.unwrap();
         let result = source.start().await;
@@ -357,7 +378,10 @@ mod tests {
 
     #[tokio::test]
     async fn stop_sets_status_to_stopped() {
-        let source = make_source("stop-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000041a")
+                .expect("fixture UUID"),
+        );
         let _ = source.subscribe().await.unwrap();
         source.start().await.unwrap();
         source.stop().await;
@@ -367,7 +391,10 @@ mod tests {
 
     #[tokio::test]
     async fn stop_clears_dispatcher() {
-        let source = make_source("stop-dispatcher-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000041b")
+                .expect("fixture UUID"),
+        );
         let _ = source.subscribe().await.unwrap();
         source.start().await.unwrap();
         source.stop().await;
@@ -377,7 +404,10 @@ mod tests {
 
     #[tokio::test]
     async fn stop_when_already_stopped_is_noop() {
-        let source = make_source("stop-noop-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000041c")
+                .expect("fixture UUID"),
+        );
         // Stopping a source that was never started should not panic
         source.stop().await;
         let status = source.status.read().await;
@@ -386,7 +416,10 @@ mod tests {
 
     #[tokio::test]
     async fn can_restart_after_stop() {
-        let source = make_source("restart-test");
+        let source = make_source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000041d")
+                .expect("fixture UUID"),
+        );
         let _ = source.subscribe().await.unwrap();
         source.start().await.unwrap();
         source.stop().await;
@@ -417,7 +450,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let source = FutureQueueSource::new(queue, "scheduled-order".into());
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000372")
+                .expect("fixture UUID");
+        let source = FutureQueueSource::new(queue, query_id.clone());
         let mut previous = 0;
         for _ in 0..2 {
             let mut receiver = source.subscribe().await.unwrap();
@@ -426,7 +462,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(event.source_id, FUTURE_QUEUE_SOURCE_ID);
+            assert_eq!(event.source_id, query_id);
             assert_eq!(event.timestamp.timestamp_millis(), 2_000);
             assert_eq!(event.event, SourceEvent::Control(SourceControl::FuturesDue));
             let sequence = event.sequence;

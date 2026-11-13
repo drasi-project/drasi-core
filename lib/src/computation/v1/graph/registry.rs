@@ -13,8 +13,29 @@
 // limitations under the License.
 
 use super::*;
+use crate::computation::v1::OperationEpoch;
 
-pub(super) type MetadataChanges = Arc<std::sync::Mutex<BTreeSet<ComponentId>>>;
+#[derive(Clone, Default)]
+pub(super) struct MetadataChanges {
+    changes: Arc<std::sync::Mutex<BTreeSet<ComponentId>>>,
+    changed: Arc<tokio::sync::Notify>,
+}
+
+impl MetadataChanges {
+    pub(super) fn lock(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, BTreeSet<ComponentId>>> {
+        self.changes.lock()
+    }
+
+    pub(super) fn notify(&self) {
+        self.changed.notify_one();
+    }
+
+    pub(super) async fn notified(&self) {
+        self.changed.notified().await;
+    }
+}
 
 /// A coherent current publication for in-process hosts. Weak bindings avoid a
 /// cycle through components that themselves hold their graph's control handle.
@@ -28,6 +49,7 @@ pub(crate) struct GraphRegistrySnapshot {
     query_apis: im::OrdMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
     source_schema_readers:
         im::OrdMap<ComponentId, std::sync::Weak<dyn crate::computation::v1::SourceSchemaReader>>,
+    source_schema_admissions: im::OrdMap<ComponentId, (Option<OperationEpoch>, bool)>,
     output_readers: im::OrdMap<ComponentId, crate::computation::v1::WeakOutputReaders>,
     primary_ports: im::OrdMap<ComponentId, crate::computation::v1::PortPrimaries>,
     factories: im::OrdMap<ImplementationIdentity, std::sync::Weak<dyn ComponentFactory>>,
@@ -81,6 +103,7 @@ impl GraphRegistrySnapshot {
             configurations,
             query_apis,
             source_schema_readers,
+            source_schema_admissions: im::OrdMap::new(),
             output_readers,
             primary_ports: desired
                 .specifications
@@ -150,7 +173,7 @@ impl GraphRegistrySnapshot {
     pub(crate) fn authored_query_configuration(
         &self,
         specification: &ComponentSpecification,
-    ) -> Option<anyhow::Result<crate::config::QueryConfig>> {
+    ) -> Option<anyhow::Result<crate::config::ResolvedQueryConfig>> {
         self.factory(&specification.implementation)
             .and_then(|factory| {
                 factory
@@ -207,6 +230,14 @@ impl GraphRegistrySnapshot {
             .map(|reader| reader.upgrade().ok_or(GraphError::StaleGeneration))
             .transpose()
     }
+
+    /// None precedes the controller's first construction metadata publication.
+    pub(crate) fn source_schema_admission(
+        &self,
+        id: &ComponentId,
+    ) -> Option<(Option<OperationEpoch>, bool)> {
+        self.source_schema_admissions.get(id).copied()
+    }
 }
 
 pub(super) fn publish(graph: &ComputationGraph) {
@@ -218,7 +249,7 @@ pub(super) fn publish(graph: &ComputationGraph) {
     let observed = graph.observed();
     let previous = graph.registry.borrow().clone();
     let next = if !Arc::ptr_eq(&previous.desired, &desired) {
-        GraphRegistrySnapshot::new(
+        let mut next = GraphRegistrySnapshot::new(
             desired,
             observed,
             &graph.resource_handles,
@@ -256,7 +287,15 @@ pub(super) fn publish(graph: &ComputationGraph) {
                 .collect(),
             &graph.factories,
             graph.deferred_activation.clone(),
-        )
+        );
+        for (id, index) in &graph.ids {
+            let (reservation, captured, reader) =
+                graph.components[*index].source_schema_admission();
+            replace_optional(&mut next.source_schema_readers, id, reader);
+            next.source_schema_admissions
+                .insert(id.clone(), (reservation, captured));
+        }
+        next
     } else {
         let mut next = (*previous).clone();
         next.observed = observed.clone();
@@ -266,16 +305,16 @@ pub(super) fn publish(graph: &ComputationGraph) {
                 let slot = &graph.components[*index];
                 next.configurations.insert(id.clone(), slot.configuration());
                 replace_optional(&mut next.query_apis, &id, slot.query_api());
-                replace_optional(
-                    &mut next.source_schema_readers,
-                    &id,
-                    slot.source_schema_reader(),
-                );
+                let (reservation, captured, reader) = slot.source_schema_admission();
+                replace_optional(&mut next.source_schema_readers, &id, reader);
+                next.source_schema_admissions
+                    .insert(id.clone(), (reservation, captured));
                 replace_optional(&mut next.output_readers, &id, slot.output_readers());
             } else {
                 next.configurations.remove(&id);
                 next.query_apis.remove(&id);
                 next.source_schema_readers.remove(&id);
+                next.source_schema_admissions.remove(&id);
                 next.output_readers.remove(&id);
             }
         }
@@ -368,10 +407,16 @@ mod tests {
 
     fn graph() -> ComputationGraph {
         ComputationGraph::builder("registry")
-            .service(Box::new(Idle(
-                ComponentDescriptor::try_new(ComponentId::try_new("component").unwrap(), vec![])
+            .service(
+                ComponentName::try_new("component").unwrap(),
+                Box::new(Idle(
+                    ComponentDescriptor::try_new(
+                        ComponentId::from_uuid(uuid::Uuid::from_u128(1)),
+                        vec![],
+                    )
                     .unwrap(),
-            )))
+                )),
+            )
             .build()
             .unwrap()
     }
@@ -383,16 +428,19 @@ mod tests {
         for count in [16, 1024, 4096] {
             let mut builder = ComputationGraph::builder("publication-scaling");
             for index in 0..count {
-                builder = builder.service(Box::new(Idle(
-                    ComponentDescriptor::try_new(
-                        ComponentId::try_new(format!("component-{index:05}")).unwrap(),
-                        vec![],
-                    )
-                    .unwrap(),
-                )));
+                builder = builder.service(
+                    ComponentName::try_new(format!("component-{index:05}")).unwrap(),
+                    Box::new(Idle(
+                        ComponentDescriptor::try_new(
+                            ComponentId::from_uuid(uuid::Uuid::from_u128(index + 1)),
+                            vec![],
+                        )
+                        .unwrap(),
+                    )),
+                );
             }
             let graph = builder.build().unwrap();
-            let id = ComponentId::try_new("component-00000").unwrap();
+            let id = ComponentId::from_uuid(uuid::Uuid::from_u128(1));
             let began = std::time::Instant::now();
             for index in 0..128 {
                 super::super::controller::update(&graph, |state| {
@@ -416,7 +464,7 @@ mod tests {
     fn configuration_comparison_ignores_status_but_fences_changed_owners_and_values() {
         let graph = graph();
         let original = graph.registry.borrow().clone();
-        let id = ComponentId::try_new("component").unwrap();
+        let id = ComponentId::from_uuid(uuid::Uuid::from_u128(1));
         let mut status = (*original).clone();
         let observed = Arc::make_mut(&mut status.observed);
         let component = observed.components.get_mut(&id).unwrap();
@@ -470,7 +518,7 @@ mod tests {
         });
         let before = graph.registry.borrow().clone();
         let inspection = graph.inspector.snapshot();
-        let id = ComponentId::try_new("component").unwrap();
+        let id = crate::test_helpers::component_id(1);
         super::super::controller::update(&graph, |state| {
             state.components.get_mut(&id).unwrap().health = ComponentHealth::Healthy;
         });
@@ -519,8 +567,8 @@ mod tests {
             let registry = graph.registry.clone();
             let run = graph.start().unwrap();
             let control = run.control();
-            let id = ComponentId::try_new("component").unwrap();
-            let handle = control.component_handle(&id).unwrap();
+            let id = crate::test_helpers::component_id(1);
+            let handle = control.component_handle_by_id(&id).unwrap();
             if unpublished_component {
                 let mut prior = (*control.registry_snapshot().observed).clone();
                 prior.components.remove(&id);

@@ -20,25 +20,29 @@ async fn legacy_mysql57_cdc_with_explicit_positional_keys() -> Result<()> {
     database
         .sql("CREATE TABLE items(`@0` INT PRIMARY KEY,`@1` VARCHAR(80) NOT NULL)")
         .await?;
-    let source = MySqlReplicationSource::builder("mysql-bulk")
-        .with_host("127.0.0.1")
-        .with_port(database.port)
-        .with_database("test")
-        .with_user("root")
-        .with_password("native-test")
-        .with_ssl_mode(SslMode::Disabled)
-        .with_tables(vec!["items".to_owned()])
-        .with_start_position(StartPosition::FromEnd)
-        .with_table_keys(vec![TableKeyConfig {
-            table: "items".into(),
-            key_columns: vec!["@0".into()],
-        }])
-        .build()?;
+    let source = MySqlReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000041")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(database.port)
+    .with_database("test")
+    .with_user("root")
+    .with_password("native-test")
+    .with_ssl_mode(SslMode::Disabled)
+    .with_tables(vec!["items".to_owned()])
+    .with_start_position(StartPosition::FromEnd)
+    .with_table_keys(vec![TableKeyConfig {
+        table: "items".into(),
+        key_columns: vec!["@0".into()],
+    }])
+    .build()?;
     let (status, _receiver) = tokio::sync::mpsc::channel(64);
     source
-        .initialize(drasi_lib::context::SourceRuntimeContext::new(
+        .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
             "mysql57-legacy",
-            "mysql-bulk",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000041")
+                .expect("fixture UUID"),
             None,
             status,
             None,
@@ -48,8 +52,10 @@ async fn legacy_mysql57_cdc_with_explicit_positional_keys() -> Result<()> {
         source.start().await.context("legacy source startup")?;
         let mut subscription = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "mysql-bulk".into(),
-                query_id: "legacy-query".into(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000041")
+                    .expect("fixture UUID"),
+                query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000329")
+                    .expect("fixture UUID"),
                 enable_bootstrap: false,
                 nodes: ["items".to_owned()].into_iter().collect(),
                 relations: Default::default(),

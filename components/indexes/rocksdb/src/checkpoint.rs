@@ -18,8 +18,8 @@
 //! sequences, opaque source position bytes, and a config hash.
 //!
 //! Keys:
-//! - `source_sequence:{source_id}` → 8-byte big-endian `u64` sequence
-//! - `source_position:{source_id}` → raw opaque bytes
+//! - `source_sequence:{checkpoint_key}` → 8-byte big-endian `u64` sequence
+//! - `source_position:{checkpoint_key}` → raw opaque bytes
 //! - `config_hash` → 8-byte big-endian `u64`
 //! - `result_sequence:{query_id}` → last committed result sequence as big-endian `u64`
 //! - `output_generation:{query_id}` → durable output generation as big-endian `u64`
@@ -28,6 +28,7 @@
 //! Result-head reads only expose committed data. Clearing bootstrap checkpoints
 //! preserves the independently managed result head and output generation.
 
+use drasi_core_types::{CheckpointKey, OutputPartition};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -100,14 +101,14 @@ impl RocksDbCheckpointStore {
 /// Works with both `Transaction::get_cf` and `DB::get_cf`.
 fn read_checkpoint_from_seq_data(
     seq_data: Option<Vec<u8>>,
-    source_id: &str,
+    checkpoint_key: &str,
     get_pos: impl FnOnce(&str) -> Result<Option<Vec<u8>>, IndexError>,
 ) -> Result<Option<SourceCheckpoint>, IndexError> {
     match seq_data {
         Some(v) => {
             let seq_bytes: [u8; 8] = v.try_into().map_err(|_| IndexError::CorruptedData)?;
             let sequence = u64::from_be_bytes(seq_bytes);
-            let pos_key = format!("{SOURCE_POSITION_PREFIX}{source_id}");
+            let pos_key = format!("{SOURCE_POSITION_PREFIX}{checkpoint_key}");
             let pos_data = get_pos(&pos_key)?;
             let source_position = pos_data.map(Bytes::from);
             Ok(Some(SourceCheckpoint {
@@ -125,8 +126,8 @@ fn read_all_checkpoints_impl(
     _cf: &impl rocksdb::AsColumnFamilyRef,
     iter: impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
     get_pos: impl Fn(&str) -> Result<Option<Vec<u8>>, IndexError>,
-) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
-    let mut result: HashMap<String, SourceCheckpoint> = HashMap::new();
+) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
+    let mut result: HashMap<CheckpointKey, SourceCheckpoint> = HashMap::new();
     let prefix = SOURCE_SEQUENCE_PREFIX.as_bytes();
 
     for item in iter {
@@ -135,19 +136,20 @@ fn read_all_checkpoints_impl(
                 if !key.starts_with(prefix) {
                     break;
                 }
-                let source_id = String::from_utf8_lossy(&key[prefix.len()..]).to_string();
+                let checkpoint_key =
+                    std::str::from_utf8(&key[prefix.len()..]).map_err(IndexError::other)?;
                 let seq_bytes: [u8; 8] = match value.as_ref().try_into() {
                     Ok(v) => v,
                     Err(_) => return Err(IndexError::CorruptedData),
                 };
                 let sequence = u64::from_be_bytes(seq_bytes);
 
-                let pos_key = format!("{SOURCE_POSITION_PREFIX}{source_id}");
+                let pos_key = format!("{SOURCE_POSITION_PREFIX}{checkpoint_key}");
                 let pos_data = get_pos(&pos_key)?;
                 let source_position = pos_data.map(Bytes::from);
 
                 result.insert(
-                    source_id,
+                    CheckpointKey::from_storage_key(checkpoint_key)?,
                     SourceCheckpoint {
                         sequence,
                         source_position,
@@ -177,13 +179,13 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
     async fn stage_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
         sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
-        let source_id = source_id.to_string();
+        let source_id = source_id.storage_key().map_err(IndexError::other)?;
         let source_position_owned = source_position.map(|b| b.to_vec());
 
         let task = task::spawn_blocking(move || {
@@ -218,11 +220,11 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
     async fn read_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
     ) -> Result<Option<SourceCheckpoint>, IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
-        let source_id = source_id.to_string();
+        let source_id = source_id.storage_key().map_err(IndexError::other)?;
 
         let task = task::spawn_blocking(move || {
             let cf = db
@@ -256,7 +258,9 @@ impl CheckpointStore for RocksDbCheckpointStore {
         }
     }
 
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
 
@@ -385,10 +389,15 @@ impl CheckpointStore for RocksDbCheckpointStore {
         }
     }
 
-    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
         let session_state = self.session_state.clone();
-        let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
+        let key = format!("{RESULT_SEQUENCE_PREFIX}{}", query_id.storage_key());
 
         let task = task::spawn_blocking(move || {
             let cf = db
@@ -406,9 +415,14 @@ impl CheckpointStore for RocksDbCheckpointStore {
         }
     }
 
-    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn write_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
-        let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
+        let key = format!("{RESULT_SEQUENCE_PREFIX}{}", query_id.storage_key());
 
         let task = task::spawn_blocking(move || {
             let cf = db
@@ -424,9 +438,13 @@ impl CheckpointStore for RocksDbCheckpointStore {
         }
     }
 
-    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
-        let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
+        let key = format!("{RESULT_SEQUENCE_PREFIX}{}", query_id.storage_key());
 
         let task = task::spawn_blocking(move || {
             let cf = db
@@ -453,11 +471,12 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
     async fn write_output_generation(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         generation: u64,
     ) -> Result<(), IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
-        let key = format!("{OUTPUT_GENERATION_PREFIX}{query_id}");
+        let key = format!("{OUTPUT_GENERATION_PREFIX}{}", query_id.storage_key());
 
         let task = task::spawn_blocking(move || {
             let cf = db
@@ -473,9 +492,13 @@ impl CheckpointStore for RocksDbCheckpointStore {
         }
     }
 
-    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_output_generation(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
-        let key = format!("{OUTPUT_GENERATION_PREFIX}{query_id}");
+        let key = format!("{OUTPUT_GENERATION_PREFIX}{}", query_id.storage_key());
 
         let task = task::spawn_blocking(move || {
             let cf = db

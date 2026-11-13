@@ -79,12 +79,13 @@ mod tests {
     async fn standalone_retirement_resolves_waiting_writers_and_receivers() {
         for resolution in ["resume", "retire", "abandon"] {
             let directory = tempfile::tempdir().unwrap();
+            let journal_id = crate::test_helpers::component_id(295);
             let indexes = LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
                 directory.path(),
                 false,
                 false,
             )))
-            .create_indexes("retirement", "journal")
+            .create_indexes("retirement", &journal_id)
             .await
             .unwrap();
             let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).unwrap());
@@ -99,7 +100,7 @@ mod tests {
                 },
                 indexes,
                 codec,
-                "journal",
+                crate::test_helpers::component_id(295).to_string(),
             )
             .await
             .unwrap();

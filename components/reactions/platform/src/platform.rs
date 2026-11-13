@@ -87,7 +87,7 @@ use super::PlatformReactionBuilder;
 
 impl PlatformReaction {
     /// Create a builder for PlatformReaction
-    pub fn builder(id: impl Into<String>) -> PlatformReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> PlatformReactionBuilder {
         PlatformReactionBuilder::new(id)
     }
 
@@ -96,17 +96,17 @@ impl PlatformReaction {
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
     pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: PlatformReactionConfig,
     ) -> Result<Self> {
-        Self::create_internal(id.into(), queries, config, None, true)
+        Self::create_internal(id.clone(), queries, config, None, true)
     }
 
     /// Create from builder (internal method)
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: PlatformReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -116,8 +116,8 @@ impl PlatformReaction {
 
     /// Internal constructor
     fn create_internal(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: PlatformReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -186,10 +186,8 @@ impl PlatformReaction {
             return Ok(());
         }
 
-        // Use first query ID from config for control events
-        let query_id = self
-            .base
-            .queries
+        let query_ids = self.base.query_ids().await?;
+        let query_id = query_ids
             .first()
             .ok_or_else(|| anyhow!("No queries configured for reaction"))?;
 
@@ -217,7 +215,7 @@ impl PlatformReaction {
 
 #[async_trait]
 impl Reaction for PlatformReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -254,7 +252,7 @@ impl Reaction for PlatformReaction {
         }
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -262,8 +260,8 @@ impl Reaction for PlatformReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {

@@ -34,7 +34,7 @@ use tokio::sync::{Mutex, RwLock};
 /// This mock source supports event injection for testing data flow through queries.
 /// Status events are emitted through the component graph (set via initialize()).
 pub struct TestMockSource {
-    id: String,
+    id: drasi_core_types::ComponentId,
     auto_start: bool,
     /// Status handle — always available, wired to graph during initialize().
     status_handle: crate::component_graph::ComponentStatusHandle,
@@ -44,8 +44,20 @@ pub struct TestMockSource {
 }
 
 impl TestMockSource {
-    pub fn new(id: String) -> Result<Self> {
-        let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+    pub(crate) fn fixture(
+        name: impl AsRef<str>,
+        auto_start: bool,
+    ) -> crate::test_helpers::creation::SourceFixture<Self> {
+        crate::test_helpers::creation::SourceFixture::new(
+            drasi_core_types::ComponentName::try_new(name.as_ref())
+                .expect("fixture component name"),
+            auto_start,
+            move |id| Self::with_auto_start(id, auto_start),
+        )
+    }
+
+    pub fn new(id: drasi_core_types::ComponentId) -> Result<Self> {
+        let status_handle = crate::component_graph::ComponentStatusHandle::new(id.clone());
         Ok(Self {
             id,
             auto_start: true,
@@ -56,8 +68,8 @@ impl TestMockSource {
     }
 
     /// Create a new test mock source with configurable auto_start
-    pub fn with_auto_start(id: String, auto_start: bool) -> Result<Self> {
-        let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+    pub fn with_auto_start(id: drasi_core_types::ComponentId, auto_start: bool) -> Result<Self> {
+        let status_handle = crate::component_graph::ComponentStatusHandle::new(id.clone());
         Ok(Self {
             id,
             auto_start,
@@ -93,7 +105,7 @@ impl TestMockSource {
 
 #[async_trait]
 impl Source for TestMockSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.id
     }
 
@@ -169,14 +181,16 @@ impl Source for TestMockSource {
         self
     }
 
-    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
         self.status_handle.wire(context.update_tx.clone()).await;
     }
 }
 
 /// Helper to create a TestMockSource instance
-pub fn create_test_mock_source(id: String) -> TestMockSource {
-    TestMockSource::new(id).unwrap()
+pub(crate) fn create_test_mock_source(
+    name: String,
+) -> crate::test_helpers::creation::SourceFixture<TestMockSource> {
+    TestMockSource::fixture(name, true)
 }
 
 /// A test mock source that provides a bootstrap channel for testing the bootstrap gate.
@@ -185,7 +199,7 @@ pub fn create_test_mock_source(id: String) -> TestMockSource {
 /// accepts a pre-created `BootstrapEventReceiver` and returns it from `subscribe()`,
 /// allowing tests to control bootstrap timing.
 pub struct TestBootstrapMockSource {
-    id: String,
+    id: drasi_core_types::ComponentId,
     auto_start: bool,
     /// Status handle — always available, wired to graph during initialize().
     status_handle: crate::component_graph::ComponentStatusHandle,
@@ -194,8 +208,11 @@ pub struct TestBootstrapMockSource {
 }
 
 impl TestBootstrapMockSource {
-    pub fn new(id: String, bootstrap_rx: BootstrapEventReceiver) -> Result<Self> {
-        let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+    pub fn new(
+        id: drasi_core_types::ComponentId,
+        bootstrap_rx: BootstrapEventReceiver,
+    ) -> Result<Self> {
+        let status_handle = crate::component_graph::ComponentStatusHandle::new(id.clone());
         Ok(Self {
             id,
             auto_start: true,
@@ -208,7 +225,7 @@ impl TestBootstrapMockSource {
 
 #[async_trait]
 impl Source for TestBootstrapMockSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.id
     }
 
@@ -277,17 +294,19 @@ impl Source for TestBootstrapMockSource {
         self
     }
 
-    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
         self.status_handle.wire(context.update_tx.clone()).await;
     }
 }
 
 /// Helper to create a TestBootstrapMockSource instance
 pub fn create_test_bootstrap_mock_source(
-    id: String,
+    name: drasi_core_types::ComponentName,
     bootstrap_rx: BootstrapEventReceiver,
-) -> TestBootstrapMockSource {
-    TestBootstrapMockSource::new(id, bootstrap_rx).unwrap()
+) -> crate::test_helpers::creation::SourceFixture<TestBootstrapMockSource> {
+    crate::test_helpers::creation::SourceFixture::new(name, true, move |id| {
+        TestBootstrapMockSource::new(id.clone(), bootstrap_rx)
+    })
 }
 
 /// A test source that uses SourceBase for logging integration tests.
@@ -299,7 +318,16 @@ pub struct LoggingTestSource {
 }
 
 impl LoggingTestSource {
-    pub fn new(id: impl Into<String>) -> Result<Self> {
+    fn fixture(name: impl AsRef<str>) -> crate::test_helpers::creation::SourceFixture<Self> {
+        crate::test_helpers::creation::SourceFixture::new(
+            drasi_core_types::ComponentName::try_new(name.as_ref())
+                .expect("fixture component name"),
+            true,
+            Self::new,
+        )
+    }
+
+    pub fn new(id: drasi_core_types::ComponentId) -> Result<Self> {
         let params = crate::sources::SourceBaseParams::new(id);
         let base = crate::sources::SourceBase::new(params)?;
         Ok(Self {
@@ -311,7 +339,7 @@ impl LoggingTestSource {
 
 #[async_trait]
 impl Source for LoggingTestSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         self.base.get_id()
     }
 
@@ -359,8 +387,8 @@ impl Source for LoggingTestSource {
         self
     }
 
-    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 }
 
@@ -373,24 +401,26 @@ mod contract_tests {
         use crate::config::SourceSubscriptionSettings;
         use drasi_core::models::{ElementMetadata, ElementReference};
 
-        let source = create_test_mock_source("sequenced".into());
-        let settings = |query: &str, resume_sequence| SourceSubscriptionSettings {
-            source_id: "sequenced".into(),
-            query_id: query.into(),
-            enable_bootstrap: false,
-            nodes: Default::default(),
-            relations: Default::default(),
-            resume_from: None,
-            resume_sequence,
-            request_position_handle: false,
-        };
+        let id = crate::config::ComponentId::generate();
+        let source = TestMockSource::new(id.clone()).unwrap();
+        let settings =
+            |query_id: drasi_core_types::ComponentId, resume_sequence| SourceSubscriptionSettings {
+                source_id: id.clone(),
+                query_id,
+                enable_bootstrap: false,
+                nodes: Default::default(),
+                relations: Default::default(),
+                resume_from: None,
+                resume_sequence,
+                request_position_handle: false,
+            };
         let mut first = source
-            .subscribe(settings("first", None))
+            .subscribe(settings(crate::config::ComponentId::generate(), None))
             .await
             .unwrap()
             .receiver;
         let mut second = source
-            .subscribe(settings("second", None))
+            .subscribe(settings(crate::config::ComponentId::generate(), None))
             .await
             .unwrap()
             .receiver;
@@ -411,13 +441,13 @@ mod contract_tests {
             let one = first.recv().await.unwrap();
             let two = second.recv().await.unwrap();
             assert_eq!(one.sequence, expected);
-            assert_eq!(one.source_id, "sequenced");
+            assert_eq!(one.source_id, id);
             assert_eq!(one.event, SourceEvent::Change(change.clone()));
             assert!(Arc::ptr_eq(&one, &two));
         }
 
         let mut resumed = source
-            .subscribe(settings("resumed", Some(500)))
+            .subscribe(settings(crate::config::ComponentId::generate(), Some(500)))
             .await
             .unwrap()
             .receiver;
@@ -434,16 +464,33 @@ mod contract_tests {
         use drasi_core::models::{ElementMetadata, ElementReference};
 
         let sources = [
-            TestMockSource::new("default-source".to_string()).unwrap(),
-            TestMockSource::with_auto_start("auto-source".to_string(), true).unwrap(),
-            TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap(),
+            TestMockSource::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000027b")
+                    .expect("fixture UUID"),
+            )
+            .unwrap(),
+            TestMockSource::with_auto_start(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000373")
+                    .expect("fixture UUID"),
+                true,
+            )
+            .unwrap(),
+            TestMockSource::with_auto_start(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000027c")
+                    .expect("fixture UUID"),
+                false,
+            )
+            .unwrap(),
         ];
 
         for source in sources {
             let mut receiver = source
                 .subscribe(SourceSubscriptionSettings {
-                    source_id: source.id().to_string(),
-                    query_id: "sequence-test".to_string(),
+                    source_id: source.id().clone(),
+                    query_id: drasi_core_types::ComponentId::try_new(
+                        "00000000-0000-0000-0000-000000000277",
+                    )
+                    .expect("fixture UUID"),
                     enable_bootstrap: false,
                     nodes: Default::default(),
                     relations: Default::default(),
@@ -459,7 +506,7 @@ mod contract_tests {
                 source
                     .inject_event(SourceChange::Delete {
                         metadata: ElementMetadata {
-                            reference: ElementReference::new(source.id(), "test-node"),
+                            reference: ElementReference::new("mock-source", "test-node"),
                             labels: vec![].into(),
                             effective_from: 0,
                         },
@@ -479,7 +526,7 @@ mod contract_tests {
 
     #[test]
     fn test_source_supports_replay_default_true() {
-        let source = create_test_mock_source("test-replay".to_string());
+        let source = TestMockSource::new(crate::config::ComponentId::generate().clone()).unwrap();
         assert!(source.supports_replay());
     }
 
@@ -489,14 +536,17 @@ mod contract_tests {
         use bytes::Bytes;
 
         let err = SourceError::PositionUnavailable {
-            source_id: "postgres-1".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000278",
+            )
+            .expect("fixture UUID"),
             requested: Bytes::copy_from_slice(&1000u64.to_le_bytes()),
             earliest_available: Some(Bytes::copy_from_slice(&5000u64.to_le_bytes())),
         };
 
         // Verify display formatting
         let msg = format!("{err}");
-        assert!(msg.contains("postgres-1"));
+        assert!(msg.contains("00000000-0000-0000-0000-000000000278"));
         assert!(msg.contains("position unavailable"));
 
         // Verify anyhow round-trip: SourceError → anyhow::Error → downcast
@@ -509,7 +559,11 @@ mod contract_tests {
                 requested,
                 earliest_available,
             } => {
-                assert_eq!(source_id, "postgres-1");
+                assert_eq!(
+                    source_id,
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000278")
+                        .expect("fixture UUID")
+                );
                 assert_eq!(*requested, Bytes::copy_from_slice(&1000u64.to_le_bytes()));
                 assert!(earliest_available.is_some());
             }
@@ -522,7 +576,10 @@ mod contract_tests {
         use bytes::Bytes;
 
         let err = SourceError::PositionUnavailable {
-            source_id: "http-wal".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000279",
+            )
+            .expect("fixture UUID"),
             requested: Bytes::from_static(b"some-position"),
             earliest_available: None,
         };
@@ -536,17 +593,18 @@ mod contract_tests {
 mod manager_tests {
     use super::*;
     use crate::test_helpers::managers::SourceManager;
-    use crate::test_helpers::wait_for_component_status;
+    use crate::test_helpers::wait_for_component_status_by_id;
 
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Counter for generating unique test IDs
     static TEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    /// Generate a unique component ID for tests to avoid conflicts in parallel test runs
-    fn unique_id(prefix: &str) -> String {
+    /// Generate a unique component name for tests to avoid conflicts in parallel test runs.
+    fn unique_name(prefix: &str) -> drasi_core_types::ComponentName {
         let counter = TEST_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-        format!("{prefix}-{counter}")
+        drasi_core_types::ComponentName::try_new(format!("{prefix}-{counter}"))
+            .expect("generated fixture component name")
     }
 
     async fn create_test_manager() -> (
@@ -560,19 +618,11 @@ mod manager_tests {
         )
     }
 
-    /// Create a test manager that also returns the shared graph for event subscription.
-    async fn create_test_manager_with_graph() -> (
-        Arc<SourceManager>,
-        crate::component_graph::ComponentGraphView,
-    ) {
-        create_test_manager().await
-    }
-
     /// Helper: register a source in the graph, then provision it in the manager.
     async fn add_source(
         manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl Source + 'static>,
     ) -> anyhow::Result<()> {
         manager.add(source).await
     }
@@ -581,10 +631,10 @@ mod manager_tests {
     async fn delete_source(
         manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        id: &str,
+        id: &drasi_core_types::ComponentName,
         cleanup: bool,
     ) -> anyhow::Result<()> {
-        manager.delete(id, cleanup).await
+        manager.teardown_source_by_name(id, cleanup).await
     }
 
     #[tokio::test]
@@ -599,7 +649,11 @@ mod manager_tests {
         // Verify source was added
         let sources = manager.list_sources().await.unwrap();
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].0, "test-source");
+        assert_eq!(
+            sources[0].name,
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name")
+        );
     }
 
     #[tokio::test]
@@ -616,29 +670,10 @@ mod manager_tests {
         let result = add_source(&manager, &graph, source2).await;
         assert!(result.is_err());
         let error = result.unwrap_err();
-        {
-            use crate::computation::v1::GraphError;
-
-            let crate::DrasiError::Internal(error) = error
-                .downcast_ref::<crate::DrasiError>()
-                .expect("public API error")
-            else {
-                panic!("native rejection must retain its ownership-bearing cause: {error:?}");
-            };
-            let GraphError::AdditionRejected { cause, addition } = error
-                .downcast_ref::<GraphError>()
-                .expect("native graph error")
-            else {
-                panic!("expected a rejected addition: {error:?}");
-            };
-            assert!(
-                matches!(cause.as_ref(), GraphError::Topology { reason }
-                        if reason == "duplicate component test-source"),
-                "unexpected rejection cause: {cause:?}"
-            );
-            let rejected = addition.take().await.expect("retained rejected source");
-            assert_eq!(rejected.definition.descriptor.id().as_str(), "test-source");
-        }
+        assert!(
+            format!("{error:#}").contains("component name already belongs to 'test-source'"),
+            "unexpected duplicate-source error: {error:#}"
+        );
     }
 
     #[tokio::test]
@@ -649,7 +684,14 @@ mod manager_tests {
         add_source(&manager, &graph, source).await.unwrap();
 
         // Remove the source
-        let result = delete_source(&manager, &graph, "test-source", false).await;
+        let result = delete_source(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+            false,
+        )
+        .await;
         assert!(result.is_ok());
 
         // Verify source was removed
@@ -661,7 +703,14 @@ mod manager_tests {
     async fn test_remove_nonexistent_source() {
         let (manager, graph) = create_test_manager().await;
 
-        let result = delete_source(&manager, &graph, "nonexistent", false).await;
+        let result = delete_source(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("nonexistent")
+                .expect("fixture component name"),
+            false,
+        )
+        .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -675,15 +724,28 @@ mod manager_tests {
 
         let source = create_test_mock_source("test-source".to_string());
         add_source(&manager, &graph, source).await.unwrap();
+        let source_id = manager
+            .get_source_by_name(
+                &drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap()
+            .id;
 
         // Start the source
-        let result = manager.start_source("test-source".to_string()).await;
+        let result = manager
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_ok());
 
         // Check for status event
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Ok(event) = event_rx.recv().await {
-                if event.component_id == "test-source" {
+                if event.component_id == source_id {
                     // Skip the Stopped event emitted by add_source (with "added" message)
                     if event
                         .message
@@ -713,28 +775,45 @@ mod manager_tests {
 
         let source = create_test_mock_source("test-source".to_string());
         add_source(&manager, &graph, source).await.unwrap();
+        let source_id = manager
+            .get_source_by_name(
+                &drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap()
+            .id;
         manager
-            .start_source("test-source".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
         // Wait for source to reach Running before stopping
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "test-source",
+            &graph,
+            &crate::ComponentName::try_new("test-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         // Stop the source
-        let result = manager.stop_source("test-source".to_string()).await;
+        let result = manager
+            .stop_source_by_name(
+                &drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_ok());
 
         // Check for stop event
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Ok(event) = event_rx.recv().await {
-                if event.component_id == "test-source"
+                if event.component_id == source_id
                     && matches!(event.status, ComponentStatus::Stopped)
                 {
                     break;
@@ -748,10 +827,18 @@ mod manager_tests {
     #[tokio::test]
     async fn test_stop_all_cleans_failed_source() {
         let (manager, graph) = create_test_manager().await;
-        let source = LoggingTestSource::new("failed-source").unwrap();
+        let source_name = drasi_core_types::ComponentName::try_new("failed-source")
+            .expect("fixture component name");
+        let source = LoggingTestSource::fixture("failed-source");
         add_source(&manager, &graph, source).await.unwrap();
-        manager.start_source("failed-source".into()).await.unwrap();
-        let runtime = manager.get_source_instance("failed-source").await.unwrap();
+        manager.start_source_by_name(&source_name).await.unwrap();
+        let runtime = manager
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("failed-source")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         let source = runtime
             .as_any()
             .downcast_ref::<LoggingTestSource>()
@@ -761,7 +848,7 @@ mod manager_tests {
         let abort_handle = task.abort_handle();
         source.base.set_task_handle(task).await;
         let mut receiver = source.base.create_streaming_receiver().await.unwrap();
-        crate::component_graph::wait_for_status(
+        crate::component_graph::wait_for_status_by_id(
             &graph,
             source.id(),
             &[ComponentStatus::Error],
@@ -773,7 +860,7 @@ mod manager_tests {
         manager.stop_all().await.unwrap();
         assert!(abort_handle.is_finished());
         assert!(source.base.task_handle.read().await.is_none());
-        crate::component_graph::wait_for_status(
+        crate::component_graph::wait_for_status_by_id(
             &graph,
             source.id(),
             &[ComponentStatus::Stopped],
@@ -782,7 +869,10 @@ mod manager_tests {
         .await
         .unwrap();
         assert_eq!(
-            manager.get_source_status(source.id().into()).await.unwrap(),
+            manager
+                .get_source_status_by_name(&source_name)
+                .await
+                .unwrap(),
             ComponentStatus::Stopped
         );
         assert!(
@@ -796,13 +886,17 @@ mod manager_tests {
     #[tokio::test]
     async fn test_stop_failed_source_with_already_stopped_runtime() {
         let (manager, graph) = create_test_manager().await;
-        let mut source = LoggingTestSource::new("failed-start").unwrap();
-        source.fail_start = true;
+        let source_name = drasi_core_types::ComponentName::try_new("failed-start")
+            .expect("fixture component name");
+        let source = LoggingTestSource::fixture("failed-start").map(|mut source| {
+            source.fail_start = true;
+            source
+        });
         add_source(&manager, &graph, source).await.unwrap();
-        assert!(manager.start_source("failed-start".into()).await.is_err());
-        crate::component_graph::wait_for_status(
+        assert!(manager.start_source_by_name(&source_name).await.is_err());
+        crate::component_graph::wait_for_status_by_name(
             &graph,
-            "failed-start",
+            &source_name,
             &[ComponentStatus::Error],
             std::time::Duration::from_secs(3),
         )
@@ -810,17 +904,20 @@ mod manager_tests {
         .unwrap();
         assert_eq!(
             manager
-                .get_source_instance("failed-start")
+                .get_source_instance_by_name(
+                    &drasi_core_types::ComponentName::try_new("failed-start")
+                        .expect("fixture component name")
+                )
                 .await
                 .unwrap()
                 .status()
                 .await,
             ComponentStatus::Stopped,
         );
-        manager.stop_source("failed-start".into()).await.unwrap();
-        crate::component_graph::wait_for_status(
+        manager.stop_source_by_name(&source_name).await.unwrap();
+        crate::component_graph::wait_for_status_by_name(
             &graph,
-            "failed-start",
+            &source_name,
             &[ComponentStatus::Stopped],
             std::time::Duration::from_secs(3),
         )
@@ -835,11 +932,21 @@ mod manager_tests {
         let source = create_test_mock_source("test-source".to_string());
         add_source(&manager, &graph, source).await.unwrap();
 
-        let retrieved = manager.get_source("test-source".to_string()).await;
+        let retrieved = manager
+            .get_source_by_name(
+                &drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(retrieved.is_ok());
 
         let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.id, "test-source");
+        assert_ne!(
+            retrieved.id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            "source creation uses the graph-assigned component ID"
+        );
         assert_eq!(retrieved.source_type, "mock");
     }
 
@@ -858,12 +965,19 @@ mod manager_tests {
         add_source(&manager, &graph, source2).await.unwrap();
 
         // Start one source
-        manager.start_source("source1".to_string()).await.unwrap();
+        manager
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("source1")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Wait for source1 to reach Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "source1",
+            &graph,
+            &crate::ComponentName::try_new("source1").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -875,14 +989,14 @@ mod manager_tests {
         // Check that we have different statuses
         let source1_status = sources
             .iter()
-            .find(|(name, _)| name == "source1")
+            .find(|entry| entry.name == crate::ComponentName::try_new("source1").unwrap())
             .unwrap()
-            .1;
+            .status;
         let source2_status = sources
             .iter()
-            .find(|(name, _)| name == "source2")
+            .find(|entry| entry.name == crate::ComponentName::try_new("source2").unwrap())
             .unwrap()
-            .1;
+            .status;
 
         assert!(matches!(source1_status, ComponentStatus::Running));
         assert!(matches!(source2_status, ComponentStatus::Added));
@@ -926,7 +1040,11 @@ mod manager_tests {
         // Verify only one source exists
         let sources = manager.list_sources().await.unwrap();
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].0, "same-source");
+        assert_eq!(
+            sources[0].name,
+            drasi_core_types::ComponentName::try_new("same-source")
+                .expect("fixture component name")
+        );
     }
 
     /// Test that concurrent add_source calls with different IDs all succeed.
@@ -972,22 +1090,21 @@ mod manager_tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Add source with auto_start=true
-        let source1 =
-            TestMockSource::with_auto_start("auto-start-source".to_string(), true).unwrap();
+        let source1 = TestMockSource::fixture("auto-start-source", true);
         add_source(&manager, &graph, source1).await.unwrap();
 
         // Add source with auto_start=false
-        let source2 =
-            TestMockSource::with_auto_start("no-auto-start-source".to_string(), false).unwrap();
+        let source2 = TestMockSource::fixture("no-auto-start-source", false);
         add_source(&manager, &graph, source2).await.unwrap();
 
         // Start all sources
         manager.start_all().await.unwrap();
 
         // Wait for auto-start source to reach Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "auto-start-source",
+            &graph,
+            &crate::ComponentName::try_new("auto-start-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -995,11 +1112,17 @@ mod manager_tests {
 
         // Check statuses
         let status1 = manager
-            .get_source_status("auto-start-source".to_string())
+            .get_source_status_by_name(
+                &drasi_core_types::ComponentName::try_new("auto-start-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let status2 = manager
-            .get_source_status("no-auto-start-source".to_string())
+            .get_source_status_by_name(
+                &drasi_core_types::ComponentName::try_new("no-auto-start-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
@@ -1033,16 +1156,20 @@ mod manager_tests {
         manager.start_all().await.unwrap();
 
         // Wait for source to reach Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "default-source",
+            &graph,
+            &crate::ComponentName::try_new("default-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let status = manager
-            .get_source_status("default-source".to_string())
+            .get_source_status_by_name(
+                &drasi_core_types::ComponentName::try_new("default-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -1060,7 +1187,7 @@ mod manager_tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Add source with auto_start=false
-        let source = TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("manual-source", false);
         add_source(&manager, &graph, source).await.unwrap();
 
         // start_all should not start it
@@ -1070,7 +1197,10 @@ mod manager_tests {
         tokio::task::yield_now().await;
 
         let status = manager
-            .get_source_status("manual-source".to_string())
+            .get_source_status_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -1080,21 +1210,28 @@ mod manager_tests {
 
         // Manually start the source
         manager
-            .start_source("manual-source".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
         // Wait for source to reach Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "manual-source",
+            &graph,
+            &crate::ComponentName::try_new("manual-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let status = manager
-            .get_source_status("manual-source".to_string())
+            .get_source_status_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -1116,7 +1253,12 @@ mod manager_tests {
         add_source(&manager, &graph, source).await.unwrap();
 
         // Subscribe to logs
-        let result = manager.subscribe_logs("logging-source").await;
+        let result = manager
+            .subscribe_logs_by_name(
+                &drasi_core_types::ComponentName::try_new("logging-source")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_ok(),
             "Should be able to subscribe to existing source logs"
@@ -1132,7 +1274,12 @@ mod manager_tests {
         let (manager, _graph) = create_test_manager().await;
 
         // Try to subscribe to a non-existent source
-        let result = manager.subscribe_logs("nonexistent-source").await;
+        let result = manager
+            .subscribe_logs_by_name(
+                &drasi_core_types::ComponentName::try_new("nonexistent-source")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_err(),
             "Should return None for non-existent source"
@@ -1146,22 +1293,22 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
-        let source_id = unique_id("logger-source");
-        let source_id_clone = source_id.clone();
+        let source_name = unique_name("logger-source");
 
         // Create a LoggingTestSource that uses SourceBase
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_name.as_str());
         add_source(&manager, &graph, source).await.unwrap();
+        let source_id = manager.get_source_by_name(&source_name).await.unwrap().id;
 
         // Subscribe to logs before emitting
-        let (history, mut receiver) = manager.subscribe_logs(&source_id).await.unwrap();
+        let (history, mut receiver) = manager.subscribe_logs_by_name(&source_name).await.unwrap();
         assert!(history.is_empty(), "No logs should exist before logging");
 
         // Emit a log within a component span (must include instance_id to match manager)
         let span = tracing::info_span!(
             "test_span",
             instance_id = "test-instance",
-            component_id = %source_id_clone,
+            component_id = %source_id,
             component_type = "source"
         );
         async {
@@ -1195,18 +1342,18 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
-        let source_id = unique_id("multi-level-source");
-        let source_id_clone = source_id.clone();
+        let source_name = unique_name("multi-level-source");
 
         // Create a LoggingTestSource
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_name.as_str());
         add_source(&manager, &graph, source).await.unwrap();
+        let source_id = manager.get_source_by_name(&source_name).await.unwrap().id;
 
         // Emit logs at all levels within a component span (must include instance_id)
         let span = tracing::info_span!(
             "test_span",
             instance_id = "test-instance",
-            component_id = %source_id_clone,
+            component_id = %source_id,
             component_type = "source"
         );
         async {
@@ -1222,7 +1369,7 @@ mod manager_tests {
         // Allow async log routing to complete (logs go through tracing layer → channel → registry)
         let history = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Ok((logs, _)) = manager.subscribe_logs(&source_id).await {
+                if let Ok((logs, _)) = manager.subscribe_logs_by_name(&source_name).await {
                     if logs.len() >= 3 {
                         return logs;
                     }
@@ -1248,18 +1395,18 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
-        let source_id = unique_id("history-source");
-        let source_id_clone = source_id.clone();
+        let source_name = unique_name("history-source");
 
         // Create and add source
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_name.as_str());
         add_source(&manager, &graph, source).await.unwrap();
+        let source_id = manager.get_source_by_name(&source_name).await.unwrap().id;
 
         // Emit some logs within a component span (must include instance_id)
         let span = tracing::info_span!(
             "test_span",
             instance_id = "test-instance",
-            component_id = %source_id_clone,
+            component_id = %source_id,
             component_type = "source"
         );
         async {
@@ -1273,7 +1420,7 @@ mod manager_tests {
         // Allow async log routing to complete (logs go through tracing layer → channel → registry)
         let history = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Ok((logs, _)) = manager.subscribe_logs(&source_id).await {
+                if let Ok((logs, _)) = manager.subscribe_logs_by_name(&source_name).await {
                     if logs.len() >= 3 {
                         return logs;
                     }
@@ -1291,7 +1438,7 @@ mod manager_tests {
         assert!(history[2].message.contains("third"));
 
         // Subscribe again - should get same history
-        let (history2, _receiver2) = manager.subscribe_logs(&source_id).await.unwrap();
+        let (history2, _receiver2) = manager.subscribe_logs_by_name(&source_name).await.unwrap();
         assert_eq!(history2.len(), 3);
     }
 
@@ -1306,19 +1453,19 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
-        let source_id = unique_id("log-routing-source");
-        let source_id_clone = source_id.clone();
+        let source_name = unique_name("log-routing-source");
 
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_name.as_str());
         add_source(&manager, &graph, source).await.unwrap();
+        let source_id = manager.get_source_by_name(&source_name).await.unwrap().id;
 
-        let (_history, mut receiver) = manager.subscribe_logs(&source_id).await.unwrap();
+        let (_history, mut receiver) = manager.subscribe_logs_by_name(&source_name).await.unwrap();
 
         // Call tracing::info!() within a component span (must include instance_id)
         let span = tracing::info_span!(
             "test_span",
             instance_id = "test-instance",
-            component_id = %source_id_clone,
+            component_id = %source_id,
             component_type = "source"
         );
         async {
@@ -1343,7 +1490,7 @@ mod manager_tests {
             }
             Ok(Err(e)) => panic!("Channel error: {e:?}"),
             Err(_) => {
-                let (history, _) = manager.subscribe_logs(&source_id).await.unwrap();
+                let (history, _) = manager.subscribe_logs_by_name(&source_name).await.unwrap();
                 panic!(
                     "Timeout. History: {:?}",
                     history.iter().map(|m| &m.message).collect::<Vec<_>>()
@@ -1362,25 +1509,29 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
-        let source_id = unique_id("cleanup-events-source");
+        let source_name = unique_name("cleanup-events-source");
 
         // Add a source
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_name.as_str());
         add_source(&manager, &graph, source).await.unwrap();
+        let source_id = manager.get_source_by_name(&source_name).await.unwrap().id;
 
-        manager.start_source(source_id.clone()).await.unwrap();
+        manager.start_source_by_name(&source_name).await.unwrap();
 
         // Verify events exist
-        let events = manager.get_source_events(&source_id).await;
+        let events = manager
+            .get_source_events_by_name(&source_name)
+            .await
+            .unwrap();
         assert!(!events.is_empty(), "Expected events after recording");
 
         // Delete the source
-        delete_source(&manager, &graph, &source_id, false)
+        delete_source(&manager, &graph, &source_name, false)
             .await
             .unwrap();
 
         // Verify events are cleaned up
-        let events_after = manager.get_source_events(&source_id).await;
+        let events_after = manager.get_source_events_by_id(&source_id).await.unwrap();
         assert!(events_after.is_empty(), "Expected no events after deletion");
     }
 
@@ -1392,18 +1543,18 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
-        let source_id = unique_id("cleanup-logs-source");
-        let source_id_clone = source_id.clone();
+        let source_name = unique_name("cleanup-logs-source");
 
         // Add a source
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_name.as_str());
         add_source(&manager, &graph, source).await.unwrap();
+        let source_id = manager.get_source_by_name(&source_name).await.unwrap().id;
 
         // Generate some logs using tracing within a component span (must include instance_id)
         let span = tracing::info_span!(
             "test_span",
             instance_id = "test-instance",
-            component_id = %source_id_clone,
+            component_id = %source_id,
             component_type = "source"
         );
         async {
@@ -1416,7 +1567,7 @@ mod manager_tests {
         // Use a short retry loop since yield_now() alone may not be sufficient
         let logs_ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Ok((logs, _)) = manager.subscribe_logs(&source_id).await {
+                if let Ok((logs, _)) = manager.subscribe_logs_by_name(&source_name).await {
                     if !logs.is_empty() {
                         return logs;
                     }
@@ -1431,12 +1582,12 @@ mod manager_tests {
         assert!(!logs_ready.is_empty(), "Expected logs after emitting");
 
         // Delete the source
-        delete_source(&manager, &graph, &source_id, false)
+        delete_source(&manager, &graph, &source_name, false)
             .await
             .unwrap();
 
         // Verify logs are cleaned up (subscribe should fail for non-existent source)
-        let result = manager.subscribe_logs(&source_id).await;
+        let result = manager.subscribe_logs_by_name(&source_name).await;
         assert!(result.is_err(), "Expected an error for deleted source logs");
     }
 
@@ -1446,36 +1597,38 @@ mod manager_tests {
 
     /// A test source that tracks deprovision calls.
     struct DeprovisionTestSource {
-        id: String,
+        id: drasi_core_types::ComponentId,
         status_handle: crate::component_graph::ComponentStatusHandle,
         deprovision_called: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl DeprovisionTestSource {
-        fn new(id: &str) -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+        fn new(
+            name: drasi_core_types::ComponentName,
+        ) -> (
+            crate::test_helpers::creation::SourceFixture<Self>,
+            Arc<std::sync::atomic::AtomicBool>,
+        ) {
             let deprovision_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let called = deprovision_called.clone();
             (
-                Self {
-                    id: id.to_string(),
-                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                    deprovision_called: deprovision_called.clone(),
-                },
+                crate::test_helpers::creation::SourceFixture::new(name, false, move |id| {
+                    Ok(Self {
+                        id: id.clone(),
+                        status_handle: crate::component_graph::ComponentStatusHandle::new(
+                            id.clone(),
+                        ),
+                        deprovision_called: called,
+                    })
+                }),
                 deprovision_called,
             )
-        }
-
-        fn new_simple(id: &str) -> Self {
-            Self {
-                id: id.to_string(),
-                status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                deprovision_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }
         }
     }
 
     #[async_trait]
     impl Source for DeprovisionTestSource {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             &self.id
         }
 
@@ -1520,13 +1673,13 @@ mod manager_tests {
             self
         }
 
-        async fn deprovision(&self) -> Result<()> {
+        async fn delete_owned_resources(&self) -> Result<()> {
             self.deprovision_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
     }
@@ -1535,13 +1688,22 @@ mod manager_tests {
     async fn test_delete_with_cleanup_calls_deprovision() {
         let (manager, graph) = create_test_manager().await;
 
-        let (source, deprovision_flag) = DeprovisionTestSource::new("deprovision-source");
+        let (source, deprovision_flag) = DeprovisionTestSource::new(
+            drasi_core_types::ComponentName::try_new("deprovision-source")
+                .expect("fixture component name"),
+        );
         add_source(&manager, &graph, source).await.unwrap();
 
         // Delete with cleanup = true
-        delete_source(&manager, &graph, "deprovision-source", true)
-            .await
-            .unwrap();
+        delete_source(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("deprovision-source")
+                .expect("fixture component name"),
+            true,
+        )
+        .await
+        .unwrap();
 
         assert!(
             deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -1553,13 +1715,22 @@ mod manager_tests {
     async fn test_delete_without_cleanup_skips_deprovision() {
         let (manager, graph) = create_test_manager().await;
 
-        let (source, deprovision_flag) = DeprovisionTestSource::new("no-deprovision-source");
+        let (source, deprovision_flag) = DeprovisionTestSource::new(
+            drasi_core_types::ComponentName::try_new("no-deprovision-source")
+                .expect("fixture component name"),
+        );
         add_source(&manager, &graph, source).await.unwrap();
 
         // Delete with cleanup = false
-        delete_source(&manager, &graph, "no-deprovision-source", false)
-            .await
-            .unwrap();
+        delete_source(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("no-deprovision-source")
+                .expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(
             !deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -1573,86 +1744,95 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_replaces_stopped_source() {
-        let (manager, graph) = create_test_manager().await;
-
-        let source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
-        add_source(&manager, &graph, source).await.unwrap();
-
-        // Update while stopped by providing a new instance
-        let new_source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
-        manager
-            .update_source("reconfig-stopped-source".to_string(), new_source)
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let source_name = drasi_core_types::ComponentName::try_new("reconfig-stopped-source")
+            .expect("fixture component name");
+        let old = updates::add(&core, source_name.clone(), false).await;
+        core.source_manager()
+            .update_source_by_name(
+                &source_name,
+                updates::definition(old.id().clone(), source_name.clone(), false, 1),
+            )
             .await
             .unwrap();
-
-        // Source should still be stopped
-        let status = manager
-            .get_source_status("reconfig-stopped-source".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        updates::settle(&core).await;
+        let current = core.component_by_id(old.id()).unwrap();
+        assert_eq!(current.id(), old.id());
+        assert_ne!(current.generation(), old.generation());
+        assert_eq!(
+            current.observed().unwrap().lifecycle,
+            crate::computation::v1::ComponentLifecycle::Stopped
+        );
+        assert_eq!(
+            trace.events(),
+            ["create", "bind", "initialize", "dispose", "create", "bind", "initialize"]
+        );
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_source_stops_and_restarts_running_source() {
-        let (manager, graph) = create_test_manager().await;
-
-        // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.subscribe().unwrap();
-
-        let source = DeprovisionTestSource::new_simple("reconfig-running-source");
-        add_source(&manager, &graph, source).await.unwrap();
-
-        // Start the source first
-        manager
-            .start_source("reconfig-running-source".to_string())
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let source_name = drasi_core_types::ComponentName::try_new("reconfig-running-source")
+            .expect("fixture component name");
+        let old = updates::add(&core, source_name.clone(), false).await;
+        old.start().await.unwrap();
+        old.wait_started().await.unwrap();
+        core.source_manager()
+            .update_source_by_name(
+                &source_name,
+                updates::definition(old.id().clone(), source_name.clone(), false, 1),
+            )
             .await
             .unwrap();
-        // Wait for source to reach Running
-        wait_for_component_status(
-            &mut event_rx,
-            "reconfig-running-source",
-            ComponentStatus::Running,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        let status = manager
-            .get_source_status("reconfig-running-source".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Running);
-
-        // Update while running
-        let new_source = DeprovisionTestSource::new_simple("reconfig-running-source");
-        manager
-            .update_source("reconfig-running-source".to_string(), new_source)
-            .await
-            .unwrap();
-
-        // Wait for source to reach Running again after update
-        wait_for_component_status(
-            &mut event_rx,
-            "reconfig-running-source",
-            ComponentStatus::Running,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        let status = manager
-            .get_source_status("reconfig-running-source".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Running);
+        updates::settle(&core).await;
+        let current = core.component_by_id(old.id()).unwrap();
+        let started = current.wait_started().await;
+        assert!(
+            started.is_ok(),
+            "{started:?}; state={:?}; hooks={:?}; management={:?}",
+            current.observed(),
+            trace.events(),
+            core.management_status().await
+        );
+        assert_eq!(
+            core.source_manager()
+                .get_source_status_by_name(&source_name)
+                .await
+                .unwrap(),
+            ComponentStatus::Running
+        );
+        assert_eq!(
+            trace.events(),
+            [
+                "create",
+                "bind",
+                "initialize",
+                "start",
+                "stop",
+                "dispose",
+                "create",
+                "bind",
+                "initialize",
+                "start"
+            ]
+        );
+        assert!(old.start().await.is_err());
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_source_preserves_log_history() {
+        use crate::test_helpers::updates;
         use tracing::Instrument;
-
-        let (manager, graph) = create_test_manager().await;
-
-        let source_id = unique_id("reconfig-logs-source");
-        let source = DeprovisionTestSource::new_simple(&source_id);
-        add_source(&manager, &graph, source).await.unwrap();
+        let (core, _) = updates::core().await;
+        let source_name = drasi_core_types::ComponentName::try_new("reconfig-logs-source")
+            .expect("fixture component name");
+        let source = updates::add(&core, source_name.clone(), false).await;
+        let source_id = source.id().clone();
+        let manager = core.source_manager();
 
         // Generate some logs
         let span = tracing::info_span!(
@@ -1670,7 +1850,7 @@ mod manager_tests {
         // Allow async log routing to complete (logs go through tracing layer → channel → registry)
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Ok((logs, _)) = manager.subscribe_logs(&source_id).await {
+                if let Ok((logs, _)) = manager.subscribe_logs_by_name(&source_name).await {
                     if !logs.is_empty() {
                         return;
                     }
@@ -1682,74 +1862,91 @@ mod manager_tests {
         .expect("Timed out waiting for logs to be routed");
 
         // Verify logs exist
-        let (logs_before, _) = manager.subscribe_logs(&source_id).await.unwrap();
+        let (logs_before, _) = manager.subscribe_logs_by_name(&source_name).await.unwrap();
         assert!(!logs_before.is_empty(), "Expected logs before update");
 
-        // Update with a new instance
-        let new_source = DeprovisionTestSource::new_simple(&source_id);
         manager
-            .update_source(source_id.clone(), new_source)
+            .update_source_by_name(
+                &source_name,
+                updates::definition(source.id().clone(), source_name.clone(), false, 1),
+            )
             .await
             .unwrap();
 
         // Verify logs still exist after update
-        let (logs_after, _) = manager.subscribe_logs(&source_id).await.unwrap();
+        let (logs_after, _) = manager.subscribe_logs_by_name(&source_name).await.unwrap();
         assert!(
             !logs_after.is_empty(),
             "Expected logs to be preserved after update"
         );
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_source_emits_reconfiguring_event() {
-        let (manager, graph) = create_test_manager_with_graph().await;
-
-        // Subscribe to graph events BEFORE adding source
-        let mut event_rx = graph.subscribe().unwrap();
-
-        let source = DeprovisionTestSource::new_simple("reconfig-event-source");
-        add_source(&manager, &graph, source).await.unwrap();
-
-        // Update
-        let new_source = DeprovisionTestSource::new_simple("reconfig-event-source");
-        manager
-            .update_source("reconfig-event-source".to_string(), new_source)
+        use crate::test_helpers::updates;
+        let (core, _) = updates::core().await;
+        let source_name = drasi_core_types::ComponentName::try_new("reconfig-event-source")
+            .expect("fixture component name");
+        let source = updates::add(&core, source_name.clone(), false).await;
+        source.start().await.unwrap();
+        source.wait_started().await.unwrap();
+        let mut event_rx = core.component_graph().subscribe().unwrap();
+        core.source_manager()
+            .update_source_by_name(
+                &source_name,
+                updates::definition(source.id().clone(), source_name.clone(), false, 1),
+            )
             .await
             .unwrap();
 
         // Wait for Reconfiguring event via the broadcast channel
-        wait_for_component_status(
+        wait_for_component_status_by_id(
             &mut event_rx,
-            "reconfig-event-source",
+            source.id(),
             ComponentStatus::Reconfiguring,
             std::time::Duration::from_secs(5),
         )
         .await;
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_source_rejects_mismatched_id() {
-        let (manager, graph) = create_test_manager().await;
-
-        let source = DeprovisionTestSource::new_simple("original-source");
-        add_source(&manager, &graph, source).await.unwrap();
-
-        // Try to update with a different ID
-        let new_source = DeprovisionTestSource::new_simple("different-id");
-        let result = manager
-            .update_source("original-source".to_string(), new_source)
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let source_name = drasi_core_types::ComponentName::try_new("original-source")
+            .expect("fixture component name");
+        let _source = updates::add(&core, source_name.clone(), false).await;
+        let before = trace.events();
+        let result = core
+            .source_manager()
+            .update_source_by_name(
+                &source_name,
+                updates::definition(
+                    crate::config::ComponentId::generate(),
+                    source_name.clone(),
+                    false,
+                    1,
+                ),
+            )
             .await;
         assert!(result.is_err(), "Expected error for mismatched IDs");
-        assert!(result.unwrap_err().to_string().contains("does not match"));
+        assert!(result.unwrap_err().to_string().contains("UUID"));
+        assert_eq!(trace.events(), before);
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_nonexistent_source() {
         let (manager, _graph) = create_test_manager().await;
-
-        let new_source = DeprovisionTestSource::new_simple("nonexistent");
+        let id = crate::config::ComponentId::generate();
+        let source_name = drasi_core_types::ComponentName::try_new("nonexistent")
+            .expect("fixture component name");
+        let definition =
+            crate::test_helpers::updates::definition(id.clone(), source_name.clone(), false, 1);
         let result = manager
-            .update_source("nonexistent".to_string(), new_source)
+            .update_source_by_name(&source_name, definition)
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));

@@ -22,7 +22,7 @@ use std::{
 use bytes::Bytes;
 use drasi_core::{
     computation::{ComputationIndexes, ComputationTransaction},
-    interface::{ElementIndex, IndexError, SourceCheckpoint},
+    interface::{CheckpointKey, ElementIndex, IndexError, OutputPartition, SourceCheckpoint},
     middleware::SourceMiddlewarePipeline,
     models::SourceChange,
 };
@@ -74,7 +74,7 @@ struct Configuration {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InputReceipt {
-    key: String,
+    key: CheckpointKey,
     sequence: u64,
     position: Option<Vec<u8>>,
     changes: Vec<u8>,
@@ -329,14 +329,20 @@ impl TransformStore {
         let checkpoint = resources.checkpoint_store().expect("validated checkpoint");
         let outbox = resources.outbox_writer().expect("validated outbox");
         let saved = checkpoint.read_all_checkpoints().await?;
-        let bindings = super::OutputBindings::load(saved.get(super::output_bindings::CHECKPOINT))?;
+        let marker = |name: &str| CheckpointKey::Metadata(name.to_owned());
+        let bindings =
+            super::OutputBindings::load(saved.get(&marker(super::output_bindings::CHECKPOINT)))?;
         bindings.validate_progress(
             saved
-                .get(HEAD)
+                .get(&marker(HEAD))
                 .and_then(|head| head.source_position.as_ref()),
         )?;
-        let entries = outbox.read_from(JOURNAL, 0).await?;
-        let (identity, head, emission, confirmed) = if let Some(config) = saved.get(CONFIGURATION) {
+        let output = OutputPartition::Component(self.id.clone());
+        let journal = output.metadata(JOURNAL);
+        let entries = outbox.read_from(&journal, 0).await?;
+        let (identity, head, emission, confirmed) = if let Some(config) =
+            saved.get(&marker(CONFIGURATION))
+        {
             let config: Configuration = serde_json::from_slice(
                 config
                     .source_position
@@ -357,7 +363,7 @@ impl TransformStore {
             }
             let number = |key| -> anyhow::Result<u64> {
                 Ok(saved
-                    .get(key)
+                    .get(&marker(key))
                     .filter(|checkpoint| key == HEAD || checkpoint.source_position.is_none())
                     .ok_or_else(|| anyhow::anyhow!("missing middleware sequence marker"))?
                     .sequence)
@@ -373,15 +379,12 @@ impl TransformStore {
                 saved.is_empty()
                     && entries.is_empty()
                     && checkpoint.read_config_hash().await?.is_none()
-                    && checkpoint
-                        .read_result_sequence(self.id.as_str())
-                        .await?
-                        .is_none()
-                    && outbox.read_from(self.id.as_str(), 0).await?.is_empty()
+                    && checkpoint.read_result_sequence(&output).await?.is_none()
+                    && outbox.read_from(&output, 0).await?.is_empty()
                     && resources
                         .live_results_writer()
                         .expect("validated projection")
-                        .read_snapshot(self.id.as_str())
+                        .read_snapshot(&self.id)
                         .await?
                         .is_empty(),
                 "refusing to adopt unowned or another component's index storage"
@@ -399,10 +402,14 @@ impl TransformStore {
                 identity: identity.clone(),
             })?);
             checkpoint
-                .stage_checkpoint(CONFIGURATION, 1, Some(&bytes))
+                .stage_checkpoint(
+                    &drasi_core::interface::CheckpointKey::Metadata(CONFIGURATION.to_owned()),
+                    1,
+                    Some(&bytes),
+                )
                 .await?;
             for key in [HEAD, EMISSION, CONFIRMED] {
-                checkpoint.stage_checkpoint(key, 0, None).await?;
+                checkpoint.stage_checkpoint(&marker(key), 0, None).await?;
             }
             (identity, 0, 0, 0)
         };
@@ -474,9 +481,9 @@ impl TransformStore {
         let mut checkpoints = BTreeMap::new();
         let mut transport_sequences = BTreeMap::new();
         for (key, checkpoint) in &saved {
-            if key.starts_with("computation:input:") {
+            if key.is_progress() {
                 let mapping = saved
-                    .get(&format!("{INPUT_OUTPUT_PREFIX}{key}"))
+                    .get(&key.associated(INPUT_OUTPUT_PREFIX))
                     .ok_or_else(|| {
                         anyhow::anyhow!("middleware input has no committed output identity")
                     })?;
@@ -507,12 +514,15 @@ impl TransformStore {
                     );
                 }
                 checkpoints.insert(super::query::progress_identity(key)?, checkpoint.clone());
-            } else if key.starts_with(super::producer_progress::INPUT_TRANSPORT_PREFIX) {
+            } else if key
+                .associated_checkpoint(super::producer_progress::INPUT_TRANSPORT_PREFIX)
+                .is_some()
+            {
                 transport_sequences.insert(
                     super::producer_progress::transport_identity(key, checkpoint)?,
                     checkpoint.sequence,
                 );
-            } else if let Some(input) = key.strip_prefix(INPUT_OWNER_PREFIX) {
+            } else if let Some(input) = key.associated_checkpoint(INPUT_OWNER_PREFIX) {
                 let owner: GraphProducerIdentity = serde_json::from_slice(
                     checkpoint
                         .source_position
@@ -523,11 +533,11 @@ impl TransformStore {
                 owner.validate()?;
                 anyhow::ensure!(
                     owner.persistent()
-                        && input == super::query::progress_key(owner.stream().as_str(), None)
+                        && input == &super::query::progress_key(owner.stream(), None)
                         && saved.contains_key(input),
                     "middleware input owner does not match its committed stream"
                 );
-            } else if let Some(input) = key.strip_prefix(QUERY_INPUT_OWNER_PREFIX) {
+            } else if let Some(input) = key.associated_checkpoint(QUERY_INPUT_OWNER_PREFIX) {
                 let owner: QueryInputOwner = serde_json::from_slice(
                     checkpoint
                         .source_position
@@ -539,16 +549,22 @@ impl TransformStore {
                 )?;
                 owner.validate(true)?;
                 anyhow::ensure!(
-                    saved.contains_key(input),
+                    input.is_progress() && saved.contains_key(input),
                     "query input owner has no committed position"
                 );
             } else {
                 anyhow::ensure!(
-                    [CONFIGURATION, HEAD, EMISSION, CONFIRMED, super::output_bindings::CHECKPOINT]
-                        .contains(&key.as_str())
+                    key.metadata_name().is_some_and(|name| [
+                        CONFIGURATION,
+                        HEAD,
+                        EMISSION,
+                        CONFIRMED,
+                        super::output_bindings::CHECKPOINT
+                    ]
+                    .contains(&name))
                         || key
-                            .strip_prefix(INPUT_OUTPUT_PREFIX)
-                            .is_some_and(|input| saved.contains_key(input)),
+                            .associated_checkpoint(INPUT_OUTPUT_PREFIX)
+                            .is_some_and(|input| input.is_progress() && saved.contains_key(input)),
                     "middleware storage contains another component's checkpoint"
                 );
             }
@@ -587,10 +603,20 @@ impl TransformStore {
         self.transaction
             .run(async {
                 checkpoint
-                    .stage_checkpoint(super::output_bindings::CHECKPOINT, 1, Some(&bytes))
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(
+                            super::output_bindings::CHECKPOINT.to_owned(),
+                        ),
+                        1,
+                        Some(&bytes),
+                    )
                     .await?;
                 checkpoint
-                    .stage_checkpoint(HEAD, head, bindings.fingerprint())
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(HEAD.to_owned()),
+                        head,
+                        bindings.fingerprint(),
+                    )
                     .await?;
                 Ok(())
             })
@@ -620,7 +646,11 @@ impl TransformStore {
         self.transaction
             .run(async {
                 checkpoint
-                    .stage_checkpoint(EMISSION, emission, None)
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(EMISSION.to_owned()),
+                        emission,
+                        None,
+                    )
                     .await?;
                 Ok(())
             })
@@ -705,7 +735,7 @@ impl TransformStore {
             .checkpoint_store()
             .expect("checkpoint");
         let saved = progress.validate(checkpoint.as_ref(), true).await?;
-        let owner_key = format!("{QUERY_INPUT_OWNER_PREFIX}{}", progress.key);
+        let owner_key = progress.key.associated(QUERY_INPUT_OWNER_PREFIX);
         let previous_owner = checkpoint.read_checkpoint(&owner_key).await?;
         match (&query_owner, previous_owner) {
             (Some(current), Some(previous)) => {
@@ -829,7 +859,12 @@ impl TransformStore {
                     .resources()
                     .outbox_writer()
                     .expect("outbox")
-                    .append_and_trim(JOURNAL, logical_sequence, &bytes, retain_from)
+                    .append_and_trim(
+                        &OutputPartition::Component(self.id.clone()).metadata(JOURNAL),
+                        logical_sequence,
+                        &bytes,
+                        retain_from,
+                    )
                     .await?;
                 progress.stage(checkpoint.as_ref()).await?;
                 if let Some(owner) = &query_owner {
@@ -840,16 +875,24 @@ impl TransformStore {
                 }
                 checkpoint
                     .stage_checkpoint(
-                        &format!("{INPUT_OUTPUT_PREFIX}{}", progress.key),
+                        &progress.key.associated(INPUT_OUTPUT_PREFIX),
                         logical_sequence,
                         None,
                     )
                     .await?;
                 checkpoint
-                    .stage_checkpoint(HEAD, logical_sequence, state.bindings.fingerprint())
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(HEAD.to_owned()),
+                        logical_sequence,
+                        state.bindings.fingerprint(),
+                    )
                     .await?;
                 checkpoint
-                    .stage_checkpoint(EMISSION, emission, None)
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(EMISSION.to_owned()),
+                        emission,
+                        None,
+                    )
                     .await?;
                 Ok(envelope)
             }
@@ -923,7 +966,11 @@ impl TransformStore {
             self.transaction
                 .run(async {
                     checkpoint
-                        .stage_checkpoint(CONFIRMED, confirmed, None)
+                        .stage_checkpoint(
+                            &drasi_core::interface::CheckpointKey::Metadata(CONFIRMED.to_owned()),
+                            confirmed,
+                            None,
+                        )
                         .await?;
                     Ok(())
                 })

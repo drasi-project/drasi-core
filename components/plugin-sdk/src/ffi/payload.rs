@@ -39,6 +39,7 @@ use bytes::Bytes;
 use chrono::DateTime;
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::events::{BootstrapEvent, SourceEvent, SourceEventWrapper};
+use drasi_lib::ComponentId;
 use serde::{Deserialize, Serialize};
 
 /// Maximum accepted serialized FFI payload size.
@@ -108,7 +109,7 @@ pub unsafe fn take_ffi_payload<T>(
 /// framework.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceEventPayload {
-    pub source_id: String,
+    pub source_id: ComponentId,
     pub event: SourceEvent,
     /// Event timestamp in microseconds since the Unix epoch.
     pub timestamp_us: i64,
@@ -121,7 +122,7 @@ pub struct SourceEventPayload {
 /// Serialized form of a `BootstrapEvent` for FFI transfer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BootstrapEventPayload {
-    pub source_id: String,
+    pub source_id: ComponentId,
     pub change: SourceChange,
     /// Event timestamp in microseconds since the Unix epoch.
     pub timestamp_us: i64,
@@ -352,7 +353,8 @@ mod tests {
     #[test]
     fn source_event_payload_roundtrips_via_named_encoding() {
         let wrapper = SourceEventWrapper::from_ffi_parts(
-            "src-1".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID"),
             SourceEvent::Change(SourceChange::Insert {
                 element: sample_node(),
             }),
@@ -390,7 +392,7 @@ mod tests {
             source_position: Option<Vec<u8>>,
         }
         let mut payload = LegacyPayload {
-            source_id: "src-1".into(),
+            source_id: "00000000-0000-0000-0000-000000000031".into(),
             event: SourceEvent::Change(SourceChange::Insert {
                 element: sample_node(),
             }),
@@ -405,6 +407,21 @@ mod tests {
                 .sequence,
             42
         );
+        let mut missing_sequence =
+            serde_json::to_value(&payload).expect("serialize legacy payload");
+        let bytes = rmp_serde::to_vec_named(&missing_sequence).expect("serialize payload map");
+        assert_eq!(
+            decode_source_event_payload(&bytes)
+                .expect("decode payload map with sequence")
+                .sequence,
+            42
+        );
+        missing_sequence
+            .as_object_mut()
+            .expect("payload map")
+            .remove("sequence");
+        let bytes = rmp_serde::to_vec_named(&missing_sequence).expect("serialize missing sequence");
+        assert!(decode_source_event_payload(&bytes).is_none());
         payload.sequence = None;
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize legacy null");
         assert!(decode_source_event_payload(&bytes).is_none());
@@ -413,7 +430,10 @@ mod tests {
     #[test]
     fn bootstrap_event_payload_roundtrips() {
         let record = BootstrapEvent {
-            source_id: "src-1".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000031",
+            )
+            .expect("fixture UUID"),
             change: SourceChange::Delete {
                 metadata: ElementMetadata {
                     reference: ElementReference::new("src-1", "vehicles:B5678"),
@@ -442,7 +462,8 @@ mod tests {
         // and fails to decode ("invalid length 5, expected 6"); named encoding
         // (`encode_query_result`) tolerates the skipped field.
         let qr = drasi_lib::channels::QueryResult::new(
-            "q-1".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000032")
+                .expect("fixture UUID"),
             3,
             Utc::now(),
             Vec::new(),
@@ -478,7 +499,8 @@ mod tests {
 
     fn encoded_source_event() -> Vec<u8> {
         let wrapper = SourceEventWrapper::from_ffi_parts(
-            "src-1".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID"),
             SourceEvent::Change(SourceChange::Insert {
                 element: sample_node(),
             }),
@@ -612,7 +634,8 @@ mod tests {
     #[test]
     fn consume_query_result_decodes_and_frees_buffer_once() {
         let qr = drasi_lib::channels::QueryResult::new(
-            "q-1".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000032")
+                .expect("fixture UUID"),
             7,
             Utc::now(),
             Vec::new(),
@@ -621,7 +644,11 @@ mod tests {
         let raw = make_ffi_query_result(encode_query_result(&qr), count_drop_qr_valid);
 
         let decoded = unsafe { consume_query_result(raw) }.expect("owned QueryResult");
-        assert_eq!(decoded.query_id, "q-1");
+        assert_eq!(
+            decoded.query_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000032")
+                .expect("fixture UUID")
+        );
         assert_eq!(decoded.sequence, 7);
 
         // The host's payload buffer was freed exactly once (no leak, no double-free),

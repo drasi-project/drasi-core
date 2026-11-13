@@ -30,7 +30,8 @@ use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
 
-use super::{CheckpointStore, IndexError, IndexSet, LiveResultsWriter, OutboxWriter};
+use super::{CheckpointStore, IndexError, IndexSet, LiveResultsWriter, OutboxWriter, StorageScope};
+use crate::ComponentId;
 
 /// Result of [`IndexBackendPlugin::create_indexes`].
 ///
@@ -117,21 +118,20 @@ pub trait IndexBackendPlugin: Send + Sync {
     /// shares the same session state as the returned `SessionControl`, so
     /// `stage_checkpoint` writes land in the same database transaction as
     /// index updates. Volatile backends return `checkpoint_store: None`.
-    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError>;
+    async fn create_indexes(
+        &self,
+        component_id: &ComponentId,
+    ) -> Result<CreatedIndexes, IndexError>;
 
     /// Create an isolated storage partition for a logical query.
     ///
-    /// Output writers still receive `query_id` for primary output and distinct
-    /// IDs for auxiliary records. Providers whose writers bind a query at
-    /// construction should override this to preserve that distinction without
-    /// changing the partition's existing primary keys.
+    /// The physical namespace is not a component identity. Providers must
+    /// implement isolation explicitly rather than passing it as an owner ID.
     async fn create_scoped_indexes(
         &self,
-        storage_scope: &str,
-        _query_id: &str,
-    ) -> Result<CreatedIndexes, IndexError> {
-        self.create_indexes(storage_scope).await
-    }
+        storage_scope: &StorageScope,
+        component_id: &ComponentId,
+    ) -> Result<CreatedIndexes, IndexError>;
 
     /// Returns true if this backend is volatile (data lost on restart).
     ///

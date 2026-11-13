@@ -183,7 +183,9 @@ unsafe extern "C" fn changed_description(context: *mut c_void) -> abi::Reply {
         let bytes = unsafe { take_reply(ORIGINAL.get().unwrap().describe.unwrap()(context))? };
         let mut request: CreateRequest = bootstrap::decode(&bytes).map_err(Failure::from)?;
         match request.configuration["describeMismatch"].as_str().unwrap() {
-            "source" => request.id = ComponentId::try_new("foreign").unwrap(),
+            "source" => {
+                request.id = ComponentId::try_new("14fc8e0c-3927-5cea-ab9d-1845e4431b0a").unwrap()
+            }
             "instance" => request.scope.as_mut().unwrap().instance_id = "foreign".into(),
             "graph" => request.scope.as_mut().unwrap().graph_id = "foreign".into(),
             "factory" => {
@@ -308,12 +310,12 @@ async fn bootstrap_coordination_constructor_only_describes_and_validates_immutab
         let query = owner("query");
         let group = Arc::new(ConsumerProgressSet::new(
             "graph",
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("1c154521-8577-54dc-863e-d6d044881ba2")?,
             [query.clone(), owner("other")],
         )?);
         let make = |configuration| {
             factory.create_source_bootstrap(
-                ComponentId::try_new("source")?,
+                ComponentId::try_new("1c154521-8577-54dc-863e-d6d044881ba2")?,
                 configuration,
                 scope(0),
                 progress(shared, &query, &group),
@@ -384,7 +386,7 @@ async fn bootstrap_coordination_validates_every_returned_handle_field() -> anyho
     let state = Arc::new(State::default());
     let plugin = NativePlugin::from_definition(source_definition(false, state)?)?;
     let resource = plugin.factories()[0].create_source_bootstrap(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("1c154521-8577-54dc-863e-d6d044881ba2")?,
         json!({}),
         scope(0),
         NativeSourceBootstrapProgress::Single(owner("query")),
@@ -524,19 +526,26 @@ async fn bootstrap_coordination_absent_and_opted_out_factories_preserve_ordinary
             .contains_key("source_bootstrap"));
         assert!(factory
             .create_source_bootstrap(
-                ComponentId::try_new("source")?,
+                ComponentId::try_new("1c154521-8577-54dc-863e-d6d044881ba2")?,
                 json!({}),
                 scope(0),
                 NativeSourceBootstrapProgress::Single(owner("query")),
             )
             .is_err());
-        let mut spec = factory.specification(ComponentId::try_new("source")?, json!({}))?;
+        let mut spec = factory.specification(
+            ComponentId::try_new("1c154521-8577-54dc-863e-d6d044881ba2")?,
+            json!({}),
+        )?;
         spec.dependencies.insert(
             "source_bootstrap".into(),
             vec![ResourceId::try_new("coordinator")?],
         );
         assert!(factory.validate(&spec).is_err());
-        let mut live = factory.create_component(ComponentId::try_new("source")?, json!({}))?;
+        let mut live = factory.create_component(
+            ComponentId::try_new("1c154521-8577-54dc-863e-d6d044881ba2")?,
+            json!({}),
+        )?;
+        live.initialize().await?;
         live.start().await?;
         assert!(live.next().await?.is_none());
         live.stop().await?;

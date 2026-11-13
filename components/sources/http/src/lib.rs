@@ -191,7 +191,8 @@
 //! use std::sync::Arc;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let source = HttpSource::builder("http-source")
+//! let id = drasi_lib::ComponentId::try_new("11223344-5566-4788-99aa-bbccddeeff00")?;
+//! let source = HttpSource::builder(id)
 //!     .with_host("0.0.0.0")
 //!     .with_port(8080)
 //!     .with_adaptive_enabled(true)
@@ -308,7 +309,7 @@ pub struct BatchEventRequest {
 #[derive(Clone)]
 struct HttpAppState {
     /// The source ID for validation against incoming requests
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     /// Channel for sending events to the adaptive batcher
     batch_tx: mpsc::Sender<SourceChangeEvent>,
     /// Webhook configuration (if in webhook mode)
@@ -418,15 +419,16 @@ impl HttpSource {
     /// use drasi_source_http::HttpSource;
     ///
     /// # fn example() -> anyhow::Result<()> {
-    /// let source = HttpSource::builder("my-http-source")
+    /// let id = drasi_lib::ComponentId::try_new("11223344-5566-4788-99aa-bbccddeeff00")?;
+    /// let source = HttpSource::builder(id)
     ///     .with_host("0.0.0.0")
     ///     .with_port(8080)
     ///     .build()?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(id: impl Into<String>, config: HttpSourceConfig) -> Result<Self> {
-        let id = id.into();
+    pub fn new(id: drasi_lib::ComponentId, config: HttpSourceConfig) -> Result<Self> {
+        let id = id.clone();
         let params = SourceBaseParams::new(id);
 
         // Configure adaptive batching
@@ -481,12 +483,12 @@ impl HttpSource {
     ///
     /// Returns an error if the base source cannot be initialized.
     pub fn with_dispatch(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         config: HttpSourceConfig,
         dispatch_mode: Option<DispatchMode>,
         dispatch_buffer_capacity: Option<usize>,
     ) -> Result<Self> {
-        let id = id.into();
+        let id = id.clone();
         let mut params = SourceBaseParams::new(id);
         if let Some(mode) = dispatch_mode {
             params = params.with_dispatch_mode(mode);
@@ -530,7 +532,7 @@ impl HttpSource {
     /// Validates the source ID matches this source and converts the HTTP event
     /// to a source change before sending to the adaptive batcher.
     async fn handle_single_event(
-        Path(source_id): Path<String>,
+        Path(source_id): Path<drasi_lib::ComponentId>,
         State(state): State<HttpAppState>,
         Json(event): Json<HttpSourceChange>,
     ) -> Result<impl IntoResponse, (StatusCode, Json<EventResponse>)> {
@@ -543,7 +545,7 @@ impl HttpSource {
     /// Validates the source ID and processes all events in the batch,
     /// returning partial success if some events fail.
     async fn handle_batch_events(
-        Path(source_id): Path<String>,
+        Path(source_id): Path<drasi_lib::ComponentId>,
         State(state): State<HttpAppState>,
         Json(batch): Json<BatchEventRequest>,
     ) -> Result<impl IntoResponse, (StatusCode, Json<EventResponse>)> {
@@ -567,13 +569,13 @@ impl HttpSource {
     ///
     /// Success response with count of processed events, or error if all fail.
     async fn process_events(
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         state: &HttpAppState,
         events: Vec<HttpSourceChange>,
     ) -> Result<impl IntoResponse, (StatusCode, Json<EventResponse>)> {
         trace!("[{}] Processing {} events", source_id, events.len());
 
-        if source_id != state.source_id {
+        if source_id != &state.source_id {
             error!(
                 "[{}] Source name mismatch. Expected '{}', got '{}'",
                 state.source_id, state.source_id, source_id
@@ -596,12 +598,19 @@ impl HttpSource {
         let mut last_error = None;
 
         for (idx, event) in events.iter().enumerate() {
-            match convert_http_to_source_change(event, source_id) {
+            match convert_http_to_source_change(event, source_id.as_str()) {
                 Ok(source_change) => {
                     let _enqueue_guard = state.enqueue_order.lock().await;
                     // WAL append before ACK (if durability enabled)
                     let sequence = if let Some(ref wal) = state.wal {
-                        match wal.append(&state.source_id, &source_change).await {
+                        match wal
+                            .append(
+                                &drasi_lib::StorageScope::default(),
+                                &state.source_id,
+                                &source_change,
+                            )
+                            .await
+                        {
                             Ok(seq) => {
                                 trace!(
                                     "[{}] WAL append succeeded: sequence={}",
@@ -650,7 +659,7 @@ impl HttpSource {
                     };
 
                     let change_event = SourceChangeEvent {
-                        source_id: source_id.to_string(),
+                        source_id: source_id.clone(),
                         change: source_change,
                         timestamp: chrono::Utc::now(),
                         sequence,
@@ -859,15 +868,23 @@ impl HttpSource {
         let mut last_error = None;
 
         for mapping in matching_mappings {
-            match webhook_state
-                .template_engine
-                .process_mapping(mapping, &context, source_id)
-            {
+            match webhook_state.template_engine.process_mapping(
+                mapping,
+                &context,
+                source_id.as_str(),
+            ) {
                 Ok(source_change) => {
                     let _enqueue_guard = state.enqueue_order.lock().await;
                     // WAL append before ACK (if durability enabled)
                     let sequence = if let Some(ref wal) = state.wal {
-                        match wal.append(&state.source_id, &source_change).await {
+                        match wal
+                            .append(
+                                &drasi_lib::StorageScope::default(),
+                                &state.source_id,
+                                &source_change,
+                            )
+                            .await
+                        {
                             Ok(seq) => Some(seq),
                             Err(WalError::CapacityExhausted(_)) => {
                                 return handle_error(
@@ -952,7 +969,7 @@ impl HttpSource {
         batch_rx: mpsc::Receiver<SourceChangeEvent>,
         base: SourceBase,
         adaptive_config: AdaptiveBatchConfig,
-        source_id: String,
+        source_id: drasi_lib::ComponentId,
     ) {
         let mut batcher = AdaptiveBatcher::new(batch_rx, adaptive_config.clone());
         let mut total_events = 0u64;
@@ -1046,7 +1063,7 @@ impl HttpSource {
 
 #[async_trait]
 impl Source for HttpSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -1103,15 +1120,19 @@ impl Source for HttpSource {
                     .as_ref()
                     .expect("durability checked above")
                     .to_wal_config();
-                wal.register(&self.base.id, wal_config.clone())
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to register WAL for source '{}': {}",
-                            self.base.id,
-                            e
-                        )
-                    })?;
+                wal.register(
+                    &drasi_lib::StorageScope::default(),
+                    &self.base.id,
+                    wal_config.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to register WAL for source '{}': {}",
+                        self.base.id,
+                        e
+                    )
+                })?;
 
                 info!(
                     "[{}] WAL registered: max_events={}, policy={:?}",
@@ -1120,7 +1141,7 @@ impl Source for HttpSource {
 
                 // Resume sequence counter from WAL head
                 let head = wal
-                    .head_sequence(&self.base.id)
+                    .head_sequence(&drasi_lib::StorageScope::default(), &self.base.id)
                     .await
                     .context("Cannot restore the committed HTTP WAL head")?;
                 self.base.begin_wal_subscriptions(head);
@@ -1408,16 +1429,17 @@ impl Source for HttpSource {
         self.base.complete_wal_subscriptions();
     }
 
-    async fn deprovision(&self) -> Result<()> {
+    async fn delete_owned_resources(&self) -> Result<()> {
         // Delete WAL data if durability was enabled
         let wal_guard = self.wal.read().await;
         if let Some(ref wal) = *wal_guard {
-            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
-            if let Err(e) = wal.delete_wal(&self.base.id).await {
-                warn!(
-                    "[{}] Failed to delete WAL during deprovision: {}",
-                    self.base.id, e
-                );
+            info!("[{}] Deleting owned WAL data", self.base.id);
+            if let Err(e) = wal
+                .delete_wal(&drasi_lib::StorageScope::default(), &self.base.id)
+                .await
+            {
+                warn!("[{}] Failed to delete owned WAL data: {}", self.base.id, e);
+                return Err(e.into());
             }
         }
         drop(wal_guard);
@@ -1428,8 +1450,8 @@ impl Source for HttpSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -1452,7 +1474,8 @@ impl Source for HttpSource {
 /// use drasi_source_http::HttpSource;
 ///
 /// # fn example() -> anyhow::Result<()> {
-/// let source = HttpSource::builder("my-source")
+/// let id = drasi_lib::ComponentId::try_new("11223344-5566-4788-99aa-bbccddeeff00")?;
+/// let source = HttpSource::builder(id)
 ///     .with_host("0.0.0.0")
 ///     .with_port(8080)
 ///     .with_adaptive_enabled(true)
@@ -1461,7 +1484,7 @@ impl Source for HttpSource {
 /// # }
 /// ```
 pub struct HttpSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     host: String,
     port: u16,
     endpoint: Option<String>,
@@ -1486,9 +1509,9 @@ impl HttpSourceBuilder {
     /// # Arguments
     ///
     /// * `id` - Unique identifier for the source instance
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             host: String::new(),
             port: 8080,
             endpoint: None,
@@ -1655,7 +1678,7 @@ impl HttpSourceBuilder {
         };
 
         // Build SourceBaseParams with all settings
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -1712,14 +1735,15 @@ impl HttpSource {
     /// use drasi_source_http::HttpSource;
     ///
     /// # fn example() -> anyhow::Result<()> {
-    /// let source = HttpSource::builder("my-source")
+    /// let id = drasi_lib::ComponentId::try_new("11223344-5566-4788-99aa-bbccddeeff00")?;
+    /// let source = HttpSource::builder(id)
     ///     .with_host("0.0.0.0")
     ///     .with_port(8080)
     ///     .build()?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn builder(id: impl Into<String>) -> HttpSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> HttpSourceBuilder {
         HttpSourceBuilder::new(id)
     }
 }
@@ -1727,7 +1751,7 @@ impl HttpSource {
 /// Handle errors according to configured error behavior
 fn handle_error(
     behavior: &ErrorBehavior,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     status: StatusCode,
     message: &str,
     detail: Option<&str>,
@@ -1888,7 +1912,12 @@ mod tests {
 
     #[tokio::test]
     async fn stop_joins_the_wal_pruner() {
-        let source = HttpSourceBuilder::new("pruner").build().unwrap();
+        let source = HttpSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000080")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
         let (started, ready) = tokio::sync::oneshot::channel();
         let mut stopping = source.base.subscribe_wal_pruning_stop();
         let task = tokio::spawn(async move {
@@ -1908,22 +1937,32 @@ mod tests {
 
         #[test]
         fn test_builder_with_valid_config() {
-            let source = HttpSourceBuilder::new("test-source")
-                .with_host("localhost")
-                .with_port(8080)
-                .build();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .with_port(8080)
+            .build();
             assert!(source.is_ok());
         }
 
         #[test]
         fn test_builder_with_custom_config() {
-            let source = HttpSourceBuilder::new("http-source")
-                .with_host("0.0.0.0")
-                .with_port(9000)
-                .with_endpoint("/events")
-                .build()
-                .unwrap();
-            assert_eq!(source.id(), "http-source");
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000016d")
+                    .expect("fixture UUID"),
+            )
+            .with_host("0.0.0.0")
+            .with_port(9000)
+            .with_endpoint("/events")
+            .build()
+            .unwrap();
+            assert_eq!(
+                source.id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000016d")
+                    .expect("fixture UUID")
+            );
         }
 
         #[test]
@@ -1943,13 +1982,18 @@ mod tests {
                 durability: None,
             };
             let source = HttpSource::with_dispatch(
-                "dispatch-source",
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009b")
+                    .expect("fixture UUID"),
                 config,
                 Some(DispatchMode::Channel),
                 Some(1000),
             );
             assert!(source.is_ok());
-            assert_eq!(source.unwrap().id(), "dispatch-source");
+            assert_eq!(
+                source.unwrap().id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009b")
+                    .expect("fixture UUID")
+            );
         }
     }
 
@@ -1958,29 +2002,42 @@ mod tests {
 
         #[test]
         fn test_id_returns_correct_value() {
-            let source = HttpSourceBuilder::new("my-http-source")
-                .with_host("localhost")
-                .build()
-                .unwrap();
-            assert_eq!(source.id(), "my-http-source");
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000016e")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .build()
+            .unwrap();
+            assert_eq!(
+                source.id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000016e")
+                    .expect("fixture UUID")
+            );
         }
 
         #[test]
         fn test_type_name_returns_http() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .build()
+            .unwrap();
             assert_eq!(source.type_name(), "http");
         }
 
         #[test]
         fn test_properties_contains_host_and_port() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("192.168.1.1")
-                .with_port(9000)
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("192.168.1.1")
+            .with_port(9000)
+            .build()
+            .unwrap();
             let props = source.properties();
 
             assert_eq!(
@@ -1995,11 +2052,14 @@ mod tests {
 
         #[test]
         fn test_properties_includes_endpoint_when_set() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .with_endpoint("/api/v1")
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .with_endpoint("/api/v1")
+            .build()
+            .unwrap();
             let props = source.properties();
 
             assert_eq!(
@@ -2010,10 +2070,13 @@ mod tests {
 
         #[test]
         fn test_properties_excludes_endpoint_when_none() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .build()
+            .unwrap();
             let props = source.properties();
 
             assert!(!props.contains_key("endpoint"));
@@ -2021,38 +2084,41 @@ mod tests {
 
         #[test]
         fn test_describe_schema_uses_webhook_mappings() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .with_webhooks(WebhookConfig {
-                    error_behavior: ErrorBehavior::AcceptAndLog,
-                    cors: None,
-                    routes: vec![crate::config::WebhookRoute {
-                        path: "/events".to_string(),
-                        methods: vec![crate::config::HttpMethod::Post],
-                        auth: None,
-                        error_behavior: None,
-                        mappings: vec![crate::config::WebhookMapping {
-                            when: None,
-                            operation: Some(crate::config::OperationType::Insert),
-                            operation_from: None,
-                            operation_map: None,
-                            element_type: crate::config::ElementType::Node,
-                            effective_from: None,
-                            template: crate::config::ElementTemplate {
-                                id: "{{payload.id}}".to_string(),
-                                labels: vec!["Order".to_string()],
-                                properties: Some(serde_json::json!({
-                                    "total": "{{payload.total}}",
-                                    "status": "{{payload.status}}"
-                                })),
-                                from: None,
-                                to: None,
-                            },
-                        }],
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .with_webhooks(WebhookConfig {
+                error_behavior: ErrorBehavior::AcceptAndLog,
+                cors: None,
+                routes: vec![crate::config::WebhookRoute {
+                    path: "/events".to_string(),
+                    methods: vec![crate::config::HttpMethod::Post],
+                    auth: None,
+                    error_behavior: None,
+                    mappings: vec![crate::config::WebhookMapping {
+                        when: None,
+                        operation: Some(crate::config::OperationType::Insert),
+                        operation_from: None,
+                        operation_map: None,
+                        element_type: crate::config::ElementType::Node,
+                        effective_from: None,
+                        template: crate::config::ElementTemplate {
+                            id: "{{payload.id}}".to_string(),
+                            labels: vec!["Order".to_string()],
+                            properties: Some(serde_json::json!({
+                                "total": "{{payload.total}}",
+                                "status": "{{payload.status}}"
+                            })),
+                            from: None,
+                            to: None,
+                        },
                     }],
-                })
-                .build()
-                .unwrap();
+                }],
+            })
+            .build()
+            .unwrap();
 
             let schema = source
                 .describe_schema()
@@ -2073,37 +2139,40 @@ mod tests {
 
         #[test]
         fn test_describe_schema_includes_relation_mappings() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .with_webhooks(WebhookConfig {
-                    error_behavior: ErrorBehavior::AcceptAndLog,
-                    cors: None,
-                    routes: vec![crate::config::WebhookRoute {
-                        path: "/events".to_string(),
-                        methods: vec![crate::config::HttpMethod::Post],
-                        auth: None,
-                        error_behavior: None,
-                        mappings: vec![crate::config::WebhookMapping {
-                            when: None,
-                            operation: Some(crate::config::OperationType::Insert),
-                            operation_from: None,
-                            operation_map: None,
-                            element_type: crate::config::ElementType::Relation,
-                            effective_from: None,
-                            template: crate::config::ElementTemplate {
-                                id: "{{payload.id}}".to_string(),
-                                labels: vec!["PLACED_BY".to_string()],
-                                properties: Some(serde_json::json!({
-                                    "placed_at": "{{payload.timestamp}}"
-                                })),
-                                from: None,
-                                to: None,
-                            },
-                        }],
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .with_webhooks(WebhookConfig {
+                error_behavior: ErrorBehavior::AcceptAndLog,
+                cors: None,
+                routes: vec![crate::config::WebhookRoute {
+                    path: "/events".to_string(),
+                    methods: vec![crate::config::HttpMethod::Post],
+                    auth: None,
+                    error_behavior: None,
+                    mappings: vec![crate::config::WebhookMapping {
+                        when: None,
+                        operation: Some(crate::config::OperationType::Insert),
+                        operation_from: None,
+                        operation_map: None,
+                        element_type: crate::config::ElementType::Relation,
+                        effective_from: None,
+                        template: crate::config::ElementTemplate {
+                            id: "{{payload.id}}".to_string(),
+                            labels: vec!["PLACED_BY".to_string()],
+                            properties: Some(serde_json::json!({
+                                "placed_at": "{{payload.timestamp}}"
+                            })),
+                            from: None,
+                            to: None,
+                        },
                     }],
-                })
-                .build()
-                .unwrap();
+                }],
+            })
+            .build()
+            .unwrap();
 
             let schema = source
                 .describe_schema()
@@ -2127,10 +2196,13 @@ mod tests {
 
         #[tokio::test]
         async fn test_initial_status_is_stopped() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .build()
+            .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
         }
     }
@@ -2140,7 +2212,12 @@ mod tests {
 
         #[test]
         fn test_http_builder_defaults() {
-            let source = HttpSourceBuilder::new("test").build().unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .build()
+            .unwrap();
             assert_eq!(source.config.port, 8080);
             assert_eq!(source.config.timeout_ms, 10000);
             assert_eq!(source.config.endpoint, None);
@@ -2148,13 +2225,16 @@ mod tests {
 
         #[test]
         fn test_http_builder_custom_values() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("api.example.com")
-                .with_port(9000)
-                .with_endpoint("/webhook")
-                .with_timeout_ms(5000)
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("api.example.com")
+            .with_port(9000)
+            .with_endpoint("/webhook")
+            .with_timeout_ms(5000)
+            .build()
+            .unwrap();
 
             assert_eq!(source.config.host, "api.example.com");
             assert_eq!(source.config.port, 9000);
@@ -2164,16 +2244,19 @@ mod tests {
 
         #[test]
         fn test_http_builder_adaptive_batching() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .with_adaptive_max_batch_size(1000)
-                .with_adaptive_min_batch_size(10)
-                .with_adaptive_max_wait_ms(500)
-                .with_adaptive_min_wait_ms(50)
-                .with_adaptive_window_secs(60)
-                .with_adaptive_enabled(true)
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .with_adaptive_max_batch_size(1000)
+            .with_adaptive_min_batch_size(10)
+            .with_adaptive_max_wait_ms(500)
+            .with_adaptive_min_wait_ms(50)
+            .with_adaptive_window_secs(60)
+            .with_adaptive_enabled(true)
+            .build()
+            .unwrap();
 
             assert_eq!(source.config.adaptive_max_batch_size, Some(1000));
             assert_eq!(source.config.adaptive_min_batch_size, Some(10));
@@ -2185,12 +2268,19 @@ mod tests {
 
         #[test]
         fn test_builder_id() {
-            let source = HttpSource::builder("my-http-source")
-                .with_host("localhost")
-                .build()
-                .unwrap();
+            let source = HttpSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000016e")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .build()
+            .unwrap();
 
-            assert_eq!(source.base.id, "my-http-source");
+            assert_eq!(
+                source.base.id,
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000016e")
+                    .expect("fixture UUID")
+            );
         }
     }
 
@@ -2318,12 +2408,15 @@ mod tests {
 
         #[test]
         fn test_adaptive_config_from_http_config() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .with_adaptive_max_batch_size(500)
-                .with_adaptive_enabled(true)
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .with_adaptive_max_batch_size(500)
+            .with_adaptive_enabled(true)
+            .build()
+            .unwrap();
 
             // The adaptive config should be initialized from the http config
             assert_eq!(source.adaptive_config.max_batch_size, 500);
@@ -2332,10 +2425,13 @@ mod tests {
 
         #[test]
         fn test_adaptive_config_uses_defaults_when_not_specified() {
-            let source = HttpSourceBuilder::new("test")
-                .with_host("localhost")
-                .build()
-                .unwrap();
+            let source = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_host("localhost")
+            .build()
+            .unwrap();
 
             // Should use AdaptiveBatchConfig defaults
             let default_config = AdaptiveBatchConfig::default();
@@ -2358,17 +2454,20 @@ mod fallback_tests {
 
     #[test]
     fn test_builder_fallback_produces_camel_case() {
-        let source = HttpSourceBuilder::new("http-fallback")
-            .with_host("0.0.0.0")
-            .with_port(9090)
-            .with_endpoint("/ingest")
-            .with_timeout_ms(5000)
-            .with_adaptive_max_batch_size(500)
-            .with_adaptive_min_batch_size(10)
-            .with_adaptive_max_wait_ms(2000)
-            .with_adaptive_min_wait_ms(100)
-            .build()
-            .unwrap();
+        let source = HttpSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000016f")
+                .expect("fixture UUID"),
+        )
+        .with_host("0.0.0.0")
+        .with_port(9090)
+        .with_endpoint("/ingest")
+        .with_timeout_ms(5000)
+        .with_adaptive_max_batch_size(500)
+        .with_adaptive_min_batch_size(10)
+        .with_adaptive_max_wait_ms(2000)
+        .with_adaptive_min_wait_ms(100)
+        .build()
+        .unwrap();
 
         let props = source.properties();
 

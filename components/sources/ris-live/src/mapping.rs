@@ -73,15 +73,15 @@ impl From<PersistedStreamState> for StreamState {
 
 /// Converts RIS messages to graph `SourceChange` events.
 pub struct GraphMapper {
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     state: StreamState,
 }
 
 impl GraphMapper {
     /// Create a mapper with initial state.
-    pub fn new(source_id: impl Into<String>, state: StreamState) -> Self {
+    pub fn new(source_id: drasi_lib::ComponentId, state: StreamState) -> Self {
         Self {
-            source_id: source_id.into(),
+            source_id: source_id.clone(),
             state,
         }
     }
@@ -194,16 +194,20 @@ fn route_id(message: &RisMessageData, prefix: &str) -> String {
     format!("{host}|{peer}|{prefix}")
 }
 
-fn relation_metadata(source_id: &str, route_id: &str, effective_from: u64) -> ElementMetadata {
+fn relation_metadata(
+    source_id: &drasi_lib::ComponentId,
+    route_id: &str,
+    effective_from: u64,
+) -> ElementMetadata {
     ElementMetadata {
-        reference: ElementReference::new(source_id, route_id),
+        reference: ElementReference::new(source_id.as_str(), route_id),
         labels: Arc::from(vec![Arc::from("ROUTES")]),
         effective_from,
     }
 }
 
 fn build_peer_node(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     peer_id: &str,
     message: &RisMessageData,
     effective_from: u64,
@@ -233,7 +237,7 @@ fn build_peer_node(
 
     Element::Node {
         metadata: ElementMetadata {
-            reference: ElementReference::new(source_id, peer_id),
+            reference: ElementReference::new(source_id.as_str(), peer_id),
             labels: Arc::from(vec![Arc::from("Peer")]),
             effective_from,
         },
@@ -241,13 +245,17 @@ fn build_peer_node(
     }
 }
 
-fn build_prefix_node(source_id: &str, prefix: &str, effective_from: u64) -> Element {
+fn build_prefix_node(
+    source_id: &drasi_lib::ComponentId,
+    prefix: &str,
+    effective_from: u64,
+) -> Element {
     let mut properties = ElementPropertyMap::new();
     properties.insert("prefix", ElementValue::String(Arc::from(prefix)));
 
     Element::Node {
         metadata: ElementMetadata {
-            reference: ElementReference::new(source_id, prefix),
+            reference: ElementReference::new(source_id.as_str(), prefix),
             labels: Arc::from(vec![Arc::from("Prefix")]),
             effective_from,
         },
@@ -256,7 +264,7 @@ fn build_prefix_node(source_id: &str, prefix: &str, effective_from: u64) -> Elem
 }
 
 fn build_route_relation(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     peer_id: &str,
     prefix: &str,
     route_id: &str,
@@ -311,8 +319,8 @@ fn build_route_relation(
 
     Element::Relation {
         metadata: relation_metadata(source_id, route_id, effective_from),
-        in_node: ElementReference::new(source_id, peer_id),
-        out_node: ElementReference::new(source_id, prefix),
+        in_node: ElementReference::new(source_id.as_str(), peer_id),
+        out_node: ElementReference::new(source_id.as_str(), prefix),
         properties,
     }
 }
@@ -370,7 +378,11 @@ mod tests {
 
     #[test]
     fn announcement_creates_peer_prefix_and_route() {
-        let mut mapper = GraphMapper::new("ris-source", StreamState::default());
+        let mut mapper = GraphMapper::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000006")
+                .expect("fixture UUID"),
+            StreamState::default(),
+        );
         let message = base_update();
 
         let changes = mapper.process_announcements(&message);
@@ -416,7 +428,11 @@ mod tests {
 
     #[test]
     fn reannouncement_updates_existing_route() {
-        let mut mapper = GraphMapper::new("ris-source", StreamState::default());
+        let mut mapper = GraphMapper::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000006")
+                .expect("fixture UUID"),
+            StreamState::default(),
+        );
         let message = base_update();
         let _ = mapper.process_announcements(&message);
 
@@ -440,7 +456,11 @@ mod tests {
 
     #[test]
     fn withdrawal_deletes_existing_route() {
-        let mut mapper = GraphMapper::new("ris-source", StreamState::default());
+        let mut mapper = GraphMapper::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000006")
+                .expect("fixture UUID"),
+            StreamState::default(),
+        );
         let message = base_update();
         let _ = mapper.process_announcements(&message);
 
@@ -455,7 +475,11 @@ mod tests {
 
     #[test]
     fn peer_state_upserts_peer_node() {
-        let mut mapper = GraphMapper::new("ris-source", StreamState::default());
+        let mut mapper = GraphMapper::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000006")
+                .expect("fixture UUID"),
+            StreamState::default(),
+        );
         let mut peer_state = base_update();
         peer_state.msg_type = Some("RIS_PEER_STATE".to_string());
         peer_state.state = Some("down".to_string());

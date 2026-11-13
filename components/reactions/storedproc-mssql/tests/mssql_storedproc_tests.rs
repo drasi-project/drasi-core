@@ -244,32 +244,43 @@ async fn wait_for_log_count(config: &MssqlConfig, expected: i64, timeout: Durati
 
 /// Build a reaction pointed at the test container that logs sensor changes via
 /// stored procedures, binding row fields with the `{{param}}` helper.
-async fn build_reaction(config: &MssqlConfig, query_id: &str) -> MsSqlStoredProcReaction {
-    MsSqlStoredProcReaction::builder("sensor-sync")
-        .with_connection(
-            config.host.clone(),
-            config.port,
-            config.database.clone(),
-            config.user.clone(),
-            config.password.clone(),
-        )
-        .with_query(query_id)
-        .with_added_command(
-            "EXEC log_sensor_added {{param after.sensor_id}}, {{param after.temperature}}",
-        )
-        .with_updated_command(
-            "EXEC log_sensor_updated {{param after.sensor_id}}, {{param after.temperature}}",
-        )
-        .with_deleted_command("EXEC log_sensor_deleted {{param before.sensor_id}}")
-        .with_auto_start(false)
-        .build()
-        .await
-        .expect("Failed to build reaction")
+async fn build_reaction(
+    config: &MssqlConfig,
+    query_id: drasi_lib::ComponentName,
+) -> MsSqlStoredProcReaction {
+    MsSqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000044")
+            .expect("fixture UUID"),
+    )
+    .with_connection(
+        config.host.clone(),
+        config.port,
+        config.database.clone(),
+        config.user.clone(),
+        config.password.clone(),
+    )
+    .with_query_by_name(query_id)
+    .with_added_command(
+        "EXEC log_sensor_added {{param after.sensor_id}}, {{param after.temperature}}",
+    )
+    .with_updated_command(
+        "EXEC log_sensor_updated {{param after.sensor_id}}, {{param after.temperature}}",
+    )
+    .with_deleted_command("EXEC log_sensor_deleted {{param before.sensor_id}}")
+    .with_auto_start(false)
+    .build()
+    .await
+    .expect("Failed to build reaction")
 }
 
-fn add_result(query_id: &str, sequence: u64, sensor_id: &str, temperature: f64) -> QueryResult {
+fn add_result(
+    query_id: drasi_lib::ComponentId,
+    sequence: u64,
+    sensor_id: &str,
+    temperature: f64,
+) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         chrono::Utc::now(),
         vec![ResultDiff::Add {
@@ -281,14 +292,14 @@ fn add_result(query_id: &str, sequence: u64, sensor_id: &str, temperature: f64) 
 }
 
 fn update_result(
-    query_id: &str,
+    query_id: drasi_lib::ComponentId,
     sequence: u64,
     sensor_id: &str,
     before_temp: f64,
     after_temp: f64,
 ) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         chrono::Utc::now(),
         vec![ResultDiff::Update {
@@ -302,9 +313,9 @@ fn update_result(
     )
 }
 
-fn delete_result(query_id: &str, sequence: u64, sensor_id: &str) -> QueryResult {
+fn delete_result(query_id: drasi_lib::ComponentId, sequence: u64, sensor_id: &str) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         chrono::Utc::now(),
         vec![ResultDiff::Delete {

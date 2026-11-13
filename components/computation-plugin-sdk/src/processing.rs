@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use drasi_computation_contracts::{SourceProgressKey, StreamId};
+use drasi_computation_contracts::{ComponentId, SourceProgressKey, StreamId};
 use drasi_core_types::{
     interface::{
         FutureElementRef, IndexError, IndexJoin, OutboxPageLimits, PushType, ResultKey,
@@ -73,7 +73,7 @@ pub struct ProcessingResetInfo {
 #[serde(deny_unknown_fields)]
 pub struct InputProgressDecision {
     pub duplicate: bool,
-    pub source_id: Option<String>,
+    pub source_id: Option<ComponentId>,
 }
 
 /// Host-owned storage and transaction authority for one component.

@@ -168,12 +168,15 @@ fn libraries(dynamic: bool) -> Result<Vec<Arc<NativePlugin>>> {
         .map(NativePlugin::from_definition)
         .collect();
     }
-    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("CARGO_TARGET_DIR").map(|path| PathBuf::from(path).join("debug"))
-        })
-        .context("set the rebuilt native plugin directory")?;
+    let directory = match std::env::var_os("DRASI_NATIVE_PLUGIN_DIR") {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_exe()?
+            .parent()
+            .context("test executable directory")?
+            .parent()
+            .context("native library directory")?
+            .join("plugins"),
+    };
     ["source_mysql", "bootstrap_mysql", "sink_storedproc_mysql"]
         .into_iter()
         .map(|name| {
@@ -374,8 +377,18 @@ async fn family(dynamic: bool) -> Result<()> {
     sink.configuration
         .insert("settings".into(), reference("sink"));
     builder = builder
-        .component(source, source_factory)
-        .component(sink, sink_factory.clone())
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            source,
+            source_factory,
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
+                .expect("fixture component name"),
+            sink,
+            sink_factory.clone(),
+        )
         .bind_stream(endpoint("source", "out"), stream("changes"));
     let mut results = Vec::new();
     let mut outputs = Vec::new();
@@ -404,19 +417,27 @@ async fn family(dynamic: bool) -> Result<()> {
         let (sender, receiver) = mpsc::channel(32);
         outputs.push(receiver);
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Capture {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&capture),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                sender,
-            }))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                    .expect("fixture component name"),
+                Box::new(Capture {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(&capture),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    sender,
+                }),
+            )
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -455,7 +476,7 @@ async fn family(dynamic: bool) -> Result<()> {
     let proof = async {
         tokio::time::timeout(Duration::from_secs(30),core.start()).await??;
         for query in &results { assert_eq!(rows(query)?,[json!({"id":1,"value":"initial"})]); }
-        let schema = tokio::time::timeout(Duration::from_secs(1),core.get_source_schema("source"))
+        let schema = tokio::time::timeout(Duration::from_secs(1),core.get_source_schema_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name")))
             .await??.context("actual native MySQL catalog schema")?;
         assert_eq!(schema.nodes.len(),1);
         assert_eq!(schema.nodes[0].label,"items");
@@ -473,13 +494,13 @@ async fn family(dynamic: bool) -> Result<()> {
             if input.changes().operations().len() == 1 { actual_input = Some(input); }
         }
         next(&mut outputs[1]).await?;
-        let key = SourceProgressKey::Source("source".into());
+        let key = SourceProgressKey::Source(drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"));
         let partial = position(&owners[1], &key)?;
         assert_eq!(partial["offset"], 0);
         assert_eq!(partial["count"], 4);
         let previous = owners[0].snapshot().checkpoints[&key].sequence;
-        tokio::time::timeout(Duration::from_secs(10), core.computation_component("source")?.stop()).await??;
-        tokio::time::timeout(Duration::from_secs(10), core.computation_component("source")?.start()).await??;
+        tokio::time::timeout(Duration::from_secs(10), core.component_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name"))?.stop()).await??;
+        tokio::time::timeout(Duration::from_secs(10), core.component_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name"))?.start()).await??;
         gate.add_permits(128);
         for _ in 0..3 { next(&mut outputs[1]).await?; }
         for output in &mut outputs {
@@ -808,8 +829,18 @@ async fn tracked_graph(
     sink.configuration
         .insert("settings".into(), reference("sink"));
     builder = builder
-        .component(source, source_factory)
-        .component(sink, sink_factory)
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-3")
+                .expect("fixture component name"),
+            source,
+            source_factory,
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-4")
+                .expect("fixture component name"),
+            sink,
+            sink_factory,
+        )
         .bind_stream(endpoint("source", "out"), stream("changes"));
     let indexes: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
         path,
@@ -856,19 +887,27 @@ async fn tracked_graph(
         let (sender, receiver) = mpsc::channel(32);
         outputs.push(receiver);
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Capture {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&capture),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                sender,
-            }))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-2")
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-2")
+                    .expect("fixture component name"),
+                Box::new(Capture {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(&capture),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    sender,
+                }),
+            )
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -986,15 +1025,32 @@ async fn transactions(dynamic: bool, shared: bool) -> Result<()> {
         );
         assert_eq!(graph.results[0].snapshot()?.as_of_sequence, heads[0] + 1);
         if shared {
-            let key = SourceProgressKey::Source("source".into());
+            let key = SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            );
             assert_eq!(position(&graph.owners[0], &key)?["version"], 1);
             assert_eq!(
                 position(&graph.owners[1], &key)?["version"],
                 2,
                 "held owner must retain its actual snapshot boundary"
             );
-            graph.core.computation_component("source")?.stop().await?;
-            graph.core.computation_component("source")?.start().await?;
+            graph
+                .core
+                .component_by_name(
+                    &drasi_core_types::ComponentName::try_new("source")
+                        .expect("fixture component name"),
+                )?
+                .stop()
+                .await?;
+            graph
+                .core
+                .component_by_name(
+                    &drasi_core_types::ComponentName::try_new("source")
+                        .expect("fixture component name"),
+                )?
+                .start()
+                .await?;
             graph.gate.add_permits(64);
             let right = next(&mut graph.outputs[1]).await?;
             assert_eq!(right.changes().operations().len(), 3);
@@ -1143,11 +1199,28 @@ async fn persistent_rows_profile(dynamic: bool, positional: bool) -> Result<()> 
             );
         }
         next(&mut graph.outputs[1]).await?;
-        let key = SourceProgressKey::Source("source".into());
+        let key = SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         assert_eq!(position(&graph.owners[1], &key)?["offset"], 0);
         assert_eq!(position(&graph.owners[0], &key)?["offset"], 3);
-        graph.core.computation_component("source")?.stop().await?;
-        graph.core.computation_component("source")?.start().await?;
+        graph
+            .core
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )?
+            .stop()
+            .await?;
+        graph
+            .core
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )?
+            .start()
+            .await?;
         graph.gate.add_permits(64);
         for _ in 0..3 {
             next(&mut graph.outputs[1]).await?;
@@ -1426,8 +1499,18 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
                 }))),
             ),
         )?
-        .component(source, source_factory)
-        .component(sink, sink_factory.clone())
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-5")
+                .expect("fixture component name"),
+            source,
+            source_factory,
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-6")
+                .expect("fixture component name"),
+            sink,
+            sink_factory.clone(),
+        )
         .bind_stream(endpoint("source", "out"), stream("changes"));
     let path = tempfile::tempdir()?;
     let indexes: Arc<dyn ComputationIndexProvider> = if transactions {
@@ -1464,19 +1547,27 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
         let (sender, receiver) = mpsc::channel(32);
         outputs.push(receiver);
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Capture {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&capture),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                sender,
-            }))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-3")
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-3")
+                    .expect("fixture component name"),
+                Box::new(Capture {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(&capture),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    sender,
+                }),
+            )
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),

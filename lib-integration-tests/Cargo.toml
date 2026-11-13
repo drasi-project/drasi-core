@@ -18,8 +18,10 @@ computation-middleware-tests = ["drasi-lib/middleware-unwind"]
 drasi-lib = { workspace = true, features = ["test-support"] }
 drasi-host-sdk.workspace = true
 drasi-computation-plugin-sdk.workspace = true
+drasi-computation-contracts.workspace = true
 drasi-computation-transformer-query = { path = "../components/computation-plugins/transformers/query" }
 drasi-core.workspace = true
+drasi-core-types.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
 drasi-reaction-application.workspace = true

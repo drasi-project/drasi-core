@@ -56,8 +56,8 @@ pub struct RisLiveSource {
 
 impl RisLiveSource {
     /// Creates a new source with the given ID and config.
-    pub fn new(id: impl Into<String>, config: RisLiveSourceConfig) -> Result<Self> {
-        let id = id.into();
+    pub fn new(id: drasi_lib::ComponentId, config: RisLiveSourceConfig) -> Result<Self> {
+        let id = id.clone();
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -69,14 +69,14 @@ impl RisLiveSource {
     }
 
     /// Creates a source builder.
-    pub fn builder(id: impl Into<String>) -> RisLiveSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> RisLiveSourceBuilder {
         RisLiveSourceBuilder::new(id)
     }
 }
 
 #[async_trait]
 impl Source for RisLiveSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -256,8 +256,8 @@ impl Source for RisLiveSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
         if self.state_store.read().await.is_none() {
             if let Some(store) = context.state_store.as_ref() {
                 *self.state_store.write().await = Some(store.clone());
@@ -275,7 +275,7 @@ impl Source for RisLiveSource {
 
 /// Builder for [`RisLiveSource`].
 pub struct RisLiveSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     websocket_url: String,
     client_name: Option<String>,
     host: Option<String>,
@@ -299,9 +299,9 @@ pub struct RisLiveSourceBuilder {
 
 impl RisLiveSourceBuilder {
     /// Creates a new builder.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             websocket_url: "wss://ris-live.ripe.net/v1/ws/".to_string(),
             client_name: None,
             host: None,
@@ -508,7 +508,7 @@ impl RisLiveSourceBuilder {
         };
         config.validate()?;
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -537,11 +537,18 @@ mod tests {
 
     #[test]
     fn builder_sets_defaults() {
-        let source = RisLiveSource::builder("test-source")
-            .build()
-            .expect("source should build");
+        let source = RisLiveSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .expect("source should build");
 
-        assert_eq!(source.id(), "test-source");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert_eq!(source.type_name(), "ris-live");
         assert_eq!(source.config.reconnect_delay_secs, 5);
         assert!(source.config.include_peer_state);
@@ -549,16 +556,19 @@ mod tests {
 
     #[test]
     fn builder_sets_custom_values() {
-        let source = RisLiveSource::builder("test-source")
-            .with_websocket_url("wss://example.invalid/ws/")
-            .with_host("rrc00")
-            .with_message_type("UPDATE")
-            .with_prefix("203.0.113.0/24")
-            .with_reconnect_delay_secs(10)
-            .with_clear_state_on_start(true)
-            .with_start_from_timestamp(1_700_000_000_000)
-            .build()
-            .expect("source should build");
+        let source = RisLiveSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_websocket_url("wss://example.invalid/ws/")
+        .with_host("rrc00")
+        .with_message_type("UPDATE")
+        .with_prefix("203.0.113.0/24")
+        .with_reconnect_delay_secs(10)
+        .with_clear_state_on_start(true)
+        .with_start_from_timestamp(1_700_000_000_000)
+        .build()
+        .expect("source should build");
 
         assert_eq!(source.config.websocket_url, "wss://example.invalid/ws/");
         assert_eq!(source.config.host.as_deref(), Some("rrc00"));

@@ -61,7 +61,7 @@ impl ApplicationSource {
     pub fn channel(
         construction_scope: impl Into<String>,
         graph_id: impl Into<String>,
-        id: impl Into<String>,
+        id: ComponentId,
         stream: StreamId,
         capacity: NonZeroUsize,
     ) -> Result<(Self, ApplicationSourceHandle)> {
@@ -69,7 +69,6 @@ impl ApplicationSource {
             capacity.get() <= tokio::sync::Semaphore::MAX_PERMITS,
             "application channel capacity exceeds the runtime maximum"
         );
-        let id = ComponentId::try_new(id.into())?;
         let identity = GraphProducerIdentity::volatile(
             construction_scope.into(),
             graph_id.into(),
@@ -80,7 +79,7 @@ impl ApplicationSource {
         let (sender, receiver) = mpsc::channel(capacity.get());
         let handle = ApplicationSourceHandle {
             tx: sender,
-            source_id: id.as_str().to_owned(),
+            source_id: id.clone(),
             requires_wal: false,
             wal: Arc::new(RwLock::new(None)),
             enqueue_order: Arc::new(Mutex::new(())),
@@ -109,8 +108,7 @@ impl ApplicationSource {
     /// The graph owns admission validation, journal commits, replay and receipts.
     /// Calls reject before activation and while stopped; unknown acceptance must
     /// be resolved using the same session and sequence before advancing.
-    pub fn durable(id: impl Into<String>, admission: Arc<SourceAdmission>) -> Result<Self> {
-        let id = ComponentId::try_new(id.into())?;
+    pub fn durable(id: ComponentId, admission: Arc<SourceAdmission>) -> Result<Self> {
         anyhow::ensure!(
             admission.component_id() == &id && admission.port().as_str() == "out",
             "application admission must own this source's out port"

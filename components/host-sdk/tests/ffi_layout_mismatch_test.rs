@@ -98,7 +98,12 @@ async fn mock_source_change_stream_survives_layout_mismatch() {
         "intervalMs": 5
     });
     let source = plugin.source_plugins[0]
-        .create_source("layout-mismatch-src", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000012a")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .expect("Should create mock source instance");
 
@@ -106,18 +111,22 @@ async fn mock_source_change_stream_survives_layout_mismatch() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = drasi_lib::context::SourceRuntimeContext::new(
         "layout-mismatch-instance",
-        "layout-mismatch-src",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000012a")
+            .expect("fixture UUID"),
         None,
         event_tx,
         None,
     );
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
     source.start().await.expect("Should start source");
 
     let settings = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "layout-mismatch-src".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000012a")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
-        query_id: "layout-mismatch-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000012b")
+            .expect("fixture UUID"),
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from: None,
@@ -138,7 +147,7 @@ async fn mock_source_change_stream_survives_layout_mismatch() {
             Ok(Ok(wrapper)) => {
                 // Touch the event's heap data — reads through `Arc<str>` and any
                 // `bytes::Bytes`. This is what corrupts/aborts before the fix.
-                let _ = wrapper.source_id.len();
+                let _ = wrapper.source_id.as_str().len();
                 if let drasi_lib::channels::events::SourceEvent::Change(change) = &wrapper.event {
                     let _ = format!("{:?}", change.get_reference());
                 }
@@ -195,7 +204,12 @@ async fn mock_source_bootstrap_stream_survives_layout_mismatch() {
         "intervalMs": 5
     });
     let source = plugin.source_plugins[0]
-        .create_source("layout-mismatch-boot-src", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000012c")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .expect("Should create mock source instance");
 
@@ -203,19 +217,23 @@ async fn mock_source_bootstrap_stream_survives_layout_mismatch() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = drasi_lib::context::SourceRuntimeContext::new(
         "layout-mismatch-boot-instance",
-        "layout-mismatch-boot-src",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000012c")
+            .expect("fixture UUID"),
         None,
         event_tx,
         None,
     );
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
     source.start().await.expect("Should start source");
 
     // enable_bootstrap: true drives the FfiBootstrapEvent deserialization path.
     let settings = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "layout-mismatch-boot-src".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000012c")
+            .expect("fixture UUID"),
         enable_bootstrap: true,
-        query_id: "layout-mismatch-boot-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000012d")
+            .expect("fixture UUID"),
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from: None,
@@ -237,7 +255,7 @@ async fn mock_source_bootstrap_stream_survives_layout_mismatch() {
             Ok(Some(event)) => {
                 // Touch the event's heap data — reads through `Arc<str>`. This is
                 // what corrupts/aborts before the fix.
-                let _ = event.source_id.len();
+                let _ = event.source_id.as_str().len();
                 let _ = format!("{:?}", event.change.get_reference());
                 received += 1;
                 // Drop the host-owned event explicitly to exercise the drop glue.

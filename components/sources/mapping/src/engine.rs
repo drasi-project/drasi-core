@@ -304,7 +304,7 @@ impl SourceMappingEngine {
         // Build metadata
         let metadata = ElementMetadata {
             reference: ElementReference {
-                source_id: Arc::from(source_id),
+                namespace: Arc::from(source_id),
                 element_id: Arc::from(id.as_str()),
             },
             labels: Arc::from(labels),
@@ -336,11 +336,11 @@ impl SourceMappingEngine {
                     metadata,
                     properties,
                     in_node: ElementReference {
-                        source_id: Arc::from(source_id),
+                        namespace: Arc::from(source_id),
                         element_id: Arc::from(to_id.as_str()),
                     },
                     out_node: ElementReference {
-                        source_id: Arc::from(source_id),
+                        namespace: Arc::from(source_id),
                         element_id: Arc::from(from_id.as_str()),
                     },
                 })

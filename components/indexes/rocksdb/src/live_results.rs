@@ -22,6 +22,7 @@
 //! entries, and the result sequence. Outside a session (tests, wipe) writes go
 //! directly to the DB.
 
+use drasi_core_types::ComponentId;
 use std::sync::Arc;
 
 use crate::{IndexDb, RocksDbSessionState};
@@ -43,9 +44,9 @@ pub(crate) fn live_results_cf_descriptor(
 }
 
 /// Build the live results key: `{query_id}\x00{row_signature_be_bytes}`.
-fn make_key(query_id: &str, row_signature: u64) -> Vec<u8> {
-    let mut key = Vec::with_capacity(query_id.len() + 1 + 8);
-    key.extend_from_slice(query_id.as_bytes());
+fn make_key(query_id: &ComponentId, row_signature: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(query_id.as_str().len() + 1 + 8);
+    key.extend_from_slice(query_id.as_str().as_bytes());
     key.push(0x00);
     key.extend_from_slice(&row_signature.to_be_bytes());
     key
@@ -61,9 +62,9 @@ fn signature_from_key(key: &[u8], prefix_len: usize) -> Option<u64> {
 }
 
 /// Build the prefix for scanning all entries of a query: `{query_id}\x00`.
-fn make_prefix(query_id: &str) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(query_id.len() + 1);
-    prefix.extend_from_slice(query_id.as_bytes());
+fn make_prefix(query_id: &ComponentId) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(query_id.as_str().len() + 1);
+    prefix.extend_from_slice(query_id.as_str().as_bytes());
     prefix.push(0x00);
     prefix
 }
@@ -88,7 +89,7 @@ impl RocksDbLiveResultsWriter {
 impl LiveResultsWriter for RocksDbLiveResultsWriter {
     async fn apply_mutations(
         &self,
-        query_id: &str,
+        query_id: &ComponentId,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
@@ -137,7 +138,10 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
         .map_err(IndexError::other)?
     }
 
-    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_snapshot(
+        &self,
+        query_id: &ComponentId,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         let db = self.db.clone();
         let prefix = make_prefix(query_id);
 
@@ -172,20 +176,26 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
 
     async fn read_page(
         &self,
-        query_id: &str,
+        query_id: &ComponentId,
         after_signature: Option<u64>,
         limits: OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         let db = self.db.clone();
         let query = query_id.to_owned();
         task::spawn_blocking(move || {
-            crate::outbox::read_keyed_page(&db, LIVE_RESULTS_CF, &query, after_signature, limits)
+            crate::outbox::read_keyed_page(
+                &db,
+                LIVE_RESULTS_CF,
+                query.as_str(),
+                after_signature,
+                limits,
+            )
         })
         .await
         .map_err(IndexError::other)?
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &ComponentId) -> Result<(), IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
         let prefix = make_prefix(query_id);
@@ -223,7 +233,7 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
         .map_err(IndexError::other)?
     }
 
-    async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
+    async fn row_count(&self, query_id: &ComponentId) -> Result<usize, IndexError> {
         let db = self.db.clone();
         let prefix = make_prefix(query_id);
 

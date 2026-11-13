@@ -156,7 +156,7 @@
 //!     .build();
 //!
 //! let source = Arc::new(PlatformSource::new("platform-source", config)?);
-//! drasi.add_source(source).await?;
+//! drasi.add_source(drasi_lib::Source::id(&source).to_owned(), source).await?;
 //! ```
 
 pub mod config;
@@ -266,7 +266,7 @@ pub struct PlatformSource {
 ///     .build()?;
 /// ```
 pub struct PlatformSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     redis_url: String,
     stream_key: String,
     consumer_group: Option<String>,
@@ -281,9 +281,9 @@ pub struct PlatformSourceBuilder {
 
 impl PlatformSourceBuilder {
     /// Create a new builder with the given ID and default values.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             redis_url: String::new(),
             stream_key: String::new(),
             consumer_group: None,
@@ -415,7 +415,7 @@ impl PlatformSourceBuilder {
             block_ms: self.block_ms.unwrap_or(5000),
         };
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -447,7 +447,7 @@ impl PlatformSource {
     ///     .with_bootstrap_provider(my_provider)
     ///     .build()?;
     /// ```
-    pub fn builder(id: impl Into<String>) -> PlatformSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> PlatformSourceBuilder {
         PlatformSourceBuilder::new(id)
     }
 
@@ -479,8 +479,8 @@ impl PlatformSource {
     ///     .with_stream_key("my-changes")
     ///     .build()?;
     /// ```
-    pub fn new(id: impl Into<String>, config: PlatformSourceConfig) -> Result<Self> {
-        let id = id.into();
+    pub fn new(id: drasi_lib::ComponentId, config: PlatformSourceConfig) -> Result<Self> {
+        let id = id.clone();
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -712,7 +712,7 @@ impl PlatformSource {
 
     /// Start the stream consumer task
     async fn start_consumer_task(
-        source_id: String,
+        source_id: drasi_lib::ComponentId,
         instance_id: String,
         platform_config: PlatformConfig,
         base: SourceBase,
@@ -1031,7 +1031,7 @@ impl PlatformSource {
 
 #[async_trait::async_trait]
 impl Source for PlatformSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -1154,8 +1154,8 @@ impl Source for PlatformSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -1254,7 +1254,7 @@ struct SourceChangeWithTimestamps {
 /// Each event in the data array has: op, payload.after/before, payload.source
 fn transform_platform_event(
     cloud_event: Value,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
 ) -> Result<Vec<SourceChangeWithTimestamps>> {
     let mut source_changes = Vec::new();
 
@@ -1324,7 +1324,7 @@ fn transform_platform_event(
         let effective_from = ts_ns / 1_000_000; // Convert nanoseconds to milliseconds
 
         // Build ElementMetadata
-        let reference = ElementReference::new(source_id, element_id);
+        let reference = ElementReference::new(source_id.as_str(), element_id);
         let metadata = ElementMetadata {
             reference,
             labels: labels.into(),
@@ -1366,8 +1366,8 @@ fn transform_platform_event(
                 Element::Relation {
                     metadata,
                     properties,
-                    in_node: ElementReference::new(source_id, start_id),
-                    out_node: ElementReference::new(source_id, end_id),
+                    in_node: ElementReference::new(source_id.as_str(), start_id),
+                    out_node: ElementReference::new(source_id.as_str(), end_id),
                 }
             }
             _ => return Err(anyhow::anyhow!("Unknown element type: {element_type}")),
@@ -1441,14 +1441,20 @@ fn transform_control_event(cloud_event: Value, control_type: &str) -> Result<Vec
 
         // Extract required fields for SourceSubscription
         let query_id = match control_data["queryId"].as_str() {
-            Some(id) => id.to_string(),
+            Some(id) => match drasi_lib::ComponentId::try_new(id) {
+                Ok(id) => id,
+                Err(error) => {
+                    warn!("Invalid query component ID in control event: {error}");
+                    continue;
+                }
+            },
             None => {
                 warn!("Missing required 'queryId' field in control event, skipping");
                 continue;
             }
         };
 
-        let query_node_id = match control_data["queryNodeId"].as_str() {
+        let query_instance_id = match control_data["queryNodeId"].as_str() {
             Some(id) => id.to_string(),
             None => {
                 warn!("Missing required 'queryNodeId' field in control event, skipping");
@@ -1486,7 +1492,7 @@ fn transform_control_event(cloud_event: Value, control_type: &str) -> Result<Vec
         // Build SourceControl::Subscription
         let control_event = SourceControl::Subscription {
             query_id,
-            query_node_id,
+            query_instance_id,
             node_labels,
             rel_labels,
             operation,

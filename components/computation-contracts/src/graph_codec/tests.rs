@@ -50,7 +50,7 @@ const GOLDEN_NODE_IMAGE: &[u8] = &[
     0x83,                                                               //       {
     0xa9, b'r', b'e', b'f', b'e', b'r', b'e', b'n', b'c', b'e',         //         "reference":
     0x82,                                                               //           {
-    0xa9, b's', b'o', b'u', b'r', b'c', b'e', b'_', b'i', b'd',         //             "source_id":
+    0xa9, b'n', b'a', b'm', b'e', b's', b'p', b'a', b'c', b'e',         //             "namespace":
     0xa1, b's',                                                         //               "s",
     0xaa, b'e', b'l', b'e', b'm', b'e', b'n', b't', b'_', b'i', b'd',   //             "element_id":
     0xa1, b'n',                                                         //               "n"},
@@ -64,11 +64,11 @@ const GOLDEN_NODE_IMAGE: &[u8] = &[
     0x81, 0xa4, b'B', b'o', b'o', b'l', 0xc3,                           //         {"Bool": true}}}}
 ];
 
-/// Canonical named MessagePack of `ElementReference { source_id: "s", element_id: "n" }`.
+/// Canonical named MessagePack of `ElementReference { namespace: "s", element_id: "n" }`.
 #[rustfmt::skip]
 const GOLDEN_REFERENCE: &[u8] = &[
     0x82,
-    0xa9, b's', b'o', b'u', b'r', b'c', b'e', b'_', b'i', b'd',
+    0xa9, b'n', b'a', b'm', b'e', b's', b'p', b'a', b'c', b'e',
     0xa1, b's',
     0xaa, b'e', b'l', b'e', b'm', b'e', b'n', b't', b'_', b'i', b'd',
     0xa1, b'n',
@@ -370,11 +370,13 @@ fn lenient_graph_schema() -> Schema {
 }
 
 fn foreign_descriptor(id: &str, version: u32) -> SchemaDescriptor {
+    let schema = GraphChangeCodec::schema();
+    let current = schema.descriptor();
     SchemaDescriptor::try_new(
         SchemaId::try_new(id).unwrap(),
         SchemaVersion::try_new(version).unwrap(),
-        "drasi-element-msgpack-v1",
-        Bytes::from_static(b"foreign"),
+        current.encoding(),
+        current.definition().clone(),
     )
     .unwrap()
 }
@@ -443,13 +445,13 @@ fn golden_node_full_image_uses_named_messagepack_without_a_nested_operation() {
 }
 
 #[test]
-fn schema_descriptor_is_exactly_graph_change_v1() {
+fn schema_descriptor_is_exactly_graph_change_v2() {
     let schema = GraphChangeCodec::schema();
     let descriptor = schema.descriptor();
     assert_eq!(descriptor.id().as_str(), "drasi.graph-change");
-    assert_eq!(descriptor.version().value(), 1);
-    assert_eq!(descriptor.encoding(), "drasi-element-msgpack-v1");
-    assert_eq!(BinaryEnvelopeCodec::VERSION, 1);
+    assert_eq!(descriptor.version().value(), 2);
+    assert_eq!(descriptor.encoding(), "drasi-element-msgpack-v2");
+    assert_eq!(BinaryEnvelopeCodec::VERSION, 3);
 }
 
 #[test]
@@ -787,7 +789,11 @@ fn decoders_verify_the_exact_schema_and_reference_of_the_record() {
     let lenient = lenient_graph_schema();
     let foreign = Schema::new(foreign_descriptor("other.schema", 1), Arc::new(AcceptAll));
     let newer = Schema::new(
-        foreign_descriptor("drasi.graph-change", 2),
+        foreign_descriptor("drasi.graph-change", 3),
+        Arc::new(AcceptAll),
+    );
+    let older = Schema::new(
+        foreign_descriptor("drasi.graph-change", 1),
         Arc::new(AcceptAll),
     );
     for record in &canonical {
@@ -817,7 +823,7 @@ fn decoders_verify_the_exact_schema_and_reference_of_the_record() {
         ));
 
         // A different schema id or version is never read as graph data.
-        for schema in [&foreign, &newer] {
+        for schema in [&foreign, &older, &newer] {
             let record = Record::try_new(schema, identity("n1"), kind, payload.clone()).unwrap();
             assert!(matches!(
                 decode_record(&record),
@@ -854,7 +860,8 @@ fn decode_changes_rejects_other_schemas_and_noncanonical_records() {
 
     for descriptor in [
         foreign_descriptor("other.schema", 1),
-        foreign_descriptor("drasi.graph-change", 2),
+        foreign_descriptor("drasi.graph-change", 1),
+        foreign_descriptor("drasi.graph-change", 3),
     ] {
         let schema = Schema::new(descriptor.clone(), Arc::new(AcceptAll));
         let record =
@@ -1316,7 +1323,7 @@ fn derived_output_is_not_retriggered_by_inherited_due_state() {
     let mut due = GraphChangeCodec::encode_futures_due(stream("timer"), 4, at(8_000)).unwrap();
     due.append_annotation(
         ContextEntry::try_new(
-            ComponentId::try_new("query").unwrap(),
+            ComponentId::try_new("777b787e-7517-5d57-a649-491dc26afd15").unwrap(),
             "drasi.query.futures-due",
             ContextValue::Bool(true),
         )
@@ -1516,8 +1523,9 @@ fn legacy_bincode_source_change_payloads_are_not_read() {
 }
 
 #[test]
-fn envelope_formats_are_version_one_only() {
-    assert_eq!(BinaryEnvelopeCodec::VERSION, 1);
+fn envelope_formats_are_version_three_only() {
+    assert_eq!(BinaryEnvelopeCodec::VERSION, 3);
+    assert_eq!(EnvelopeCodec::VERSION, 3);
     let original = GraphChangeCodec::encode_changes(
         &[SourceChange::Insert {
             element: node("n", 1, vec![]),
@@ -1531,18 +1539,30 @@ fn envelope_formats_are_version_one_only() {
     let binary = binary_codec();
     let bytes = binary.encode(&original).unwrap();
     assert!(binary.decode(&bytes).is_ok());
-    let newer = replace_once(&bytes, b"\xa6format\x01", b"\xa6format\x02");
-    assert!(matches!(
-        binary.decode(&newer),
-        Err(BinaryEnvelopeCodecError::Version(2))
-    ));
+    for version in [1, 2, 4] {
+        let changed = replace_once(
+            &bytes,
+            b"\xa6format\x03",
+            &[b'\xa6', b'f', b'o', b'r', b'm', b'a', b't', version],
+        );
+        assert!(matches!(
+            binary.decode(&changed),
+            Err(BinaryEnvelopeCodecError::Version(actual)) if actual == u32::from(version)
+        ));
+    }
 
     let json = json_codec();
     let bytes = json.encode(&original).unwrap();
     assert!(json.decode(&bytes).is_ok());
-    let newer = replace_once(&bytes, b"\"format\":1", b"\"format\":2");
-    assert!(matches!(
-        json.decode(&newer),
-        Err(crate::EnvelopeCodecError::Version(2))
-    ));
+    for version in [1, 2, 4] {
+        let changed = replace_once(
+            &bytes,
+            b"\"format\":3",
+            format!("\"format\":{version}").as_bytes(),
+        );
+        assert!(matches!(
+            json.decode(&changed),
+            Err(crate::EnvelopeCodecError::Version(actual)) if actual == version
+        ));
+    }
 }

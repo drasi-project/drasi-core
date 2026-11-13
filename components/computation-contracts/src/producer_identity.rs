@@ -208,7 +208,7 @@ impl GraphProducerProgress {
         );
         progress.identity.validate()?;
         anyhow::ensure!(
-            progress.sequence > 0 && progress.identity.component_id.as_str() == entry.contributor(),
+            progress.sequence > 0 && &progress.identity.component_id == entry.contributor(),
             "graph producer progress does not identify the immediate producer"
         );
         if progress.identity.stream != *stream

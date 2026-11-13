@@ -160,16 +160,16 @@ impl ReactionPluginDescriptor for AzureStorageReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         let dto: AzureStorageReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let mut builder = AzureStorageReaction::builder(id)
-            .with_queries(query_ids)
+        let mut builder = AzureStorageReaction::builder(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start)
             .with_account_name(mapper.resolve_string(&dto.account_name).await?)
             .with_access_key(mapper.resolve_string(&dto.access_key).await?)

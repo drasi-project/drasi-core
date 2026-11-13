@@ -41,7 +41,7 @@ pub struct WebSocketSource {
 }
 
 struct PositionlessBootstrapProvider {
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     inner: Box<dyn BootstrapProvider + 'static>,
 }
 
@@ -69,11 +69,11 @@ impl BootstrapProvider for PositionlessBootstrapProvider {
 }
 
 fn positionless_bootstrap_provider(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     provider: Box<dyn BootstrapProvider + 'static>,
 ) -> Box<dyn BootstrapProvider + 'static> {
     Box::new(PositionlessBootstrapProvider {
-        source_id: source_id.to_string(),
+        source_id: source_id.clone(),
         inner: provider,
     })
 }
@@ -84,12 +84,12 @@ impl WebSocketSource {
     /// # Errors
     ///
     /// Returns an error if the configuration or source base is invalid.
-    pub fn new(id: impl Into<String>, config: WebSocketSourceConfig) -> Result<Self> {
+    pub fn new(id: drasi_lib::ComponentId, config: WebSocketSourceConfig) -> Result<Self> {
         Self::builder(id).with_config(config).build()
     }
 
     /// Creates a source builder.
-    pub fn builder(id: impl Into<String>) -> WebSocketSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> WebSocketSourceBuilder {
         WebSocketSourceBuilder::new(id)
     }
 
@@ -166,7 +166,7 @@ impl WebSocketSource {
 
 /// Builder for [`WebSocketSource`].
 pub struct WebSocketSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: WebSocketSourceConfig,
     bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
     auto_start: bool,
@@ -174,9 +174,9 @@ pub struct WebSocketSourceBuilder {
 
 impl WebSocketSourceBuilder {
     /// Creates a builder with configuration defaults.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: WebSocketSourceConfig::default(),
             bootstrap_provider: None,
             auto_start: true,
@@ -256,15 +256,9 @@ impl WebSocketSourceBuilder {
     }
 }
 
-impl Default for WebSocketSourceBuilder {
-    fn default() -> Self {
-        Self::new("websocket")
-    }
-}
-
 #[async_trait]
 impl Source for WebSocketSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -297,8 +291,8 @@ impl Source for WebSocketSource {
         derive_schema(&self.config.mappings)
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -338,8 +332,8 @@ impl Source for WebSocketSource {
         self
     }
 
-    async fn deprovision(&self) -> Result<()> {
-        self.base.deprovision_common().await
+    async fn delete_owned_resources(&self) -> Result<()> {
+        self.base.delete_owned_resources_common().await
     }
 
     async fn set_bootstrap_provider(&self, provider: Box<dyn BootstrapProvider + 'static>) {
@@ -632,11 +626,15 @@ mod tests {
         }
     }
 
-    fn subscription_settings(query_id: &str, enable_bootstrap: bool) -> SourceSubscriptionSettings {
+    fn subscription_settings(
+        query_id: drasi_core::ComponentId,
+        enable_bootstrap: bool,
+    ) -> SourceSubscriptionSettings {
         SourceSubscriptionSettings {
-            source_id: "source".to_string(),
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             enable_bootstrap,
-            query_id: query_id.to_string(),
+            query_id,
             nodes: HashSet::from(["Item".to_string()]),
             relations: HashSet::new(),
             resume_from: None,
@@ -650,9 +648,18 @@ mod tests {
 
         #[test]
         fn new_source_exposes_expected_identity_and_capabilities() {
-            let source = WebSocketSource::new("source", config()).unwrap();
+            let source = WebSocketSource::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                config(),
+            )
+            .unwrap();
 
-            assert_eq!(source.id(), "source");
+            assert_eq!(
+                source.id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            );
             assert_eq!(source.type_name(), "websocket");
             assert_eq!(source.dispatch_mode(), DispatchMode::Channel);
             assert!(source.auto_start());
@@ -665,7 +672,12 @@ mod tests {
 
         #[test]
         fn embedded_source_properties_round_trip_configuration() {
-            let source = WebSocketSource::new("source", config()).unwrap();
+            let source = WebSocketSource::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                config(),
+            )
+            .unwrap();
 
             assert_eq!(
                 serde_json::to_value(source.properties()).unwrap(),
@@ -702,10 +714,11 @@ mod tests {
         use super::*;
 
         #[test]
-        fn default_trait_uses_builder_defaults() {
-            let builder = WebSocketSourceBuilder::default();
+        fn explicit_identity_uses_builder_defaults() {
+            let id = drasi_lib::ComponentId::generate();
+            let builder = WebSocketSourceBuilder::new(id.clone());
 
-            assert_eq!(builder.id, "websocket");
+            assert_eq!(builder.id, id);
             assert_eq!(builder.config, WebSocketSourceConfig::default());
             assert!(builder.bootstrap_provider.is_none());
             assert!(builder.auto_start);
@@ -713,12 +726,15 @@ mod tests {
 
         #[test]
         fn builder_rejects_insecure_url_without_opt_in() {
-            let error = WebSocketSource::builder("invalid")
-                .with_url("ws://example.com")
-                .with_mapping(mapping())
-                .build()
-                .err()
-                .expect("insecure URL should be rejected");
+            let error = WebSocketSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b9")
+                    .expect("fixture UUID"),
+            )
+            .with_url("ws://example.com")
+            .with_mapping(mapping())
+            .build()
+            .err()
+            .expect("insecure URL should be rejected");
             assert_eq!(
                 error.to_string(),
                 "allowInsecure must be true for ws:// endpoints"
@@ -727,14 +743,17 @@ mod tests {
 
         #[test]
         fn builder_applies_headers_initial_messages_and_auto_start() {
-            let source = WebSocketSource::builder("source")
-                .with_url("wss://example.com")
-                .with_header("X-Test", "value")
-                .with_initial_message(r#"{"subscribe":true}"#)
-                .with_mapping(mapping())
-                .with_auto_start(false)
-                .build()
-                .unwrap();
+            let source = WebSocketSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            )
+            .with_url("wss://example.com")
+            .with_header("X-Test", "value")
+            .with_initial_message(r#"{"subscribe":true}"#)
+            .with_mapping(mapping())
+            .with_auto_start(false)
+            .build()
+            .unwrap();
 
             assert!(!source.auto_start());
             assert_eq!(
@@ -756,7 +775,12 @@ mod tests {
 
         #[tokio::test]
         async fn stop_cancels_worker_waiting_for_subscription() {
-            let source = WebSocketSource::new("source", plain_config()).unwrap();
+            let source = WebSocketSource::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                plain_config(),
+            )
+            .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
 
             source.start().await.unwrap();
@@ -771,12 +795,18 @@ mod tests {
 
         #[tokio::test]
         async fn connector_failure_sets_error_without_creating_a_worker() {
-            let source = WebSocketSource::new("source", config()).unwrap();
+            let source = WebSocketSource::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                config(),
+            )
+            .unwrap();
             let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(4);
             source
-                .initialize(SourceRuntimeContext::new(
+                .bind_runtime_context(SourceRuntimeContext::new(
                     "test-instance",
-                    "source",
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
                     None,
                     update_tx,
                     None,
@@ -807,7 +837,7 @@ mod tests {
                     component_id,
                     status: ComponentStatus::Starting,
                     message: Some(message),
-                }) if component_id == "source" && message == "Initializing WebSocket source"
+                }) if component_id == drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID") && message == "Initializing WebSocket source"
             ));
             assert!(matches!(
                 update_rx.recv().await,
@@ -815,7 +845,7 @@ mod tests {
                     component_id,
                     status: ComponentStatus::Error,
                     message: Some(message),
-                }) if component_id == "source"
+                }) if component_id == drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID")
                     && message
                         == "WebSocket TLS trust store unavailable: No usable platform TLS trust roots were found"
             ));
@@ -824,23 +854,49 @@ mod tests {
 
         #[tokio::test]
         async fn subscribe_returns_streaming_response_without_bootstrap_or_position() {
-            let source = WebSocketSource::new("source", config()).unwrap();
+            let source = WebSocketSource::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                config(),
+            )
+            .unwrap();
             let response = source
-                .subscribe(subscription_settings("query", false))
+                .subscribe(subscription_settings(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    false,
+                ))
                 .await
                 .unwrap();
 
-            assert_eq!(response.query_id, "query");
-            assert_eq!(response.source_id, "source");
+            assert_eq!(
+                response.query_id,
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            );
+            assert_eq!(
+                response.source_id,
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            );
             assert!(response.bootstrap_receiver.is_none());
             assert!(response.position_handle.is_none());
         }
 
         #[tokio::test]
         async fn stop_clears_subscription_registered_while_stopped() {
-            let source = WebSocketSource::new("source", config()).unwrap();
+            let source = WebSocketSource::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                config(),
+            )
+            .unwrap();
             let response = source
-                .subscribe(subscription_settings("query", false))
+                .subscribe(subscription_settings(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    false,
+                ))
                 .await
                 .unwrap();
             let mut receiver = response.receiver;
@@ -882,17 +938,34 @@ mod tests {
         #[tokio::test]
         async fn builder_strips_bootstrap_source_position() {
             let called = Arc::new(AtomicBool::new(false));
-            let source = WebSocketSource::builder("source")
-                .with_config(config())
-                .with_bootstrap_provider(RecordingBootstrapProvider {
-                    called: called.clone(),
-                    returns_position: true,
-                })
-                .build()
-                .unwrap();
+            let source = WebSocketSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            )
+            .with_config(config())
+            .with_bootstrap_provider(RecordingBootstrapProvider {
+                called: called.clone(),
+                returns_position: true,
+            })
+            .build()
+            .unwrap();
+            let (update_tx, _update_rx) = tokio::sync::mpsc::channel(4);
+            source
+                .bind_runtime_context(SourceRuntimeContext::new(
+                    "test-instance",
+                    source.id().clone(),
+                    None,
+                    update_tx,
+                    None,
+                ))
+                .await;
 
             let mut response = source
-                .subscribe(subscription_settings("builder-bootstrap-query", true))
+                .subscribe(subscription_settings(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003aa")
+                        .expect("fixture UUID"),
+                    true,
+                ))
                 .await
                 .unwrap();
             let result = response
@@ -910,19 +983,36 @@ mod tests {
         #[tokio::test]
         async fn setter_strips_bootstrap_source_position() {
             let called = Arc::new(AtomicBool::new(false));
-            let source = WebSocketSource::builder("source")
-                .with_config(config())
-                .build()
-                .unwrap();
+            let source = WebSocketSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            )
+            .with_config(config())
+            .build()
+            .unwrap();
             source
                 .set_bootstrap_provider(Box::new(RecordingBootstrapProvider {
                     called: called.clone(),
                     returns_position: true,
                 }))
                 .await;
+            let (update_tx, _update_rx) = tokio::sync::mpsc::channel(4);
+            source
+                .bind_runtime_context(SourceRuntimeContext::new(
+                    "test-instance",
+                    source.id().clone(),
+                    None,
+                    update_tx,
+                    None,
+                ))
+                .await;
 
             let mut response = source
-                .subscribe(subscription_settings("bootstrap-query", true))
+                .subscribe(subscription_settings(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000011c")
+                        .expect("fixture UUID"),
+                    true,
+                ))
                 .await
                 .unwrap();
             assert!(response.bootstrap_receiver.is_some());

@@ -36,23 +36,23 @@ async fn cancelled_worker_retains_one_client() -> Result<()> {
     };
     let first = Arc::new(QuerySourceProgress::new(
         "sqlite-shared-cleanup",
-        ComponentId::try_new("first")?,
+        ComponentId::try_new("7a54c1ad-7f0d-59ba-a837-06ff6f0edf87")?,
     )?);
     let second = Arc::new(QuerySourceProgress::new(
         "sqlite-shared-cleanup",
-        ComponentId::try_new("second")?,
+        ComponentId::try_new("5d09205b-7a42-5d47-945b-8b3a29daf0bc")?,
     )?);
     let owners = Arc::new(ConsumerProgressSet::new(
         "sqlite-shared-cleanup",
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("a389d280-33a2-5f14-bbb4-b3dd618b67d0")?,
         [first.clone(), second],
     )?);
     let client = Arc::new(SqliteClientResource::new(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("a389d280-33a2-5f14-bbb4-b3dd618b67d0")?,
         config.clone(),
     )?);
     let (source, snapshots) = SqliteSource::coordinated_with_consumers(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("a389d280-33a2-5f14-bbb4-b3dd618b67d0")?,
         StreamId::try_new("changes")?,
         config.clone(),
         owners.clone(),
@@ -105,7 +105,7 @@ async fn cancelled_worker_retains_one_client() -> Result<()> {
     drop(source);
     let replacement = || {
         SqliteSource::new_replayable_with_consumers(
-            ComponentId::try_new("sqlite").expect("source"),
+            ComponentId::try_new("a389d280-33a2-5f14-bbb4-b3dd618b67d0").expect("source"),
             StreamId::try_new("changes").expect("stream"),
             config.clone(),
             owners.clone(),

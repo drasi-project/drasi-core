@@ -17,11 +17,13 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use super::QueryInputConfig;
 use crate::channels::DispatchMode;
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
 use crate::recovery::RecoveryPolicy;
 pub use drasi_computation_contracts::{
-    QueryInputConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryResultConfig,
+    ComponentId, ComponentName, ComponentReference, QueryJoinConfig, QueryJoinKeyConfig,
+    QueryResultConfig,
 };
 use drasi_core::models::SourceMiddlewareConfig;
 
@@ -98,9 +100,9 @@ pub enum QueryLanguage {
 /// use drasi_lib::config::SourceSubscriptionSettings;
 ///
 /// let settings = SourceSubscriptionSettings {
-///     source_id: "orders_db".to_string(),
+///     source_id: drasi_lib::ComponentId::generate(),
 ///     enable_bootstrap: true,
-///     query_id: "my-query".to_string(),
+///     query_id: drasi_lib::ComponentId::generate(),
 ///     nodes: ["Order", "Customer"].iter().map(|s| s.to_string()).collect(),
 ///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
 ///     resume_from: None,
@@ -110,9 +112,9 @@ pub enum QueryLanguage {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSubscriptionSettings {
-    pub source_id: String,
+    pub source_id: ComponentId,
     pub enable_bootstrap: bool,
-    pub query_id: String,
+    pub query_id: ComponentId,
     /// Node labels the query is interested in. Explicit mappings are exclusive to their
     /// configured source; unmapped labels are sent to every source, which must filter out
     /// labels it does not own.
@@ -196,10 +198,10 @@ pub struct SourceSubscriptionSettings {
 /// let core = DrasiLib::builder()
 ///     .with_id("my-server")
 ///     .with_query(
-///         Query::cypher("my-query")
+///         Query::cypher(drasi_lib::ComponentName::try_new("my-query")?)
 ///             .query("MATCH (n) RETURN n")
-///             .from_input("my-source")
-///             .build()
+///             .from_input_by_name(drasi_lib::ComponentName::try_new("my-source")?)
+///             .build()?
 ///     )
 ///     .build()
 ///     .await?;
@@ -219,6 +221,9 @@ pub struct DrasiLibConfig {
     /// Unique identifier for this DrasiLib instance (defaults to UUID)
     #[serde(default = "default_id")]
     pub id: String,
+    /// Permit caller-assigned UUIDs and preconstructed objects. Immutable after construction.
+    #[serde(default, rename = "allowExternalComponentIds")]
+    pub allow_external_component_ids: bool,
     /// Default priority queue capacity for queries and reactions (default: 10000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_queue_capacity: Option<usize>,
@@ -255,6 +260,7 @@ impl Default for DrasiLibConfig {
     fn default() -> Self {
         Self {
             id: default_id(),
+            allow_external_component_ids: false,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
@@ -274,6 +280,12 @@ impl Default for DrasiLibConfig {
 /// `QueryConfig` defines a continuous query that processes data changes from sources
 /// and emits incremental result updates. Queries subscribe to one or more sources and
 /// maintain materialized views that update automatically as data changes.
+///
+/// This is authoring input: `name` is required and `id` is optional. Only instances
+/// constructed with `allowExternalComponentIds` accept a supplied UUID. Accepted
+/// configurations use [`AssignedQueryConfig`]. Input strings select names, even
+/// when UUID-shaped; `{"id":"UUID"}` selects an identity. Resolution replaces a
+/// name with the selected UUID once, so rename cannot retarget a connection.
 ///
 /// # Query Languages
 ///
@@ -386,11 +398,12 @@ impl Default for DrasiLibConfig {
 ///     inputs:
 ///       - users_db
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+macro_rules! query_configuration {
+    ($name:ident, $input:ty { $($identity:tt)* }) => {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QueryConfig {
-    /// Unique identifier for the query
-    pub id: String,
+pub struct $name {
+    $($identity)*
     /// Query string (Cypher or GQL depending on query_language)
     pub query: String,
     /// Query language to use (default: Cypher)
@@ -401,13 +414,10 @@ pub struct QueryConfig {
     pub middleware: Vec<SourceMiddlewareConfig>,
     /// Upstream component inputs with optional ports, label interests and middleware pipelines
     #[serde(default)]
-    pub inputs: Vec<QueryInputConfig>,
+    pub inputs: Vec<$input>,
     /// Result publication options
     #[serde(default, skip_serializing_if = "QueryResultConfig::is_default")]
     pub result: QueryResultConfig,
-    /// Whether to automatically start this query (default: true)
-    #[serde(default = "default_auto_start")]
-    pub auto_start: bool,
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<QueryJoinConfig>>,
@@ -450,33 +460,221 @@ pub struct QueryConfig {
     )]
     pub bootstrap_timeout_secs: u64,
 }
+    };
+}
 
-impl QueryConfig {
-    /// Reject malformed input and result declarations before any component is created.
-    pub fn validate_declarations(&self) -> Result<()> {
-        let mut components = HashSet::new();
-        for input in &self.inputs {
-            input
-                .validate()
-                .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.id))?;
-            if input.component == self.id {
-                anyhow::bail!(
-                    "Query '{}' cannot consume its own output as input '{}'",
-                    self.id,
-                    input.component
-                );
+query_configuration!(QueryConfig, QueryInputConfig {
+    /// Omit for DrasiLib-owned creation. Explicit UUIDs require instance opt-in.
+    #[serde(default)]
+    pub id: Option<ComponentId>,
+    /// Graph-owned, case-sensitive name.
+    pub name: ComponentName,
+    #[serde(default = "default_auto_start")]
+    pub auto_start: bool,
+});
+
+query_configuration!(AssignedQueryConfig, QueryInputConfig {
+    /// Required accepted identity. Missing and null IDs are invalid.
+    pub id: ComponentId,
+    pub name: ComponentName,
+    #[serde(default = "default_auto_start")]
+    pub auto_start: bool,
+});
+
+query_configuration!(QuerySettings, QueryInputConfig {});
+
+query_configuration!(ResolvedQueryConfig, drasi_computation_contracts::QueryInputConfig {
+    pub id: ComponentId,
+    #[serde(default)]
+    pub source_transactions: Option<drasi_computation_contracts::SourceTransactionLimits>,
+});
+
+macro_rules! query_configuration_methods {
+    ($name:ident) => {
+        impl $name {
+            /// Query settings without the enclosing declaration's identity or lifecycle.
+            pub fn into_settings(self) -> QuerySettings {
+                QuerySettings {
+                    query: self.query,
+                    query_language: self.query_language,
+                    middleware: self.middleware,
+                    inputs: self.inputs,
+                    result: self.result,
+                    joins: self.joins,
+                    enable_bootstrap: self.enable_bootstrap,
+                    priority_queue_capacity: self.priority_queue_capacity,
+                    dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+                    dispatch_mode: self.dispatch_mode,
+                    storage_backend: self.storage_backend,
+                    recovery_policy: self.recovery_policy,
+                    outbox_capacity: self.outbox_capacity,
+                    bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+                }
             }
-            if !components.insert(input.component.as_str()) {
-                anyhow::bail!(
-                    "Query '{}' declares input '{}' more than once",
-                    self.id,
-                    input.component
-                );
+
+            /// Reject malformed input and result declarations before any component is created.
+            pub fn validate_declarations(&self) -> Result<()> {
+                let mut components = HashSet::new();
+                for input in &self.inputs {
+                    input
+                        .validate()
+                        .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.name))?;
+                    if input
+                        .component
+                        .as_name()
+                        .is_some_and(|name| name == &self.name)
+                    {
+                        anyhow::bail!(
+                            "Query '{}' cannot consume its own output as input '{}'",
+                            self.name,
+                            input.component
+                        );
+                    }
+                    if !components.insert(serde_json::to_string(&input.component)?) {
+                        anyhow::bail!(
+                            "Query '{}' declares input '{}' more than once",
+                            self.name,
+                            input.component
+                        );
+                    }
+                }
+                self.result
+                    .validate()
+                    .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.name))
             }
         }
-        self.result
-            .validate()
-            .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.id))
+    };
+}
+
+query_configuration_methods!(QueryConfig);
+query_configuration_methods!(AssignedQueryConfig);
+
+impl QueryConfig {
+    /// Assign configuration data; admission authority remains with DrasiLib.
+    pub fn with_assigned_id(self, id: ComponentId) -> AssignedQueryConfig {
+        let name = self.name.clone();
+        let auto_start = self.auto_start;
+        self.into_settings().with_identity(id, name, auto_start)
+    }
+}
+
+impl QuerySettings {
+    pub fn with_identity(
+        self,
+        id: ComponentId,
+        name: ComponentName,
+        auto_start: bool,
+    ) -> AssignedQueryConfig {
+        AssignedQueryConfig {
+            id,
+            name,
+            auto_start,
+            query: self.query,
+            query_language: self.query_language,
+            middleware: self.middleware,
+            inputs: self.inputs,
+            result: self.result,
+            joins: self.joins,
+            enable_bootstrap: self.enable_bootstrap,
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            dispatch_mode: self.dispatch_mode,
+            storage_backend: self.storage_backend,
+            recovery_policy: self.recovery_policy,
+            outbox_capacity: self.outbox_capacity,
+            bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+        }
+    }
+}
+
+impl AssignedQueryConfig {
+    /// Resolve the execution representation only after every input is ID-bound.
+    /// Names and lifecycle policy remain with the graph-owned declaration.
+    pub fn into_resolved(self) -> Result<ResolvedQueryConfig> {
+        Ok(ResolvedQueryConfig {
+            id: self.id,
+            source_transactions: None,
+            query: self.query,
+            query_language: self.query_language,
+            middleware: self.middleware,
+            inputs: self
+                .inputs
+                .iter()
+                .map(QueryInputConfig::to_execution_input)
+                .collect::<Result<_>>()?,
+            result: self.result,
+            joins: self.joins,
+            enable_bootstrap: self.enable_bootstrap,
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            dispatch_mode: self.dispatch_mode,
+            storage_backend: self.storage_backend,
+            recovery_policy: self.recovery_policy,
+            outbox_capacity: self.outbox_capacity,
+            bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+        })
+    }
+
+    /// Retain the current UUID when preparing an explicit update request.
+    pub fn into_authoring(self) -> QueryConfig {
+        QueryConfig {
+            id: Some(self.id),
+            name: self.name,
+            auto_start: self.auto_start,
+            query: self.query,
+            query_language: self.query_language,
+            middleware: self.middleware,
+            inputs: self.inputs,
+            result: self.result,
+            joins: self.joins,
+            enable_bootstrap: self.enable_bootstrap,
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            dispatch_mode: self.dispatch_mode,
+            storage_backend: self.storage_backend,
+            recovery_policy: self.recovery_policy,
+            outbox_capacity: self.outbox_capacity,
+            bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+        }
+    }
+}
+
+impl ResolvedQueryConfig {
+    pub fn execution_settings(&self) -> drasi_computation_contracts::QueryExecutionSettings {
+        drasi_computation_contracts::QueryExecutionSettings {
+            joins: self.joins.clone().unwrap_or_default(),
+            middleware: self.middleware.clone(),
+            inputs: self.inputs.clone(),
+            result: self.result.clone(),
+            source_transactions: self.source_transactions,
+        }
+    }
+
+    /// Attach metadata obtained from the same authoritative graph publication.
+    pub fn into_assigned(self, name: ComponentName, auto_start: bool) -> AssignedQueryConfig {
+        AssignedQueryConfig {
+            id: self.id,
+            name,
+            auto_start,
+            query: self.query,
+            query_language: self.query_language,
+            middleware: self.middleware,
+            inputs: self
+                .inputs
+                .into_iter()
+                .map(QueryInputConfig::from_execution)
+                .collect(),
+            result: self.result,
+            joins: self.joins,
+            enable_bootstrap: self.enable_bootstrap,
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            dispatch_mode: self.dispatch_mode,
+            storage_backend: self.storage_backend,
+            recovery_policy: self.recovery_policy,
+            outbox_capacity: self.outbox_capacity,
+            bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+        }
     }
 }
 
@@ -517,9 +715,15 @@ impl DrasiLibConfig {
         }
         // Validate unique query ids
         let mut query_ids = std::collections::HashSet::new();
+        let mut query_names = std::collections::HashSet::new();
         for query in &self.queries {
-            if !query_ids.insert(&query.id) {
-                return Err(anyhow::anyhow!("Duplicate query id: '{}'", query.id));
+            if let Some(id) = &query.id {
+                if !query_ids.insert(id) {
+                    return Err(anyhow::anyhow!("Duplicate query id: '{id}'"));
+                }
+            }
+            if !query_names.insert(&query.name) {
+                return Err(anyhow::anyhow!("Duplicate query name: '{}'", query.name));
             }
         }
 
@@ -562,7 +766,7 @@ impl DrasiLibConfig {
                         spec.validate().map_err(|e| {
                             anyhow::anyhow!(
                                 "Query '{}' has invalid inline storage backend configuration: {}",
-                                query.id,
+                                query.name,
                                 e
                             )
                         })?;
@@ -613,14 +817,40 @@ mod tests {
             relations: Vec::new(),
         };
 
-        graph.merge_source_schema("charlie", &schema);
-        graph.merge_source_schema("alpha", &schema);
-        graph.merge_source_schema("bravo", &schema);
-        graph.merge_source_schema("alpha", &schema); // duplicate
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000027f")
+                .expect("fixture UUID"),
+            &schema,
+        );
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000280")
+                .expect("fixture UUID"),
+            &schema,
+        );
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000281")
+                .expect("fixture UUID"),
+            &schema,
+        );
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000280")
+                .expect("fixture UUID"),
+            &schema,
+        ); // duplicate
 
         let item = graph.nodes.get("Item").unwrap();
         let sources: Vec<_> = item.sources.iter().cloned().collect();
-        assert_eq!(sources, vec!["alpha", "bravo", "charlie"]);
+        assert_eq!(
+            sources,
+            vec![
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000027f")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000280")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000281")
+                    .expect("fixture UUID"),
+            ]
+        );
     }
 
     #[test]
@@ -656,13 +886,26 @@ mod tests {
             relations: Vec::new(),
         };
 
-        graph.merge_source_schema("src-a", &schema_a);
-        graph.merge_source_schema("src-b", &schema_b);
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e3")
+                .expect("fixture UUID"),
+            &schema_a,
+        );
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e4")
+                .expect("fixture UUID"),
+            &schema_b,
+        );
 
         let sensor = graph.nodes.get("Sensor").unwrap();
         assert_eq!(
             sensor.sources,
-            BTreeSet::from(["src-a".to_string(), "src-b".to_string()])
+            BTreeSet::from([
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e3")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e4")
+                    .expect("fixture UUID"),
+            ])
         );
         assert_eq!(sensor.properties.len(), 2);
 

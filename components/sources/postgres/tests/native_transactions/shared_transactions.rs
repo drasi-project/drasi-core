@@ -7,7 +7,7 @@ use drasi_postgres_common::replication::shared_transactions::{
 };
 
 fn position(owner: &QuerySourceProgress) -> Result<Option<SharedTransactionPosition>> {
-    cursor::read_position(&owner.snapshot(), &id("source"))
+    cursor::read_position(&owner.snapshot(), &id(77))
 }
 
 fn output_count(events: &Events) -> usize {
@@ -105,11 +105,11 @@ async fn whole_commit_fanout() -> Result<()> {
         let revision = control.desired_snapshot().revision;
         let stopped = tokio::time::timeout(
             Duration::from_secs(10),
-            control.stop_components(revision, GraphSelection::Exact(vec![id("source")])),
+            control.stop_components(revision, GraphSelection::Exact(vec![id(77)])),
         )
         .await??;
         assert!(matches!(
-            stopped.components.get(&id("source")),
+            stopped.components.get(&id(77)),
             Some(StopOutcome::Stopped)
         ));
         let active: bool = database
@@ -125,10 +125,10 @@ async fn whole_commit_fanout() -> Result<()> {
             "source stop must await its real replication worker"
         );
         let started = control
-            .start_components(revision, GraphSelection::Exact(vec![id("source")]))
+            .start_components(revision, GraphSelection::Exact(vec![id(77)]))
             .await?;
         assert!(matches!(
-            started.components.get(&id("source")),
+            started.components.get(&id(77)),
             Some(StartOutcome::Started)
         ));
         wait_until("whole-commit replay above retained allocations", || {
@@ -233,11 +233,13 @@ async fn whole_commit_fanout() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn whole_commit_current_thread_static_and_dynamic() -> Result<()> {
     whole_commit_fanout().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn whole_commit_multi_thread_static_and_dynamic() -> Result<()> {
     whole_commit_fanout().await
 }
@@ -370,21 +372,25 @@ async fn different_snapshots() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn configured_snapshots_current_thread_static_and_dynamic() -> Result<()> {
     different_snapshots().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn configured_snapshots_multi_thread_static_and_dynamic() -> Result<()> {
     different_snapshots().await
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn membership_replacement_current_thread_static_and_dynamic() -> Result<()> {
     bootstrap::late_query_group(SharedOutput::Transactions).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn membership_replacement_multi_thread_static_and_dynamic() -> Result<()> {
     bootstrap::late_query_group(SharedOutput::Transactions).await
 }
@@ -398,7 +404,7 @@ fn renumber_transaction(
     let transaction_id = transaction.transaction_id().to_vec().into();
     let mut position: SharedTransactionPosition = serde_json::from_slice(transaction.position())?;
     position.sequence = logical;
-    let mut builder = SourceTransactionBuilder::new("source", limits(16))?;
+    let mut builder = SourceTransactionBuilder::new(&id(77), limits(16))?;
     for change in transaction.into_changes() {
         builder.push(change)?;
     }
@@ -424,9 +430,9 @@ async fn different_counters() -> Result<()> {
         let plugins = libraries::plugins(dynamic)?;
         let database = Database::new().await?;
         let path = tempfile::tempdir()?;
-        let owners = ["fast", "slow"].map(|name| {
+        let owners = [named_id("fast"), named_id("slow")].map(|component_id| {
             Arc::new(
-                QuerySourceProgress::new(ComponentBatch::GRAPH_ID, id(name))
+                QuerySourceProgress::new(ComponentBatch::GRAPH_ID, component_id)
                     .expect("test query owner"),
             )
         });
@@ -448,15 +454,16 @@ async fn different_counters() -> Result<()> {
         slow.start().await?;
         let mut source = factory_for(&plugins, SharedOutput::Transactions)?
             .create_component_with_consumer_progress(
-                id("source"),
+                id(77),
                 json!({"stream":"changes","settings":database.config}),
                 libraries::scope(ComponentBatch::GRAPH_ID),
                 Arc::new(ConsumerProgressSet::new(
                     ComponentBatch::GRAPH_ID,
-                    id("source"),
+                    id(77),
                     owners.clone(),
                 )?),
             )?;
+        source.initialize().await?;
         source.start().await?;
         database
             .client()
@@ -546,11 +553,13 @@ async fn different_counters() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn unrelated_counters_current_thread_static_and_dynamic() -> Result<()> {
     different_counters().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn unrelated_counters_multi_thread_static_and_dynamic() -> Result<()> {
     different_counters().await
 }
@@ -663,9 +672,10 @@ async fn interrupted_snapshots() -> Result<()> {
             })
             .context("shared transaction snapshot")?;
         for name in ["fast", "slow"] {
+            let component_id = named_id(name);
             let owner = Arc::new(QuerySourceProgress::new(
                 ComponentBatch::GRAPH_ID,
-                id(name),
+                component_id.clone(),
             )?);
             let mut query = processing_query_recovery(
                 name,
@@ -676,8 +686,12 @@ async fn interrupted_snapshots() -> Result<()> {
             )
             .await?
             .with_bootstrap(factory.create_provider(
-                id(name),
-                json!({"source":"source","stream":"changes","settings":database.config}),
+                component_id,
+                json!({
+                    "source": id(77).to_string(),
+                    "stream": "changes",
+                    "settings": database.config
+                }),
                 Some(libraries::scope(ComponentBatch::GRAPH_ID)),
                 Some(owner),
             )?);
@@ -714,16 +728,19 @@ async fn interrupted_snapshots() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn interrupted_snapshots_current_thread_static_and_dynamic() -> Result<()> {
     interrupted_snapshots().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn interrupted_snapshots_multi_thread_static_and_dynamic() -> Result<()> {
     interrupted_snapshots().await
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<()> {
     for dynamic in [false, true] {
         let plugins = libraries::plugins(dynamic)?;
@@ -731,23 +748,23 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
         let factory = factory_for(&plugins, SharedOutput::Transactions)?;
         let configuration = json!({"stream":"changes","settings":database.config});
         assert!(factory
-            .create_component(id("source"), configuration.clone())
+            .create_component(id(77), configuration.clone())
             .is_err());
-        let owners = ["fast", "slow"].map(|name| {
+        let owners = [named_id("fast"), named_id("slow")].map(|component_id| {
             Arc::new(
-                QuerySourceProgress::new(ComponentBatch::GRAPH_ID, id(name))
+                QuerySourceProgress::new(ComponentBatch::GRAPH_ID, component_id)
                     .expect("test query owner"),
             )
         });
         let group = Arc::new(ConsumerProgressSet::new(
             ComponentBatch::GRAPH_ID,
-            id("source"),
+            id(77),
             owners.clone(),
         )?);
         assert!(
             plugins.source.factories()[0]
                 .create_component_with_consumer_progress(
-                    id("source"),
+                    id(77),
                     configuration.clone(),
                     libraries::scope(ComponentBatch::GRAPH_ID),
                     group.clone(),
@@ -757,7 +774,7 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
         );
         assert!(factory
             .create_component_with_consumer_progress(
-                id("source"),
+                id(77),
                 configuration.clone(),
                 libraries::scope("wrong-graph"),
                 group.clone(),
@@ -768,11 +785,12 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
         fast.start().await?;
         slow.start().await?;
         let mut source = factory.create_component_with_consumer_progress(
-            id("source"),
+            id(77),
             configuration.clone(),
             libraries::scope(ComponentBatch::GRAPH_ID),
             group,
         )?;
+        source.initialize().await?;
         let error = source.start().await.expect_err("volatile consumer");
         assert!(format!("{error:#}").contains("persistent"), "{error:#}");
         source.stop().await?;
@@ -789,16 +807,19 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
                     == drasi_computation_bootstrap_postgres::POSTGRES_SHARED_TRANSACTION_BOOTSTRAP
             })
             .context("shared transaction bootstrap")?;
-        let snapshot_configuration =
-            json!({"source":"source","stream":"changes","settings":database.config});
+        let snapshot_configuration = json!({
+            "source": id(77).to_string(),
+            "stream": "changes",
+            "settings": database.config
+        });
         let owner = Arc::new(QuerySourceProgress::new(
             ComponentBatch::GRAPH_ID,
-            id("fast"),
+            named_id("fast"),
         )?);
         let mut memory_query = ordinary_query("fast", None, owner.clone())
             .await?
             .with_bootstrap(snapshot_factory.create_provider(
-                id("fast"),
+                named_id("fast"),
                 snapshot_configuration.clone(),
                 Some(libraries::scope(ComponentBatch::GRAPH_ID)),
                 Some(owner.clone()),
@@ -814,11 +835,11 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
         let path = tempfile::tempdir()?;
         let expected = Arc::new(QuerySourceProgress::new(
             ComponentBatch::GRAPH_ID,
-            id("fast"),
+            named_id("fast"),
         )?);
         let actual = Arc::new(QuerySourceProgress::new(
             ComponentBatch::GRAPH_ID,
-            id("fast"),
+            named_id("fast"),
         )?);
         let mut substituted = processing_query(
             "fast",
@@ -828,7 +849,7 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
         )
         .await?
         .with_bootstrap(snapshot_factory.create_provider(
-            id("fast"),
+            named_id("fast"),
             snapshot_configuration,
             Some(libraries::scope(ComponentBatch::GRAPH_ID)),
             Some(expected.clone()),
@@ -847,19 +868,19 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
 
         let actual_fast = Arc::new(QuerySourceProgress::new(
             ComponentBatch::GRAPH_ID,
-            id("fast"),
+            named_id("fast"),
         )?);
         let actual_slow = Arc::new(QuerySourceProgress::new(
             ComponentBatch::GRAPH_ID,
-            id("slow"),
+            named_id("slow"),
         )?);
         let source = factory.create_component_with_consumer_progress(
-            id("source"),
+            id(77),
             configuration,
             libraries::scope(ComponentBatch::GRAPH_ID),
             Arc::new(ConsumerProgressSet::new(
                 ComponentBatch::GRAPH_ID,
-                id("source"),
+                id(77),
                 [expected, actual_slow.clone()],
             )?),
         )?;
@@ -878,18 +899,57 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
         )
         .await?;
         let batch = ComponentBatch::builder()
-            .source(Box::new(source))
-            .transformer(Box::new(fast))
-            .transformer(Box::new(slow))
-            .bind_stream(endpoint("source", "out"), stream())
-            .bind_stream(endpoint("fast", "out"), StreamId::try_new("fast-results")?)
-            .bind_stream(endpoint("slow", "out"), StreamId::try_new("slow-results")?)
+            .source(
+                drasi_lib::computation::v1::ComponentName::try_new("source")
+                    .expect("source component name"),
+                Box::new(source),
+            )
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fast")
+                    .expect("fast component name"),
+                Box::new(fast),
+            )
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("slow")
+                    .expect("slow component name"),
+                Box::new(slow),
+            )
+            .bind_stream(
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream(),
+            )
+            .bind_stream(
+                endpoint(&named_id("fast"), "out"),
+                StreamId::try_new("fast-results")?,
+            )
+            .bind_stream(
+                endpoint(&named_id("slow"), "out"),
+                StreamId::try_new("slow-results")?,
+            )
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("fast", "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(&named_id("fast"), "in"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 4 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("slow", "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(&named_id("slow"), "in"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 4 }),
             )
             .build();

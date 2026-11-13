@@ -460,18 +460,24 @@ fn length_prefixed_ids_do_not_collide() {
 
 #[test]
 fn builder_enforces_result_key_fields_and_durable_hooks() {
-    let missing = A2AReactionBuilder::new("a2a")
-        .with_query("q1")
-        .with_endpoint("http://localhost:8080")
-        .build();
+    let missing = A2AReactionBuilder::new(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000000e1")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_endpoint("http://localhost:8080")
+    .build();
     assert!(missing.is_err());
 
-    let reaction: A2AReaction = A2AReaction::builder("a2a")
-        .with_query("q1")
-        .with_endpoint("http://localhost:8080")
-        .with_result_key_fields(["invoiceId"])
-        .build()
-        .expect("reaction build");
+    let reaction: A2AReaction = A2AReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000000e1")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_endpoint("http://localhost:8080")
+    .with_result_key_fields(["invoiceId"])
+    .build()
+    .expect("reaction build");
     assert!(reaction.is_durable());
     assert!(!reaction.needs_snapshot_on_fresh_start());
 }
@@ -623,10 +629,22 @@ async fn descriptor_creates_reaction_from_json() {
         "terminalUpdatePolicy": "ignore"
     });
     let r = d
-        .create_reaction("a2a-r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000000e2")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .expect("create reaction");
-    assert_eq!(r.id(), "a2a-r");
+    assert_eq!(
+        r.id(),
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000000e2")
+            .expect("fixture UUID")
+    );
     assert_eq!(r.type_name(), "a2a");
     let p = r.properties();
     assert_eq!(p.get("endpoint"), Some(&json!("http://localhost:8080")));
@@ -638,8 +656,11 @@ async fn descriptor_rejects_unknown_fields_and_missing_keys() {
     let d = A2AReactionDescriptor;
     let unknown = d
         .create_reaction(
-            "a2a-r",
-            vec!["q1".to_string()],
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000000e2")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
             &json!({
                 "endpoint": "http://localhost:8080",
                 "resultKeyFields": ["invoiceId"],
@@ -657,8 +678,11 @@ async fn descriptor_rejects_unknown_fields_and_missing_keys() {
 
     let missing_keys = d
         .create_reaction(
-            "a2a-r",
-            vec!["q1".to_string()],
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000000e2")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
             &json!({ "endpoint": "http://localhost:8080" }),
             true,
         )

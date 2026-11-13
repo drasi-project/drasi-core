@@ -37,15 +37,15 @@ pub const MOCK_BOOTSTRAP_EVENT_COUNT: u64 = 10;
 
 /// Emits a fixed batch of node-insert bootstrap events for the mock source.
 pub struct MockBootstrapProvider {
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     count: u64,
 }
 
 impl MockBootstrapProvider {
     /// Create a provider that emits [`MOCK_BOOTSTRAP_EVENT_COUNT`] events.
-    pub fn new(source_id: impl Into<String>) -> Self {
+    pub fn new(source_id: drasi_lib::ComponentId) -> Self {
         Self {
-            source_id: source_id.into(),
+            source_id: source_id.clone(),
             count: MOCK_BOOTSTRAP_EVENT_COUNT,
         }
     }
@@ -63,7 +63,7 @@ impl BootstrapProvider for MockBootstrapProvider {
         let mut sent = 0usize;
         for seq in 1..=self.count {
             let element_id = format!("bootstrap_{seq}");
-            let reference = ElementReference::new(&self.source_id, &element_id);
+            let reference = ElementReference::new(self.source_id.as_str(), &element_id);
 
             let mut properties = ElementPropertyMap::new();
             properties.insert("value", ElementValue::Integer(seq as i64));

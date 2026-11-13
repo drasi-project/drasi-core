@@ -145,7 +145,8 @@ fn make_proxy(n: usize, fail_after: Option<usize>) -> (BootstrapProviderProxy, P
 
 fn req() -> BootstrapRequest {
     BootstrapRequest {
-        query_id: "probe-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ec")
+            .expect("fixture UUID"),
         node_labels: vec!["Probe".to_string()],
         relation_labels: vec![],
         request_id: "probe-request".to_string(),
@@ -153,7 +154,11 @@ fn req() -> BootstrapRequest {
 }
 
 fn ctx() -> BootstrapContext {
-    BootstrapContext::new_minimal("probe-server".to_string(), "probe-src".to_string())
+    BootstrapContext::new_minimal(
+        "probe-server".to_string(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ed")
+            .expect("fixture UUID"),
+    )
 }
 
 /// A consumer that stays idle until the gate opens, then drains everything.
@@ -470,16 +475,18 @@ async fn releasing_receivers_cancels_provider() {
     };
     let vtable = build_bootstrap_provider_vtable(Box::new(provider), noop_executor);
 
+    let request = req();
+    let context = ctx();
     let stream_ptr = (vtable.bootstrap_fn)(
         vtable.state,
-        FfiStr::from_str("probe-query"),
+        FfiStr::from_str(request.query_id.as_str()),
         std::ptr::null(),
         0,
         std::ptr::null(),
         0,
-        FfiStr::from_str("probe-request"),
-        FfiStr::from_str("probe-server"),
-        FfiStr::from_str("probe-src"),
+        FfiStr::from_str(&request.request_id),
+        FfiStr::from_str(&context.server_id),
+        FfiStr::from_str(context.source_id.as_str()),
         FfiStr::from_str("null"),
         FfiStr::from_str("{}"),
     );
@@ -532,17 +539,19 @@ async fn null_label_arrays_are_treated_as_empty() {
     };
     let vtable = build_bootstrap_provider_vtable(Box::new(provider), noop_executor);
 
+    let request = req();
+    let context = ctx();
     // Null arrays with NON-ZERO counts: must not be walked.
     let stream_ptr = (vtable.bootstrap_fn)(
         vtable.state,
-        FfiStr::from_str("probe-query"),
+        FfiStr::from_str(request.query_id.as_str()),
         std::ptr::null(),
         3,
         std::ptr::null(),
         2,
-        FfiStr::from_str("probe-request"),
-        FfiStr::from_str("probe-server"),
-        FfiStr::from_str("probe-src"),
+        FfiStr::from_str(&request.request_id),
+        FfiStr::from_str(&context.server_id),
+        FfiStr::from_str(context.source_id.as_str()),
         FfiStr::from_str("null"),
         FfiStr::from_str("{}"),
     );
@@ -621,9 +630,15 @@ async fn arguments_and_ownership_through_both_proxies() {
     for settings in [
         None,
         Some(SourceSubscriptionSettings {
-            source_id: "probe-src".into(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-0000000000ed",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap: false,
-            query_id: "probe-query".into(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-0000000000ec",
+            )
+            .expect("fixture UUID"),
             nodes: ["Probe".into(), "Second".into()].into(),
             relations: ["CONNECTS".into()].into(),
             resume_from: Some(bytes::Bytes::from_static(&[0, 255, 17])),
@@ -631,9 +646,15 @@ async fn arguments_and_ownership_through_both_proxies() {
             request_position_handle: true,
         }),
         Some(SourceSubscriptionSettings {
-            source_id: "probe-src".into(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-0000000000ed",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap: true,
-            query_id: "probe-query".into(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-0000000000ec",
+            )
+            .expect("fixture UUID"),
             nodes: Default::default(),
             relations: Default::default(),
             resume_from: None,
@@ -703,6 +724,8 @@ async fn bootstrap_arguments_and_ownership_multi_thread() {
 
 #[tokio::test]
 async fn malformed_bootstrap_arguments_fail_instead_of_using_defaults() {
+    let request = req();
+    let context = ctx();
     for (settings, properties, expected) in [
         ("{", "{}", "invalid bootstrap settings"),
         ("null", "[]", "invalid bootstrap properties"),
@@ -710,14 +733,14 @@ async fn malformed_bootstrap_arguments_fail_instead_of_using_defaults() {
         let vtable = build_bootstrap_provider_vtable(Box::new(PanickingProvider), noop_executor);
         let stream = (vtable.bootstrap_fn)(
             vtable.state,
-            FfiStr::from_str("query"),
+            FfiStr::from_str(request.query_id.as_str()),
             std::ptr::null(),
             0,
             std::ptr::null(),
             0,
-            FfiStr::from_str("request"),
-            FfiStr::from_str("server"),
-            FfiStr::from_str("source"),
+            FfiStr::from_str(&request.request_id),
+            FfiStr::from_str(&context.server_id),
+            FfiStr::from_str(context.source_id.as_str()),
             FfiStr::from_str(settings),
             FfiStr::from_str(properties),
         );

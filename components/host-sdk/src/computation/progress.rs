@@ -235,7 +235,13 @@ mod tests {
     use std::time::Duration;
 
     fn owner() -> Arc<QuerySourceProgress> {
-        Arc::new(QuerySourceProgress::new("graph", ComponentId::try_new("query").unwrap()).unwrap())
+        Arc::new(
+            QuerySourceProgress::new(
+                "graph",
+                ComponentId::try_new("b707c759-5c24-5416-9d93-e82f2ae71302").unwrap(),
+            )
+            .unwrap(),
+        )
     }
 
     fn capability(binding: &ProgressBinding) -> NativeSourceProgress {

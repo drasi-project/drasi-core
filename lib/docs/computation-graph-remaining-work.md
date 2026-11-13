@@ -21,10 +21,10 @@ quality, coverage gaps, execution/CI selection, reliability, cost and measured
 qualification. Mixed implementation items link to their testing obligations
 instead of maintaining a second test checklist.
 
-The [executable requirement ledger](../tests/runtime_parity/requirements.tsv)
-and [contract checks](../tests/runtime_parity/computation-contracts.tsv) record
-coverage. They are evidence indexes, not competing work lists. A passing named
-profile does not qualify every provider, failure schedule or deployment.
+The [testing guide](../../docs/contributing/contributing-code/contributing-code-tests/)
+describes ordinary Cargo/CI execution. The custom profile runners, name
+inventories and qualification ledgers have been removed. A passing test does
+not qualify every provider, failure schedule or deployment.
 The recent reconciliation, controller, partial-start, snapshot-generation,
 ownership, rollback and lineage repairs are implemented; their broader
 qualification boundaries remain below. Intentional child-worker test ignores
@@ -47,6 +47,8 @@ compatibility-shim or automatic old-state migration programme is implied.
 | Work area | Main entries |
 |---|---|
 | Implementation, lifecycle and diagnostics | [Deadlines](#cw-06), [errors](#cw-22), [status delivery](#cw-23), [background ownership](#cw-17) |
+| Managed component updates | [Safe rebootstrap coordination](#cw-92), [user-deferred graph-change/live-rebinding design review](#cw-94); state-preserving factory updates and lifecycle ownership are implemented |
+| Native named references | [Deferred bind-once endpoints](#cw-93); native topology endpoints currently require assigned UUIDs |
 | Testing quality and selection | [Testing overview](#testing-and-qualification), [production-path oracles](#cw-83), [honest runners](#cw-84), [CI selection](#cw-85), [duplication](#cw-86), [behavior ledgers](#cw-88) |
 | Recovery and behavior qualification | [Pending input](#cw-14), [reset](#cw-20), [completion evidence](#cw-36), [combined failures](#cw-39), [FFI](#cw-41), [Server](#cw-46), [examples](#cw-90) |
 | Query-plugin follow-ups | [Large items](#cw-76), [native parity coverage](#cw-77), [complete test run](#cw-78), [performance](#cw-79), [linked-reference retirement](#cw-80) |
@@ -105,6 +107,141 @@ Other conflicting lifecycle work still has a bounded wait. Nonyielding native
 code cannot be preempted by an asynchronous deadline. Wider deployment/provider
 qualification remains in [CW-14](#cw-14), [CW-41](#cw-41) and [CW-46](#cw-46),
 not an unfinished instance-startup contention fix.
+
+<a id="cw-92"></a>
+
+### Coordinate safe rebootstrap during managed updates (CW-92)
+
+**Kind:** Unsupported capability / follow-on implementation.
+**Area:** Core, native SDK/Host, query plugin, Server.
+**Priority:** Generalized native graph recovery; basic ordinary-query replacement
+does not require this broader protocol. **Effort:** Large.
+**Status:** Qualified ordinary-query reconstruction implemented; general reset
+coordination remains deferred.
+
+**Current boundary:** The registered ordinary native-query constructor supports
+semantic `Recreate/Rebootstrap` and streaming-only `Recreate/Reset` with stable
+bindings. Controlled startup completes query-owned rebuilding before the owner
+confirms completion and releases activation. Memory and persistent atomic/non-atomic
+publication use their actual reset protocols and the accepted operation identity.
+Ordinary reaction recovery policies and source/sibling ownership remain independent.
+Other factories reject data reset by default; downstream query resynchronization,
+live input rebinding and shared resource replacement remain unsupported.
+
+The factory can assess a change and report that reconstruction and rebootstrap
+are necessary, but that assessment does not establish a safe graph-wide reset.
+For example, changing a query's filter, joins or grouping can invalidate retained
+state even when its output columns remain unchanged. Qualified ordinary updates
+replace and rebuild that state rather than treating it as compatible.
+Supported state-preserving updates still require an explicit factory plan;
+initialization/disposal and accepted-update journaling are already implemented.
+
+**Work:** Add a graph-owned execution protocol that can establish all of these
+guarantees before discarding state:
+
+1. **Authoritative snapshot and live handover.** Identify the actual input
+   snapshot frontier and retain a consistent path to changes arriving after it.
+   Provider availability or an empty bootstrap result is not proof.
+2. **Exact queued-work treatment.** Identify which admitted work the snapshot
+   supersedes, retain or replay later work, and prevent an unconfirmed output
+   from being silently dropped. Persist the required execution identity and
+   boundaries so retries and process restart cannot reset twice or resume an
+   unconfirmed operation.
+3. **Downstream reset acknowledgement.** Coordinate affected queries and
+   stateful consumers, prove their resynchronization, and preserve shared history
+   and other consumers' obligations. A local query reset must not delete data
+   owned by another component or a shared recovery domain.
+
+Reuse the existing configuration owner, lifecycle operations, bootstrap/read
+services and recovery-domain ownership. Do not add a parallel runtime or assume
+that a Boolean plan, the presence of a factory, or `reset_configuration: true`
+provides these guarantees. Do not disguise a semantic change as `Preserve`.
+
+**Finish when:** Real native query pipelines exercise both changed output shape
+and changed semantics with unchanged columns. Independent result oracles verify
+the snapshot/live boundary, retained post-frontier changes, dependent-query and
+stateful-consumer resynchronization, and isolation of unaffected consumers.
+Cancellation, cleanup failure and process exit before/after reset, bootstrap and
+completion acknowledgement must either resume the same accepted operation safely
+or leave it visibly blocked without losing ownership or data. Unsupported
+provider/consumer combinations must continue to reject before destructive work.
+
+<a id="cw-93"></a>
+
+### Persist and resolve native named endpoints once (CW-93)
+
+**Kind:** Unsupported authoring capability. **Area:** Core, Server, test-infra.
+**Priority:** Medium; needed for separate out-of-order native declarations by name.
+
+**Current boundary:** Native topology relationships require component UUIDs.
+An edge to an already accepted component belongs in `relationships`, even when
+that component was created in another request; `boundary_relationships` is
+scope-boundary context, not a way to connect previous creations. A native
+consumer can be declared disconnected, then explicitly wired after its producer's
+UUID is available. Do not wait for activation before supplying required ports.
+Ordinary declarations' pending name references do not provide this native
+endpoint-authoring capability.
+
+**Work:** Add a configuration-owner-managed native named-endpoint declaration
+that can wait for a later component declaration and bind exactly once to its
+assigned UUID. Preserve unresolved intent and the eventual binding across
+acceptance, retries and restart. A rename or reuse of the old name must not
+retarget a resolved edge. Validate the actual role, port and schema before
+publishing the connection.
+
+Do not derive component UUIDs from names, invent placeholder component objects,
+enable external IDs as a workaround, or introduce a second mutable graph
+registry. Until this contract exists, native helpers requiring named producers
+must either require their declarations first or expose explicit two-step wiring.
+
+**Finish when:** Separate consumer-before-producer requests, missing/wrong ports,
+duplicate names, rename/name reuse, request retry and restart have public-API
+tests proving the original binding cannot silently follow another object.
+
+<a id="cw-94"></a>
+
+### Review managed graph changes and live input rebinding (CW-94)
+
+**Kind:** Design review / disabled functional coverage.
+**Area:** Core, native SDK/Host, SSE sink.
+**Status:** USER-DEFERRED until the other build and test failures are resolved;
+not a fixed defect or an adopted implementation plan.
+
+**Current boundary:** DrasiLib owns managed configuration changes; public raw
+graph reconciliation cannot bypass that owner. The specification-only managed
+update planner cannot assess changed live input or resource bindings and rejects
+them before acceptance. Native update descriptions can carry actual input
+bindings, but the current graph-factory assessment path does not supply them,
+and the SSE factory does not advertise or implement managed update planning.
+Construction-time input binding and a preview's replacement decision do not
+constitute author-assessed permission to update a managed component.
+
+**Disabled tests:** Only these two wrappers in
+`components/host-sdk/tests/native_network/sse.rs`, executed by the
+`native_network_loopback` target, have the explicit ignore reason
+`CW-94: deferred pending graph-change design review`:
+
+- `sse_tests::native_sse_declared_inputs_follow_a_live_rebind_on_current_thread`
+- `sse_tests::native_sse_declared_inputs_follow_a_live_rebind_on_multi_thread`
+
+Their bodies, correctly typed owner-scoped fixtures, expectations and
+linked/loaded plugin loops remain intact. These are deferred functional failures,
+not intentional crash-child workers, and their ignored executions provide no
+passing coverage of live rebinding.
+
+**Work:** After the remaining build/test failures are resolved, revisit the
+user's desired ComputationGraph change design before selecting an implementation.
+Review managed acceptance, actual binding/factory assessment, affected
+generations, recovery and cleanup together. Do not adopt a temporary graph,
+owner bypass, forced replacement strategy or unsupported-error oracle to turn
+these tests green.
+
+**Future coverage intent:** Preserve the current test bodies and assertions now
+as reference, not a committed replacement or generation strategy. After agreeing
+the user's desired managed graph-change design, revisit and re-enable coverage
+for affected and unaffected components and actual live streams, retaining both
+Tokio flavors and linked/loaded plugin paths. Until then, report this coverage as
+deferred rather than claiming complete functional qualification.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -166,6 +303,13 @@ the remaining native components in Server, UI and clients. Make waiting,
 accepted, running and failed states clear. Resolve the recorded full VS Code
 type-check failures in the component and YAML tooling. The concrete gaps are:
 
+- Route first-store Server seeds through Core's common creation preparation and
+  acceptance path. `managed_configuration::configure` still assigns omitted
+  UUIDs in the Host before storing the initial `DesiredInstance`. It enforces
+  external-ID opt-in and preserves stored UUIDs, but duplicates allocation/policy
+  instead of using the normal Core creation receipt and validation path. Keep
+  the persistent-builder guard and genuine stored-record restoration; do not
+  introduce pre-acceptance component construction or a temporary runtime.
 - Expose the existing Rust named-configuration-snapshot operations through HTTP,
   including revision-aware create/list/delete/restore and clear receipt semantics.
 - Expose supported replacement, in-place settings changes, input/resource
@@ -179,7 +323,8 @@ type-check failures in the component and YAML tooling. The concrete gaps are:
   rejects external component/pipe/boundary bindings. Preserve snapshot/live
   handover and replacement ownership rather than introduce another graph owner.
 - Extend solution templates to native topology and resource recipes, with
-  instance-scoped ID rewriting and no accidental cross-deployment sharing.
+  owner-assigned UUIDs, bind-once references and no accidental cross-deployment
+  sharing.
 
 Existing API/UI operations do not depend on every connector conversion. Only
 workflows requiring a missing family depend on [CW-44](#cw-44); broader
@@ -1164,8 +1309,8 @@ with their useful coverage preserved.
 
 | Surface | Existing gap and evidence |
 |---|---|
-| Core Host SDK | The workspace excludes the package; the runtime runner selects eight integration binaries plus `native_query_plugin`, not every target. `native_sqlite_components`, `native_output_snapshots`, `native_postgres_http_bootstrap`, `bootstrap_ffi_test` and `secret_store_integration_test` are examples outside that primary selection. `registry`/`fetcher` units need explicit features and are absent from runtime Host discovery. See `drasi-core/.github/workflows/test.yml:34-45`, `lib/tests/run-runtime-parity.sh:89-104`, `components/host-sdk/src/lib.rs:26-42`, `components/host-sdk/Cargo.toml:7-13`. |
-| Native MySQL and PostgreSQL/HTTP | The ignored-container detector matches particular text such as `testcontainers` and simple `mod` paths, not `#[path]` overrides or Podman-only fixtures. Static replay selected 16 targets and no Host target. `make test-native-mysql` exists but primary CI does not invoke it. See `drasi-core/xtask/src/integration_matrix.rs:43-65,124-187`, `components/host-sdk/tests/native_mysql_components.rs:24-33`, `tests/fixtures/native_mysql/database.rs:38-84` within Host SDK, and `Makefile:156-158`. |
+| Core Host SDK | Selection repaired: `make test` runs all Host SDK targets with `test-support,registry,fetcher,watcher`, after shared plugin preparation. Passing selection is not a claim that existing identity/lifecycle defects are fixed. |
+| Native MySQL and PostgreSQL/HTTP | Discovery repaired: the existing integration matrix follows `#[path]` modules and recognizes Podman/native-library fixtures. CI provisions the CLI and matched plugins. Explicit SQL Server credentials and prepared cross-OS peers remain outside automatically provisioned jobs. |
 | Server and UI | Primary Rust CI runs `cargo test --locked`, not ignored stock-binary/E2E cases or `make test-all`. The separate React workflow does not select every control-UI, VS Code, GPU/Move-a-wall workspace or connector qualification suite. See `drasi-server/.github/workflows/test.yml:1-13`, `.github/workflows/react-package.yml:1-45,175-238` and the respective package scripts. |
 | Learning | Deterministic tutorial unit/CLI tests are not explicit CI jobs. Scheduled/same-repository PR evaluation selects getting-started only and accepts an agent-written `## STATUS: SUCCESS`; fork PRs cannot run that secret-dependent job. Keep exploratory evaluation, but not as the only oracle. See `learning-drasi-server/.github/workflows/tutorial-evaluation-scheduled.yml:17-40,64-96,180-218`. |
 | Test infrastructure | PR jobs build images and lint; no general `cargo test` PR job was found. The manual completed-recovery workflow runs Python completion-checker tests, not all framework units. See `test-infra/.github/workflows/build.yml:17-31,40-87`, `.github/workflows/lint.yml:17-28`, `.github/workflows/e2e-building-comfort-completion.yml:3-13,55-59`. |
@@ -1195,17 +1340,17 @@ and declared environments once; never run crash workers independently.
 | Gate | Existing selectors | Selection rule |
 |---|---|---|
 | Fast PR: engine/data | `cargo test -p drasi-core-types -p drasi-core -p drasi-query-cypher -p drasi-query-gql -p drasi-computation-contracts`; `cargo test -p shared-tests in_memory::` | Literal semantics and shared memory conformance; add `drasi-core --features parallel_solver` for solver changes. |
-| Fast PR: graph/query/SDK | `cargo test -p drasi-lib --lib --tests`; focused `bash lib/tests/run-query-plugin.sh ordinary`, `semantics`, `subscriptions` or `durability` | Directly affected tests plus one appropriate development group, not every overlapping group. Linked `semantics` is not loaded-plugin proof. |
+| Fast PR: graph/query/SDK | `cargo test --locked -p drasi-lib --lib --tests`; `make build-test-plugins` then focused `cargo test --locked -p drasi-host-sdk --test native_query_plugin <filter>` | Directly affected tests, not overlapping wrapper groups. Linked reference tests are not loaded-plugin proof. |
 | PR: ABI/loaded artifacts | `cargo test -p drasi-host-sdk --features test-support --test native_query_plugin`; pipeline/loopback/wire and explicitly selected additional Host targets | Preserve both runtimes and static/loaded permutations; give registry/fetcher/watcher units a feature job and keep cross-platform FFI distinct. |
 | PR: Server | `make test-tooling`; `cargo test --locked`; explicit ignored stock-binary case in `single_runtime_test` with `DRASI_NATIVE_TEST_PLUGINS` | Repair [CW-84](#cw-84)'s aggregate claims; use the documented complete Cargo invocation on an environment-qualified broader job. |
 | PR: JavaScript/UI | Existing React/Trading packed/browser commands; `npm --prefix ui test`; VS Code `npm test`; affected GPU/Move-a-wall package/workspace tests | Bind currently unselected tests. Keep live-server and deterministic fake-transport evidence separate; parallelize heavy browser jobs rather than hide failures with retries. |
 | PR: tutorials/test-infra | Per-directory `python3 -m unittest discover -s <tutorial>/scripts -p 'test_*.py'`; root `scripts` tests; CLI with `DRASI_SSE_CLI`; `cargo test --manifest-path e2e-test-framework/Cargo.toml`; standalone data-tools manifests; comparator/checker Python tests | Tutorial directories need separate processes where module names collide. Agent-written tutorial success is supplementary. |
-| Broader/nightly | `bash lib/tests/run-runtime-parity.sh`; `make test-native-mysql`; native PostgreSQL/SQLite targets; Building Comfort completion workflow; `verify_demo.py --exercise` | Full capability/backend/fault and bootstrap/live/restart evidence, with only proven identical execution removed under [CW-86](#cw-86). |
-| Release/platform | `make test-ffi-layout-mismatch` on actual nightly/Linux; real SQL Server; cross-OS peers; independently built ABI fixtures; `run-computation-foundations.sh` | Missing prerequisites remain unqualified. Controlled long-running hosts for performance/soaks, not contention beside the main PR gate. |
+| Broader/nightly | Explicit feature commands in `test.yml`; discovered ignored-container targets; Building Comfort completion workflow; `verify_demo.py --exercise` | Full capability/backend/fault and bootstrap/live/restart evidence, with only proven identical execution removed under [CW-86](#cw-86). |
+| Release/platform | `make test-ffi-layout-mismatch` on actual nightly/Linux; explicitly configured real SQL Server and cross-OS peers; independently built ABI fixtures | Missing prerequisites remain unqualified. Controlled long-running hosts for performance/soaks, not contention beside the main PR gate. |
 
 Changed transaction/ownership code still needs targeted deterministic fault and
 crash parents on the PR; do not move all recovery coverage to nightly. Conversely,
-workspace, runtime, foundations and every query-plugin group must not be chained
+workspace tests and overlapping focused selections must not be chained
 as if each adds wholly new coverage.
 
 **Finish when:** Each required suite has an explicit owner, selector, feature/
@@ -1244,34 +1389,22 @@ have not been mistaken for duplication. A count reduction alone is not success.
 **Area:** Core, Server, test-infra and CI. **Priority:** Medium.
 **Effort:** Small-medium. **Confidence:** High; protect migration obligations.
 
-The reviewed files contain 914 original-case rows, 206 mappings, 88 integration
-baseline rows, 918 contract bindings, 36 ignore exceptions and 60 requirement
-rows. They protect against empty selections, accidental loss, new unexplained
-ignores, absent feature suites and missing crash parents; they do not prove
-assertion quality.
+The custom original-name inventories, mappings, qualification checkers and
+calendar-based exception gates have been removed. Cargo now discovers the
+workspace and Host SDK tests directly; supported feature and service jobs are
+visible in the ordinary workflows.
 
-**Work:** Keep nonempty discovery, discovered/executed agreement, required parent
-drivers, rejection of unexplained ignores, and separation of synthetic runner
-checks from actual execution. Preserve failure-report parsing that excludes
-captured child diagnostics. Treat original-name lists as finite migration
-retention, not a permanent test-count floor. Do not expand them to reward more
-names.
+**Work:** Review the asserted outcome, construction, backend and failure
+boundary when renaming or consolidating tests. Keep crash parent drivers and
+explicit service prerequisites. Do not replace the removed machinery with
+another permanent test-count floor or profile-list framework.
 
-Use stable requirement IDs with the actual asserted outcome, construction,
-backend and failure boundary. Allow renaming or many-to-one consolidation only
-after inspecting the replacement body and preserving those obligations. The
-existing mappings already permit reasoned consolidation; the TSV/checker and
-Cargo targets can support this without a second profile-list framework.
-
-The checker requires a `covered` declaration plus passing named evidence.
-`--require-qualified` is optional and is not passed by the normal runtime
-runner. Keep successful execution and broad replacement qualification distinct;
+Keep successful execution and broad replacement qualification distinct;
 [CW-36](#cw-36) owns proof of completed processing/delivery and
 [CW-78](#cw-78) owns the recorded execution baseline.
 
-**Evidence:** `drasi-core/lib/tests/runtime_parity/case-mappings.tsv:7-30`;
-`check_requirements.py:83-113,116-141` in that directory;
-`drasi-core/lib/tests/run-runtime-parity.sh:410-485`.
+**Execution:** See `Makefile`, `.github/workflows/test.yml` and the
+[testing guide](../../docs/contributing/contributing-code/contributing-code-tests/).
 
 **Finish when:** Important behaviors remain traceably enforced while obsolete
 names/wrappers can be consolidated safely. Coverage declarations cannot be
@@ -1450,10 +1583,8 @@ oracles catch semantic errors rather than reproduce the implementation.
 **Status:** Native correctness baseline established; exhaustive behavioral
 parity remains a qualification item.
 
-**Completed coverage:** The existing
-[requirement ledger](../tests/runtime_parity/requirements.tsv) now distinguishes
-construction modes through N01-N12 native-query requirements and
-an independent `native-query` test batch. The current plugin suite passes 176
+**Historical coverage:** The native-query Rust target distinguishes linked and
+loaded construction modes. The previously recorded plugin suite passed 176
 cases; six additional entries are subprocess fixtures exercised by their
 required parents, not ordinary standalone tests.
 
@@ -1480,9 +1611,8 @@ factory while preserving role, owner, slot and progress checks. Strict bootstrap
 refusal retains its typed cause, and managed startup joins the actual lifecycle
 owner without duplicate activation.
 
-The `semantics`, `recovery` and `timers` groups and the library portion of `api`
-in [the query runner](../tests/run-query-plugin.sh) still use the explicit linked
-reference. Connector tests that register that factory are also reference
+The library semantics, recovery, timer and ordinary API tests that register the
+explicit linked reference remain reference evidence. Connector tests that register that factory are also reference
 evidence. Keep useful low-level Core unit tests; migrate the hosted behavior,
 not every evaluator unit test into an FFI test.
 
@@ -2118,7 +2248,7 @@ rather than counted as passes.
 **Status:** Locally available execution baseline completed. Environment-bound
 checks below remain open; this is not an unconditional all-platform pass.
 
-The existing workspace command, [runtime runner](../tests/run-runtime-parity.sh),
+The historical workspace command, the now-removed runtime runner,
 complete Host SDK targets and Server suites were executed against frozen
 production source and freshly rebuilt matching libraries. Exact commands,
 per-target outcomes and source/lock hashes are retained in the
@@ -2312,7 +2442,7 @@ executing the work above. They are not a second list of test tasks.
 | Shared engine/index scenarios | Reused behavioral oracles across memory, RocksDB transactions/archive and Redis-backed Garnet/cache are distinct coverage, not duplicate implementations. Preserve their permutations; repair the concrete wiring gaps in [CW-89](#cw-89). |
 | Graph lifecycle, pipes, QoS, transactions, redb/WAL | Strong fault, cancellation, ownership, replay and real-reopen coverage. The QoS model has an independent accepted-event/cursor ledger across 128 seeds and 1,024 actions per seed inside one test (`drasi-core/lib-integration-tests/tests/computation_qos.rs:756-940`). Preserve it rather than infer absent property testing from absent framework names. |
 | Crash parents/workers | Keep the external process boundaries and exact state/identity checks. Native input qualification kills after a proven boundary, reopens in a different PID and compares against a no-fault run (`drasi-core/lib-integration-tests/tests/native_input_crash_recovery.rs:1118-1229`). Differential recovery complements literal semantic oracles; ignored workers are not missing functionality. |
-| Reference versus native query execution | Construction determines the evidence. The query runner labels linked preservation groups; the native target checks actual loaded factories and literal ADD/UPDATE/DELETE (`drasi-core/lib/tests/run-query-plugin.sh:28-35`; `components/host-sdk/tests/native_query_plugin.rs:69-135` in Core). A graph/index test named native may still use the linked query. |
+| Reference versus native query execution | Construction determines the evidence. The native target checks actual loaded factories and literal ADD/UPDATE/DELETE (`components/host-sdk/tests/native_query_plugin.rs` in Core). A graph/index test named native may still use the linked query. |
 | Shared native semantic cases | Good literal per-step snapshots across static/loaded, memory/RocksDB and both runtimes. Preserve the shared assertions; [CW-77](#cw-77) owns the missing emitted-delta checks. Persistent selection alone is not restart evidence. |
 | Codecs, native/legacy SDK and FFI | Handwritten golden MessagePack bytes are stronger than roundtrips alone (`drasi-core/components/computation-contracts/src/graph_codec/tests.rs:31-74`). Independently mismatched-layout libraries protect a boundary matching-build loopbacks cannot (`components/host-sdk/tests/ffi_layout_mismatch_test.rs:15-42` in Core). Retain packaging/platform permutations. |
 | Sources, bootstrap and common protocols | Distinguish pure mapping/configuration, controlled transport, and real CDC/snapshot/handover fixtures. Constructor validation is not live handover proof (`drasi-core/components/bootstrappers/mysql/src/tests.rs:1-68`). Retain real process/volume ownership for restart/retention. |

@@ -41,7 +41,7 @@ use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState,
 /// keeps a `QueryResult` split across batches at-least-once correct.
 pub(crate) struct BatchItem {
     pub payload: serde_json::Value,
-    pub query_id: String,
+    pub query_id: drasi_lib::ComponentId,
     pub sequence: u64,
     pub is_terminal: bool,
 }
@@ -49,7 +49,7 @@ pub(crate) struct BatchItem {
 /// Run forwarding and batching concurrently inside the owned processor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_adaptive_loop(
-    reaction_name: String,
+    reaction_id: drasi_lib::ComponentId,
     base: ReactionBase,
     config: HttpReactionConfig,
     runtime_adaptive: AdaptiveBatcherConfig,
@@ -67,12 +67,12 @@ pub(crate) async fn run_adaptive_loop(
     let errored = Arc::new(AtomicBool::new(false));
 
     debug!(
-        "[{reaction_name}] HttpReaction adaptive mode using batch channel capacity: {capacity} (max_batch_size: {})",
+        "[{reaction_id}] HttpReaction adaptive mode using batch channel capacity: {capacity} (max_batch_size: {})",
         runtime_adaptive.max_batch_size
     );
 
     let batcher = {
-        let reaction_name = reaction_name.clone();
+        let reaction_id = reaction_id.clone();
         let client = client.clone();
         let config = config.clone();
         let runtime_adaptive = runtime_adaptive.clone();
@@ -84,7 +84,7 @@ pub(crate) async fn run_adaptive_loop(
             let mut total_batches = 0u64;
             let mut total_results = 0u64;
 
-            info!("[{reaction_name}] HTTP adaptive batcher started");
+            info!("[{reaction_id}] HTTP adaptive batcher started");
 
             while let Some(batch) = batcher.next_batch().await {
                 if batch.is_empty() {
@@ -95,7 +95,7 @@ pub(crate) async fn run_adaptive_loop(
                 total_results += batch_size as u64;
                 total_batches += 1;
 
-                debug!("[{reaction_name}] Processing adaptive batch of {batch_size} results");
+                debug!("[{reaction_id}] Processing adaptive batch of {batch_size} results");
 
                 // Split the batch into wire payloads (moved, not cloned) and the
                 // per-query checkpoint candidates (`completed` / `seen`). See
@@ -108,7 +108,7 @@ pub(crate) async fn run_adaptive_loop(
                 }
                 let (completed, seen) = batch_checkpoint_candidates(meta);
 
-                match deliver_batch(&client, &config, &reaction_name, payloads).await {
+                match deliver_batch(&client, &config, &reaction_id, payloads).await {
                     Ok(()) => {
                         // Advance each represented query to its max fully-acked
                         // (terminal) sequence after the side effect committed.
@@ -117,12 +117,12 @@ pub(crate) async fn run_adaptive_loop(
                             .await
                         {
                             error!(
-                                "[{reaction_name}] Failed to write batch checkpoint after ack: {e}"
+                                "[{reaction_id}] Failed to write batch checkpoint after ack: {e}"
                             );
                             fail_stop(
                                 &base,
                                 &errored,
-                                &reaction_name,
+                                &reaction_id,
                                 "HTTP checkpoint write failed after batch ack; \
                                  stopped per recovery policy",
                             )
@@ -132,11 +132,11 @@ pub(crate) async fn run_adaptive_loop(
                     }
                     Err(e) => match FailureAction::from_policy(policy) {
                         FailureAction::Stop => {
-                            error!("[{reaction_name}] Failed to deliver batch: {e}");
+                            error!("[{reaction_id}] Failed to deliver batch: {e}");
                             fail_stop(
                                 &base,
                                 &errored,
-                                &reaction_name,
+                                &reaction_id,
                                 "HTTP batch delivery failed; stopped per recovery policy — \
                                  the batch replays from the outbox on restart",
                             )
@@ -145,7 +145,7 @@ pub(crate) async fn run_adaptive_loop(
                         }
                         FailureAction::SkipAndContinue => {
                             warn!(
-                                "[{reaction_name}] Failed to deliver batch: {e}; skipping and \
+                                "[{reaction_id}] Failed to deliver batch: {e}; skipping and \
                                  advancing checkpoints per AutoSkipGap recovery policy"
                             );
                             // AutoSkipGap accepts loss: advance every represented
@@ -162,14 +162,14 @@ pub(crate) async fn run_adaptive_loop(
 
                 if total_batches.is_multiple_of(100) {
                     info!(
-                        "[{reaction_name}] Adaptive HTTP metrics - Batches: {total_batches}, Results: {total_results}, Avg batch size: {:.1}",
+                        "[{reaction_id}] Adaptive HTTP metrics - Batches: {total_batches}, Results: {total_results}, Avg batch size: {:.1}",
                         total_results as f64 / total_batches as f64
                     );
                 }
             }
 
             info!(
-                "[{reaction_name}] HTTP adaptive batcher stopped - Total batches: {total_batches}, Total results: {total_results}"
+                "[{reaction_id}] HTTP adaptive batcher stopped - Total batches: {total_batches}, Total results: {total_results}"
             );
         }
     };
@@ -184,13 +184,13 @@ pub(crate) async fn run_adaptive_loop(
             let query_result_arc = tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => {
-                    debug!("[{reaction_name}] Received shutdown signal, exiting adaptive loop");
+                    debug!("[{reaction_id}] Received shutdown signal, exiting adaptive loop");
                     break;
                 }
                 // The batcher dropping its receiver (e.g. a fail-stop) closes this
                 // sender; break promptly instead of blocking on the next dequeue.
                 _ = batch_tx.closed() => {
-                    debug!("[{reaction_name}] Batcher exited; exiting adaptive loop");
+                    debug!("[{reaction_id}] Batcher exited; exiting adaptive loop");
                     break;
                 }
                 result = base.priority_queue.dequeue() => result,
@@ -218,7 +218,8 @@ pub(crate) async fn run_adaptive_loop(
 
             let mut batcher_closed = false;
             for (i, notification) in notifications.iter().enumerate() {
-                let payload = render_batch_item(&handlebars, &config, notification, &reaction_name);
+                let payload =
+                    render_batch_item(&handlebars, &config, notification, reaction_id.as_str());
                 let item = BatchItem {
                     payload,
                     query_id: query_id.clone(),
@@ -226,7 +227,7 @@ pub(crate) async fn run_adaptive_loop(
                     is_terminal: i == last_idx,
                 };
                 if batch_tx.send(item).await.is_err() {
-                    error!("[{reaction_name}] Failed to send to batch channel — batcher exited");
+                    error!("[{reaction_id}] Failed to send to batch channel — batcher exited");
                     batcher_closed = true;
                     break;
                 }
@@ -242,11 +243,11 @@ pub(crate) async fn run_adaptive_loop(
 
     // Preserve the `Error` status set by a fail-stopping batcher.
     if errored.load(Ordering::SeqCst) {
-        info!("[{reaction_name}] HTTP adaptive loop stopped after a delivery failure");
+        info!("[{reaction_id}] HTTP adaptive loop stopped after a delivery failure");
         return;
     }
 
-    info!("[{reaction_name}] HTTP adaptive loop stopped");
+    info!("[{reaction_id}] HTTP adaptive loop stopped");
     status_handle
         .set_status(
             ComponentStatus::Stopped,
@@ -257,8 +258,13 @@ pub(crate) async fn run_adaptive_loop(
 
 /// Set the reaction to `Error` and record that a fail-stop occurred so the main
 /// loop does not overwrite the status with `Stopped`.
-async fn fail_stop(base: &ReactionBase, errored: &Arc<AtomicBool>, reaction_name: &str, msg: &str) {
-    error!("[{reaction_name}] {msg}");
+async fn fail_stop(
+    base: &ReactionBase,
+    errored: &Arc<AtomicBool>,
+    reaction_id: &drasi_lib::ComponentId,
+    msg: &str,
+) {
+    error!("[{reaction_id}] {msg}");
     errored.store(true, Ordering::SeqCst);
     base.status_handle()
         .set_status(ComponentStatus::Error, Some(msg.to_string()))
@@ -275,7 +281,7 @@ async fn fail_stop(base: &ReactionBase, errored: &Arc<AtomicBool>, reaction_name
 async fn deliver_batch(
     client: &Client,
     config: &HttpReactionConfig,
-    reaction_name: &str,
+    reaction_id: &drasi_lib::ComponentId,
     batch: Vec<serde_json::Value>,
 ) -> anyhow::Result<()> {
     let Some(batch_endpoint) = config.batch_endpoint.as_ref() else {
@@ -288,7 +294,7 @@ async fn deliver_batch(
         batch_endpoint,
         &config.token,
         batch,
-        reaction_name,
+        reaction_id.as_str(),
     )
     .await
     .map(|_outcome| ())

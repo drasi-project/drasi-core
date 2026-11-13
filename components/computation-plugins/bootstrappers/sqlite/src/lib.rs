@@ -59,7 +59,7 @@ impl BootstrapFactory for FileBootstrapFactory {
                 .expect("constant implementation"),
             configuration_version: 1,
             configuration: ConfigSchema::from_fields([
-                ("source", ConfigType::String, true),
+                ("source", ConfigType::ComponentId, true),
                 ("stream", ConfigType::String, true),
                 ("settings", ConfigType::Object, true),
             ]),
@@ -84,8 +84,8 @@ impl BootstrapFactory for FileBootstrapFactory {
             .scope
             .clone()
             .context("SQLite file bootstrap requires query scope")?;
-        ComponentId::try_new(scope.instance_id.as_str())?;
-        ComponentId::try_new(scope.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+        drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
         let mut provider = SqliteBootstrapProvider::new(
             ComponentId::try_new(config.source)?,
             StreamId::try_new(config.stream)?,
@@ -102,11 +102,14 @@ mod tests {
     use drasi_computation_plugin_sdk::{ExportedPlugin, Scope};
     use serde_json::json;
 
+    const SOURCE_ID: &str = "052ef9a0-75ff-5510-bd5a-45b21f5f6ccd";
+
     fn request() -> Result<CreateRequest> {
         Ok(CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
-            id: ComponentId::try_new("query")?,
+            update_directive: None,
+            id: ComponentId::try_new("c6de0d72-9721-581a-9dad-f91259a2ad07")?,
             implementation: FileBootstrapFactory.metadata().implementation,
             configuration_version: 1,
             scope: Some(Scope {
@@ -115,7 +118,7 @@ mod tests {
                 generation: 1,
             }),
             configuration: json!({
-                "source": "source",
+                "source": SOURCE_ID,
                 "stream": "source/out",
                 "settings": {
                     "path": "a-file-that-must-not-be-opened-at-construction.db",
@@ -143,7 +146,11 @@ mod tests {
             .validate_query_scope("instance", "another", &request.id)
             .is_err());
         assert!(provider
-            .validate_query_scope("instance", "graph", &ComponentId::try_new("other")?)
+            .validate_query_scope(
+                "instance",
+                "graph",
+                &ComponentId::try_new("71abd8b9-3bf1-55bb-9d8d-189a533e0ce0")?
+            )
             .is_err());
         assert!(!FileBootstrapFactory.metadata().source_progress);
         Ok(())

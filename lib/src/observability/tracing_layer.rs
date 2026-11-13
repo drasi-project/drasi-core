@@ -62,6 +62,7 @@ use tracing_subscriber::Layer;
 
 use super::component_log::{ComponentLogRegistry, ComponentLogType, LogLevel, LogMessage};
 
+use crate::ComponentId;
 use std::sync::OnceLock;
 
 /// Default capacity for the log message channel.
@@ -211,8 +212,11 @@ where
             // Walk up the span tree to find component info
             let mut current = Some(span);
             while let Some(span_ref) = current {
-                if let Some(info) = extract_component_info(&span_ref) {
-                    return Some(info);
+                if let Some(context) = extract_component_info(&span_ref) {
+                    return match context {
+                        ComponentSpanContext::Bound(info) => Some(info),
+                        ComponentSpanContext::Invalid => None,
+                    };
                 }
                 current = span_ref.parent();
             }
@@ -250,20 +254,26 @@ where
 #[derive(Clone)]
 struct ComponentInfo {
     instance_id: String,
-    component_id: String,
+    component_id: ComponentId,
     component_type: ComponentLogType,
+}
+
+#[derive(Clone)]
+enum ComponentSpanContext {
+    Bound(ComponentInfo),
+    Invalid,
 }
 
 /// Extract component info from a span's cached extensions.
 fn extract_component_info<S>(
     span: &tracing_subscriber::registry::SpanRef<'_, S>,
-) -> Option<ComponentInfo>
+) -> Option<ComponentSpanContext>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     // Component info is cached in span extensions during on_new_span
     let extensions = span.extensions();
-    extensions.get::<ComponentInfo>().cloned()
+    extensions.get::<ComponentSpanContext>().cloned()
 }
 
 /// Visitor for extracting component info from span/event fields.
@@ -301,17 +311,24 @@ impl Visit for ComponentInfoVisitor {
 }
 
 impl ComponentInfoVisitor {
-    fn into_component_info(self) -> Option<ComponentInfo> {
+    fn into_component_info(self) -> Option<ComponentSpanContext> {
         let component_id = self.component_id?;
         let component_type = self
             .component_type
             .as_deref()
             .and_then(parse_component_type)?;
-        Some(ComponentInfo {
+        let component_id = match ComponentId::try_new(component_id) {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(parent: None, "Invalid component log identity: {error}");
+                return Some(ComponentSpanContext::Invalid);
+            }
+        };
+        Some(ComponentSpanContext::Bound(ComponentInfo {
             instance_id: self.instance_id.unwrap_or_default(),
             component_id,
             component_type,
-        })
+        }))
     }
 }
 

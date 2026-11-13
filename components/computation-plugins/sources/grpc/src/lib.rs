@@ -17,8 +17,6 @@ use drasi_computation_plugin_sdk::{
 use std::sync::Arc;
 
 pub use config::GrpcSourceConfig;
-/// Compatibility name for this component's gRPC configuration.
-pub type SourceConfig = GrpcSourceConfig;
 pub mod proto {
     pub use drasi_grpc_common::source;
     pub mod admission {

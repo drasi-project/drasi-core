@@ -58,6 +58,7 @@ impl sdk::Factory for Factory {
 
 fn field(value_type: sdk::ConfigType) -> sdk::ConfigField {
     sdk::ConfigField {
+        constraint: None,
         value_type,
         required: false,
         secret: false,

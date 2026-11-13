@@ -151,7 +151,7 @@ impl SourcePluginDescriptor for SqliteSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -188,7 +188,7 @@ impl SourcePluginDescriptor for SqliteSourceDescriptor {
             ..Default::default()
         };
 
-        let mut builder = crate::SqliteSourceBuilder::new(id);
+        let mut builder = crate::SqliteSourceBuilder::new(id.clone());
         if let Some(p) = &config.path {
             builder = builder.with_path(p);
         }

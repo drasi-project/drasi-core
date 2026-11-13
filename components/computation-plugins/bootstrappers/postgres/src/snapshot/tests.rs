@@ -261,10 +261,12 @@ async fn snapshot_rows_use_database_clock_before_boundary_not_host_wall_clock() 
         "max_protocol_bytes": 65536, "io_timeout_ms": 5000, "feedback_interval_ms": 100
     }))?;
     let provider = PostgresSnapshot::new(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("084744af-5fa3-5cfc-beef-e8d2e5f2ce54")?,
         StreamId::try_new("source/out")?,
         config,
-        SourceProgressView::new(Arc::new(Progress(ComponentId::try_new("query")?))),
+        SourceProgressView::new(Arc::new(Progress(ComponentId::try_new(
+            "3f79afd1-493c-5244-9192-130ea10d824f",
+        )?))),
     )?;
     let state = State::default();
     tokio::time::timeout(Duration::from_secs(10), async {

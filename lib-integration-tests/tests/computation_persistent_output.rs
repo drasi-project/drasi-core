@@ -17,6 +17,7 @@
 use anyhow::{Context, Result};
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::{
+    computation::v1::ComponentId,
     config::QueryConfig,
     queries::output_state::SnapshotStream,
     queries::{FetchError, SnapshotResponse},
@@ -39,26 +40,46 @@ const QUERY: &str = "names";
 const TEXT: &str = "MATCH (p:Person) RETURN p.name AS name";
 const UPDATED_TEXT: &str = "MATCH (p:Person) RETURN p.name AS name, p.active AS active";
 
+fn component_id(instance: &str, name: &str) -> ComponentId {
+    let namespace = ComponentId::try_new("1f1f29a9-5710-5d4c-9a85-21c7052c603a")
+        .expect("persistent-output namespace");
+    let instance =
+        ComponentId::derive_owned(&namespace, instance).expect("persistent-output instance ID");
+    ComponentId::derive_owned(&instance, name).expect("persistent-output component ID")
+}
+
 fn config(text: &str, capacity: usize) -> QueryConfig {
-    Query::cypher(QUERY)
+    config_named(
+        drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+        text,
+        capacity,
+    )
+}
+
+fn config_named(name: drasi_core::ComponentName, text: &str, capacity: usize) -> QueryConfig {
+    Query::cypher(name)
         .query(text)
-        .from_input(SOURCE)
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        )
         .enable_bootstrap(false)
         .auto_start(true)
         .with_outbox_capacity(capacity)
         .with_storage_backend(StorageBackendRef::Named("rocks".into()))
         .with_recovery_policy(RecoveryPolicy::Strict)
         .build()
+        .expect("valid persistent query configuration")
 }
 
 async fn build(
     root: &Path,
     instance: &str,
-    query: QueryConfig,
+    mut query: QueryConfig,
 ) -> Result<(DrasiLib, ApplicationSourceHandle)> {
-    let query_id = query.id.clone();
+    let query_name = query.name.clone();
+    query.id = Some(component_id(instance, query_name.as_str()));
     let (source, handle) = ApplicationSource::new(
-        SOURCE,
+        component_id(instance, SOURCE).clone(),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: Some(DurabilityConfig {
@@ -70,7 +91,11 @@ async fn build(
     )?;
     let core = lib_integration_tests::query_builder()
         .with_id(instance)
-        .with_source(source)
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
         .with_wal_provider(Arc::new(RedbWalProvider::new(root.join("wal"))))
         .with_index_provider(
@@ -84,18 +109,23 @@ async fn build(
         .build()
         .await?;
     core.start().await?;
-    ready_named(&core, &query_id).await?;
+    ready_named(&core, &query_name).await?;
     Ok((core, handle))
 }
 
 async fn ready(core: &DrasiLib) -> Result<()> {
-    ready_named(core, QUERY).await
+    ready_named(
+        core,
+        &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+    )
+    .await
 }
 
-async fn ready_named(core: &DrasiLib, query: &str) -> Result<()> {
+async fn ready_named(core: &DrasiLib, query: &drasi_core::ComponentName) -> Result<()> {
+    let query_id = core.component_by_name(query)?.id().clone();
     timeout(
         Duration::from_secs(15),
-        core.computation_component(query)?.wait_started(),
+        core.component_by_id(&query_id)?.wait_started(),
     )
     .await
     .context("query readiness timed out")??;
@@ -116,13 +146,23 @@ async fn insert(source: &ApplicationSourceHandle, id: &str) -> Result<()> {
 }
 
 async fn snapshot(core: &DrasiLib, minimum: u64) -> Result<SnapshotResponse> {
-    snapshot_named(core, QUERY, minimum).await
+    snapshot_named(
+        core,
+        &drasi_core::ComponentName::try_new(QUERY).expect("fixture component name"),
+        minimum,
+    )
+    .await
 }
 
-async fn snapshot_named(core: &DrasiLib, id: &str, minimum: u64) -> Result<SnapshotResponse> {
+async fn snapshot_named(
+    core: &DrasiLib,
+    name: &drasi_core::ComponentName,
+    minimum: u64,
+) -> Result<SnapshotResponse> {
+    let id = core.component_by_name(name)?.id().clone();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let diagnostic = match core.query_manager().get_query_instance(id).await {
+        let diagnostic = match core.query_manager().get_query_instance_by_id(&id).await {
             Ok(query) => match query.fetch_snapshot().await {
                 Ok(snapshot) if snapshot.as_of_sequence >= minimum => return Ok(snapshot),
                 Ok(snapshot) => format!("output is only at sequence {}", snapshot.as_of_sequence),
@@ -173,9 +213,15 @@ async fn ordinary_persistent_query_reopens_snapshot_and_trimmed_outbox_without_r
     assert_eq!(reopened.output_generation, generation);
     assert_eq!(keyed(reopened).await, keyed(before).await);
     {
+        let query_id = core
+            .component_by_name(
+                &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+            )?
+            .id()
+            .clone();
         let query = core
             .query_manager()
-            .get_query_instance(QUERY)
+            .get_query_instance_by_id(&query_id)
             .await
             .map_err(anyhow::Error::msg)?;
         assert!(!query.is_volatile());
@@ -207,16 +253,26 @@ async fn deleting_and_recreating_a_query_preserves_a_distinct_persistent_output_
 ) -> Result<()> {
     let directory = tempfile::tempdir()?;
     let instance = "computation-output-recreate";
-    let query_config = config(TEXT, 8);
+    let mut query_config = config(TEXT, 8);
+    query_config.id = Some(component_id(instance, QUERY));
     let (core, source) = build(directory.path(), instance, query_config.clone()).await?;
     insert(&source, "old").await?;
     let old = snapshot(&core, 1).await?;
+    let query_id = core
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+        )?
+        .id()
+        .clone();
     let old_reader = core
         .query_manager()
-        .get_query_instance(QUERY)
+        .get_query_instance_by_id(&query_id)
         .await
         .map_err(anyhow::Error::msg)?;
-    core.remove_query(QUERY).await?;
+    core.remove_query_by_name(
+        &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+    )
+    .await?;
     assert_eq!(old_reader.output_generation().await, old.output_generation);
     drop(old_reader);
     core.add_query(query_config).await?;
@@ -239,21 +295,29 @@ async fn deleting_and_recreating_a_query_preserves_a_distinct_persistent_output_
 }
 
 #[tokio::test]
-async fn reconfiguration_wipes_old_output_and_persists_the_new_lifetime() -> Result<()> {
+async fn reconfiguration_resets_persistent_output_and_reopens_the_new_generation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let instance = "computation-output-update";
     let (core, source) = build(directory.path(), instance, config(TEXT, 8)).await?;
     insert(&source, "old").await?;
     let old = snapshot(&core, 1).await?;
-    core.update_query(QUERY, config(UPDATED_TEXT, 8)).await?;
+    let old_generation = old.output_generation;
+    core.update_query_by_name(
+        &drasi_core::ComponentName::try_new("names").expect("fixture component name"),
+        config(UPDATED_TEXT, 8),
+    )
+    .await?;
     ready(&core).await?;
     let reset = snapshot(&core, 0).await?;
+    assert!(reset.output_generation > old_generation);
+    assert_eq!(reset.as_of_sequence, old.as_of_sequence);
     assert!(reset.to_vec().is_empty());
-    assert!(reset.output_generation > old.output_generation);
     insert(&source, "new").await?;
     let current = snapshot(&core, reset.as_of_sequence + 1).await?;
+    let mut rows = current.to_vec();
+    rows.sort_by_cached_key(|row| row.to_string());
     assert_eq!(
-        current.to_vec(),
+        rows,
         vec![serde_json::json!({"name": "new", "active": true})]
     );
     shutdown(core, source).await?;
@@ -272,11 +336,11 @@ async fn long_instance_and_query_identifiers_reopen_the_same_persistent_output()
         "http-persist-index-budget-instance",
     ] {
         let directory = tempfile::tempdir()?;
-        let mut query = config(TEXT, 8);
-        query.id = format!("{instance}-query");
+        let query_name = drasi_core::ComponentName::try_new(format!("{instance}-query"))?;
+        let query = config_named(query_name.clone(), TEXT, 8);
         let (core, source) = build(directory.path(), instance, query.clone()).await?;
         insert(&source, "persisted").await?;
-        let before = snapshot_named(&core, &query.id, 1).await?;
+        let before = snapshot_named(&core, &query_name, 1).await?;
         assert_eq!(before.as_of_sequence, 1);
         assert_eq!(
             before.to_vec(),
@@ -286,11 +350,11 @@ async fn long_instance_and_query_identifiers_reopen_the_same_persistent_output()
         shutdown(core, source).await?;
 
         let (core, source) = build(directory.path(), instance, query.clone()).await?;
-        let reopened = snapshot_named(&core, &query.id, 1).await?;
+        let reopened = snapshot_named(&core, &query_name, 1).await?;
         assert_eq!(reopened.output_generation, generation);
         assert_eq!(keyed(reopened).await, keyed(before).await);
         insert(&source, "after-reopen").await?;
-        let after = snapshot_named(&core, &query.id, 2).await?;
+        let after = snapshot_named(&core, &query_name, 2).await?;
         assert_eq!(after.as_of_sequence, 2);
         assert_eq!(after.len(), 2);
         shutdown(core, source).await?;

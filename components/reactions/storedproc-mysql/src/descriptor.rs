@@ -149,16 +149,16 @@ impl ReactionPluginDescriptor for MySqlStoredProcReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         let dto: MySqlStoredProcReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let mut builder = MySqlStoredProcReaction::builder(id)
-            .with_queries(query_ids)
+        let mut builder = MySqlStoredProcReaction::builder(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start)
             .with_user(mapper.resolve_string(&dto.user).await?)
             .with_password(mapper.resolve_string(&dto.password).await?)

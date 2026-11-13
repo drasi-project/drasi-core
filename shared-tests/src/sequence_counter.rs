@@ -15,8 +15,13 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use drasi_core_types::ComponentId;
+
+fn source_key(value: u128) -> CheckpointKey {
+    CheckpointKey::Source(ComponentId::from_uuid(uuid::Uuid::from_u128(value)))
+}
 use drasi_core::interface::{
-    CheckpointStore, ResultSequence, ResultSequenceCounter, SourceCheckpoint,
+    CheckpointKey, CheckpointStore, ResultSequence, ResultSequenceCounter, SourceCheckpoint,
 };
 
 /// Basic result sequence counter test for ResultSequenceCounter implementations.
@@ -47,18 +52,18 @@ pub async fn result_sequence_counter(subject: &dyn ResultSequenceCounter) {
 pub async fn sequence_counter(subject: &dyn CheckpointStore) {
     // Initially no checkpoint for "foo"
     let result = subject
-        .read_checkpoint("foo")
+        .read_checkpoint(&source_key(1))
         .await
         .expect("read_checkpoint failed");
     assert_eq!(result, None);
 
     subject
-        .stage_checkpoint("foo", 2, None)
+        .stage_checkpoint(&source_key(1), 2, None)
         .await
         .expect("stage_checkpoint failed");
 
     let result = subject
-        .read_checkpoint("foo")
+        .read_checkpoint(&source_key(1))
         .await
         .expect("read_checkpoint failed");
     assert_eq!(
@@ -88,12 +93,12 @@ pub async fn checkpoint_round_trip(subject: &dyn CheckpointStore) {
     // Stage checkpoint with 8-byte position (Postgres-like)
     let pos_8 = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
     subject
-        .stage_checkpoint("source-pg", 10, Some(&pos_8))
+        .stage_checkpoint(&source_key(2), 10, Some(&pos_8))
         .await
         .expect("stage_checkpoint failed");
 
     let cp = subject
-        .read_checkpoint("source-pg")
+        .read_checkpoint(&source_key(2))
         .await
         .expect("read_checkpoint failed")
         .expect("expected checkpoint for source-pg");
@@ -103,12 +108,12 @@ pub async fn checkpoint_round_trip(subject: &dyn CheckpointStore) {
     // Stage checkpoint with 20-byte position (MSSQL-like)
     let pos_20 = Bytes::from(vec![0xAA; 20]);
     subject
-        .stage_checkpoint("source-mssql", 20, Some(&pos_20))
+        .stage_checkpoint(&source_key(3), 20, Some(&pos_20))
         .await
         .expect("stage_checkpoint failed");
 
     let cp = subject
-        .read_checkpoint("source-mssql")
+        .read_checkpoint(&source_key(3))
         .await
         .expect("read_checkpoint failed")
         .expect("expected checkpoint for source-mssql");
@@ -121,13 +126,13 @@ pub async fn checkpoint_round_trip(subject: &dyn CheckpointStore) {
         .await
         .expect("read_all_checkpoints failed");
     assert_eq!(all.len(), 2);
-    assert_eq!(all["source-pg"].source_position.as_ref(), Some(&pos_8));
-    assert_eq!(all["source-mssql"].source_position.as_ref(), Some(&pos_20));
+    assert_eq!(all[&source_key(2)].source_position.as_ref(), Some(&pos_8));
+    assert_eq!(all[&source_key(3)].source_position.as_ref(), Some(&pos_20));
 
     // Stage checkpoint with 80-byte position (Cosmos DB-like resume token)
     let pos_80 = Bytes::from(vec![0xBB; 80]);
     subject
-        .stage_checkpoint("source-cosmos", 30, Some(&pos_80))
+        .stage_checkpoint(&source_key(4), 30, Some(&pos_80))
         .await
         .expect("stage_checkpoint failed");
 
@@ -136,18 +141,18 @@ pub async fn checkpoint_round_trip(subject: &dyn CheckpointStore) {
         .await
         .expect("read_all_checkpoints failed");
     assert_eq!(all.len(), 3);
-    assert_eq!(all["source-cosmos"].source_position.as_ref(), Some(&pos_80));
-    assert_eq!(all["source-pg"].source_position.as_ref(), Some(&pos_8));
-    assert_eq!(all["source-mssql"].source_position.as_ref(), Some(&pos_20));
+    assert_eq!(all[&source_key(4)].source_position.as_ref(), Some(&pos_80));
+    assert_eq!(all[&source_key(2)].source_position.as_ref(), Some(&pos_8));
+    assert_eq!(all[&source_key(3)].source_position.as_ref(), Some(&pos_20));
 
     // Stage checkpoint with None position
     subject
-        .stage_checkpoint("source-volatile", 40, None)
+        .stage_checkpoint(&source_key(5), 40, None)
         .await
         .expect("stage_checkpoint failed");
 
     let cp = subject
-        .read_checkpoint("source-volatile")
+        .read_checkpoint(&source_key(5))
         .await
         .expect("read_checkpoint failed")
         .expect("expected checkpoint for source-volatile");
@@ -160,17 +165,17 @@ pub async fn checkpoint_round_trip(subject: &dyn CheckpointStore) {
         .await
         .expect("read_all_checkpoints failed");
     assert_eq!(all.len(), 4);
-    assert_eq!(all["source-cosmos"].source_position.as_ref(), Some(&pos_80));
+    assert_eq!(all[&source_key(4)].source_position.as_ref(), Some(&pos_80));
 
     // Overwrite an existing source with new sequence and position
     let pos_updated = Bytes::from_static(&[0xFF; 8]);
     subject
-        .stage_checkpoint("source-pg", 50, Some(&pos_updated))
+        .stage_checkpoint(&source_key(2), 50, Some(&pos_updated))
         .await
         .expect("stage_checkpoint failed");
 
     let cp = subject
-        .read_checkpoint("source-pg")
+        .read_checkpoint(&source_key(2))
         .await
         .expect("read_checkpoint failed")
         .expect("expected checkpoint for source-pg");

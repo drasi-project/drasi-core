@@ -38,6 +38,7 @@ use serde_json::json;
 use crate::{
     exchange::{ResultDiff, SourceEvent, SourceEventWrapper},
     profiling::ProfilingMetadata,
+    query_codec::QueryInputOrigin,
 };
 
 use super::*;
@@ -55,7 +56,8 @@ fn element(properties: ElementPropertyMap, effective_from: u64) -> Element {
 
 fn wrapper(change: SourceChange) -> SourceEventWrapper {
     let mut wrapper = SourceEventWrapper::with_sequence(
-        "source-a".to_string(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b5")
+            .expect("fixture UUID"),
         SourceEvent::Change(change),
         chrono::DateTime::from_timestamp_millis(1_700_000_000_123).unwrap(),
         42,
@@ -79,8 +81,12 @@ fn variables(entries: &[(&str, VariableValue)]) -> QueryVariables {
 
 fn query_metadata(sequence: u64) -> QueryEnvelopeMetadata {
     QueryEnvelopeMetadata::new(
-        "query-a",
-        Some(Arc::from("source-a")),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000078")
+            .expect("fixture UUID"),
+        Some(QueryInputOrigin::Source(
+            drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID"),
+        )),
         sequence,
         chrono::DateTime::from_timestamp_millis(1_700_000_000_456).unwrap(),
         HashMap::from([
@@ -447,7 +453,11 @@ fn query_updates_preserve_order_before_images_and_legacy_shape() {
     ));
 
     let result = query_result_from_envelope(&envelope).unwrap();
-    assert_eq!(result.query_id, "query-a");
+    assert_eq!(
+        result.query_id,
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000078")
+            .expect("fixture UUID")
+    );
     assert_eq!(result.sequence, 7);
     assert_eq!(
         result.results,
@@ -493,12 +503,20 @@ fn envelopes_share_immutable_changes_and_append_context_persistently() {
     )
     .unwrap();
     let first = envelope.append_context(ContextContribution::new(
-        ContextContributor::new(ContextContributorKind::Source, "source-a"),
+        ContextContributor::new(
+            ContextContributorKind::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b5")
+                .expect("fixture UUID"),
+        ),
         "partition",
         ContextValue::Unsigned(3),
     ));
     let second = first.append_context(ContextContribution::new(
-        ContextContributor::new(ContextContributorKind::Query, "query-a"),
+        ContextContributor::new(
+            ContextContributorKind::Query,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000078")
+                .expect("fixture UUID"),
+        ),
         "matched",
         ContextValue::Bool(true),
     ));
@@ -552,8 +570,15 @@ fn context_reference_preserves_every_contributor_and_value_kind() {
             ContextValue::String(Arc::from("value")),
             ContextValue::Bytes(Arc::from([1_u8, 2, 3].as_slice())),
         ] {
-            let contribution =
-                ContextContribution::new(ContextContributor::new(kind, "owner"), "key", value);
+            let contribution = ContextContribution::new(
+                ContextContributor::new(
+                    kind,
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002ce")
+                        .expect("fixture UUID"),
+                ),
+                "key",
+                value,
+            );
             let appended = envelope.append_context(contribution.clone());
             assert_eq!(
                 appended.context().head().unwrap().contribution(),

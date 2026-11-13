@@ -21,6 +21,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use drasi_core_types::StorePartition;
 use drasi_lib::StateStoreProvider;
 use drasi_plugin_sdk::ffi::{
     FfiGetResult, FfiResult, FfiStorageDurability, FfiStr, FfiStringArray, StateStoreVtable,
@@ -101,14 +102,28 @@ fn block_on<F: std::future::Future>(f: F) -> Option<F::Output> {
     Some(rt.block_on(f))
 }
 
-extern "C" fn ss_get(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiGetResult {
+fn decode_partition(value: &FfiStr) -> Result<StorePartition, String> {
+    if value.ptr.is_null()
+        || value.len == 0
+        || value.len > drasi_plugin_sdk::ffi::payload::MAX_FFI_PAYLOAD_BYTES
+    {
+        return Err("invalid state-store partition buffer".into());
+    }
+    serde_json::from_slice(unsafe { std::slice::from_raw_parts(value.ptr.cast::<u8>(), value.len) })
+        .map_err(|error| format!("invalid state-store partition: {error}"))
+}
+
+extern "C" fn ss_get(state: *mut c_void, partition: FfiStr, key: FfiStr) -> FfiGetResult {
     ffi_guard(
         || FfiGetResult::err("ss_get: panic".into()),
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => return FfiGetResult::err(error),
+            };
             let key = unsafe { key.to_string() };
-            match block_on(provider.get(&store_id, &key)) {
+            match block_on(provider.get(&partition, &key)) {
                 Some(Ok(Some(value))) => FfiGetResult::found(value),
                 Some(Ok(None)) => FfiGetResult::not_found(),
                 Some(Err(error)) => FfiGetResult::err(error.to_string()),
@@ -120,7 +135,7 @@ extern "C" fn ss_get(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiGe
 
 extern "C" fn ss_set(
     state: *mut c_void,
-    store_id: FfiStr,
+    partition: FfiStr,
     key: FfiStr,
     value: *const u8,
     value_len: usize,
@@ -129,10 +144,13 @@ extern "C" fn ss_set(
         || FfiResult::err("ss_set: panic".to_string()),
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => return FfiResult::err(error),
+            };
             let key = unsafe { key.to_string() };
             let value = unsafe { std::slice::from_raw_parts(value, value_len) }.to_vec();
-            match block_on(provider.set(&store_id, &key, value)) {
+            match block_on(provider.set(&partition, &key, value)) {
                 Some(Ok(())) => FfiResult::ok(),
                 Some(Err(e)) => FfiResult::err(e.to_string()),
                 None => FfiResult::err("failed to build runtime".to_string()),
@@ -141,14 +159,17 @@ extern "C" fn ss_set(
     )
 }
 
-extern "C" fn ss_delete(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult {
+extern "C" fn ss_delete(state: *mut c_void, partition: FfiStr, key: FfiStr) -> FfiResult {
     ffi_guard(
         || FfiResult::err("ss_delete: panic".to_string()),
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => return FfiResult::err(error),
+            };
             let key = unsafe { key.to_string() };
-            match block_on(provider.delete(&store_id, &key)) {
+            match block_on(provider.delete(&partition, &key)) {
                 Some(Ok(_)) => FfiResult::ok(),
                 Some(Err(e)) => FfiResult::err(e.to_string()),
                 None => FfiResult::err("failed to build runtime".to_string()),
@@ -157,14 +178,17 @@ extern "C" fn ss_delete(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> Ff
     )
 }
 
-extern "C" fn ss_contains_key(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult {
+extern "C" fn ss_contains_key(state: *mut c_void, partition: FfiStr, key: FfiStr) -> FfiResult {
     ffi_guard(
         || FfiResult::err("ss_contains_key: panic".to_string()),
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => return FfiResult::err(error),
+            };
             let key = unsafe { key.to_string() };
-            match block_on(provider.contains_key(&store_id, &key)) {
+            match block_on(provider.contains_key(&partition, &key)) {
                 Some(Ok(true)) => FfiResult::ok(),
                 Some(Ok(false)) => FfiResult::err("not_found".to_string()),
                 Some(Err(e)) => FfiResult::err(e.to_string()),
@@ -176,7 +200,7 @@ extern "C" fn ss_contains_key(state: *mut c_void, store_id: FfiStr, key: FfiStr)
 
 extern "C" fn ss_get_many(
     state: *mut c_void,
-    store_id: FfiStr,
+    partition: FfiStr,
     keys: *const FfiStr,
     keys_count: usize,
     out_values: *mut FfiGetResult,
@@ -185,12 +209,15 @@ extern "C" fn ss_get_many(
         || FfiResult::err("ss_get_many: panic".to_string()),
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => return FfiResult::err(error),
+            };
             let key_strs: Vec<String> = (0..keys_count)
                 .map(|i| unsafe { (*keys.add(i)).to_string() })
                 .collect();
             let key_refs: Vec<&str> = key_strs.iter().map(|s| s.as_str()).collect();
-            match block_on(provider.get_many(&store_id, &key_refs)) {
+            match block_on(provider.get_many(&partition, &key_refs)) {
                 Some(Ok(results)) => {
                     for (i, key) in key_strs.iter().enumerate() {
                         let ffi_result = match results.get(key) {
@@ -210,7 +237,7 @@ extern "C" fn ss_get_many(
 
 extern "C" fn ss_set_many(
     state: *mut c_void,
-    store_id: FfiStr,
+    partition: FfiStr,
     keys: *const FfiStr,
     values: *const *const u8,
     value_lens: *const usize,
@@ -220,7 +247,10 @@ extern "C" fn ss_set_many(
         || FfiResult::err("ss_set_many: panic".to_string()),
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => return FfiResult::err(error),
+            };
             let entries: Vec<(String, Vec<u8>)> = (0..count)
                 .map(|i| unsafe {
                     let key = (*keys.add(i)).to_string();
@@ -233,7 +263,7 @@ extern "C" fn ss_set_many(
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_slice()))
                 .collect();
-            match block_on(provider.set_many(&store_id, &refs)) {
+            match block_on(provider.set_many(&partition, &refs)) {
                 Some(Ok(())) => FfiResult::ok(),
                 Some(Err(e)) => FfiResult::err(e.to_string()),
                 None => FfiResult::err("failed to build runtime".to_string()),
@@ -244,7 +274,7 @@ extern "C" fn ss_set_many(
 
 extern "C" fn ss_delete_many(
     state: *mut c_void,
-    store_id: FfiStr,
+    partition: FfiStr,
     keys: *const FfiStr,
     keys_count: usize,
 ) -> i64 {
@@ -252,12 +282,18 @@ extern "C" fn ss_delete_many(
         || -1,
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => {
+                    log::error!("State-store partition rejected: {error}");
+                    return -1;
+                }
+            };
             let key_strs: Vec<String> = (0..keys_count)
                 .map(|i| unsafe { (*keys.add(i)).to_string() })
                 .collect();
             let key_refs: Vec<&str> = key_strs.iter().map(|s| s.as_str()).collect();
-            match block_on(provider.delete_many(&store_id, &key_refs)) {
+            match block_on(provider.delete_many(&partition, &key_refs)) {
                 Some(Ok(count)) => count as i64,
                 _ => -1,
             }
@@ -265,13 +301,19 @@ extern "C" fn ss_delete_many(
     )
 }
 
-extern "C" fn ss_clear_store(state: *mut c_void, store_id: FfiStr) -> i64 {
+extern "C" fn ss_clear_store(state: *mut c_void, partition: FfiStr) -> i64 {
     ffi_guard(
         || -1,
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
-            match block_on(provider.clear_store(&store_id)) {
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => {
+                    log::error!("State-store partition rejected: {error}");
+                    return -1;
+                }
+            };
+            match block_on(provider.clear_store(&partition)) {
                 Some(Ok(count)) => count as i64,
                 _ => -1,
             }
@@ -281,7 +323,7 @@ extern "C" fn ss_clear_store(state: *mut c_void, store_id: FfiStr) -> i64 {
 
 extern "C" fn ss_list_keys(
     state: *mut c_void,
-    store_id: FfiStr,
+    partition: FfiStr,
     out_keys: *mut FfiStringArray,
 ) -> FfiResult {
     ffi_guard(
@@ -291,8 +333,11 @@ extern "C" fn ss_list_keys(
                 return FfiResult::err("ss_list_keys: null output".into());
             }
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
-            match block_on(provider.list_keys(&store_id)) {
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => return FfiResult::err(error),
+            };
+            match block_on(provider.list_keys(&partition)) {
                 Some(Ok(keys)) => {
                     unsafe { out_keys.write(FfiStringArray::from_vec(keys)) };
                     FfiResult::ok()
@@ -304,13 +349,16 @@ extern "C" fn ss_list_keys(
     )
 }
 
-extern "C" fn ss_store_exists(state: *mut c_void, store_id: FfiStr) -> FfiResult {
+extern "C" fn ss_store_exists(state: *mut c_void, partition: FfiStr) -> FfiResult {
     ffi_guard(
         || FfiResult::err("ss_store_exists: panic".to_string()),
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
-            match block_on(provider.store_exists(&store_id)) {
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => return FfiResult::err(error),
+            };
+            match block_on(provider.store_exists(&partition)) {
                 Some(Ok(true)) => FfiResult::ok(),
                 Some(Ok(false)) => FfiResult::err("not_found".to_string()),
                 Some(Err(e)) => FfiResult::err(e.to_string()),
@@ -320,13 +368,19 @@ extern "C" fn ss_store_exists(state: *mut c_void, store_id: FfiStr) -> FfiResult
     )
 }
 
-extern "C" fn ss_key_count(state: *mut c_void, store_id: FfiStr) -> i64 {
+extern "C" fn ss_key_count(state: *mut c_void, partition: FfiStr) -> i64 {
     ffi_guard(
         || -1,
         || {
             let provider = provider_ref(state);
-            let store_id = unsafe { store_id.to_string() };
-            match block_on(provider.key_count(&store_id)) {
+            let partition = match decode_partition(&partition) {
+                Ok(partition) => partition,
+                Err(error) => {
+                    log::error!("State-store partition rejected: {error}");
+                    return -1;
+                }
+            };
+            match block_on(provider.key_count(&partition)) {
                 Some(Ok(count)) => count as i64,
                 _ => -1,
             }
@@ -373,55 +427,90 @@ mod tests {
             drasi_core::interface::StorageDurability::UNKNOWN
         }
 
-        async fn get(&self, _: &str, _: &str) -> StateStoreResult<Option<Vec<u8>>> {
+        async fn get(
+            &self,
+            _: &drasi_core_types::StorePartition,
+            _: &str,
+        ) -> StateStoreResult<Option<Vec<u8>>> {
             assert!(!self.0, "injected provider panic");
             Err(StateStoreError::Other("injected storage outage".into()))
         }
-        async fn set(&self, _: &str, _: &str, _: Vec<u8>) -> StateStoreResult<()> {
+        async fn set(
+            &self,
+            _: &drasi_core_types::StorePartition,
+            _: &str,
+            _: Vec<u8>,
+        ) -> StateStoreResult<()> {
             unreachable!()
         }
-        async fn delete(&self, _: &str, _: &str) -> StateStoreResult<bool> {
+        async fn delete(
+            &self,
+            _: &drasi_core_types::StorePartition,
+            _: &str,
+        ) -> StateStoreResult<bool> {
             unreachable!()
         }
-        async fn contains_key(&self, _: &str, _: &str) -> StateStoreResult<bool> {
+        async fn contains_key(
+            &self,
+            _: &drasi_core_types::StorePartition,
+            _: &str,
+        ) -> StateStoreResult<bool> {
             unreachable!()
         }
         async fn get_many(
             &self,
-            _: &str,
+            _: &drasi_core_types::StorePartition,
             _: &[&str],
         ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
             unreachable!()
         }
-        async fn set_many(&self, _: &str, _: &[(&str, &[u8])]) -> StateStoreResult<()> {
+        async fn set_many(
+            &self,
+            _: &drasi_core_types::StorePartition,
+            _: &[(&str, &[u8])],
+        ) -> StateStoreResult<()> {
             unreachable!()
         }
-        async fn delete_many(&self, _: &str, _: &[&str]) -> StateStoreResult<usize> {
+        async fn delete_many(
+            &self,
+            _: &drasi_core_types::StorePartition,
+            _: &[&str],
+        ) -> StateStoreResult<usize> {
             unreachable!()
         }
-        async fn clear_store(&self, _: &str) -> StateStoreResult<usize> {
+        async fn clear_store(
+            &self,
+            _: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<usize> {
             unreachable!()
         }
-        async fn list_keys(&self, _: &str) -> StateStoreResult<Vec<String>> {
+        async fn list_keys(
+            &self,
+            _: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<Vec<String>> {
             assert!(!self.0, "injected provider panic");
             Err(StateStoreError::Other("injected storage outage".into()))
         }
-        async fn store_exists(&self, _: &str) -> StateStoreResult<bool> {
+        async fn store_exists(
+            &self,
+            _: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<bool> {
             unreachable!()
         }
-        async fn key_count(&self, _: &str) -> StateStoreResult<usize> {
+        async fn key_count(&self, _: &drasi_core_types::StorePartition) -> StateStoreResult<usize> {
             unreachable!()
         }
     }
 
     #[test]
     fn read_errors_and_panics_are_not_missing_checkpoints() {
+        let partition = serde_json::to_string(&StorePartition::named("query")).unwrap();
         for panic in [false, true] {
             let table = StateStoreVtableBuilder::build(Arc::new(FailedRead(panic)));
             let result = unsafe {
                 (table.get_fn)(
                     table.state,
-                    FfiStr::from_str("query"),
+                    FfiStr::from_str(&partition),
                     FfiStr::from_str("checkpoint"),
                 )
                 .into_result()
@@ -441,7 +530,8 @@ mod tests {
         let weak = Arc::downgrade(&provider);
         let table = StateStoreVtableBuilder::build(provider.clone());
         drop(provider);
-        let store = || FfiStr::from_str("store");
+        let partition = serde_json::to_string(&StorePartition::named("store")).unwrap();
+        let store = || FfiStr::from_str(&partition);
         let key = || FfiStr::from_str("present");
         assert_eq!(
             unsafe { (table.get_fn)(table.state, store(), key()).into_result() }.unwrap(),
@@ -468,11 +558,12 @@ mod tests {
 
     #[test]
     fn list_errors_and_panics_are_not_empty_history() {
+        let partition = serde_json::to_string(&StorePartition::named("store")).unwrap();
         for panic in [false, true] {
             let table = StateStoreVtableBuilder::build(Arc::new(FailedRead(panic)));
             let mut keys = FfiStringArray::from_vec(vec!["untouched".into()]);
             let error = unsafe {
-                (table.list_keys_fn)(table.state, FfiStr::from_str("store"), &mut keys)
+                (table.list_keys_fn)(table.state, FfiStr::from_str(&partition), &mut keys)
                     .into_result()
             }
             .expect_err("failed history lookup");

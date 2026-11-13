@@ -12,6 +12,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use drasi_computation_contracts::{InputBinding, OutputAliases};
 use drasi_computation_network_common::proto::{reaction, source};
 use drasi_core::{
     computation::InMemoryComputationProvider,
@@ -43,6 +44,10 @@ const HTTP_SOURCE: &str = "drasi.network/http-source";
 const GRPC_SOURCE: &str = "drasi.network/grpc-source";
 const HTTP_SINK: &str = "drasi.network/http-sink";
 const GRPC_SINK: &str = "drasi.network/grpc-sink";
+const NETWORK_SOURCE_ID: &str = "8e13c492-7d52-5d87-9353-6576206a6bb4";
+const NETWORK_SINK_ID: &str = "0fa195af-476d-55ba-9a4a-8690b19f61cf";
+const RESULT_QUERY_ID: &str = "148802ca-c82a-5a87-9bfe-b3a01e4674d8";
+const RESULT_SOURCE_ID: &str = "5c3e49cc-32f8-5b75-888d-30b75b572221";
 #[path = "native_network/durable.rs"]
 mod durable_tests;
 #[path = "native_network/grpc_family.rs"]
@@ -87,7 +92,7 @@ fn plugin(kind: &str) -> Result<Arc<NativePlugin>> {
     };
     let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| target.join("debug"));
+        .unwrap_or_else(|| target.join("debug/plugins"));
     let path = directory.join(format!(
         "{}{}{}",
         std::env::consts::DLL_PREFIX,
@@ -114,15 +119,38 @@ fn plugin(kind: &str) -> Result<Arc<NativePlugin>> {
     plugins.insert(package.to_owned(), plugin.clone());
     Ok(plugin)
 }
-fn component(kind: &str, name: &str, config: Value) -> Result<NativeComponentProxy> {
+fn network_component(
+    factory: &drasi_host_sdk::computation::NativeFactory,
+    id: ComponentId,
+    configuration: Value,
+) -> Result<NativeComponentProxy> {
+    let mut inputs = Vec::new();
+    if factory.metadata().capabilities.binds_inputs {
+        if let Some(outputs) = configuration.get("outputs") {
+            let aliases: OutputAliases = serde_json::from_value(outputs.clone())?;
+            for (alias, output) in aliases.iter() {
+                let port = output.port.clone().context("fixture output port")?;
+                inputs.push(InputBinding {
+                    input_port: PortId::try_new("in")?,
+                    output: OutputEndpoint::new(output.component.clone(), port.clone()),
+                    // These fixtures choose alias-based data streams, independent of UUIDs.
+                    stream: stream(&format!("{alias}/{port}")),
+                });
+            }
+        }
+    }
+    factory.create_component_with_inputs(id, configuration, inputs)
+}
+
+fn component(kind: &str, id: &str, config: Value) -> Result<NativeComponentProxy> {
     let plugin = plugin(kind)?;
-    sink_inputs::create(
+    network_component(
         plugin
             .factories()
             .iter()
             .find(|factory| factory.metadata().implementation.name.as_ref() == kind)
             .context("native factory")?,
-        ComponentId::try_new(name)?,
+        ComponentId::try_new(id)?,
         config,
     )
 }
@@ -151,7 +179,7 @@ fn configuration_descriptions_match_the_loaded_network_components() -> Result<()
             assert_eq!(schema["properties"]["timeoutMs"]["default"], 60000);
             assert_eq!(schema["properties"]["port"]["maximum"], 65535);
             let adaptive = factory.specification(
-                ComponentId::try_new("metadata")?,
+                ComponentId::try_new("28e5dd97-73d7-560f-825e-f9e6ee799a3f")?,
                 json!({"stream":"metadata/out","adaptiveEnabled":true}),
             );
             if kind == GRPC_SOURCE {
@@ -177,8 +205,8 @@ fn configuration_descriptions_match_the_loaded_network_components() -> Result<()
             assert_eq!(schema["properties"]["maxRetries"]["default"], 5);
             assert!(factory
                 .specification(
-                    ComponentId::try_new("metadata")?,
-                    json!({"outputs":{"q":{"component":"q","port":"out"}},"batchSize":2})
+                    ComponentId::try_new("28e5dd97-73d7-560f-825e-f9e6ee799a3f")?,
+                    json!({"outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"batchSize":2})
                 )
                 .is_ok());
         }
@@ -209,15 +237,22 @@ fn http_event(value: i64) -> Value {
     }})
 }
 fn proto_event(value: i64) -> source::SourceChange {
+    proto_event_for(
+        &ComponentId::try_new(NETWORK_SOURCE_ID).expect("network source UUID"),
+        value,
+    )
+}
+
+fn proto_event_for(source_id: &ComponentId, value: i64) -> source::SourceChange {
     source::SourceChange {
         r#type: source::ChangeType::Insert as i32,
-        source_id: "facilities-db".into(),
+        source_id: source_id.to_string(),
         timestamp: None,
         change: Some(source::source_change::Change::Element(source::Element {
             element: Some(source::element::Element::Node(source::Node {
                 metadata: Some(source::ElementMetadata {
                     reference: Some(source::ElementReference {
-                        source_id: "facilities-db".into(),
+                        namespace: "facilities-db".into(),
                         element_id: format!("row-{value}"),
                     }),
                     labels: vec!["Room".into()],
@@ -264,12 +299,13 @@ async fn http_source_order_batch_backpressure_cancel_and_awaited_stop() -> Resul
     let port = free_port()?;
     let config = json!({"stream":"facilities-db/out","host":"127.0.0.1","port":port,
         "ingressCapacity":1,"timeoutMs":500,"maxMessageBytes":4096,"maxBatchEvents":4});
-    let mut source = component(HTTP_SOURCE, "http-input", config)?;
+    let mut source = component(HTTP_SOURCE, NETWORK_SOURCE_ID, config)?;
     let before = source.configuration()?;
     assert!(
         TcpListener::bind(("127.0.0.1", port)).await.is_ok(),
         "factory must not bind"
     );
+    source.initialize().await?;
     source.start().await?;
     assert_eq!(source.configuration()?, before);
     let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
@@ -278,20 +314,30 @@ async fn http_source_order_batch_backpressure_cancel_and_awaited_stop() -> Resul
         client.get(format!("{base}/health")).send().await?.status(),
         StatusCode::OK
     );
-    let mut occupied = component(HTTP_SOURCE, "occupied", before.clone())?;
+    let mut occupied = component(
+        HTTP_SOURCE,
+        "00000000-0000-0000-0000-000000000605",
+        before.clone(),
+    )?;
+    occupied.initialize().await?;
     assert!(
         occupied.start().await.is_err(),
         "bind conflict must reach the host"
     );
     occupied.stop().await?;
-    let url = format!("{base}/sources/facilities-db/events");
+    occupied.dispose().await?;
+    let url = format!("{base}/sources/{NETWORK_SOURCE_ID}/events");
     let bad = client
-        .post(format!("{base}/sources/wrong/events"))
+        .post(format!(
+            "{base}/sources/00000000-0000-0000-0000-000000000607/events"
+        ))
         .json(&http_event(0))
         .send()
         .await?;
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(bad.json::<Value>().await?["success"], false);
+    let bad = bad.json::<Value>().await?;
+    assert_eq!(bad["success"], false);
+    assert_eq!(bad["error"], "source ID mismatch");
     assert!(!client
         .post(&url)
         .json(&json!({"operation":"bad"}))
@@ -411,6 +457,7 @@ async fn http_source_order_batch_backpressure_cancel_and_awaited_stop() -> Resul
     stop?;
     assert_eq!(response?.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(source.next().await.is_err());
+    source.dispose().await?;
     let rebound = TcpListener::bind(("127.0.0.1", port)).await?;
     drop(rebound);
     Ok(())
@@ -421,11 +468,12 @@ async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_stream
     let port = free_port()?;
     let mut source = component(
         GRPC_SOURCE,
-        "grpc-input",
+        NETWORK_SOURCE_ID,
         json!({
             "stream":"facilities-db/out","host":"127.0.0.1","port":port,"ingressCapacity":2,"timeoutMs":1000,"maxMessageBytes":1024
         }),
     )?;
+    source.initialize().await?;
     source.start().await?;
     let mut client = source::source_service_client::SourceServiceClient::connect(format!(
         "http://127.0.0.1:{port}"
@@ -437,7 +485,7 @@ async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_stream
     );
     let error = client
         .request_bootstrap(source::BootstrapRequest {
-            query_id: "q".into(),
+            query_id: RESULT_QUERY_ID.into(),
             node_labels: vec![],
             relation_labels: vec![],
         })
@@ -451,7 +499,7 @@ async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_stream
         .into_inner();
     assert!(!invalid.success && !invalid.error.is_empty());
     let mut wrong = proto_event(0);
-    wrong.source_id = "wrong".into();
+    wrong.source_id = "00000000-0000-0000-0000-000000000607".into();
     assert!(
         !client
             .submit_event(source::SubmitEventRequest { event: Some(wrong) })
@@ -500,7 +548,7 @@ async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_stream
             .is_err()
     );
     let mut invalid = proto_event(152);
-    invalid.source_id = "wrong".into();
+    invalid.source_id = "00000000-0000-0000-0000-000000000607".into();
     let mut failed_stream = client
         .stream_events(tokio_stream::iter([proto_event(151), invalid]))
         .await?
@@ -586,6 +634,7 @@ async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_stream
     drop(send);
     drop(client);
     assert!(source.next().await.is_err());
+    source.dispose().await?;
     drop(TcpListener::bind(("127.0.0.1", port)).await?);
     Ok(())
 }
@@ -607,16 +656,20 @@ fn result_inputs(sequence: u64, values: &[i64]) -> Result<InputEnvelope> {
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new("q")?,
+            &ComponentId::try_new(RESULT_QUERY_ID)?,
             SystemMetadata::new(stream("q/out"), sequence),
             &ResultNodeProjector::try_new("test/native-network-loopback/q/out", None)?,
             &changes,
             QueryOutputMetadata {
-                query_id: "q".into(),
-                source_id: Some("facilities-db".into()),
+                query_id: drasi_core_types::ComponentId::try_new(RESULT_QUERY_ID)
+                    .expect("fixture UUID"),
+                input_origin: Some(drasi_computation_contracts::QueryInputOrigin::Source(
+                    drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                        .expect("fixture UUID"),
+                )),
                 timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 123)
                     .context("timestamp")?,
-                metadata: HashMap::from([("source".into(), json!("facilities-db"))]),
+                metadata: HashMap::from([("source".into(), json!(RESULT_SOURCE_ID))]),
                 profiling: None,
             },
         )?
@@ -793,9 +846,10 @@ async fn grpc_receiver() -> Result<ReceiverServer> {
 #[tokio::test(flavor = "current_thread")]
 async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip() -> Result<()> {
     let mut receiver = http_receiver().await?;
-    let base = json!({"outputs":{"q":{"component":"q","port":"out"}},"url":format!("http://{}/reaction", receiver.address),"maxRetries":1,"timeoutMs":1000});
-    let mut sink = component(HTTP_SINK, "http-output", base.clone())?;
+    let base = json!({"outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"url":format!("http://{}/reaction", receiver.address),"maxRetries":1,"timeoutMs":1000});
+    let mut sink = component(HTTP_SINK, NETWORK_SINK_ID, base.clone())?;
     assert!(sink.handle(result_input(1)?).await.is_err());
+    sink.initialize().await?;
     sink.start().await?;
     receiver.state.failures.store(1, Ordering::Release);
     sink.handle(result_input(1)?).await?;
@@ -806,12 +860,12 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
             delivered[0].1, delivered[1].1,
             "retry preserves logical delivery"
         );
-        assert_eq!(delivered[0].0["x-drasi-component"], "q");
+        assert_eq!(delivered[0].0["x-drasi-component"], RESULT_QUERY_ID);
         assert_eq!(delivered[0].0["x-drasi-port"], "out");
         assert_eq!(delivered[0].0["content-type"], "application/json");
         assert_eq!(
             delivered[0].1,
-            json!({"operation":"ADD","output":{"alias":"q","component":"q","port":"out"},"sequence":1,
+            json!({"operation":"ADD","output":{"alias":"q","component":RESULT_QUERY_ID,"port":"out"},"sequence":1,
             "timestamp":"2023-11-14T22:13:20.000000123+00:00","after":{"value":42},
             "identity":{"namespace":"test/native-network-loopback/q/out","id":"000000000000000b"},
             "element":{"kind":"node","labels":["Result"]},
@@ -827,10 +881,12 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
     let mut config = base;
     config["failurePolicy"] = json!("skip");
     config["maxRetries"] = json!(0);
-    let mut skip = component(HTTP_SINK, "http-skip", config)?;
+    let mut skip = component(HTTP_SINK, "00000000-0000-0000-0000-000000000604", config)?;
+    skip.initialize().await?;
     skip.start().await?;
     skip.handle(result_input(3)?).await?;
     skip.stop().await?;
+    skip.dispose().await?;
     receiver.state.failures.store(0, Ordering::Release);
     receiver.state.delay.store(1, Ordering::Release);
     sink.start().await?;
@@ -842,6 +898,7 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
     );
     sink.stop().await?;
     assert!(sink.handle(result_input(5)?).await.is_err());
+    sink.dispose().await?;
     receiver.stop().await?;
     Ok(())
 }
@@ -893,16 +950,17 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
     let mut http = http_receiver().await?;
     let mut sink = component(
         HTTP_SINK,
-        "http-source-output",
-        json!({"outputs":{"facilities-db":{"component":"facilities-db","port":"out"}},"url":format!("http://{}/reaction", http.address),
+        NETWORK_SINK_ID,
+        json!({"outputs":{"facilities-db":{"component":NETWORK_SOURCE_ID,"port":"out"}},"url":format!("http://{}/reaction", http.address),
             "maxRetries":0,"timeoutMs":1000}),
     )?;
+    sink.initialize().await?;
     sink.start().await?;
     sink.handle(source_graph_input(7)?).await?;
     {
         let delivered = http.state.http.lock().expect("capture");
         assert_eq!(delivered.len(), 3, "one request per ordered change");
-        assert_eq!(delivered[0].0["x-drasi-component"], "facilities-db");
+        assert_eq!(delivered[0].0["x-drasi-component"], NETWORK_SOURCE_ID);
         assert_eq!(delivered[0].0["x-drasi-port"], "out");
         let operations: Vec<_> = delivered
             .iter()
@@ -912,7 +970,7 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
         assert_eq!(delivered[0].1["after"], json!({"name":"one"}));
         assert_eq!(
             delivered[0].1["output"],
-            json!({"alias":"facilities-db","component":"facilities-db","port":"out"})
+            json!({"alias":"facilities-db","component":NETWORK_SOURCE_ID,"port":"out"})
         );
         assert_eq!(delivered[0].1["sequence"], 7);
         assert!(delivered
@@ -945,16 +1003,18 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
     };
     assert!(sink.handle(due).await.is_err());
     sink.stop().await?;
+    sink.dispose().await?;
     http.stop().await?;
 
     let mut grpc = grpc_receiver().await?;
     let mut sink = component(
         GRPC_SINK,
-        "grpc-source-output",
-        json!({"outputs":{"facilities-db":{"component":"facilities-db","port":"out"}},"endpoint":format!("grpc://{}", grpc.address),
+        NETWORK_SINK_ID,
+        json!({"outputs":{"facilities-db":{"component":NETWORK_SOURCE_ID,"port":"out"}},"endpoint":format!("grpc://{}", grpc.address),
             "maxRetries":0,"timeoutMs":1000,"connectionRetryAttempts":1,
             "initialConnectionTimeoutMs":1000}),
     )?;
+    sink.initialize().await?;
     sink.start().await?;
     sink.handle(source_graph_input(7)?).await?;
     {
@@ -970,7 +1030,7 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
                 output.alias.as_str(),
                 output.component.as_str(),
                 output.port.as_str(),
-            ) == ("facilities-db", "facilities-db", "out")
+            ) == ("facilities-db", NETWORK_SOURCE_ID, "out")
         }));
         let operations: Vec<_> = items.iter().map(|item| item.operation).collect();
         assert_eq!(
@@ -997,6 +1057,7 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
         assert!(items[2].before.is_none() && items[2].after.is_none());
     }
     sink.stop().await?;
+    sink.dispose().await?;
     grpc.stop().await?;
     Ok(())
 }
@@ -1004,10 +1065,11 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
 #[tokio::test(flavor = "current_thread")]
 async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_success() -> Result<()> {
     let mut receiver = grpc_receiver().await?;
-    let config = json!({"outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}", receiver.address),
+    let config = json!({"outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}", receiver.address),
         "maxRetries":1,"timeoutMs":1000,"connectionRetryAttempts":1,"initialConnectionTimeoutMs":1000,
         "metadata":{"x-custom":"custom"}});
-    let mut sink = component(GRPC_SINK, "grpc-output", config)?;
+    let mut sink = component(GRPC_SINK, NETWORK_SINK_ID, config)?;
+    sink.initialize().await?;
     sink.start().await?;
     receiver.state.failures.store(1, Ordering::Release);
     sink.handle(result_input(1)?).await?;
@@ -1016,7 +1078,10 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
         assert_eq!(delivered.len(), 2);
         assert_eq!(delivered[0].1, delivered[1].1);
         let (headers, request) = &delivered[0];
-        for (name, expected) in [("x-drasi-component", "q"), ("x-drasi-port", "out")] {
+        for (name, expected) in [
+            ("x-drasi-component", RESULT_QUERY_ID),
+            ("x-drasi-port", "out"),
+        ] {
             assert_eq!(
                 headers.get(name).context("identity header")?.to_str()?,
                 expected
@@ -1035,7 +1100,7 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
                 identity.component.as_str(),
                 identity.port.as_str()
             ),
-            ("q", "q", "out")
+            ("q", RESULT_QUERY_ID, "out")
         );
         assert_eq!(output.changes.len(), 1);
         let item = &output.changes[0];
@@ -1056,20 +1121,23 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
     );
     sink.stop().await?;
     assert!(sink.handle(result_input(4)?).await.is_err());
+    sink.dispose().await?;
     receiver.stop().await?;
     let mut failed = component(
         GRPC_SINK,
-        "no-receiver",
+        "00000000-0000-0000-0000-000000000606",
         json!({
-            "outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://127.0.0.1:{}", free_port()?),
+            "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://127.0.0.1:{}", free_port()?),
             "connectionRetryAttempts":1,"initialConnectionTimeoutMs":50,"timeoutMs":50
         }),
     )?;
+    failed.initialize().await?;
     assert!(
         failed.start().await.is_err(),
         "connection failure must not be lazy startup success"
     );
     failed.stop().await?;
+    failed.dispose().await?;
     Ok(())
 }
 
@@ -1103,13 +1171,13 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
             .context("sink factory")?
             .clone();
         let sink_config = if grpc {
-            json!({"outputs":{"q":{"component":"q","port":"out"}},"endpoint":format!("grpc://{}", receiver.address),"maxRetries":0})
+            json!({"outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}", receiver.address),"maxRetries":0})
         } else {
-            json!({"outputs":{"q":{"component":"q","port":"out"}},"url":format!("http://{}/reaction",receiver.address),"maxRetries":0})
+            json!({"outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"url":format!("http://{}/reaction",receiver.address),"maxRetries":0})
         };
         let query = ContinuousQueryDefinition {
             graph_id: "network-evaluator".into(),
-            id: ComponentId::try_new("q")?,
+            id: ComponentId::try_new("148802ca-c82a-5a87-9bfe-b3a01e4674d8")?,
             query: "MATCH (r:Room) RETURN r.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("q/out"),
@@ -1128,6 +1196,12 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
                     ConfigurationValue::Literal(query.query.clone().into()),
                 ),
                 ("stream".into(), ConfigurationValue::Literal("q/out".into())),
+                (
+                    "execution".into(),
+                    ConfigurationValue::Literal(
+                        json!({"inputs": [{"component": NETWORK_SOURCE_ID, "port": "out"}]}),
+                    ),
+                ),
             ]
             .into(),
             dependencies: [("indexes".into(), vec![indexes.clone()])].into(),
@@ -1155,29 +1229,42 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
                 ),
             )?
             .component(
+                drasi_lib::computation::v1::ComponentName::try_new("facilities-db")?,
                 source_factory.specification(
-                    ComponentId::try_new("facilities-db")?,
+                    ComponentId::try_new(NETWORK_SOURCE_ID)?,
                     json!({
                         "stream":"facilities-db","host":"127.0.0.1","port":port,"timeoutMs":1000
                     }),
                 )?,
                 source_factory,
             )
-            .component(spec, Arc::new(ContinuousQueryFactory::default()))
             .component(
-                sink_factory.specification(ComponentId::try_new("sink")?, sink_config)?,
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                    .expect("fixture component name"),
+                spec,
+                Arc::new(ContinuousQueryFactory::default()),
+            )
+            .component(
+                drasi_lib::computation::v1::ComponentName::try_new("sink")?,
+                sink_factory.specification(ComponentId::try_new(NETWORK_SINK_ID)?, sink_config)?,
                 sink_factory,
             )
             .connect(
-                EdgeDefinition::new(endpoint("facilities-db", "out")?, endpoint("q", "in")?),
+                EdgeDefinition::new(
+                    endpoint(NETWORK_SOURCE_ID, "out")?,
+                    endpoint(RESULT_QUERY_ID, "in")?,
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("q", "out")?, endpoint("sink", "in")?),
+                EdgeDefinition::new(
+                    endpoint(RESULT_QUERY_ID, "out")?,
+                    endpoint(NETWORK_SINK_ID, "in")?,
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
-            .bind_stream(endpoint("facilities-db", "out")?, stream("facilities-db"))
-            .bind_stream(endpoint("q", "out")?, stream("q/out"))
+            .bind_stream(endpoint(NETWORK_SOURCE_ID, "out")?, stream("facilities-db"))
+            .bind_stream(endpoint(RESULT_QUERY_ID, "out")?, stream("q/out"))
             .build()?;
         let run = graph.start()?;
         let control = run.control();
@@ -1211,7 +1298,7 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
                         );
                     } else {
                         http.post(format!(
-                            "http://127.0.0.1:{port}/sources/facilities-db/events"
+                            "http://127.0.0.1:{port}/sources/{NETWORK_SOURCE_ID}/events"
                         ))
                         .json(&http_event(value))
                         .send()
@@ -1270,6 +1357,7 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
                 assert!(item.get("queryId").is_none() && item.get("metadata").is_none());
             }
         }
+        graph.shutdown().await?;
         receiver.stop().await?;
     }
     Ok(())

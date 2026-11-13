@@ -25,7 +25,13 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 async fn get_element_as_at_archive_disabled() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
-    let created = provider.create_indexes("archive-disabled").await.unwrap();
+    let created = provider
+        .create_indexes(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e8")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
 
     let result = created
         .set
@@ -39,7 +45,13 @@ async fn get_element_as_at_archive_disabled() {
 async fn get_element_versions_archive_disabled() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
-    let created = provider.create_indexes("archive-disabled").await.unwrap();
+    let created = provider
+        .create_indexes(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e8")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
 
     for from in [
         TimestampBound::Included(0),
@@ -61,7 +73,13 @@ async fn get_element_versions_archive_disabled() {
 async fn clear_archive_disabled_is_ok() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
-    let created = provider.create_indexes("archive-disabled").await.unwrap();
+    let created = provider
+        .create_indexes(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e8")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
 
     let result = created.set.archive_index.clone().clear().await;
     assert!(result.is_ok());
@@ -71,7 +89,13 @@ async fn clear_archive_disabled_is_ok() {
 async fn archive_reads_with_archive_enabled() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
-    let created = provider.create_indexes("archive-enabled").await.unwrap();
+    let created = provider
+        .create_indexes(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e9")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
 
     // Reads require an active session.
     created.set.session_control.begin().await.unwrap();

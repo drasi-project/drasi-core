@@ -27,7 +27,9 @@ use drasi_bootstrap_sqlite::native::{
 use drasi_lib::{computation::v1::*, Query};
 use std::sync::Arc;
 
-let source = ComponentId::try_new("sqlite")?;
+let application = ComponentId::try_new("983df4ad-2d50-49f4-a3e2-7853e0ee1550")?;
+let source = ComponentId::derive_owned(&application, "sqlite")?;
+let query = ComponentId::derive_owned(&application, "temperatures")?;
 let output = Endpoint::new(source.clone(), PortId::try_new("out")?);
 let bootstrap = SqliteBootstrapProvider::new(
     source,
@@ -49,7 +51,8 @@ let queries = drasi.computation_pipeline()?
     .query(Query::cypher("temperatures")
         .query("MATCH (s:sensors) RETURN s.name AS name,s.temp AS temperature")
         .from_input("sqlite")
-        .build())
+        .build()?
+        .with_assigned_id(query))
     .build()?;
 drasi.add_components(queries).await?;
 ```

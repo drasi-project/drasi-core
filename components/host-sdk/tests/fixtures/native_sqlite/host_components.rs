@@ -76,7 +76,19 @@ enum TransactionMode {
 }
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("test component")
+    let uuid = match value {
+        "source" => "00000000-0000-0000-0000-00000000004d",
+        "first" => "00000000-0000-0000-0000-000000000081",
+        "second" => "00000000-0000-0000-0000-000000000082",
+        "third" => "00000000-0000-0000-0000-000000000083",
+        "first-sink" => "00000000-0000-0000-0000-000000000181",
+        "second-sink" => "00000000-0000-0000-0000-000000000182",
+        "first-results" => "00000000-0000-0000-0000-000000000281",
+        "second-results" => "00000000-0000-0000-0000-000000000282",
+        "third-results" => "00000000-0000-0000-0000-000000000283",
+        other => panic!("unknown SQLite fixture component: {other}"),
+    };
+    ComponentId::try_new(uuid).expect("fixture UUID")
 }
 fn endpoint(component: &str, port: &str) -> Endpoint {
     Endpoint::new(id(component), PortId::try_new(port).expect("test port"))
@@ -114,7 +126,7 @@ fn load(package: &str) -> Result<Arc<NativePlugin>> {
             .context("test executable directory")?
             .parent()
             .context("native library directory")?
-            .to_owned(),
+            .join("plugins"),
     };
     let library = directory.join(format!(
         "{}{}{}",
@@ -210,7 +222,11 @@ async fn ordinary_graph(
         }),
     )?;
     let mut builder = ComponentBatch::builder()
-        .source(Box::new(source))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("source")
+                .expect("fixture component name"),
+            Box::new(source),
+        )
         .bind_stream(endpoint("source", "out"), StreamId::try_new("sqlite/out")?);
     let mut results = Vec::new();
     let mut handled = Vec::new();
@@ -219,7 +235,7 @@ async fn ordinary_graph(
             factory.metadata().implementation.name.as_ref() == "drasi.sqlite/file-bootstrap"
         }).context("SQLite file bootstrap")?.create_provider(
             id(name),
-            json!({"source":"source","stream":"sqlite/out","settings":{
+            json!({"source":id("source"),"stream":"sqlite/out","settings":{
                 "path":path,"tables":["items"],"table_keys":keys,"max_tables":8,"max_bytes":1048576,
                 "max_duration_ms":5000,"output_capacity":2,"shutdown_timeout_ms":5000,
             }}),
@@ -259,8 +275,16 @@ async fn ordinary_graph(
         };
         handled.push(events);
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(capture))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new(name)
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new(sink.as_str())
+                    .expect("fixture component name"),
+                Box::new(capture),
+            )
             .bind_stream(
                 endpoint(name, "out"),
                 StreamId::try_new(format!("{name}/out"))?,
@@ -275,6 +299,7 @@ async fn ordinary_graph(
             );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -322,19 +347,27 @@ async fn memory_file_bootstrap_and_rest() -> Result<()> {
         let result = async {
             core.start().await?;
             for name in ["first", "second", "source", "first-sink", "second-sink"] {
-                tokio::time::timeout(DEADLINE, core.computation_component(name)?.wait_started())
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "SQLite {name} startup (dynamic={dynamic}): {:?}",
-                            core.computation_component(name)
-                                .map(|component| component.observed())
-                        )
-                    })??;
+                let component_name =
+                    drasi_core_types::ComponentName::try_new(name).expect("fixture component name");
+                tokio::time::timeout(
+                    DEADLINE,
+                    core.component_by_name(&component_name)?.wait_started(),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "SQLite {name} startup (dynamic={dynamic}): {:?}",
+                        core.component_by_name(&component_name)
+                            .map(|component| component.observed())
+                    )
+                })??;
             }
             wait_values(&results, &[json!({"id":1,"value":"snapshot"})]).await?;
             let schema = core
-                .get_source_schema("source")
+                .get_source_schema_by_name(
+                    &drasi_core_types::ComponentName::try_new("source")
+                        .expect("fixture component name"),
+                )
                 .await?
                 .context("public native source schema")?;
             anyhow::ensure!(
@@ -355,7 +388,12 @@ async fn memory_file_bootstrap_and_rest() -> Result<()> {
                 merged
                     .nodes
                     .get("items")
-                    .is_some_and(|node| node.sources.contains("source")),
+                    .is_some_and(|node| node.sources.contains(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d"
+                        )
+                        .expect("fixture UUID")
+                    )),
                 "native SQLite was omitted from public graph schema"
             );
             let tables: Value = client
@@ -476,7 +514,13 @@ async fn memory_file_bootstrap_and_rest() -> Result<()> {
             restarted.start().await?;
             wait_values(&results, &[json!({"id":20,"value":"rekey"})]).await?;
             anyhow::ensure!(
-                restarted.get_source_schema("source").await?.is_some(),
+                restarted
+                    .get_source_schema_by_name(
+                        &drasi_core_types::ComponentName::try_new("source")
+                            .expect("fixture component name")
+                    )
+                    .await?
+                    .is_some(),
                 "restarted source schema was not available"
             );
             Ok::<_, anyhow::Error>(())
@@ -538,7 +582,13 @@ async fn native_identity_parity() -> Result<()> {
                 graph.core.start().await?;
                 tokio::time::timeout(
                     DEADLINE,
-                    graph.core.computation_component("source")?.wait_started(),
+                    graph
+                        .core
+                        .component_by_name(
+                            &drasi_core_types::ComponentName::try_new("source")
+                                .expect("fixture component name"),
+                        )?
+                        .wait_started(),
                 )
                 .await??;
                 wait_values(&graph.results, &[initial]).await?;
@@ -665,7 +715,12 @@ async fn transaction_graph(
             .provide_resource(resource, handle)?;
     }
     builder = builder
-        .component(specification, factory)
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("source")
+                .expect("fixture component name"),
+            specification,
+            factory,
+        )
         .bind_stream(endpoint("source", "out"), StreamId::try_new("sqlite/out")?);
     let mut results = Vec::new();
     let mut handled = Vec::new();
@@ -704,19 +759,27 @@ async fn transaction_graph(
         let events: Events = Arc::default();
         handled.push(events.clone());
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Capture {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&sink),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                events,
-            }))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new(*name)
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new(sink.as_str())
+                    .expect("fixture component name"),
+                Box::new(Capture {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(&sink),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    events,
+                }),
+            )
             .bind_stream(
                 endpoint(name, "out"),
                 StreamId::try_new(format!("{name}/out"))?,
@@ -731,6 +794,7 @@ async fn transaction_graph(
             );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -783,7 +847,13 @@ async fn persistent_replay(shared: bool) -> Result<()> {
             graph.core.start().await?;
             tokio::time::timeout(
                 DEADLINE,
-                graph.core.computation_component("source")?.wait_started(),
+                graph
+                    .core
+                    .component_by_name(
+                        &drasi_core_types::ComponentName::try_new("source")
+                            .expect("fixture component name"),
+                    )?
+                    .wait_started(),
             )
             .await??;
             client
@@ -819,7 +889,12 @@ async fn persistent_replay(shared: bool) -> Result<()> {
                 );
                 let position = progress
                     .checkpoints
-                    .get(&SourceProgressKey::Source("source".into()))
+                    .get(&SourceProgressKey::Source(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                    ))
                     .context("SQLite handled checkpoint")?;
                 anyhow::ensure!(
                     position.sequence == 1 && position.source_position.is_some(),
@@ -874,7 +949,10 @@ async fn persistent_replay(shared: bool) -> Result<()> {
                 DEADLINE,
                 restarted
                     .core
-                    .computation_component("source")?
+                    .component_by_name(
+                        &drasi_core_types::ComponentName::try_new("source")
+                            .expect("fixture component name"),
+                    )?
                     .wait_started(),
             )
             .await??;
@@ -934,7 +1012,7 @@ async fn shared_stop_drains_accepted_sql() -> Result<()> {
         .await?;
         let result = async {
             graph.core.start().await?;
-            tokio::time::timeout(DEADLINE, graph.core.computation_component("source")?.wait_started()).await??;
+            tokio::time::timeout(DEADLINE, graph.core.component_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name"))?.wait_started()).await??;
             let mut request = tokio::net::TcpStream::connect(&address).await?;
             let body = r#"{"id":1,"value":"accepted-during-stop"}"#;
             request.write_all(format!(
@@ -1011,7 +1089,13 @@ async fn volatile_transactions() -> Result<()> {
             graph.core.start().await?;
             tokio::time::timeout(
                 DEADLINE,
-                graph.core.computation_component("source")?.wait_started(),
+                graph
+                    .core
+                    .component_by_name(
+                        &drasi_core_types::ComponentName::try_new("source")
+                            .expect("fixture component name"),
+                    )?
+                    .wait_started(),
             )
             .await??;
             let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
@@ -1102,6 +1186,7 @@ async fn cancelled_rest_cleanup() -> Result<()> {
                 "stream":"sqlite/out","settings":config,"rest_api":{"host":"127.0.0.1","port":port},
             }),
         )?;
+        source.initialize().await?;
         source.start().await?;
         let mut request = tokio::net::TcpStream::connect(&address).await?;
         let body = r#"{"id":1,"value":"accepted"}"#;

@@ -47,6 +47,7 @@ impl sdk::Factory for Factory {
                 fields: [(
                     "mode".into(),
                     sdk::ConfigField {
+                        constraint: None,
                         value_type: sdk::ConfigType::String,
                         required: true,
                         secret: false,
@@ -270,7 +271,8 @@ impl sdk::NativeSource for Producer {
     fn recovery_reader(&self) -> Option<SourceProgressView> {
         (self.mode == "dual").then(|| {
             SourceProgressView::new(Arc::new(SingleOwner(
-                ComponentId::try_new("first").expect("fixed fixture consumer"),
+                ComponentId::try_new("efc814e5-7e54-5621-a0a1-4d813f88f3f3")
+                    .expect("fixed fixture consumer"),
             )))
         })
     }
@@ -314,7 +316,10 @@ impl sdk::NativeTransformer for Producer {
 
 fn position_policy() -> Result<Arc<InputPositionPolicy>> {
     Ok(Arc::new(InputPositionPolicy::new(
-        SourceProgressKey::Source("source".into()),
+        SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        ),
         Arc::new(Partitioned),
     )?))
 }
@@ -363,7 +368,7 @@ struct Commands {
 impl sdk::NativeControlHandler for Commands {
     async fn on_message(&self, message: sdk::ControlMessage, _: sdk::ControlSender) -> Result<()> {
         let sdk::ControlNotification::Custom { kind, payload } = message.notification else {
-            anyhow::bail!("unsupported fixture command");
+            return Ok(());
         };
         match kind.as_str() {
             "expect-calls" => {
@@ -472,7 +477,7 @@ impl SinkState {
 impl sdk::NativeControlHandler for SinkState {
     async fn on_message(&self, message: sdk::ControlMessage, _: sdk::ControlSender) -> Result<()> {
         let sdk::ControlNotification::Custom { kind, payload } = message.notification else {
-            anyhow::bail!("unsupported sink fixture command");
+            return Ok(());
         };
         anyhow::ensure!(kind == "expect-handled", "unknown sink fixture command");
         let calls = self.calls()?;

@@ -25,6 +25,7 @@ use axum::{
     Json, Router,
 };
 use drasi_lib::reactions::SnapshotFetcher;
+use drasi_lib::ComponentId;
 use drasi_lib::StateStoreProvider;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -33,8 +34,8 @@ use tower::ServiceExt;
 /// Shared state for dashboard API handlers.
 #[derive(Clone)]
 pub struct ApiState {
-    reaction_id: String,
-    query_ids: Arc<Vec<String>>,
+    reaction_id: ComponentId,
+    query_ids: Arc<Vec<ComponentId>>,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     snapshot_store: QuerySnapshotStore,
     snapshot_fetcher: Option<Arc<dyn SnapshotFetcher>>,
@@ -42,14 +43,14 @@ pub struct ApiState {
 
 impl ApiState {
     pub fn new(
-        reaction_id: impl Into<String>,
-        query_ids: Vec<String>,
+        reaction_id: ComponentId,
+        query_ids: Vec<ComponentId>,
         state_store: Option<Arc<dyn StateStoreProvider>>,
         snapshot_store: QuerySnapshotStore,
         snapshot_fetcher: Option<Arc<dyn SnapshotFetcher>>,
     ) -> Self {
         Self {
-            reaction_id: reaction_id.into(),
+            reaction_id,
             query_ids: Arc::new(query_ids),
             state_store,
             snapshot_store,
@@ -67,7 +68,7 @@ impl ApiState {
         ))
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_ids(&self) -> Vec<ComponentId> {
         self.query_ids.as_ref().clone()
     }
 }
@@ -98,7 +99,7 @@ struct UpdateDashboardRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QueryListResponse {
-    query_ids: Vec<String>,
+    query_ids: Vec<ComponentId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -264,7 +265,7 @@ async fn list_queries(State(state): State<ApiState>) -> ApiResult<Json<QueryList
 
 async fn get_query_snapshot(
     State(state): State<ApiState>,
-    Path(query_id): Path<String>,
+    Path(query_id): Path<ComponentId>,
 ) -> ApiResult<Json<QuerySnapshot>> {
     // Validate query_id against the known query list to prevent SSRF.
     if !state.query_ids.contains(&query_id) {
@@ -307,8 +308,12 @@ mod tests {
     fn test_state() -> ApiState {
         let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
         ApiState::new(
-            "test-reaction",
-            vec!["query-1".to_string()],
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000088")
+                    .expect("fixture UUID"),
+            ],
             Some(store),
             QuerySnapshotStore::new(),
             None,
@@ -387,7 +392,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_queries_route() {
-        let app = router().with_state(test_state());
+        let state = test_state();
+        let expected = serde_json::json!({"queryIds": state.query_ids()});
+        let app = router().with_state(state);
         let response = app
             .oneshot(
                 Request::builder()
@@ -406,6 +413,6 @@ mod tests {
             .expect("response body should read");
         let body: serde_json::Value =
             serde_json::from_slice(&bytes).expect("response should be valid json");
-        assert_eq!(body["queryIds"][0], "query-1");
+        assert_eq!(body, expected);
     }
 }

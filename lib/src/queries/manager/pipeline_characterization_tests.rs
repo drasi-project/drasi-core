@@ -60,7 +60,7 @@ use crate::{
         ChangeReceiver, ComponentStatus, QueryResult, ResultDiff, SourceEvent, SourceEventWrapper,
         SubscriptionResponse,
     },
-    computation::v1::{progress_key, EnvelopeCodec, QueryChangeCodec},
+    computation::v1::{EnvelopeCodec, QueryChangeCodec, StreamId},
     config::{QueryInputConfig, QueryLanguage},
     indexes::config::StorageBackendRef,
     profiling::ProfilingMetadata,
@@ -68,32 +68,43 @@ use crate::{
 };
 
 const SOURCE_ID: &str = "pipeline-source";
-const QUERY_ID: &str = "pipeline-query";
+
+fn source_component_id() -> crate::ComponentId {
+    crate::ComponentId::try_new("00000000-0000-0000-0000-00000000036a").expect("fixture UUID")
+}
+
+fn query_component_id() -> crate::ComponentId {
+    crate::ComponentId::try_new("00000000-0000-0000-0000-00000000036c").expect("fixture UUID")
+}
+
+fn source_checkpoint_key() -> drasi_core_types::CheckpointKey {
+    drasi_core_types::CheckpointKey::Source(source_component_id())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TraceEvent {
     SessionBegin,
     CheckpointStaged {
-        source_id: String,
+        source_id: drasi_core_types::CheckpointKey,
         sequence: u64,
         source_position: Option<Bytes>,
     },
     SessionCommit,
     SessionRollback,
     OutboxAppendAttempt {
-        query_id: String,
+        query_id: drasi_core_types::OutputPartition,
         sequence: u64,
     },
     LiveResultsApplyAttempt {
-        query_id: String,
+        query_id: crate::ComponentId,
         mutation_count: usize,
     },
     ResultSequenceWritten {
-        query_id: String,
+        query_id: drasi_core_types::OutputPartition,
         sequence: u64,
     },
     ResultSequenceStaged {
-        query_id: String,
+        query_id: drasi_core_types::OutputPartition,
         sequence: u64,
     },
     ReactionDispatch {
@@ -120,7 +131,6 @@ impl EventTrace {
     }
 }
 
-type StoredRows = HashMap<String, BTreeMap<u64, Vec<u8>>>;
 type SortedSets = HashMap<u64, BTreeMap<OrderedFloat<f64>, isize>>;
 
 #[derive(Clone, Default)]
@@ -130,10 +140,10 @@ struct TransactionData {
     sorted_sets: SortedSets,
     index_sequence: ResultSequence,
     futures: Vec<(usize, FutureElementRef)>,
-    checkpoints: HashMap<String, SourceCheckpoint>,
-    result_sequences: HashMap<String, u64>,
-    outbox: StoredRows,
-    live_results: StoredRows,
+    checkpoints: HashMap<drasi_core_types::CheckpointKey, SourceCheckpoint>,
+    result_sequences: HashMap<drasi_core_types::OutputPartition, u64>,
+    outbox: HashMap<drasi_core_types::OutputPartition, BTreeMap<u64, Vec<u8>>>,
+    live_results: HashMap<crate::ComponentId, BTreeMap<u64, Vec<u8>>>,
 }
 
 #[derive(Default)]
@@ -141,7 +151,7 @@ struct TransactionState {
     pending: Option<TransactionData>,
     committed: TransactionData,
     config_hash: Option<u64>,
-    output_generations: HashMap<String, u64>,
+    output_generations: HashMap<drasi_core_types::OutputPartition, u64>,
 }
 
 impl TransactionState {
@@ -552,7 +562,7 @@ impl CheckpointStore for TransactionalCheckpointStore {
 
     async fn stage_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &drasi_core_types::CheckpointKey,
         sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
@@ -561,9 +571,9 @@ impl CheckpointStore for TransactionalCheckpointStore {
         state
             .stage()?
             .checkpoints
-            .insert(source_id.to_string(), checkpoint.clone());
+            .insert(source_id.clone(), checkpoint.clone());
         self.trace.record(TraceEvent::CheckpointStaged {
-            source_id: source_id.to_string(),
+            source_id: source_id.clone(),
             sequence,
             source_position: checkpoint.source_position,
         });
@@ -572,7 +582,7 @@ impl CheckpointStore for TransactionalCheckpointStore {
 
     async fn read_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &drasi_core_types::CheckpointKey,
     ) -> Result<Option<SourceCheckpoint>, IndexError> {
         Ok(self
             .state
@@ -584,7 +594,9 @@ impl CheckpointStore for TransactionalCheckpointStore {
             .cloned())
     }
 
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<drasi_core_types::CheckpointKey, SourceCheckpoint>, IndexError> {
         Ok(self.state.lock().unwrap().committed.checkpoints.clone())
     }
 
@@ -607,39 +619,48 @@ impl CheckpointStore for TransactionalCheckpointStore {
         Ok(self.state.lock().unwrap().config_hash)
     }
 
-    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(
+        &self,
+        query_id: &drasi_core_types::OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         self.state
             .lock()
             .unwrap()
             .stage()?
             .result_sequences
-            .insert(query_id.to_string(), sequence);
+            .insert(query_id.clone(), sequence);
         self.trace.record(TraceEvent::ResultSequenceStaged {
-            query_id: query_id.to_string(),
+            query_id: query_id.clone(),
             sequence,
         });
         Ok(())
     }
 
-    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn write_result_sequence(
+        &self,
+        query_id: &drasi_core_types::OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         let mut state = self.state.lock().unwrap();
         state
             .committed
             .result_sequences
-            .insert(query_id.to_string(), sequence);
+            .insert(query_id.clone(), sequence);
         if let Some(pending) = &mut state.pending {
-            pending
-                .result_sequences
-                .insert(query_id.to_string(), sequence);
+            pending.result_sequences.insert(query_id.clone(), sequence);
         }
         self.trace.record(TraceEvent::ResultSequenceWritten {
-            query_id: query_id.to_string(),
+            query_id: query_id.clone(),
             sequence,
         });
         Ok(())
     }
 
-    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(
+        &self,
+        query_id: &drasi_core_types::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         Ok(self
             .state
             .lock()
@@ -652,18 +673,21 @@ impl CheckpointStore for TransactionalCheckpointStore {
 
     async fn write_output_generation(
         &self,
-        query_id: &str,
+        query_id: &drasi_core_types::OutputPartition,
         generation: u64,
     ) -> Result<(), IndexError> {
         self.state
             .lock()
             .unwrap()
             .output_generations
-            .insert(query_id.to_string(), generation);
+            .insert(query_id.clone(), generation);
         Ok(())
     }
 
-    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_output_generation(
+        &self,
+        query_id: &drasi_core_types::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         Ok(self
             .state
             .lock()
@@ -700,9 +724,14 @@ impl RecordingOutputStore {
 
 #[async_trait]
 impl OutboxWriter for RecordingOutputStore {
-    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        query_id: &drasi_core_types::OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
         self.trace.record(TraceEvent::OutboxAppendAttempt {
-            query_id: query_id.to_string(),
+            query_id: query_id.clone(),
             sequence,
         });
         self.state
@@ -710,7 +739,7 @@ impl OutboxWriter for RecordingOutputStore {
             .unwrap()
             .stage()?
             .outbox
-            .entry(query_id.to_string())
+            .entry(query_id.clone())
             .or_default()
             .insert(sequence, data.to_vec());
         Ok(())
@@ -718,7 +747,7 @@ impl OutboxWriter for RecordingOutputStore {
 
     async fn read_from(
         &self,
-        query_id: &str,
+        query_id: &drasi_core_types::OutputPartition,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         Ok(self
@@ -737,7 +766,10 @@ impl OutboxWriter for RecordingOutputStore {
             .unwrap_or_default())
     }
 
-    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        query_id: &drasi_core_types::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         Ok(self
             .state
             .lock()
@@ -748,7 +780,7 @@ impl OutboxWriter for RecordingOutputStore {
             .and_then(|entries| entries.last_key_value().map(|(sequence, _)| *sequence)))
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &drasi_core_types::OutputPartition) -> Result<(), IndexError> {
         self.state
             .lock()
             .unwrap()
@@ -758,7 +790,11 @@ impl OutboxWriter for RecordingOutputStore {
         Ok(())
     }
 
-    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        query_id: &drasi_core_types::OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
         let mut state = self.state.lock().unwrap();
         let Some(entries) = state.stage()?.outbox.get_mut(query_id) else {
             return Ok(0);
@@ -768,7 +804,11 @@ impl OutboxWriter for RecordingOutputStore {
         Ok(previous_len - entries.len())
     }
 
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        query_id: &drasi_core_types::OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
         let mut state = self.state.lock().unwrap();
         let Some(entries) = state.stage()?.outbox.get_mut(query_id) else {
             return Ok(0);
@@ -787,11 +827,11 @@ impl OutboxWriter for RecordingOutputStore {
 impl LiveResultsWriter for RecordingOutputStore {
     async fn apply_mutations(
         &self,
-        query_id: &str,
+        query_id: &drasi_core_types::ComponentId,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         self.trace.record(TraceEvent::LiveResultsApplyAttempt {
-            query_id: query_id.to_string(),
+            query_id: query_id.clone(),
             mutation_count: mutations.len(),
         });
         if self.fail_live_results.load(Ordering::Acquire) {
@@ -801,7 +841,7 @@ impl LiveResultsWriter for RecordingOutputStore {
         let rows = state
             .stage()?
             .live_results
-            .entry(query_id.to_string())
+            .entry(query_id.clone())
             .or_default();
         for mutation in mutations {
             match mutation.data {
@@ -816,7 +856,10 @@ impl LiveResultsWriter for RecordingOutputStore {
         Ok(())
     }
 
-    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_snapshot(
+        &self,
+        query_id: &drasi_core_types::ComponentId,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         Ok(self
             .state
             .lock()
@@ -832,7 +875,7 @@ impl LiveResultsWriter for RecordingOutputStore {
             .unwrap_or_default())
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &drasi_core_types::ComponentId) -> Result<(), IndexError> {
         self.state
             .lock()
             .unwrap()
@@ -842,7 +885,10 @@ impl LiveResultsWriter for RecordingOutputStore {
         Ok(())
     }
 
-    async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
+    async fn row_count(
+        &self,
+        query_id: &drasi_core_types::ComponentId,
+    ) -> Result<usize, IndexError> {
         Ok(self
             .state
             .lock()
@@ -855,6 +901,7 @@ impl LiveResultsWriter for RecordingOutputStore {
 }
 
 struct CharacterizationBackend {
+    owner: std::sync::OnceLock<(crate::StorageScope, crate::ComponentId)>,
     trace: EventTrace,
     element_index: Arc<TransactionalIndexes>,
     result_index: Arc<TransactionalIndexes>,
@@ -872,6 +919,7 @@ impl CharacterizationBackend {
             state: state.clone(),
         });
         Self {
+            owner: std::sync::OnceLock::new(),
             trace: trace.clone(),
             element_index: indexes.clone(),
             result_index: indexes.clone(),
@@ -895,7 +943,25 @@ impl IndexBackendPlugin for CharacterizationBackend {
     fn supports_atomic_query_output(&self) -> bool {
         true
     }
-    async fn create_indexes(&self, _query_id: &str) -> Result<CreatedIndexes, IndexError> {
+    async fn create_indexes(
+        &self,
+        query_id: &drasi_core_types::ComponentId,
+    ) -> Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(&crate::StorageScope::default(), query_id)
+            .await
+    }
+
+    async fn create_scoped_indexes(
+        &self,
+        scope: &crate::StorageScope,
+        query_id: &crate::ComponentId,
+    ) -> Result<CreatedIndexes, IndexError> {
+        let owner = (scope.clone(), query_id.clone());
+        if self.owner.get_or_init(|| owner.clone()) != &owner {
+            return Err(IndexError::other(std::io::Error::other(
+                "characterization fixture has one scoped query owner",
+            )));
+        }
         Ok(CreatedIndexes {
             set: IndexSet {
                 element_index: self.element_index.clone(),
@@ -922,7 +988,7 @@ struct CharacterizationSource {
 
 impl CharacterizationSource {
     fn new(
-        id: &str,
+        id: drasi_core_types::ComponentId,
         subscription_tx: mpsc::UnboundedSender<crate::config::SourceSubscriptionSettings>,
     ) -> Self {
         Self {
@@ -940,7 +1006,7 @@ impl CharacterizationSource {
         let timestamp =
             chrono::DateTime::from_timestamp_millis(change.get_realtime() as i64).unwrap();
         let mut event = SourceEventWrapper::with_sequence(
-            self.id().to_string(),
+            self.id().clone(),
             SourceEvent::Change(change),
             timestamp,
             sequence,
@@ -956,7 +1022,7 @@ impl Source for CharacterizationSource {
     fn supports_replay(&self) -> bool {
         true
     }
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         self.base.get_id()
     }
 
@@ -1008,11 +1074,11 @@ impl Source for CharacterizationSource {
         self
     }
 
-    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_core_types::ComponentId) {
         self.base.remove_position_handle(query_id).await;
     }
 
@@ -1029,7 +1095,6 @@ struct PipelineHarness {
 impl PipelineHarness {
     async fn new(backend: Arc<CharacterizationBackend>) -> Self {
         let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
-        let source = CharacterizationSource::new(SOURCE_ID, subscription_tx);
         let core = crate::DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -1044,12 +1109,29 @@ impl PipelineHarness {
                     .clone(),
             )
             .with_id("pipeline-characterization")
+            .with_allow_external_component_ids(true)
             .with_index_provider("characterization", backend)
-            .with_source(source)
+            .with_source_factory_async(
+                drasi_core_types::ComponentName::try_new("pipeline-source")
+                    .expect("fixture component name"),
+                Some(source_component_id()),
+                true,
+                move |id| async move {
+                    Ok((
+                        CharacterizationSource::new(id, subscription_tx),
+                        HashMap::new(),
+                    ))
+                },
+            )
             .build()
             .await
             .unwrap();
-        core.start_source(SOURCE_ID).await.unwrap();
+        core.start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("pipeline-source")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         Self {
             core,
             subscription_rx,
@@ -1065,14 +1147,43 @@ impl PipelineHarness {
         config: QueryConfig,
         trace: EventTrace,
     ) -> (Arc<dyn Query>, ResultReceiver) {
-        if self.core.get_query_config(QUERY_ID).await.is_ok() {
-            self.core.update_query(QUERY_ID, config).await.unwrap();
-        } else {
-            self.core.add_query(config).await.unwrap();
+        match self
+            .core
+            .get_query_config_by_name(
+                &drasi_core_types::ComponentName::try_new("pipeline-query")
+                    .expect("fixture component name"),
+            )
+            .await
+        {
+            Ok(existing) => {
+                assert_eq!(
+                    serde_json::to_value(existing).unwrap(),
+                    serde_json::to_value(config.with_assigned_id(query_component_id())).unwrap(),
+                    "this fixture restarts the same definition; configuration changes need an update plan"
+                );
+            }
+            Err(error)
+                if matches!(
+                    error.classification(),
+                    crate::DrasiError::ComponentNotFound { .. }
+                ) =>
+            {
+                self.core.add_query(config).await.unwrap();
+            }
+            Err(error) => panic!("cannot read the accepted query definition: {error:#}"),
         }
-        self.core.start_query(QUERY_ID).await.unwrap();
         self.core
-            .computation_component(QUERY_ID)
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("pipeline-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
+        self.core
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("pipeline-query")
+                    .expect("fixture component name"),
+            )
             .unwrap()
             .wait_started()
             .await
@@ -1080,10 +1191,20 @@ impl PipelineHarness {
         let query = self
             .core
             .query_manager()
-            .get_query_instance(QUERY_ID)
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("pipeline-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        let receiver = query.subscribe("recording".into()).await.unwrap().receiver;
+        let receiver = query
+            .subscribe(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000362")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .receiver;
         (query, ResultReceiver { receiver, trace })
     }
 
@@ -1095,7 +1216,14 @@ impl PipelineHarness {
     }
 
     async fn inject(&self, change: SourceChange, sequence: u64, source_position: Bytes) {
-        let source = self.core.source_instance(SOURCE_ID).await.unwrap();
+        let source = self
+            .core
+            .source_instance(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036a")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
         source
             .as_any()
             .downcast_ref::<CharacterizationSource>()
@@ -1122,12 +1250,14 @@ impl ResultReceiver {
 
 fn query_config() -> QueryConfig {
     QueryConfig {
-        id: QUERY_ID.to_string(),
+        id: Some(query_component_id()),
+        name: drasi_core_types::ComponentName::try_new("pipeline-query")
+            .expect("fixture component name"),
         query: "MATCH (n:Person) RETURN n.name AS name".to_string(),
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
         inputs: vec![QueryInputConfig {
-            component: SOURCE_ID.to_string(),
+            component: crate::config::ComponentReference::by_id(source_component_id()),
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
@@ -1199,14 +1329,22 @@ async fn strict_restart_keeps_sequence_only_checkpoint_output() {
     let backend = Arc::new(CharacterizationBackend::new(false));
     let harness = PipelineHarness::new(backend.clone()).await;
     let (query, mut receiver) = harness.start_query(backend.trace.clone()).await;
-    let source = harness.core.source_instance(SOURCE_ID).await.unwrap();
+    let source = harness
+        .core
+        .source_instance(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036a")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     let base = &source
         .as_any()
         .downcast_ref::<CharacterizationSource>()
         .unwrap()
         .base;
     base.dispatch_event(SourceEventWrapper::with_sequence(
-        SOURCE_ID.into(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036a")
+            .expect("fixture UUID"),
         SourceEvent::Change(person_insert("one", "Alice", 1000)),
         chrono::Utc::now(),
         1,
@@ -1217,7 +1355,7 @@ async fn strict_restart_keeps_sequence_only_checkpoint_output() {
     assert_eq!(next_result(&mut receiver).await.sequence, 1);
     let checkpoint = backend
         .checkpoint_store
-        .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
+        .read_checkpoint(&source_checkpoint_key())
         .await
         .unwrap()
         .unwrap();
@@ -1229,7 +1367,10 @@ async fn strict_restart_keeps_sequence_only_checkpoint_output() {
     query.start().await.unwrap();
     harness
         .core
-        .computation_component(QUERY_ID)
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("pipeline-query")
+                .expect("fixture component name"),
+        )
         .unwrap()
         .wait_started()
         .await
@@ -1241,18 +1382,22 @@ async fn strict_restart_keeps_sequence_only_checkpoint_output() {
     assert!(
         !backend.trace.snapshot().iter().any(|event| matches!(
             event, TraceEvent::CheckpointStaged { source_id, sequence: 0, .. }
-                if source_id == "\0computation:query-bootstrap:v1"
+                if source_id.metadata_name() == Some("\0computation:query-bootstrap:v1")
         )),
         "a replay-only restart must not mark a completed bootstrap incomplete"
     );
 
     let mut output = query
-        .subscribe("after-restart".into())
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036b")
+                .expect("fixture UUID"),
+        )
         .await
         .unwrap()
         .receiver;
     base.dispatch_event(SourceEventWrapper::with_sequence(
-        SOURCE_ID.into(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036a")
+            .expect("fixture UUID"),
         SourceEvent::Change(person_insert("two", "Bob", 2000)),
         chrono::Utc::now(),
         2,
@@ -1279,7 +1424,10 @@ async fn cursorless_reconstruction_bootstraps_with_explicit_reset_authorization(
         let mut harness = PipelineHarness::new(backend.clone()).await;
         harness
             .core
-            .source_instance(SOURCE_ID)
+            .source_instance(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036a")
+                    .expect("fixture UUID"),
+            )
             .await
             .unwrap()
             .set_bootstrap_provider(Box::new(CountingBootstrap(bootstraps.clone())))
@@ -1295,7 +1443,7 @@ async fn cursorless_reconstruction_bootstraps_with_explicit_reset_authorization(
         assert_eq!(bootstraps.load(Ordering::Acquire), expected);
         assert!(backend
             .checkpoint_store
-            .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
+            .read_checkpoint(&source_checkpoint_key())
             .await
             .unwrap()
             .is_none());
@@ -1354,7 +1502,7 @@ fn assert_commit_precedes_dispatch(trace: &[TraceEvent], sequence: u64) {
 }
 
 fn assert_native_evaluation_codec() {
-    use crate::computation::v1::{ComponentId, QueryOutputMetadata, StreamId, SystemMetadata};
+    use crate::computation::v1::{QueryOutputMetadata, StreamId, SystemMetadata};
     let contexts = vec![
         QueryPartEvaluationContext::Adding {
             after: variables(&[("kind", VariableValue::String("added".into()))]),
@@ -1386,14 +1534,20 @@ fn assert_native_evaluation_codec() {
     ]);
     let output = QueryChangeCodec::encode_evaluation(
         None,
-        &ComponentId::try_new("query-a").unwrap(),
+        &crate::test_helpers::component_id(120),
         SystemMetadata::new(StreamId::try_new("query-a/out").unwrap(), 1),
         &crate::computation::v1::ResultNodeProjector::try_new("test/pipeline/query-a", None)
             .unwrap(),
         &contexts,
         QueryOutputMetadata {
-            query_id: "query-a".into(),
-            source_id: Some("source-a".into()),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000078",
+            )
+            .expect("fixture UUID"),
+            input_origin: Some(drasi_computation_contracts::QueryInputOrigin::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b5")
+                    .expect("fixture UUID"),
+            )),
             timestamp: chrono::Utc::now(),
             metadata: metadata.clone(),
             profiling: Some(ProfilingMetadata::default()),
@@ -1402,9 +1556,20 @@ fn assert_native_evaluation_codec() {
     .unwrap()
     .unwrap();
     let result = QueryChangeCodec::to_legacy_result(&output).unwrap();
-    assert_eq!(result.query_id, "query-a");
+    assert_eq!(
+        result.query_id,
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000078")
+            .expect("fixture UUID")
+    );
     assert_eq!(result.sequence, 1);
-    assert_eq!(result.metadata, metadata);
+    let mut expected_metadata = metadata;
+    expected_metadata.insert(
+        "input_origin".into(),
+        json!(drasi_computation_contracts::QueryInputOrigin::Source(
+            crate::test_helpers::component_id(181)
+        )),
+    );
+    assert_eq!(result.metadata, expected_metadata);
     assert_eq!(result.profiling, Some(ProfilingMetadata::default()));
     assert_eq!(
         result.results,
@@ -1456,20 +1621,38 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         assert_eq!(
             backend
                 .output_store
-                .read_from(QUERY_ID, 0)
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000036c"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
                 .await
                 .unwrap()
                 .len(),
             sequence as usize - 1
         );
         assert_eq!(
-            backend.output_store.row_count(QUERY_ID).await.unwrap(),
+            backend
+                .output_store
+                .row_count(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                        .expect("fixture UUID")
+                )
+                .await
+                .unwrap(),
             sequence as usize - 1
         );
         assert_eq!(
             backend
                 .checkpoint_store
-                .read_result_sequence(QUERY_ID)
+                .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .unwrap()
                 .unwrap_or(0),
@@ -1482,7 +1665,12 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         gate.release.notify_one();
         let result = next_result(&mut receiver).await;
         assert_eq!(result.sequence, sequence);
-        assert_eq!(result.metadata["source_id"], json!(SOURCE_ID));
+        assert_eq!(
+            result.metadata["input_origin"],
+            json!(drasi_computation_contracts::QueryInputOrigin::Source(
+                source_component_id()
+            ))
+        );
         assert_eq!(result.metadata["processed_by"], json!("drasi-core"));
         assert_eq!(result.metadata["result_count"], json!(1));
         assert_commit_precedes_dispatch(&backend.trace.snapshot(), sequence);
@@ -1495,7 +1683,10 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         assert_eq!(
             backend
                 .checkpoint_store
-                .read_result_sequence(QUERY_ID)
+                .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .unwrap(),
             Some(sequence)
@@ -1515,7 +1706,10 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(initial_subscription.resume_from, None);
     let initial_result_sequence = backend
         .checkpoint_store
-        .read_result_sequence(QUERY_ID)
+        .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                .expect("fixture UUID"),
+        ))
         .await
         .unwrap();
     assert_eq!(initial_result_sequence.unwrap_or(0), 0);
@@ -1530,9 +1724,10 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             first_position.clone(),
         )
         .await;
-    crate::test_helpers::wait_for_component_status(
+    crate::test_helpers::wait_for_component_status_by_id(
         &mut events,
-        QUERY_ID,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+            .expect("fixture UUID"),
         ComponentStatus::Error,
         Duration::from_secs(5),
     )
@@ -1542,20 +1737,23 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         "failed output must not be dispatched"
     );
     let source_component = crate::computation::v1::ComputationPipelineBuilder::source_component_id(
-        QUERY_ID, SOURCE_ID,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036a")
+            .expect("fixture UUID"),
     )
     .unwrap();
-    let transport_key = format!(
-        "\0computation:input-transport:v1:{}",
-        progress_key(&format!("{source_component}/out"), None)
-    );
+    let transport_key = drasi_core_types::CheckpointKey::Stream(
+        StreamId::try_new(format!("{source_component}/out")).unwrap(),
+    )
+    .associated("\0computation:input-transport:v1:");
 
     assert_eq!(
         backend.trace.snapshot(),
         vec![
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
-                source_id: progress_key("", Some(SOURCE_ID)),
+                source_id: source_checkpoint_key(),
                 sequence: 1,
                 source_position: Some(first_position.clone()),
             },
@@ -1565,11 +1763,11 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 source_position: None,
             },
             TraceEvent::OutboxAppendAttempt {
-                query_id: QUERY_ID.to_string(),
+                query_id: drasi_core_types::OutputPartition::Component(query_component_id()),
                 sequence: 1,
             },
             TraceEvent::LiveResultsApplyAttempt {
-                query_id: QUERY_ID.to_string(),
+                query_id: query_component_id(),
                 mutation_count: 1,
             },
             TraceEvent::SessionRollback,
@@ -1598,7 +1796,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
+            .read_checkpoint(&source_checkpoint_key())
             .await
             .unwrap(),
         None,
@@ -1607,7 +1805,13 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert!(
         backend
             .output_store
-            .read_from(QUERY_ID, 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .unwrap()
             .is_empty(),
@@ -1616,7 +1820,10 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert!(
         backend
             .output_store
-            .read_snapshot(QUERY_ID)
+            .read_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            )
             .await
             .unwrap()
             .is_empty(),
@@ -1625,7 +1832,10 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_result_sequence(QUERY_ID)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            ))
             .await
             .unwrap(),
         initial_result_sequence,
@@ -1671,7 +1881,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
+            .read_checkpoint(&source_checkpoint_key())
             .await
             .unwrap(),
         Some(SourceCheckpoint::new(1, Some(first_position.clone())))
@@ -1679,12 +1889,25 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_result_sequence(QUERY_ID)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            ))
             .await
             .unwrap(),
         Some(1)
     );
-    let persisted = backend.output_store.read_from(QUERY_ID, 0).await.unwrap();
+    let persisted = backend
+        .output_store
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
+        .await
+        .unwrap();
     assert_eq!(persisted.len(), 1);
     let persisted_result = decode_result(&persisted[0].1);
     assert_eq!(persisted_result.sequence, recovered.sequence);
@@ -1779,7 +2002,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             TraceEvent::SessionCommit,
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
-                source_id: progress_key("", Some(SOURCE_ID)),
+                source_id: source_checkpoint_key(),
                 sequence: 2,
                 source_position: Some(Bytes::from_static(b"position-3")),
             },
@@ -1789,26 +2012,30 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 source_position: None,
             },
             TraceEvent::OutboxAppendAttempt {
-                query_id: QUERY_ID.to_string(),
+                query_id: drasi_core_types::OutputPartition::Component(query_component_id()),
                 sequence: 2,
             },
             TraceEvent::LiveResultsApplyAttempt {
-                query_id: QUERY_ID.to_string(),
+                query_id: query_component_id(),
                 mutation_count: 1,
             },
             TraceEvent::ResultSequenceStaged {
-                query_id: QUERY_ID.to_string(),
+                query_id: drasi_core_types::OutputPartition::Component(query_component_id()),
                 sequence: 2,
             },
             TraceEvent::CheckpointStaged {
-                source_id: "\0computation:query-delivery-sequence:v1".into(),
+                source_id: drasi_core_types::CheckpointKey::Metadata(
+                    "\0computation:query-delivery-sequence:v1".into(),
+                ),
                 sequence: 2,
                 source_position: None,
             },
             TraceEvent::SessionCommit,
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
-                source_id: "\0computation:query-delivered:v1".into(),
+                source_id: drasi_core_types::CheckpointKey::Metadata(
+                    "\0computation:query-delivered:v1".into(),
+                ),
                 sequence: 2,
                 source_position: None,
             },
@@ -1819,7 +2046,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
+            .read_checkpoint(&source_checkpoint_key())
             .await
             .unwrap(),
         Some(SourceCheckpoint::new(
@@ -1830,7 +2057,10 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_result_sequence(QUERY_ID)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            ))
             .await
             .unwrap(),
         Some(2)
@@ -1838,7 +2068,13 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .output_store
-            .read_from(QUERY_ID, 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .unwrap()
             .into_iter()
@@ -1846,7 +2082,17 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert_eq!(backend.output_store.row_count(QUERY_ID).await.unwrap(), 2);
+    assert_eq!(
+        backend
+            .output_store
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        2
+    );
 
     restarted_query.stop().await.unwrap();
     harness.core.shutdown().await.unwrap();
@@ -1904,20 +2150,32 @@ async fn due_future_output_is_dispatched_after_core_commit() {
     );
     assert!(backend
         .output_store
-        .read_from(QUERY_ID, 0)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
         .await
         .unwrap()
         .is_empty());
     assert!(backend
         .output_store
-        .read_snapshot(QUERY_ID)
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                .expect("fixture UUID")
+        )
         .await
         .unwrap()
         .is_empty());
     assert_eq!(
         backend
             .checkpoint_store
-            .read_result_sequence(QUERY_ID)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            ))
             .await
             .unwrap()
             .unwrap_or(0),
@@ -1927,7 +2185,12 @@ async fn due_future_output_is_dispatched_after_core_commit() {
     gate.release.notify_one();
     let dispatched = next_result(&mut result_rx).await;
     assert_eq!(dispatched.sequence, 1);
-    assert_eq!(dispatched.metadata["source_id"], json!(SOURCE_ID));
+    assert_eq!(
+        dispatched.metadata["input_origin"],
+        json!(drasi_computation_contracts::QueryInputOrigin::Scheduled(
+            ElementReference::new(SOURCE_ID, "order-1")
+        ))
+    );
     assert_commit_precedes_dispatch(&backend.trace.snapshot(), 1);
     assert!(backend
         .future_queue
@@ -1935,14 +2198,27 @@ async fn due_future_output_is_dispatched_after_core_commit() {
         .await
         .unwrap()
         .is_none());
-    let persisted = backend.output_store.read_from(QUERY_ID, 0).await.unwrap();
+    let persisted = backend
+        .output_store
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
+        .await
+        .unwrap();
     assert_eq!(persisted.len(), 1);
     assert_eq!(persisted[0].0, 1);
     assert_eq!(decode_result(&persisted[0].1).results, dispatched.results);
     assert_eq!(
         backend
             .checkpoint_store
-            .read_result_sequence(QUERY_ID)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            ))
             .await
             .unwrap(),
         Some(1)
@@ -1950,6 +2226,16 @@ async fn due_future_output_is_dispatched_after_core_commit() {
     let snapshot = query.fetch_snapshot().await.unwrap();
     assert_eq!(snapshot.as_of_sequence, 1);
     assert_eq!(snapshot.to_vec(), vec![json!({"value": 2.0})]);
-    assert_eq!(backend.output_store.row_count(QUERY_ID).await.unwrap(), 1);
+    assert_eq!(
+        backend
+            .output_store
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036c")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        1
+    );
     harness.core.shutdown().await.unwrap();
 }

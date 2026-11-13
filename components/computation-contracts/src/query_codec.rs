@@ -38,7 +38,7 @@ use crate::{
 
 use super::{
     ChangeEnvelope, ChangeOperation, ChangeOrdering, ChangeSet, ChangeSetId, ComponentId,
-    ContextEntry, ContextValue, ContractError, Record, RecordId, Schema, SystemMetadata,
+    ContextEntry, ContextValue, ContractError, Record, RecordId, Schema, StreamId, SystemMetadata,
     UpdateSemantics,
 };
 
@@ -80,11 +80,20 @@ impl From<GraphCodecError> for QueryCodecError {
     }
 }
 
+/// The input that caused query evaluation, without conflating data namespaces
+/// or generic producer streams with source component identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueryInputOrigin {
+    Source(ComponentId),
+    Stream(StreamId),
+    Scheduled(drasi_core_types::models::ElementReference),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryOutputMetadata {
-    pub query_id: String,
-    pub source_id: Option<String>,
+    pub query_id: ComponentId,
+    pub input_origin: Option<QueryInputOrigin>,
     pub timestamp: DateTime<Utc>,
     pub metadata: HashMap<String, serde_json::Value>,
     pub profiling: Option<ProfilingMetadata>,
@@ -142,7 +151,7 @@ struct ProjectionScope {
     version: u32,
     change_set_namespace: String,
     change_set_value: Vec<u8>,
-    query_id: String,
+    query_id: ComponentId,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -354,10 +363,18 @@ impl QueryChangeCodec {
             .collect())
     }
 
+    fn current_query_component(envelope: &ChangeEnvelope) -> Result<ComponentId, QueryCodecError> {
+        Self::current_entries(envelope)?
+            .into_iter()
+            .find(|entry| entry.key() == QUERY_METADATA)
+            .map(|entry| entry.contributor().to_owned())
+            .ok_or(QueryCodecError::InvalidRow)
+    }
+
     fn projection_entry(
         component: &ComponentId,
         id: &ChangeSetId,
-        query_id: &str,
+        query_id: &ComponentId,
         projector: &ResultNodeProjector,
         operations: &[ResultOperationMetadata],
     ) -> Result<ContextEntry, QueryCodecError> {
@@ -436,7 +453,7 @@ impl QueryChangeCodec {
     /// The explicit output scope is required even though no rows are carried.
     pub fn progress_envelope(
         projector: &ResultNodeProjector,
-        query_id: &str,
+        query_id: &ComponentId,
         query_sequence: u64,
         generation: u64,
         component: &ComponentId,
@@ -463,7 +480,7 @@ impl QueryChangeCodec {
     /// scope, keyed by its own identity.
     pub fn snapshot_envelope(
         projector: &ResultNodeProjector,
-        query_id: &str,
+        query_id: &ComponentId,
         snapshot: &super::QueryResultSnapshot,
         component: &ComponentId,
         system: SystemMetadata,
@@ -511,7 +528,7 @@ impl QueryChangeCodec {
 
     fn recovery_envelope(
         projector: &ResultNodeProjector,
-        query_id: &str,
+        query_id: &ComponentId,
         query_sequence: u64,
         generation: u64,
         component: &ComponentId,
@@ -538,7 +555,7 @@ impl QueryChangeCodec {
         let mut envelope = ChangeEnvelope::new(id, changes, system);
         let metadata = QueryOutputMetadata {
             query_id: query_id.to_owned(),
-            source_id: None,
+            input_origin: None,
             timestamp: Utc::now(),
             metadata: HashMap::new(),
             profiling: None,
@@ -578,14 +595,15 @@ impl QueryChangeCodec {
 
     /// The positive output sequence contributed by this query's own component.
     pub fn output_sequence(envelope: &ChangeEnvelope) -> Result<u64, QueryCodecError> {
-        let query = Self::metadata(envelope)?.query_id;
+        Self::metadata(envelope)?;
+        let query = Self::current_query_component(envelope)?;
         let entries = Self::current_entries(envelope)?;
         let entry = entries
             .iter()
             .find(|entry| entry.key() == QUERY_SEQUENCE)
             .ok_or(QueryCodecError::InvalidRow)?;
         match entry.value() {
-            ContextValue::Unsigned(sequence) if sequence > 0 && entry.contributor() == query => {
+            ContextValue::Unsigned(sequence) if sequence > 0 && entry.contributor() == &query => {
                 Ok(sequence)
             }
             _ => Err(QueryCodecError::InvalidRow),
@@ -620,7 +638,7 @@ impl QueryChangeCodec {
             return Err(QueryCodecError::InvalidRow);
         };
         let projector =
-            ResultNodeProjector::try_new(&metadata.reference.source_id, Some(&**label))?;
+            ResultNodeProjector::try_new(&metadata.reference.namespace, Some(&**label))?;
         Self::decode_row_in(&projector, record)
     }
 
@@ -774,7 +792,8 @@ impl QueryChangeCodec {
     pub fn without_post_commit_profiling(
         envelope: &ChangeEnvelope,
     ) -> Result<ChangeEnvelope, QueryCodecError> {
-        let query = Self::metadata(envelope)?.query_id;
+        Self::metadata(envelope)?;
+        let query = Self::current_query_component(envelope)?;
         let mut current = true;
         let mut entries: Vec<_> = envelope
             .annotations()
@@ -784,7 +803,7 @@ impl QueryChangeCodec {
                     current = false;
                 }
                 !(current
-                    && entry.contributor() == query
+                    && entry.contributor() == &query
                     && matches!(entry.key(), QUERY_CORE_RETURN_NS | QUERY_SEND_NS))
             })
             .collect();
@@ -955,11 +974,11 @@ impl QueryChangeCodec {
         envelope: &ChangeEnvelope,
     ) -> Result<QueryOutputMetadata, QueryCodecError> {
         let mut metadata = Self::metadata(envelope)?;
-        if let Some(source) = &metadata.source_id {
+        if let Some(origin) = &metadata.input_origin {
             metadata
                 .metadata
-                .entry("source_id".into())
-                .or_insert_with(|| serde_json::json!(source));
+                .entry("input_origin".into())
+                .or_insert_with(|| serde_json::json!(origin));
         }
         metadata
             .metadata
@@ -981,7 +1000,7 @@ impl QueryChangeCodec {
             &results,
             typed_change::QueryEnvelopeMetadata::new(
                 metadata.query_id,
-                metadata.source_id.map(Arc::from),
+                metadata.input_origin,
                 Self::query_sequence(envelope)?,
                 metadata.timestamp,
                 metadata.metadata,
@@ -1001,6 +1020,22 @@ mod test_support {
     use crate::StreamId;
     use drasi_core_types::evaluation::variable_value::VariableValue;
 
+    pub(super) const SOURCE_ID: &str = "5c3e49cc-32f8-5b75-888d-30b75b572221";
+
+    pub(super) fn component(value: &str) -> ComponentId {
+        let value = match value {
+            "foreign" => "00000000-0000-0000-0000-000000000101",
+            "query" => "00000000-0000-0000-0000-000000000102",
+            "upstream" => "00000000-0000-0000-0000-000000000103",
+            "replay" => "00000000-0000-0000-0000-000000000104",
+            "another-query" => "00000000-0000-0000-0000-000000000105",
+            "fallback" => "00000000-0000-0000-0000-000000000106",
+            "downstream" => "00000000-0000-0000-0000-0000000002d0",
+            other => other,
+        };
+        ComponentId::try_new(value).expect("explicit fixture component ID")
+    }
+
     pub(super) fn projector(dataset: &str) -> ResultNodeProjector {
         ResultNodeProjector::try_new(dataset, Some("Comfort")).unwrap()
     }
@@ -1018,8 +1053,11 @@ mod test_support {
 
     pub(super) fn metadata(query: &str) -> QueryOutputMetadata {
         QueryOutputMetadata {
-            query_id: query.into(),
-            source_id: Some("source".into()),
+            query_id: component(query),
+            input_origin: Some(crate::QueryInputOrigin::Source(
+                drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                    .expect("fixture UUID"),
+            )),
             timestamp: DateTime::from_timestamp_millis(1_000).unwrap(),
             metadata: HashMap::new(),
             profiling: None,
@@ -1041,7 +1079,7 @@ mod test_support {
     ) -> ChangeEnvelope {
         QueryChangeCodec::encode_evaluation(
             input,
-            &ComponentId::try_new(query).unwrap(),
+            &component(query),
             system(&format!("{query}/out"), 1),
             projector,
             results,
@@ -1141,11 +1179,12 @@ mod recovery_envelope_tests {
 
     #[test]
     fn progress_envelope_is_distinct_from_snapshot_and_preserves_query_position() {
-        let component = ComponentId::try_new("replay").unwrap();
+        let component = ComponentId::try_new("ac549db7-e194-589d-9573-7f557d6495cf").unwrap();
         let scope = projector("scope/replay");
         let envelope = QueryChangeCodec::progress_envelope(
             &scope,
-            "query",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
             42,
             9,
             &component,
@@ -1169,7 +1208,8 @@ mod recovery_envelope_tests {
         assert_eq!(QueryChangeCodec::query_generation(&envelope).unwrap(), 9);
         assert_eq!(
             QueryChangeCodec::metadata(&envelope).unwrap().query_id,
-            "query"
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID")
         );
         assert!(QueryChangeCodec::to_legacy_result(&envelope).is_err());
 
@@ -1185,7 +1225,8 @@ mod recovery_envelope_tests {
 
         let snapshot = QueryChangeCodec::snapshot_envelope(
             &scope,
-            "query",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
             &QueryResultSnapshot {
                 projector: scope.clone(),
                 rows: im::HashMap::new(),
@@ -1204,7 +1245,7 @@ mod recovery_envelope_tests {
 
     #[test]
     fn published_query_envelopes_use_producer_sequence_and_keep_business_time() {
-        let component = ComponentId::try_new("replay").unwrap();
+        let component = ComponentId::try_new("ac549db7-e194-589d-9573-7f557d6495cf").unwrap();
         let scope = projector("scope/replay");
         let business_time = DateTime::from_timestamp_millis(2_000).unwrap();
         let supplied = |sequence| {
@@ -1223,12 +1264,20 @@ mod recovery_envelope_tests {
         )
         .unwrap()
         .unwrap();
-        let progress =
-            QueryChangeCodec::progress_envelope(&scope, "replay", 2, 1, &component, supplied(2))
-                .unwrap();
+        let progress = QueryChangeCodec::progress_envelope(
+            &scope,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002cf")
+                .expect("fixture UUID"),
+            2,
+            1,
+            &component,
+            supplied(2),
+        )
+        .unwrap();
         let snapshot = QueryChangeCodec::snapshot_envelope(
             &scope,
-            "replay",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002cf")
+                .expect("fixture UUID"),
             &QueryResultSnapshot {
                 projector: scope.clone(),
                 rows: im::HashMap::new(),
@@ -1268,11 +1317,12 @@ mod recovery_envelope_tests {
 
     #[test]
     fn empty_snapshot_keeps_its_explicit_scope_and_rows_use_common_graph_records() {
-        let component = ComponentId::try_new("replay").unwrap();
+        let component = ComponentId::try_new("ac549db7-e194-589d-9573-7f557d6495cf").unwrap();
         let scope = projector("scope/a");
         let empty = QueryChangeCodec::snapshot_envelope(
             &scope,
-            "query",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
             &QueryResultSnapshot {
                 projector: scope.clone(),
                 rows: im::HashMap::new(),
@@ -1298,7 +1348,8 @@ mod recovery_envelope_tests {
         };
         let envelope = QueryChangeCodec::snapshot_envelope(
             &scope,
-            "query",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
             &snapshot,
             &component,
             system("replay/out", 2),
@@ -1337,13 +1388,14 @@ mod recovery_envelope_tests {
 
     #[test]
     fn snapshot_rejects_rows_outside_the_explicit_scope_or_under_the_wrong_key() {
-        let component = ComponentId::try_new("replay").unwrap();
+        let component = ComponentId::try_new("ac549db7-e194-589d-9573-7f557d6495cf").unwrap();
         let scope = projector("scope/a");
         let other = projector("scope/b");
         let build = |rows| {
             QueryChangeCodec::snapshot_envelope(
                 &scope,
-                "query",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
                 &QueryResultSnapshot {
                     projector: scope.clone(),
                     rows,
@@ -1409,17 +1461,13 @@ mod projection_tests {
         SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("db", "n1"),
+                    reference: ElementReference::new(SOURCE_ID, "n1"),
                     labels: Arc::from([Arc::from("Person")]),
                     effective_from: 5,
                 },
                 properties: ElementPropertyMap::new(),
             },
         }
-    }
-
-    fn component(name: &str) -> ComponentId {
-        ComponentId::try_new(name).unwrap()
     }
 
     #[test]
@@ -1475,7 +1523,7 @@ mod projection_tests {
             panic!("a query row is one ordinary graph node insert");
         };
         assert_eq!(metadata.labels.as_ref(), [Arc::from("Comfort")]);
-        assert_eq!(metadata.reference.source_id.as_ref(), "scope/a");
+        assert_eq!(metadata.reference.namespace.as_ref(), "scope/a");
         assert!(GraphChangeCodec::decode_changes(&source).is_ok());
     }
 
@@ -1626,7 +1674,7 @@ mod projection_tests {
         assert_eq!(before.image(), RecordImage::Full);
 
         let legacy = QueryChangeCodec::to_legacy_result(&envelope).unwrap();
-        assert_eq!(legacy.query_id, "query");
+        assert_eq!(legacy.query_id, component("query"));
         assert_eq!(legacy.results.len(), 4);
     }
 
@@ -1678,7 +1726,7 @@ mod projection_tests {
         assert_eq!(QueryChangeCodec::query_generation(&again).unwrap(), 5);
         assert_eq!(
             QueryChangeCodec::metadata(&again).unwrap().query_id,
-            "upstream"
+            component("upstream")
         );
 
         let derived = GraphChangeCodec::derive_changes(
@@ -1706,7 +1754,8 @@ mod projection_tests {
         );
         assert_eq!(
             QueryChangeCodec::metadata(&downstream).unwrap().query_id,
-            "downstream"
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002d0")
+                .expect("fixture UUID")
         );
         assert_eq!(
             QueryChangeCodec::query_generation(&downstream).unwrap(),
@@ -1727,7 +1776,10 @@ mod projection_tests {
                     QueryChangeCodec::projection_entry(
                         &component("query"),
                         envelope.changes().id(),
-                        "query",
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002e",
+                        )
+                        .expect("fixture UUID"),
                         &scope,
                         &operations,
                     )
@@ -1780,7 +1832,10 @@ mod projection_tests {
                 version: 2,
                 change_set_namespace: envelope.changes().id().namespace().to_owned(),
                 change_set_value: envelope.changes().id().value().to_vec(),
-                query_id: "query".into(),
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000002e",
+                )
+                .expect("fixture UUID"),
             },
             dataset: "scope/a".into(),
             label: "Comfort".into(),
@@ -1926,7 +1981,8 @@ mod projection_tests {
                 QueryChangeCodec::projection_entry(
                     &component("query"),
                     envelope.changes().id(),
-                    "query",
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
                     &scope,
                     &operations,
                 )
@@ -1957,7 +2013,7 @@ mod profiling_tests {
         query_metadata.profiling = profiling;
         QueryChangeCodec::encode_evaluation(
             input,
-            &ComponentId::try_new(query).unwrap(),
+            &component(query),
             system(&format!("{query}/out"), 1),
             &projector(&format!("{query}/dataset")),
             &[QueryPartEvaluationContext::Adding {
@@ -1987,7 +2043,7 @@ mod profiling_tests {
         use crate::output_identity::{Candidate, Producer};
         use crate::{EnvelopeCodec, GraphProducerIdentity, GraphProducerProgress};
 
-        let query = ComponentId::try_new("query").unwrap();
+        let query = ComponentId::try_new("63d14bfc-2827-577e-aed6-d4e1f755df25").unwrap();
         let mut stored = output(None, query.as_str(), None);
         let identity = GraphProducerIdentity::new(
             "instance".into(),
@@ -2009,7 +2065,7 @@ mod profiling_tests {
         assert_eq!(saved.sequence, retry.sequence);
         assert_eq!(saved.digest, retry.digest);
 
-        let downstream = ComponentId::try_new("downstream").unwrap();
+        let downstream = ComponentId::try_new("56f1fc31-56d0-51eb-a9ae-d1f2b17d0899").unwrap();
         let mut derived = output(Some(&live), downstream.as_str(), None);
         let identity = GraphProducerIdentity::new(
             "instance".into(),
@@ -2040,7 +2096,10 @@ mod profiling_tests {
         let original = metadata_bytes(&envelope);
         let expected = HashMap::from([
             ("preserved".into(), serde_json::json!(true)),
-            ("source_id".into(), serde_json::json!("source")),
+            (
+                "input_origin".into(),
+                serde_json::json!({"Source": SOURCE_ID}),
+            ),
             ("processed_by".into(), serde_json::json!("drasi-core")),
             ("result_count".into(), serde_json::json!(1)),
         ]);
@@ -2078,7 +2137,7 @@ mod profiling_tests {
         let original_bytes = metadata_bytes(&staged);
         QueryChangeCodec::append_post_commit_profiling(
             &mut live,
-            &ComponentId::try_new("query").unwrap(),
+            &ComponentId::try_new("63d14bfc-2827-577e-aed6-d4e1f755df25").unwrap(),
             16,
             17,
         )
@@ -2114,7 +2173,7 @@ mod profiling_tests {
 
     #[test]
     fn current_metadata_fences_inherited_profiling_and_newest_local_values_win() {
-        let contributor = ComponentId::try_new("upstream").unwrap();
+        let contributor = ComponentId::try_new("c33d6cee-26e4-5e8a-ab74-05b9788dc561").unwrap();
         let mut upstream = output(None, "upstream", None);
         QueryChangeCodec::append_post_commit_profiling(&mut upstream, &contributor, 10, 20)
             .unwrap();
@@ -2134,7 +2193,7 @@ mod profiling_tests {
             .unwrap()
             .profiling
             .is_none());
-        let contributor = ComponentId::try_new("downstream").unwrap();
+        let contributor = ComponentId::try_new("56f1fc31-56d0-51eb-a9ae-d1f2b17d0899").unwrap();
         downstream
             .append_annotation(
                 ContextEntry::try_new(
@@ -2178,8 +2237,12 @@ mod profiling_tests {
                 let mut envelope = output(None, "query", None);
                 envelope
                     .append_annotation(
-                        ContextEntry::try_new(ComponentId::try_new("query").unwrap(), key, value)
-                            .unwrap(),
+                        ContextEntry::try_new(
+                            ComponentId::try_new("63d14bfc-2827-577e-aed6-d4e1f755df25").unwrap(),
+                            key,
+                            value,
+                        )
+                        .unwrap(),
                     )
                     .unwrap();
                 assert!(matches!(

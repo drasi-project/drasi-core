@@ -97,9 +97,9 @@ impl MockSource {
     ///
     /// let source = MockSource::new("my-mock-source", config)?;
     /// ```
-    pub fn new(id: impl Into<String>, config: MockSourceConfig) -> Result<Self> {
+    pub fn new(id: drasi_lib::ComponentId, config: MockSourceConfig) -> Result<Self> {
         config.validate()?;
-        let id = id.into();
+        let id = id.clone();
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -127,13 +127,13 @@ impl MockSource {
     /// - `config.interval_ms` is 0
     /// - `config.data_type` is `SensorReading` with `sensor_count` of 0
     pub fn with_dispatch(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         config: MockSourceConfig,
         dispatch_mode: Option<DispatchMode>,
         dispatch_buffer_capacity: Option<usize>,
     ) -> Result<Self> {
         config.validate()?;
-        let id = id.into();
+        let id = id.clone();
         let mut params = SourceBaseParams::new(id);
         if let Some(mode) = dispatch_mode {
             params = params.with_dispatch_mode(mode);
@@ -152,7 +152,7 @@ impl MockSource {
 
 #[async_trait]
 impl Source for MockSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -343,7 +343,8 @@ impl Source for MockSource {
                     let source_change = match &data_type {
                         DataType::Counter => {
                             let element_id = format!("counter_{seq}");
-                            let reference = ElementReference::new(&source_name, &element_id);
+                            let reference =
+                                ElementReference::new(source_name.as_str(), &element_id);
 
                             let mut property_map = ElementPropertyMap::new();
                             property_map.insert(
@@ -391,7 +392,8 @@ impl Source for MockSource {
                             };
                             // Use sensor_id as the element_id for stable identity
                             let element_id = format!("sensor_{sensor_id}");
-                            let reference = ElementReference::new(&source_name, &element_id);
+                            let reference =
+                                ElementReference::new(source_name.as_str(), &element_id);
 
                             let mut property_map = ElementPropertyMap::new();
                             property_map.insert(
@@ -463,7 +465,8 @@ impl Source for MockSource {
                         DataType::Generic => {
                             // Generic data
                             let element_id = format!("generic_{seq}");
-                            let reference = ElementReference::new(&source_name, &element_id);
+                            let reference =
+                                ElementReference::new(source_name.as_str(), &element_id);
 
                             let mut property_map = ElementPropertyMap::new();
                             property_map.insert(
@@ -518,7 +521,7 @@ impl Source for MockSource {
                             Arc::clone(&mesh_state),
                             Arc::clone(&seen_sensors),
                             *sensor_count,
-                            &source_name,
+                            source_name.as_str(),
                             &source_id,
                             seq,
                             base.clone_shared(),
@@ -578,7 +581,7 @@ impl Source for MockSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
         // Test-only: exercise the FFI identity-provider clone/drop path across the plugin
         // boundary. Gated entirely behind the `DRASI_MOCK_IDENTITY_CLONE_STRESS` environment
         // variable (read only here) so no test-only knob leaks into the public config schema.
@@ -599,7 +602,7 @@ impl Source for MockSource {
                 }
             }
         }
-        self.base.initialize(context).await;
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -686,7 +689,7 @@ impl MockSource {
 ///     .build()?;
 /// ```
 pub struct MockSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     data_type: DataType,
     interval_ms: u64,
     dispatch_mode: Option<DispatchMode>,
@@ -701,9 +704,9 @@ impl MockSourceBuilder {
     /// # Arguments
     ///
     /// * `id` - Unique identifier for the source instance
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             data_type: DataType::Generic,
             interval_ms: 5000,
             dispatch_mode: None,
@@ -797,7 +800,7 @@ impl MockSourceBuilder {
         config.validate()?;
 
         // Build SourceBaseParams with all settings
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -834,7 +837,7 @@ impl MockSource {
     ///     .with_interval_ms(1000)
     ///     .build()?;
     /// ```
-    pub fn builder(id: impl Into<String>) -> MockSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> MockSourceBuilder {
         MockSourceBuilder::new(id)
     }
 }
@@ -963,7 +966,7 @@ fn connected_to_element(source_name: &str, edge: &MeshEdge, strength: f64) -> El
 
 async fn dispatch_generated_change(
     base: SourceBase,
-    _source_id: &str,
+    _source_id: &drasi_lib::ComponentId,
     source_change: SourceChange,
 ) {
     if let Err(e) = base.dispatch_source_change(source_change).await {
@@ -976,7 +979,7 @@ async fn emit_mesh_tick(
     seen_sensors: Arc<RwLock<HashSet<u32>>>,
     sensor_count: u32,
     source_name: &str,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     seq: u64,
     base: SourceBase,
 ) {
@@ -1076,7 +1079,8 @@ mod mesh_unit_tests {
     async fn concurrent_generated_and_injected_events_deliver_in_sequence_order() {
         let source = Arc::new(
             MockSource::new(
-                "concurrent-mock",
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029f")
+                    .expect("fixture UUID"),
                 MockSourceConfig {
                     data_type: DataType::Counter,
                     interval_ms: 1,
@@ -1109,7 +1113,10 @@ mod mesh_unit_tests {
                     if generated {
                         dispatch_generated_change(
                             source.base.clone_shared(),
-                            "concurrent-mock",
+                            &drasi_core::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000029f",
+                            )
+                            .expect("fixture UUID"),
                             change,
                         )
                         .await;
@@ -1125,7 +1132,11 @@ mod mesh_unit_tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(event.sequence, expected);
-            assert_eq!(event.source_id, "concurrent-mock");
+            assert_eq!(
+                event.source_id,
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029f")
+                    .expect("fixture UUID")
+            );
             assert!(event.profiling.as_ref().unwrap().source_send_ns.is_some());
         }
         while let Some(result) = producers.join_next().await {

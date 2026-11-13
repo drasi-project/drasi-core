@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::info;
+use log::{error, info};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -23,10 +23,154 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::observability::log_component_start;
 use drasi_lib::profiling::ProfilingMetadata;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::common::CheckpointState;
 use drasi_lib::Reaction;
 use std::collections::HashMap;
 
 pub use super::config::ProfilerReactionConfig;
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use drasi_lib::{
+        channels::{QueryResult, ResultDiff},
+        context::{workers::WorkerAlreadyOwned, ReactionRuntimeContext},
+        state_store::{MemoryStateStoreProvider, StateStoreProvider},
+        ComponentId, ReactionCheckpoint, StorePartition,
+    };
+    use std::time::Duration;
+
+    async fn fixture() -> Result<(ProfilerReaction, Arc<MemoryStateStoreProvider>, ComponentId)> {
+        let query = ComponentId::generate();
+        let reaction = ProfilerReaction::builder(ComponentId::generate())
+            .with_query_by_id(query.clone())
+            .build()?;
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        let (updates, _rx) = tokio::sync::mpsc::channel(32);
+        reaction
+            .bind_runtime_context(ReactionRuntimeContext::new(
+                "profiler-checkpoints",
+                reaction.id().clone(),
+                vec![query.clone()],
+                Some(store.clone()),
+                updates,
+                None,
+            ))
+            .await;
+        Ok((reaction, store, query))
+    }
+
+    fn sample(query: &ComponentId, sequence: u64) -> QueryResult {
+        let mut result = QueryResult::new(
+            query.clone(),
+            sequence,
+            chrono::Utc::now(),
+            vec![ResultDiff::Noop],
+            HashMap::new(),
+        );
+        result.profiling = Some(ProfilingMetadata::new());
+        result
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_samples_checkpoint_only_after_completion_and_survive_cancelled_stop() -> Result<()>
+    {
+        let (reaction, _store, query) = fixture().await?;
+        reaction.start().await?;
+        tokio::task::yield_now().await;
+        let seed = ReactionCheckpoint {
+            sequence: 0,
+            config_hash: 91,
+        };
+        reaction.base.write_checkpoint(&query, &seed).await?;
+        let held = reaction.stats.read().await;
+        reaction.enqueue_query_result(sample(&query, 1)).await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !reaction.base.priority_queue.is_empty().await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(held.count, 0);
+        assert_eq!(reaction.base.read_checkpoint(&query).await?, Some(seed));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reaction.stop())
+                .await
+                .is_err()
+        );
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .is::<WorkerAlreadyOwned>());
+        assert!(reaction.base.processing_task.read().await.is_some());
+        drop(held);
+        reaction.stop().await?;
+        assert_eq!(reaction.stats.read().await.count, 1);
+        assert_eq!(
+            reaction.base.read_checkpoint(&query).await?,
+            Some(ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 91
+            })
+        );
+        assert!(reaction.base.processing_task.read().await.is_none());
+        reaction.start().await?;
+        let mut no_sample = sample(&query, 2);
+        no_sample.profiling = None;
+        reaction.enqueue_query_result(no_sample).await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if reaction
+                    .base
+                    .read_checkpoint(&query)
+                    .await?
+                    .is_some_and(|cp| cp.sequence == 2)
+                {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await??;
+        assert_eq!(reaction.stats.read().await.count, 1);
+        reaction.stop().await?;
+        assert_eq!(
+            reaction.base.read_checkpoint(&query).await?,
+            Some(ReactionCheckpoint {
+                sequence: 2,
+                config_hash: 91
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn checkpoint_read_failure_preserves_old_state_and_stops_later_samples() -> Result<()> {
+        let (mut reaction, store, query) = fixture().await?;
+        reaction.base.recovery_policy = Some(drasi_lib::ReactionRecoveryPolicy::Strict);
+        let partition = StorePartition::component(reaction.id().clone());
+        let key = format!("checkpoint:{query}");
+        store.set(&partition, &key, vec![0]).await?;
+        reaction.start().await?;
+        reaction.enqueue_query_result(sample(&query, 1)).await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while reaction.status().await != ComponentStatus::Error {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(reaction.stats.read().await.count, 1);
+        assert_eq!(store.get(&partition, &key).await?, Some(vec![0]));
+        reaction.enqueue_query_result(sample(&query, 2)).await?;
+        tokio::task::yield_now().await;
+        assert_eq!(reaction.stats.read().await.count, 1);
+        assert!(reaction.base.processing_task.read().await.is_some());
+        reaction.stop().await?;
+        assert!(reaction.base.processing_task.read().await.is_none());
+        Ok(())
+    }
+}
 
 /// Statistics for a specific metric
 #[derive(Debug, Clone)]
@@ -372,7 +516,7 @@ pub struct ProfilerReaction {
 
 impl ProfilerReaction {
     /// Create a builder for ProfilerReaction
-    pub fn builder(id: impl Into<String>) -> ProfilerReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> ProfilerReactionBuilder {
         ProfilerReactionBuilder::new(id)
     }
 
@@ -381,17 +525,17 @@ impl ProfilerReaction {
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
     pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: ProfilerReactionConfig,
     ) -> Self {
-        Self::create_internal(id.into(), queries, config, None, true)
+        Self::create_internal(id.clone(), queries, config, None, true)
     }
 
     /// Create from builder (internal method)
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: ProfilerReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -401,8 +545,8 @@ impl ProfilerReaction {
 
     /// Internal constructor
     fn create_internal(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: ProfilerReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -441,7 +585,7 @@ impl ProfilerReaction {
 
 #[async_trait]
 impl Reaction for ProfilerReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -464,7 +608,7 @@ impl Reaction for ProfilerReaction {
         }
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -472,8 +616,8 @@ impl Reaction for ProfilerReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -504,9 +648,14 @@ impl Reaction for ProfilerReaction {
         let stats = self.stats.clone();
         let report_interval = self.report_interval_secs;
         let priority_queue = self.base.priority_queue.clone();
+        let base = self.base.clone_shared();
+        let policy = self
+            .base
+            .resolved_recovery_policy(self.default_recovery_policy());
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            let mut checkpoints = CheckpointState::load(&base).await;
             let mut report_timer =
                 tokio::time::interval(tokio::time::Duration::from_secs(report_interval));
             report_timer.tick().await; // Skip first immediate tick
@@ -525,6 +674,26 @@ impl Reaction for ProfilerReaction {
                 if let Some(query_result) = query_result {
                     if let Some(profiling) = query_result.profiling.clone() {
                         stats.write().await.add_sample(profiling);
+                    }
+                    if let Err(error) = checkpoints
+                        .advance_with_policy(
+                            &base,
+                            &query_result.query_id,
+                            query_result.sequence,
+                            policy,
+                        )
+                        .await
+                    {
+                        error!("[{reaction_name}] Profiler checkpoint write failed: {error:#}");
+                        base.set_status(
+                            ComponentStatus::Error,
+                            Some(format!(
+                                "Profiler checkpoint failed for query '{}' (seq {}): {error:#}",
+                                query_result.query_id, query_result.sequence
+                            )),
+                        )
+                        .await;
+                        break;
                     }
                 } else {
                     let stats_guard = stats.read().await;

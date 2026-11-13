@@ -44,7 +44,7 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Runs the resilient streaming loop with reconnect behavior.
 pub async fn run_stream_loop(
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     config: RisLiveSourceConfig,
     base: SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
@@ -97,7 +97,7 @@ pub async fn run_stream_loop(
 }
 
 async fn run_single_connection(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &RisLiveSourceConfig,
     base: &SourceBase,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
@@ -167,7 +167,7 @@ async fn run_single_connection(
 }
 
 async fn process_text_frame(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &RisLiveSourceConfig,
     base: &SourceBase,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
@@ -241,7 +241,7 @@ async fn process_text_frame(
 }
 
 async fn dispatch_change(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     base: &SourceBase,
     change: drasi_core::models::SourceChange,
 ) -> Result<()> {
@@ -249,7 +249,7 @@ async fn dispatch_change(
     profiling.source_send_ns = Some(timestamp_ns());
 
     let wrapper = SourceEventWrapper::with_profiling(
-        source_id.to_string(),
+        source_id.clone(),
         SourceEvent::Change(change),
         chrono::Utc::now(),
         profiling,
@@ -291,15 +291,21 @@ fn build_url(config: &RisLiveSourceConfig) -> Result<Url> {
 }
 
 async fn load_initial_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &RisLiveSourceConfig,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<StreamState> {
     if config.clear_state_on_start {
         if let Some(store) = state_store {
-            store.delete(source_id, STATE_KEY).await.with_context(|| {
-                format!("failed to clear persisted state for source '{source_id}'")
-            })?;
+            store
+                .delete(
+                    &drasi_lib::StorePartition::component(source_id.clone()),
+                    STATE_KEY,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to clear persisted state for source '{source_id}'")
+                })?;
         }
         return Ok(StreamState::default());
     }
@@ -308,7 +314,7 @@ async fn load_initial_state(
 }
 
 async fn load_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<StreamState> {
     let Some(store) = state_store else {
@@ -316,7 +322,10 @@ async fn load_state(
     };
 
     let bytes = store
-        .get(source_id, STATE_KEY)
+        .get(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            STATE_KEY,
+        )
         .await
         .with_context(|| format!("failed to read state for source '{source_id}'"))?;
 
@@ -331,7 +340,7 @@ async fn load_state(
 }
 
 async fn persist_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     state: &StreamState,
 ) -> Result<()> {
@@ -342,7 +351,11 @@ async fn persist_state(
     let payload =
         serde_json::to_vec(&PersistedStreamState::from(state)).context("failed to encode state")?;
     store
-        .set(source_id, STATE_KEY, payload)
+        .set(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            STATE_KEY,
+            payload,
+        )
         .await
         .with_context(|| format!("failed to persist state for source '{source_id}'"))?;
     Ok(())
@@ -366,8 +379,16 @@ mod tests {
     async fn process_text_frame_stamps_monotonic_sequence() {
         let source_id = "ris-seq-source";
         let config = RisLiveSourceConfig::default();
-        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
-        let mut mapper = GraphMapper::new(source_id.to_string(), StreamState::default());
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ed")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let mut mapper = GraphMapper::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ed")
+                .expect("fixture UUID"),
+            StreamState::default(),
+        );
         let mut last_persisted = Instant::now();
         let state_store: Option<Arc<dyn StateStoreProvider>> = None;
 
@@ -394,7 +415,8 @@ mod tests {
         .to_string();
 
         process_text_frame(
-            source_id,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ed")
+                .expect("fixture UUID"),
             &config,
             &base,
             &state_store,

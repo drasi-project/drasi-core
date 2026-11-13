@@ -68,8 +68,8 @@ impl ChangeOp {
 
 /// Derive a deterministic event id from the identifying tuple.
 pub fn deterministic_id(
-    reaction_id: &str,
-    query_id: &str,
+    reaction_id: &drasi_lib::ComponentId,
+    query_id: &drasi_lib::ComponentId,
     sequence: u64,
     op: &str,
     index: usize,
@@ -84,7 +84,7 @@ pub struct EventEnvelope {
     /// Deterministic event id.
     pub id: String,
     /// Subject / source (the query id).
-    pub subject: String,
+    pub subject: drasi_lib::ComponentId,
     /// Event type (e.g. `Drasi.ChangeEvent`).
     pub event_type: String,
     /// RFC 3339 timestamp.

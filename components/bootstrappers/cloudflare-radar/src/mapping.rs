@@ -27,12 +27,12 @@ fn labels(labels: &[&str]) -> Arc<[Arc<str>]> {
     labels.iter().map(|label| Arc::from(*label)).collect()
 }
 
-fn element_reference(source_id: &str, element_id: &str) -> ElementReference {
-    ElementReference::new(source_id, element_id)
+fn element_reference(source_id: &drasi_lib::ComponentId, element_id: &str) -> ElementReference {
+    ElementReference::new(source_id.as_str(), element_id)
 }
 
 fn node_metadata(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label_names: &[&str],
     effective_from: u64,
@@ -45,7 +45,7 @@ fn node_metadata(
 }
 
 fn relation_metadata(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label_names: &[&str],
     effective_from: u64,
@@ -90,7 +90,7 @@ pub fn normalize_id(input: &str) -> String {
 }
 
 fn build_node(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label: &str,
     properties: ElementPropertyMap,
@@ -106,7 +106,7 @@ fn build_node(
 }
 
 fn build_relation(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label: &str,
     from_id: &str,
@@ -126,7 +126,7 @@ fn build_relation(
 }
 
 pub fn map_outage(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     outage_id: &str,
     outage: &OutageAnnotation,
     include_shared: bool,
@@ -214,7 +214,7 @@ pub fn map_outage(
 }
 
 pub fn map_hijack(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     hijack: &BgpHijackEvent,
     include_shared: bool,
 ) -> Vec<SourceChange> {
@@ -348,7 +348,11 @@ pub fn map_hijack(
     changes
 }
 
-pub fn map_leak(source_id: &str, leak: &BgpLeakEvent, include_shared: bool) -> Vec<SourceChange> {
+pub fn map_leak(
+    source_id: &drasi_lib::ComponentId,
+    leak: &BgpLeakEvent,
+    include_shared: bool,
+) -> Vec<SourceChange> {
     let mut changes = Vec::new();
     let leak_id = format!("bgp-leak-{}", leak.id);
     let effective_from =
@@ -430,7 +434,7 @@ pub fn map_leak(source_id: &str, leak: &BgpLeakEvent, include_shared: bool) -> V
 }
 
 pub fn map_http_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     node_id: &str,
     series_name: &str,
     summary: &HttpSummaryData,
@@ -449,7 +453,7 @@ pub fn map_http_summary(
 }
 
 pub fn map_attack_l7_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     node_id: &str,
     series_name: &str,
     summary: &AttackSummaryData,
@@ -476,7 +480,7 @@ pub fn map_attack_l7_summary(
 }
 
 pub fn map_attack_l3_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     node_id: &str,
     series_name: &str,
     summary: &AttackLayer3SummaryData,
@@ -496,7 +500,7 @@ pub fn map_attack_l3_summary(
 }
 
 pub fn map_domain_ranking(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     domain: &DomainRank,
     effective_from: u64,
 ) -> Vec<SourceChange> {
@@ -551,7 +555,7 @@ pub fn map_domain_ranking(
 }
 
 pub fn map_dns_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     domain: &str,
     locations: &[DnsLocationEntry],
     effective_from: u64,

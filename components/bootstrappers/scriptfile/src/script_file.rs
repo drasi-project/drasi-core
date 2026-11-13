@@ -111,7 +111,10 @@ impl Default for ScriptFileBootstrapProviderBuilder {
 
 impl ScriptFileBootstrapProvider {
     /// Convert a NodeRecord to an Element::Node
-    fn convert_node_to_element(source_id: &str, node: &NodeRecord) -> Result<Element> {
+    fn convert_node_to_element(
+        source_id: &drasi_lib::ComponentId,
+        node: &NodeRecord,
+    ) -> Result<Element> {
         // Convert properties from JSON to ElementPropertyMap
         let properties = if let serde_json::Value::Object(obj) = &node.properties {
             convert_json_to_element_properties(obj)
@@ -136,7 +139,7 @@ impl ScriptFileBootstrapProvider {
 
         Ok(Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, &node.id),
+                reference: ElementReference::new(source_id.as_str(), &node.id),
                 labels,
                 effective_from: 0,
             },
@@ -145,7 +148,10 @@ impl ScriptFileBootstrapProvider {
     }
 
     /// Convert a RelationRecord to an Element::Relation
-    fn convert_relation_to_element(source_id: &str, relation: &RelationRecord) -> Result<Element> {
+    fn convert_relation_to_element(
+        source_id: &drasi_lib::ComponentId,
+        relation: &RelationRecord,
+    ) -> Result<Element> {
         // Convert properties from JSON to ElementPropertyMap
         let properties = if let serde_json::Value::Object(obj) = &relation.properties {
             convert_json_to_element_properties(obj)
@@ -169,12 +175,12 @@ impl ScriptFileBootstrapProvider {
             .into();
 
         // Create start and end element references
-        let start_ref = ElementReference::new(source_id, &relation.start_id);
-        let end_ref = ElementReference::new(source_id, &relation.end_id);
+        let start_ref = ElementReference::new(source_id.as_str(), &relation.start_id);
+        let end_ref = ElementReference::new(source_id.as_str(), &relation.end_id);
 
         Ok(Element::Relation {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, &relation.id),
+                reference: ElementReference::new(source_id.as_str(), &relation.id),
                 labels,
                 effective_from: 0,
             },
@@ -355,6 +361,8 @@ mod tests {
 
     #[test]
     fn test_convert_node_to_element() {
+        let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+            .expect("fixture UUID");
         let node = NodeRecord {
             id: "n1".to_string(),
             labels: vec!["Person".to_string()],
@@ -362,14 +370,14 @@ mod tests {
         };
 
         let element =
-            ScriptFileBootstrapProvider::convert_node_to_element("test_source", &node).unwrap();
+            ScriptFileBootstrapProvider::convert_node_to_element(&source_id, &node).unwrap();
 
         match element {
             Element::Node {
                 metadata,
                 properties,
             } => {
-                assert_eq!(metadata.reference.source_id.as_ref(), "test_source");
+                assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                 assert_eq!(metadata.reference.element_id.as_ref(), "n1");
                 assert_eq!(metadata.labels.len(), 1);
                 assert_eq!(metadata.labels[0].as_ref(), "Person");
@@ -387,8 +395,12 @@ mod tests {
             properties: serde_json::Value::Null,
         };
 
-        let element =
-            ScriptFileBootstrapProvider::convert_node_to_element("test_source", &node).unwrap();
+        let element = ScriptFileBootstrapProvider::convert_node_to_element(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+                .expect("fixture UUID"),
+            &node,
+        )
+        .unwrap();
 
         match element {
             Element::Node { properties, .. } => {
@@ -401,6 +413,8 @@ mod tests {
 
     #[test]
     fn test_convert_relation_to_element() {
+        let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000170")
+            .expect("fixture UUID");
         let relation = RelationRecord {
             id: "r1".to_string(),
             labels: vec!["KNOWS".to_string()],
@@ -412,7 +426,7 @@ mod tests {
         };
 
         let element =
-            ScriptFileBootstrapProvider::convert_relation_to_element("test_source", &relation)
+            ScriptFileBootstrapProvider::convert_relation_to_element(&source_id, &relation)
                 .unwrap();
 
         match element {
@@ -422,13 +436,13 @@ mod tests {
                 in_node,
                 properties,
             } => {
-                assert_eq!(metadata.reference.source_id.as_ref(), "test_source");
+                assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                 assert_eq!(metadata.reference.element_id.as_ref(), "r1");
                 assert_eq!(metadata.labels.len(), 1);
                 assert_eq!(metadata.labels[0].as_ref(), "KNOWS");
-                assert_eq!(in_node.source_id.as_ref(), "test_source");
+                assert_eq!(in_node.namespace.as_ref(), source_id.as_str());
                 assert_eq!(in_node.element_id.as_ref(), "n1");
-                assert_eq!(out_node.source_id.as_ref(), "test_source");
+                assert_eq!(out_node.namespace.as_ref(), source_id.as_str());
                 assert_eq!(out_node.element_id.as_ref(), "n2");
                 assert!(properties.get(&Arc::from("since")).is_some());
             }

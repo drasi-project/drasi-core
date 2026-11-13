@@ -56,7 +56,7 @@ struct ResolvedEndpoint {
 }
 
 pub struct SnapshotRequest<'a> {
-    pub source_id: &'a str,
+    pub source_id: &'a drasi_core_types::ComponentId,
     pub node_labels: &'a [String],
     pub relation_labels: &'a [String],
 }

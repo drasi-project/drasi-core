@@ -101,7 +101,9 @@ async fn assert_state(indexes: &CreatedIndexes, reference: &ElementReference, pr
 async fn clearing_indexes_joins_the_transaction_and_preserves_column_families() {
     let directory = tempfile::tempdir().unwrap();
     let provider = RocksDbIndexProvider::new(directory.path(), true, false);
-    let indexes = provider.create_indexes("clear").await.unwrap();
+    let owner = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ea")
+        .expect("fixture UUID");
+    let indexes = provider.create_indexes(&owner).await.unwrap();
     let reference = ElementReference::new("source", "item");
     let node = Element::Node {
         metadata: ElementMetadata {
@@ -148,7 +150,7 @@ async fn clearing_indexes_joins_the_transaction_and_preserves_column_families() 
         .unwrap();
     indexes.set.session_control.commit().await.unwrap();
     let options_files = || {
-        let mut files: Vec<_> = std::fs::read_dir(directory.path().join("clear"))
+        let mut files: Vec<_> = std::fs::read_dir(directory.path().join(owner.as_str()))
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .filter(|name| name.to_string_lossy().starts_with("OPTIONS-"))
@@ -171,7 +173,13 @@ async fn clearing_indexes_joins_the_transaction_and_preserves_column_families() 
         "data clearing must not rewrite the CF OPTIONS files"
     );
     drop(indexes);
-    let reopened = provider.create_indexes("clear").await.unwrap();
+    let reopened = provider
+        .create_indexes(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ea")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     reopened.set.session_control.begin().await.unwrap();
     assert_state(&reopened, &reference, false).await;
     reopened.set.session_control.commit().await.unwrap();

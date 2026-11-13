@@ -7,7 +7,8 @@ use the same definitions and encoding implementations.
 There is no graph executor, query evaluator, language parser or storage backend
 in this package. Sources, transformers and query outputs share the graph-change
 contract; query-specific metadata is optional for generic graph consumers.
-Shared graph values come from `drasi-core-types`.
+Shared graph values and the canonical `ComponentId`/`ComponentName` types come
+from `drasi-core-types`.
 `QueryJoinConfig` and `QueryJoinKeyConfig`, their validation, and semantic-order
 normalization are shared by ordinary and native query factories. They convert to
 the existing Core join models; join matching and indexing do not live here.
@@ -22,6 +23,25 @@ The former `QuerySnapshot` alias has been removed.
 The runtime remains responsible for graph membership, actual storage ownership,
 query processing and recovery. Native plugins use explicit host capabilities,
 not concrete runtime objects.
+
+`ComponentId` is a validated UUID, serialized as canonical UUID text.
+`ComponentName` is separate, case-sensitive graph-owned metadata; renaming does
+not change the UUID or existing connections. Authoring `ComponentReference`
+strings select names, even when the string looks like a UUID; `{"id":"UUID"}`
+selects an existing identity explicitly. Plugin IDs, implementation versions,
+graph/instance IDs and business-record namespaces remain their own identifiers.
+
+JSON `EnvelopeCodec` and MessagePack `BinaryEnvelopeCodec` use format **3**.
+Both reject previous formats, including envelopes without component annotations.
+Use fresh persisted state and matching native libraries; there is no name-to-ID
+conversion or migration reader.
+
+`ConfigurationConstraint` supplies validated, inline JSON Schema constraints for
+identity-bearing nested settings. Native configuration admission, graph admission,
+and discovery use the same constraint. Execution inputs contain UUIDs only;
+assigned query authoring inputs retain explicit name and ID reference forms.
+Schema references and base URIs are rejected; configuration validation performs no
+external schema resolution.
 
 Published envelopes have a maximum ancestry depth of 1,024
 (`MAX_LINEAGE_DEPTH`). JSON and binary decoding, encoding and binary size

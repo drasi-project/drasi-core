@@ -28,7 +28,7 @@ pub struct TemplateContext {
     /// The index of the current item in the page.
     pub index: usize,
     /// Source ID.
-    pub source_id: String,
+    pub source_id: drasi_core_types::ComponentId,
 }
 
 /// Compiled template engine with Handlebars.
@@ -182,7 +182,10 @@ mod tests {
         let context = TemplateContext {
             item: json!({"id": "123", "name": "Alice"}),
             index: 0,
-            source_id: "test-source".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000001d",
+            )
+            .expect("fixture UUID"),
         };
 
         let result = engine.render_string("{{item.id}}", &context).unwrap();
@@ -198,7 +201,10 @@ mod tests {
         let context = TemplateContext {
             item: json!({"id": "str-123", "count": 42, "rate": 3.15, "active": true}),
             index: 0,
-            source_id: "test-source".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000001d",
+            )
+            .expect("fixture UUID"),
         };
 
         // Simple references preserve original type
@@ -226,7 +232,10 @@ mod tests {
         let context = TemplateContext {
             item: json!({"id": 42, "prefix": "user"}),
             index: 0,
-            source_id: "test-source".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000001d",
+            )
+            .expect("fixture UUID"),
         };
 
         // Complex templates always produce strings
@@ -242,7 +251,10 @@ mod tests {
         let context = TemplateContext {
             item: json!({"id": "123", "name": "Alice", "age": 30}),
             index: 0,
-            source_id: "test-source".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000001d",
+            )
+            .expect("fixture UUID"),
         };
 
         let props = json!({
@@ -261,7 +273,10 @@ mod tests {
         let context = TemplateContext {
             item: json!({"id": "123"}),
             index: 0,
-            source_id: "test-source".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000001d",
+            )
+            .expect("fixture UUID"),
         };
 
         // Non-strict mode: missing fields render as empty string
@@ -293,7 +308,10 @@ mod tests {
         let context = TemplateContext {
             item: json!({"id": "42"}), // String "42", not integer 42
             index: 0,
-            source_id: "test-source".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000001d",
+            )
+            .expect("fixture UUID"),
         };
 
         // Should stay as string since the original value is a string

@@ -68,7 +68,7 @@ use drasi_lib::context::workers::{
 pub struct SqliteSourceHandle {
     command_tx: Arc<RwLock<Option<mpsc::UnboundedSender<SqliteCommand>>>>,
     bound_command_tx: Option<mpsc::UnboundedSender<SqliteCommand>>,
-    source_id: Arc<str>,
+    source_id: drasi_lib::ComponentId,
 }
 
 impl SqliteSourceHandle {
@@ -90,7 +90,7 @@ impl SqliteSourceHandle {
     }
 
     /// Source ID this handle is associated with.
-    pub fn source_id(&self) -> &str {
+    pub fn source_id(&self) -> &drasi_lib::ComponentId {
         &self.source_id
     }
 
@@ -289,7 +289,7 @@ pub struct SqliteSource {
 }
 
 impl SqliteSource {
-    pub fn builder(id: impl Into<String>) -> SqliteSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> SqliteSourceBuilder {
         SqliteSourceBuilder::new(id)
     }
 
@@ -312,7 +312,7 @@ impl SqliteSource {
         SqliteSourceHandle {
             command_tx: self.command_tx.clone(),
             bound_command_tx: None,
-            source_id: Arc::from(self.base.id.as_str()),
+            source_id: self.base.id.clone(),
         }
     }
 
@@ -478,7 +478,7 @@ impl SqliteSource {
 
 #[async_trait]
 impl Source for SqliteSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -611,8 +611,8 @@ impl Source for SqliteSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(

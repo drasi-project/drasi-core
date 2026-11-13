@@ -27,6 +27,7 @@ use drasi_core::{
         ResultSequence, ResultSequenceCounter,
     },
 };
+use drasi_core::{interface::StorageScope, ComponentId};
 use ordered_float::OrderedFloat;
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 
@@ -37,11 +38,11 @@ use crate::{
 };
 
 /// Redis key structure (hash-tagged for cluster compatibility):
-/// ari:{<query_id>}:{set_id} -> {value}
-/// ari:{<query_id>}:{set_id} -> [sorted value]
-/// ari:{<query_id>}:{set_id}:{value} -> count
+/// ari:{<storage_key>}:{set_id} -> {value}
+/// ari:{<storage_key>}:{set_id} -> [sorted value]
+/// ari:{<storage_key>}:{set_id}:{value} -> count
 pub struct GarnetResultIndex {
-    query_id: Arc<str>,
+    storage_key: Arc<str>,
     connection: MultiplexedConnection,
     session_state: Arc<GarnetSessionState>,
 }
@@ -49,12 +50,14 @@ pub struct GarnetResultIndex {
 impl GarnetResultIndex {
     /// Create a new GarnetResultIndex from a shared connection.
     pub fn new(
-        query_id: &str,
+        scope: &StorageScope,
+        component_id: &ComponentId,
         connection: MultiplexedConnection,
         session_state: Arc<GarnetSessionState>,
     ) -> Self {
+        let storage_key: Arc<str> = scope.component_key(component_id).into();
         GarnetResultIndex {
-            query_id: Arc::from(query_id),
+            storage_key,
             connection,
             session_state,
         }
@@ -70,7 +73,7 @@ impl AccumulatorIndex for GarnetResultIndex {
         owner: &ResultOwner,
     ) -> Result<Option<ValueAccumulator>, IndexError> {
         let set_id = get_hash_key(owner, key);
-        let ari_key = format!("ari:{{{}}}:{}", self.query_id, set_id);
+        let ari_key = format!("ari:{{{}}}:{}", self.storage_key, set_id);
 
         // Check buffer first
         {
@@ -119,7 +122,7 @@ impl AccumulatorIndex for GarnetResultIndex {
         value: Option<ValueAccumulator>,
     ) -> Result<(), IndexError> {
         let set_id = get_hash_key(&owner, &key);
-        let ari_key = format!("ari:{{{}}}:{}", self.query_id, set_id);
+        let ari_key = format!("ari:{{{}}}:{}", self.storage_key, set_id);
 
         let mut guard = self.session_state.lock()?;
         let buffer = guard.as_mut().ok_or_else(|| {
@@ -147,7 +150,7 @@ impl AccumulatorIndex for GarnetResultIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         self.connection
-            .clear(format!("ari:{{{}}}:*", self.query_id))
+            .clear(format!("ari:{{{}}}:*", self.storage_key))
             .await
     }
 }
@@ -160,7 +163,7 @@ impl LazySortedSetStore for GarnetResultIndex {
         set_id: u64,
         value: Option<OrderedFloat<f64>>,
     ) -> Result<Option<(OrderedFloat<f64>, isize)>, IndexError> {
-        let set_key = format!("ari:{{{}}}:{}", self.query_id, set_id);
+        let set_key = format!("ari:{{{}}}:{}", self.storage_key, set_id);
 
         // Load all members to merge with buffer deltas.
         // We cannot use a targeted ZRANGEBYSCORE + LIMIT 1 because buffer
@@ -251,7 +254,7 @@ impl LazySortedSetStore for GarnetResultIndex {
         set_id: u64,
         value: OrderedFloat<f64>,
     ) -> Result<isize, IndexError> {
-        let key = format!("ari:{{{}}}:{}:{}", self.query_id, set_id, value.0);
+        let key = format!("ari:{{{}}}:{}:{}", self.storage_key, set_id, value.0);
         self.get_value_count_internal(&key).await
     }
 
@@ -262,7 +265,7 @@ impl LazySortedSetStore for GarnetResultIndex {
         value: OrderedFloat<f64>,
         delta: isize,
     ) -> Result<(), IndexError> {
-        let set_key = format!("ari:{{{}}}:{}", self.query_id, set_id);
+        let set_key = format!("ari:{{{}}}:{}", self.storage_key, set_id);
         let val_key = format!("{}:{}", set_key, value.0);
 
         // Read current count: check buffer first, then Redis.
@@ -361,8 +364,8 @@ impl ResultSequenceCounter for GarnetResultIndex {
         sequence: u64,
         source_change_id: &str,
     ) -> Result<(), IndexError> {
-        let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
-        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
+        let seq_key = format!("metadata:{{{}}}:sequence", self.storage_key);
+        let scid_key = format!("metadata:{{{}}}:source_change_id", self.storage_key);
 
         let mut guard = self.session_state.lock()?;
         let buffer = guard.as_mut().ok_or_else(|| {
@@ -376,8 +379,8 @@ impl ResultSequenceCounter for GarnetResultIndex {
     }
 
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
-        let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
-        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
+        let seq_key = format!("metadata:{{{}}}:sequence", self.storage_key);
+        let scid_key = format!("metadata:{{{}}}:source_change_id", self.storage_key);
 
         // Extract buffer reads into a sync block so MutexGuard is dropped before any await
         let (seq_val, scid_val) = {
@@ -425,7 +428,7 @@ impl GarnetResultIndex {
         let mut con = self.connection.clone();
 
         let sequence = match con
-            .get::<String, Option<u64>>(format!("metadata:{{{}}}:sequence", self.query_id))
+            .get::<String, Option<u64>>(format!("metadata:{{{}}}:sequence", self.storage_key))
             .await
         {
             Ok(v) => v.unwrap_or(0),
@@ -435,7 +438,7 @@ impl GarnetResultIndex {
         let source_change_id = match con
             .get::<String, Option<String>>(format!(
                 "metadata:{{{}}}:source_change_id",
-                self.query_id
+                self.storage_key
             ))
             .await
         {

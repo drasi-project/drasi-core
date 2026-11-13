@@ -16,7 +16,8 @@
 //!
 //! This crate implements the [`WalProvider`](drasi_lib::WalProvider) trait
 //! using [redb](https://docs.rs/redb) for durable event storage. Each
-//! registered source gets its own redb file at `{root_dir}/{source_id}.redb`.
+//! registered source gets its own file, keyed by its storage scope and component
+//! UUID. Root and database format markers reject incompatible persisted state.
 //!
 //! Events are serialized via explicit DTOs (not by deriving serde on core
 //! domain types), keeping the wire format decoupled from the core model.

@@ -411,7 +411,7 @@ impl SqliteConsumerSnapshot {
                 !progress.bootstrap_complete
                     && !progress
                         .checkpoints
-                        .contains_key(&SourceProgressKey::Source(self.shared.source.to_string())),
+                        .contains_key(&SourceProgressKey::Source(self.shared.source.clone())),
                 "SQLite shared snapshot ownership state is missing"
             );
         }
@@ -561,7 +561,7 @@ impl SqliteConsumerSnapshot {
         Ok(vec![BootstrapWatermark {
             producer: None,
             stream: self.shared.stream.clone(),
-            source_id: Some(self.shared.source.to_string()),
+            source_id: Some(self.shared.source.clone()),
             sequence: handover.sequence,
             position: Some(journal::identity(handover.epoch, handover.sequence)?),
         }])

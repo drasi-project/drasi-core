@@ -342,12 +342,19 @@ struct Binding {
 
 struct Persistent {
     transaction: Arc<ComputationTransaction>,
-    key: String,
+    key: drasi_core::interface::OutputPartition,
     codec: EnvelopeCodec,
     shared: bool,
 }
 
 impl Persistent {
+    fn checkpoint_key(&self) -> drasi_core::interface::CheckpointKey {
+        drasi_core::interface::CheckpointKey::Journal {
+            journal: self.key.clone(),
+            key: "qos-state".into(),
+        }
+    }
+
     async fn read_records(
         &self,
         after: u64,
@@ -619,7 +626,7 @@ impl QosChannel {
         }
         let store = Arc::new(Persistent {
             transaction: Arc::new(transaction),
-            key,
+            key: drasi_core::interface::OutputPartition::Journal(key),
             codec,
             shared: shared_replay.is_some(),
         });
@@ -1216,7 +1223,7 @@ impl QosChannel {
                     .resources()
                     .checkpoint_store()
                     .expect("validated transaction")
-                    .stage_checkpoint(&store.key, metadata.head, Some(&bytes))
+                    .stage_checkpoint(&store.checkpoint_key(), metadata.head, Some(&bytes))
                     .await?;
                 Ok(())
             })

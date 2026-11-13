@@ -50,11 +50,12 @@ use serde_json::{Map, Value};
 use std::cell::RefCell;
 
 use drasi_computation_contracts::exchange::{QueryResult, ResultDiff};
+use drasi_computation_contracts::ComponentId;
 use drasi_reaction_common::OperationType;
 
 /// The outcome of resolving an inbound diff into a render context.
 pub struct RenderInput {
-    pub query_id: String,
+    pub query_id: ComponentId,
     /// Operation type used to select the template.
     pub operation: OperationType,
     /// The Handlebars context object.
@@ -283,12 +284,18 @@ pub fn build_render_input(query_result: &QueryResult, diff: &ResultDiff) -> Opti
     };
 
     let mut context = Map::new();
-    // `query_name` and `query_id` are intentionally aliases of the same value
-    // (the query id as received), per the Reaction Developer Guide. Both are
-    // provided for symmetry with other Drasi reactions.
-    let query_id = Value::String(query_result.query_id.clone());
-    context.insert("query_name".to_string(), query_id.clone());
-    context.insert("query_id".to_string(), query_id);
+    context.insert(
+        "query_name".to_string(),
+        serde_json::json!(query_result.query_name),
+    );
+    context.insert(
+        "query_id".to_string(),
+        serde_json::json!(query_result.query_id),
+    );
+    context.insert(
+        "input_alias".to_string(),
+        serde_json::json!(query_result.input_alias),
+    );
     context.insert("operation".to_string(), Value::String(op_str.to_string()));
     context.insert("timestamp".to_string(), Value::String(timestamp));
     context.insert("metadata".to_string(), metadata);
@@ -414,7 +421,15 @@ mod tests {
         use std::collections::HashMap;
 
         let qr = QueryResult {
-            query_id: "src.user-query".to_string(),
+            query_name: Some(
+                drasi_core_types::ComponentName::try_new("src.user-query")
+                    .expect("fixture query name"),
+            ),
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000286",
+            )
+            .expect("fixture UUID"),
             sequence: 1,
             timestamp: Utc::now(),
             metadata: HashMap::new(),
@@ -428,7 +443,10 @@ mod tests {
         assert_eq!(input.operation, OperationType::Add);
         let ctx = input.context.as_object().unwrap();
         assert_eq!(ctx.get("operation").unwrap(), &json!("ADD"));
-        assert_eq!(ctx.get("query_id").unwrap(), &json!("src.user-query"));
+        assert_eq!(
+            ctx.get("query_id").unwrap(),
+            &json!("00000000-0000-0000-0000-000000000286")
+        );
         assert_eq!(ctx.get("query_name").unwrap(), &json!("src.user-query"));
         assert!(ctx.contains_key("after"));
         assert!(!ctx.contains_key("before"));
@@ -440,7 +458,12 @@ mod tests {
         use std::collections::HashMap;
 
         let qr = QueryResult {
-            query_id: "q".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000081",
+            )
+            .expect("fixture UUID"),
             sequence: 1,
             timestamp: Utc::now(),
             metadata: HashMap::new(),

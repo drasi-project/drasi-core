@@ -39,8 +39,8 @@ pub use profiler::ProfilerReaction;
 
 /// Builder for Profiler reaction
 pub struct ProfilerReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     window_size: usize,
     report_interval_secs: u64,
     priority_queue_capacity: Option<usize>,
@@ -49,9 +49,9 @@ pub struct ProfilerReactionBuilder {
 
 impl ProfilerReactionBuilder {
     /// Create a new Profiler reaction builder with the given ID
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             window_size: 1000,
             report_interval_secs: 60,
@@ -60,15 +60,42 @@ impl ProfilerReactionBuilder {
         }
     }
 
-    /// Set the query IDs to subscribe to
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
         self
     }
 
-    /// Add a query ID to subscribe to
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
+    }
+
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
+        self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
     }
 
@@ -127,30 +154,62 @@ mod tests {
 
     #[test]
     fn test_profiler_builder_defaults() {
-        let reaction = ProfilerReactionBuilder::new("test-reaction")
-            .build()
-            .unwrap();
-        assert_eq!(reaction.id(), "test-reaction");
+        let reaction = ProfilerReactionBuilder::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            reaction.id(),
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_profiler_builder_custom() {
-        let reaction = ProfilerReaction::builder("test-reaction")
-            .with_window_size(2000)
-            .with_report_interval_secs(30)
-            .with_queries(vec!["query1".to_string()])
-            .build()
-            .unwrap();
+        let reaction = ProfilerReaction::builder(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+        )
+        .with_window_size(2000)
+        .with_report_interval_secs(30)
+        .with_queries_by_name(vec![
+            drasi_lib::ComponentName::try_new("query1").expect("fixture component name")
+        ])
+        .build()
+        .unwrap();
 
-        assert_eq!(reaction.id(), "test-reaction");
-        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+        assert_eq!(
+            reaction.id(),
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID")
+        );
+        assert_eq!(
+            reaction.query_inputs(),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_lib::ComponentName::try_new("query1").expect("fixture component name")
+            )]
+        );
     }
 
     #[test]
     fn test_profiler_new_constructor() {
         let config = ProfilerReactionConfig::default();
-        let reaction = ProfilerReaction::new("test-reaction", vec!["query1".to_string()], config);
-        assert_eq!(reaction.id(), "test-reaction");
+        let reaction = ProfilerReaction::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_lib::ComponentName::try_new("query1").expect("fixture component name"),
+            )],
+            config,
+        );
+        assert_eq!(
+            reaction.id(),
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID")
+        );
     }
 }
 

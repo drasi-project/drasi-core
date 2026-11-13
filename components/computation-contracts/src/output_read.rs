@@ -532,7 +532,7 @@ mod tests {
         GraphProducerIdentity::for_epoch(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("component").unwrap(),
+            ComponentId::try_new("cb8af9d6-584e-5f22-aaec-5f4c14d3e5af").unwrap(),
             StreamId::try_new("component/out").unwrap(),
             uuid::Uuid::from_u128(epoch),
             true,
@@ -585,9 +585,11 @@ mod tests {
                 Err(OutputReadError::NotReady("test".into()))
             }
         }
-        let descriptor =
-            ComponentDescriptor::try_new(ComponentId::try_new("component").unwrap(), vec![])
-                .unwrap();
+        let descriptor = ComponentDescriptor::try_new(
+            ComponentId::try_new("cb8af9d6-584e-5f22-aaec-5f4c14d3e5af").unwrap(),
+            vec![],
+        )
+        .unwrap();
         let readers =
             OutputReaders::new().with_snapshot(PortId::try_new("out").unwrap(), Arc::new(Never));
         assert!(readers.validate(&descriptor).is_err());

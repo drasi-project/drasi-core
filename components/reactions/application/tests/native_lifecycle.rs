@@ -19,6 +19,10 @@ fn schema() -> SchemaDescriptor {
     QueryChangeCodec::schema().descriptor().clone()
 }
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 struct OneEvent {
     descriptor: ComponentDescriptor,
     event: Option<OutputEnvelope>,
@@ -30,7 +34,7 @@ impl OneEvent {
         let port = PortId::try_new("out").expect("output port");
         Self {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("source").expect("source ID"),
+                ComponentId::try_new("305e0fbd-0522-5088-addd-0d0833d591e3").expect("source ID"),
                 vec![PortDescriptor::new(
                     port.clone(),
                     PortDirection::Output,
@@ -88,8 +92,16 @@ fn graph(reaction: NativeApplicationReaction, source: OneEvent) -> ComputationGr
         PortId::try_new("out").expect("output port"),
     );
     ComputationGraph::builder("native-application-lifecycle")
-        .source(Box::new(source))
-        .sink(Box::new(reaction))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(source),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(reaction),
+        )
         .bind_stream(
             output.clone(),
             StreamId::try_new("source").expect("source stream"),
@@ -115,7 +127,7 @@ fn assert_stop_timeout(error: GraphError) {
     assert!(
         errors.iter().any(|error| matches!(
             cause(error),
-            GraphError::StopTimeout { component } if component.as_str() == "callback"
+            GraphError::StopTimeout { component } if component == &component_id(290)
         )),
         "{errors:?}"
     );
@@ -131,21 +143,22 @@ async fn graph_drop_and_cancellation_retain_callback_through_cleanup_deadlines()
         let calls = submitted.clone();
         let finished = completed.clone();
         let mut job = Some((started, blocked));
-        let reaction = NativeApplicationReaction::callback("callback", schema(), move |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            let (started, blocked) = job.take().expect("one callback invocation");
-            let finished = finished.clone();
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    started.send(()).unwrap();
-                    blocked.recv().unwrap();
-                    finished.fetch_add(1, Ordering::SeqCst);
-                })
-                .await?;
-                Ok(())
-            }
-        })
-        .unwrap();
+        let reaction =
+            NativeApplicationReaction::callback(component_id(290).clone(), schema(), move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let (started, blocked) = job.take().expect("one callback invocation");
+                let finished = finished.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        started.send(()).unwrap();
+                        blocked.recv().unwrap();
+                        finished.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .await?;
+                    Ok(())
+                }
+            })
+            .unwrap();
         let mut graph = graph(reaction, OneEvent::new()).build().unwrap();
         let mut run = Box::pin(graph.start().unwrap());
         let control = run.control();
@@ -183,10 +196,17 @@ async fn graph_drop_and_cancellation_retain_callback_through_cleanup_deadlines()
         assert_eq!(submitted.load(Ordering::SeqCst), 1);
         assert_eq!(completed.load(Ordering::SeqCst), 0);
         release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), graph.shutdown())
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match graph.shutdown().await {
+                    Ok(()) => break,
+                    Err(error) => assert_stop_timeout(error),
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(completed.load(Ordering::SeqCst), 1);
         assert_eq!(submitted.load(Ordering::SeqCst), 1);
         assert_eq!(graph.state(), GraphState::Cancelled);
@@ -199,21 +219,26 @@ struct ApplicationFailure;
 
 #[tokio::test(flavor = "current_thread")]
 async fn graph_preserves_callback_errors_panics_and_receiver_closure() {
-    let failed = NativeApplicationReaction::callback("failed", schema(), |_| async {
-        Err(ApplicationFailure.into())
-    })
+    let failed =
+        NativeApplicationReaction::callback(component_id(53).clone(), schema(), |_| async {
+            Err(ApplicationFailure.into())
+        })
+        .unwrap();
+    let panicked =
+        NativeApplicationReaction::callback(component_id(784).clone(), schema(), |_| async {
+            panic!("actual application panic");
+        })
+        .unwrap();
+    let (closed, mut receiver) = NativeApplicationReaction::channel(
+        component_id(785).clone(),
+        schema(),
+        NonZeroUsize::new(1).unwrap(),
+    )
     .unwrap();
-    let panicked = NativeApplicationReaction::callback("panicked", schema(), |_| async {
-        panic!("actual application panic");
-    })
-    .unwrap();
-    let (closed, mut receiver) =
-        NativeApplicationReaction::channel("closed", schema(), NonZeroUsize::new(1).unwrap())
-            .unwrap();
-    for (reaction, expected) in [
-        (failed, "failed"),
-        (panicked, "panicked"),
-        (closed, "closed"),
+    for (reaction, expected, failed_id) in [
+        (failed, "failed", component_id(53)),
+        (panicked, "panicked", component_id(784)),
+        (closed, "closed", component_id(785)),
     ] {
         let (release, ready) = oneshot::channel();
         let mut source = OneEvent::new();
@@ -221,7 +246,6 @@ async fn graph_preserves_callback_errors_panics_and_receiver_closure() {
         let mut graph = graph(reaction, source).build().unwrap();
         let run = graph.start().unwrap();
         let control = run.control();
-        let failed_id = ComponentId::try_new(expected).unwrap();
         let (result, failure) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(run, async {
                 control.startup_report().await.unwrap();
@@ -256,7 +280,7 @@ async fn graph_preserves_callback_errors_panics_and_receiver_closure() {
         else {
             panic!("graph did not preserve the component failure: {error:?}");
         };
-        assert_eq!(component.as_str(), expected);
+        assert_eq!(component, &failed_id);
         assert_eq!(*operation, "handle");
         match expected {
             "failed" => assert!(source.is::<ApplicationFailure>()),
@@ -282,9 +306,12 @@ fn graph_rejects_acknowledgement_claims_for_application_channel() {
         PipeCapability::Transactions,
         PipeCapability::ExactlyOnce,
     ] {
-        let (reaction, _receiver) =
-            NativeApplicationReaction::channel("channel", schema(), NonZeroUsize::new(1).unwrap())
-                .unwrap();
+        let (reaction, _receiver) = NativeApplicationReaction::channel(
+            component_id(297).clone(),
+            schema(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
             graph(reaction, OneEvent::new())
                 .requirements(PipeRequirements::new([capability]))

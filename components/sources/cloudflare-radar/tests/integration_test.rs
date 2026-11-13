@@ -6,10 +6,11 @@ use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_cloudflare_radar::{CloudflareRadarSource, StartBehavior};
 use serde_json::Value;
+use shared_tests::fixture_attribution::{Attribution, Fixture};
 use std::time::Duration;
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use testcontainers::{ContainerAsync, ContainerRequest, GenericImage, Image, ImageExt};
 
 const SOURCE_ID: &str = "radar-source";
 const QUERY_ID: &str = "hijack-query";
@@ -81,7 +82,23 @@ where
 
 async fn setup_wiremock() -> Result<(ContainerAsync<GenericImage>, String)> {
     let image = GenericImage::new("wiremock/wiremock", "3.3.1").with_exposed_port(8080.tcp());
-    let container = image.start().await?;
+    let attribution = Attribution::from_env(Fixture::new(
+        "wiremock",
+        format!("{}:{}", image.name(), image.tag()),
+        "components/sources/cloudflare-radar/tests/integration_test.rs",
+        1,
+    ))?;
+    let mut request: ContainerRequest<_> = image.into();
+    if let Some(owner) = &attribution {
+        request = request
+            .with_container_name(owner.container_name(1))
+            .with_labels(owner.labels(1));
+        owner.record_intent(1)?;
+    }
+    let container = request.start().await?;
+    if let Some(owner) = &attribution {
+        owner.record_started(1, container.id())?;
+    }
     let port = container.get_host_port_ipv4(8080.tcp()).await?;
     let host = container.get_host().await?.to_string();
     let admin_base = format!("http://{host}:{port}");
@@ -188,30 +205,42 @@ async fn test_cloudflare_radar_hijack_changes() -> Result<()> {
         .with_category("bgp_hijacks", true)
         .build()?;
 
-    let source = CloudflareRadarSource::builder(SOURCE_ID)
-        .with_api_token("test-token")
-        .with_api_base_url(&api_base_url)
-        .with_poll_interval_secs(1)
-        .with_category("bgp_hijacks", true)
-        .with_start_behavior(StartBehavior::StartFromBeginning)
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = CloudflareRadarSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000324")
+            .expect("fixture UUID"),
+    )
+    .with_api_token("test-token")
+    .with_api_base_url(&api_base_url)
+    .with_poll_interval_secs(1)
+    .with_category("bgp_hijacks", true)
+    .with_start_behavior(StartBehavior::StartFromBeginning)
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
-    let query = Query::cypher(QUERY_ID)
-        .query(
-            r#"
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("hijack-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (h:BgpHijack)
             RETURN h.eventId AS eventId, h.confidenceScore AS confidence
         "#,
-        )
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("radar-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .build()?;
 
-    let (reaction, handle) = ApplicationReaction::builder("app-reaction")
-        .with_query(QUERY_ID)
-        .build();
+    let (reaction, handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000001")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("hijack-query").expect("fixture component name"),
+    )
+    .build();
 
     let core = DrasiLib::builder()
         .with_query_factory(
@@ -227,9 +256,16 @@ async fn test_cloudflare_radar_hijack_changes() -> Result<()> {
                 .clone(),
         )
         .with_id("radar-integration-test")
-        .with_source(source)
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core::ComponentName::try_new("radar-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("app-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 

@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 use super::types::FfiStr;
 use super::vtables::StateStoreVtable;
+use drasi_core_types::StorePartition;
 use drasi_lib::{StateStoreProvider, StateStoreResult};
 
 /// Plugin-side proxy: wraps a host-provided `StateStoreVtable` into a local
@@ -32,7 +33,8 @@ pub struct FfiStateStoreProxy {
 }
 
 impl FfiStateStoreProxy {
-    /// Take ownership of a host-provided ABI 0.17 state-store vtable.
+    /// Take ownership of a host-provided state-store vtable using the ownership
+    /// contract introduced in ABI 0.17 and retained in ABI 0.19.
     ///
     /// # Safety
     /// `vtable` must be a non-null, uniquely transferred `Box<StateStoreVtable>`
@@ -78,12 +80,18 @@ impl StateStoreProvider for FfiStateStoreProxy {
         })
     }
 
-    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+    async fn get(
+        &self,
+        partition: &StorePartition,
+        key: &str,
+    ) -> StateStoreResult<Option<Vec<u8>>> {
+        let partition_json = serde_json::to_string(partition)
+            .map_err(|error| drasi_lib::StateStoreError::Other(error.to_string()))?;
         unsafe {
             let vtable = &*self.vtable;
             (vtable.get_fn)(
                 vtable.state,
-                FfiStr::from_str(store_id),
+                FfiStr::from_str(&partition_json),
                 FfiStr::from_str(key),
             )
             .into_result()
@@ -91,12 +99,19 @@ impl StateStoreProvider for FfiStateStoreProxy {
         }
     }
 
-    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+    async fn set(
+        &self,
+        partition: &StorePartition,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<()> {
+        let partition_json = serde_json::to_string(partition)
+            .map_err(|error| drasi_lib::StateStoreError::Other(error.to_string()))?;
         unsafe {
             let vtable = &*self.vtable;
             (vtable.set_fn)(
                 vtable.state,
-                FfiStr::from_str(store_id),
+                FfiStr::from_str(&partition_json),
                 FfiStr::from_str(key),
                 value.as_ptr(),
                 value.len(),
@@ -106,48 +121,58 @@ impl StateStoreProvider for FfiStateStoreProxy {
         }
     }
 
-    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-        self.delete_many(store_id, &[key])
+    async fn delete(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool> {
+        self.delete_many(partition, &[key])
             .await
             .map(|count| count != 0)
     }
 
-    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn contains_key(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool> {
         // The legacy boolean slot conflates absence and errors. The get slot
         // already has distinct found/error fields without changing the ABI.
-        self.get(store_id, key).await.map(|value| value.is_some())
+        self.get(partition, key).await.map(|value| value.is_some())
     }
 
     async fn get_many(
         &self,
-        store_id: &str,
+        partition: &StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
         // Fall back to individual gets for simplicity
         let mut result = HashMap::new();
         for key in keys {
-            if let Some(val) = self.get(store_id, key).await? {
+            if let Some(val) = self.get(partition, key).await? {
                 result.insert(key.to_string(), val);
             }
         }
         Ok(result)
     }
 
-    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        partition: &StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()> {
         // Fall back to individual sets for simplicity
         for (key, value) in entries {
-            self.set(store_id, key, value.to_vec()).await?;
+            self.set(partition, key, value.to_vec()).await?;
         }
         Ok(())
     }
 
-    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+    async fn delete_many(
+        &self,
+        partition: &StorePartition,
+        keys: &[&str],
+    ) -> StateStoreResult<usize> {
+        let partition_json = serde_json::to_string(partition)
+            .map_err(|error| drasi_lib::StateStoreError::Other(error.to_string()))?;
         let keys: Vec<_> = keys.iter().map(|key| FfiStr::from_str(key)).collect();
         let count = unsafe {
             let vtable = &*self.vtable;
             (vtable.delete_many_fn)(
                 vtable.state,
-                FfiStr::from_str(store_id),
+                FfiStr::from_str(&partition_json),
                 keys.as_ptr(),
                 keys.len(),
             )
@@ -162,10 +187,12 @@ impl StateStoreProvider for FfiStateStoreProxy {
             })
     }
 
-    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn clear_store(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+        let partition_json = serde_json::to_string(partition)
+            .map_err(|error| drasi_lib::StateStoreError::Other(error.to_string()))?;
         unsafe {
             let vtable = &*self.vtable;
-            let result = (vtable.clear_store_fn)(vtable.state, FfiStr::from_str(store_id));
+            let result = (vtable.clear_store_fn)(vtable.state, FfiStr::from_str(&partition_json));
             if result < 0 {
                 Err(drasi_lib::StateStoreError::Other(
                     "clear_store failed".into(),
@@ -176,25 +203,33 @@ impl StateStoreProvider for FfiStateStoreProxy {
         }
     }
 
-    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+    async fn list_keys(&self, partition: &StorePartition) -> StateStoreResult<Vec<String>> {
+        let partition_json = serde_json::to_string(partition)
+            .map_err(|error| drasi_lib::StateStoreError::Other(error.to_string()))?;
         unsafe {
             let vtable = &*self.vtable;
             let mut array = std::mem::MaybeUninit::uninit();
-            (vtable.list_keys_fn)(vtable.state, FfiStr::from_str(store_id), array.as_mut_ptr())
-                .into_result()
-                .map_err(drasi_lib::StateStoreError::Other)?;
+            (vtable.list_keys_fn)(
+                vtable.state,
+                FfiStr::from_str(&partition_json),
+                array.as_mut_ptr(),
+            )
+            .into_result()
+            .map_err(drasi_lib::StateStoreError::Other)?;
             Ok(array.assume_init().into_vec())
         }
     }
 
-    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
-        self.key_count(store_id).await.map(|count| count != 0)
+    async fn store_exists(&self, partition: &StorePartition) -> StateStoreResult<bool> {
+        self.key_count(partition).await.map(|count| count != 0)
     }
 
-    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn key_count(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+        let partition_json = serde_json::to_string(partition)
+            .map_err(|error| drasi_lib::StateStoreError::Other(error.to_string()))?;
         unsafe {
             let vtable = &*self.vtable;
-            let result = (vtable.key_count_fn)(vtable.state, FfiStr::from_str(store_id));
+            let result = (vtable.key_count_fn)(vtable.state, FfiStr::from_str(&partition_json));
             if result < 0 {
                 Err(drasi_lib::StateStoreError::Other("key_count failed".into()))
             } else {
@@ -264,16 +299,18 @@ mod tests {
         deleted
     }
     extern "C" fn count(_: *mut c_void, store: FfiStr) -> i64 {
-        match unsafe { store.to_string() }.as_str() {
-            "populated" => 2,
-            "empty" => 0,
+        match serde_json::from_str::<StorePartition>(&unsafe { store.to_string() }) {
+            Ok(partition) if partition == StorePartition::named("populated") => 2,
+            Ok(partition) if partition == StorePartition::named("empty") => 0,
             _ => -1,
         }
     }
     extern "C" fn list(_: *mut c_void, store: FfiStr, out_keys: *mut FfiStringArray) -> FfiResult {
-        let keys = match unsafe { store.to_string() }.as_str() {
-            "populated" => vec!["first".into(), "second".into()],
-            "empty" => vec![],
+        let keys = match serde_json::from_str::<StorePartition>(&unsafe { store.to_string() }) {
+            Ok(partition) if partition == StorePartition::named("populated") => {
+                vec!["first".into(), "second".into()]
+            }
+            Ok(partition) if partition == StorePartition::named("empty") => vec![],
             _ => return FfiResult::err("storage unavailable".into()),
         };
         unsafe { out_keys.write(FfiStringArray::from_vec(keys)) };
@@ -380,34 +417,92 @@ mod tests {
             proxy.durability(),
             drasi_core::interface::StorageDurability::VOLATILE
         );
-        assert!(proxy.contains_key("store", "present").await.unwrap());
-        assert!(!proxy.contains_key("store", "missing").await.unwrap());
-        assert!(proxy.contains_key("store", "error").await.is_err());
-        assert!(proxy.store_exists("populated").await.unwrap());
-        assert!(!proxy.store_exists("empty").await.unwrap());
-        assert!(proxy.store_exists("error").await.is_err());
-        assert_eq!(
-            proxy.list_keys("populated").await.unwrap(),
-            vec!["first", "second"]
-        );
-        assert!(proxy.list_keys("empty").await.unwrap().is_empty());
         assert!(proxy
-            .list_keys("error")
+            .contains_key(&drasi_core_types::StorePartition::named("store"), "present")
             .await
-            .unwrap_err()
-            .to_string()
-            .contains("storage unavailable"));
-        assert!(proxy.delete("store", "present").await.unwrap());
-        assert!(!proxy.delete("store", "missing").await.unwrap());
+            .unwrap());
+        assert!(!proxy
+            .contains_key(&drasi_core_types::StorePartition::named("store"), "missing")
+            .await
+            .unwrap());
+        assert!(proxy
+            .contains_key(&drasi_core_types::StorePartition::named("store"), "error")
+            .await
+            .is_err());
+        assert!(proxy
+            .store_exists(&drasi_core_types::StorePartition::named("populated"))
+            .await
+            .unwrap());
+        assert!(!proxy
+            .store_exists(&drasi_core_types::StorePartition::named("empty"))
+            .await
+            .unwrap());
+        assert!(proxy
+            .store_exists(&drasi_core_types::StorePartition::named("error"))
+            .await
+            .is_err());
         assert_eq!(
             proxy
-                .delete_many("store", &["one", "missing", "two"])
+                .key_count(&StorePartition::named("populated"))
                 .await
                 .unwrap(),
             2
         );
-        assert!(proxy.delete("store", "error").await.is_err());
-        assert!(proxy.delete("store", "invalid").await.is_err());
+        assert_eq!(
+            proxy
+                .key_count(&StorePartition::named("empty"))
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(proxy
+            .key_count(&StorePartition::named("error"))
+            .await
+            .is_err());
+        assert_eq!(
+            proxy
+                .list_keys(&drasi_core_types::StorePartition::named("populated"))
+                .await
+                .unwrap(),
+            vec!["first", "second"]
+        );
+        assert!(proxy
+            .list_keys(&drasi_core_types::StorePartition::named("empty"))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(proxy
+            .list_keys(&drasi_core_types::StorePartition::named("error"))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("storage unavailable"));
+        assert!(proxy
+            .delete(&drasi_core_types::StorePartition::named("store"), "present")
+            .await
+            .unwrap());
+        assert!(!proxy
+            .delete(&drasi_core_types::StorePartition::named("store"), "missing")
+            .await
+            .unwrap());
+        assert_eq!(
+            proxy
+                .delete_many(
+                    &drasi_core_types::StorePartition::named("store"),
+                    &["one", "missing", "two"]
+                )
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(proxy
+            .delete(&drasi_core_types::StorePartition::named("store"), "error")
+            .await
+            .is_err());
+        assert!(proxy
+            .delete(&drasi_core_types::StorePartition::named("store"), "invalid")
+            .await
+            .is_err());
     }
 
     extern "C" fn release_boxed_arc(state: *mut c_void) {

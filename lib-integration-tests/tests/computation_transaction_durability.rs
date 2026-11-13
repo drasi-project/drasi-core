@@ -35,9 +35,14 @@ use std::{
 };
 
 const CRASH_EXIT: i32 = 74;
+const TRANSACTION_ID: &str = "4aea9fc2-4d34-5897-b4bf-26eddc85b78c";
+const CONNECTED_QUERY_ID: &str = "00000000-0000-0000-0000-000000000402";
+const FIRST_QUERY_ID: &str = "00000000-0000-0000-0000-000000000403";
+const SECOND_QUERY_ID: &str = "00000000-0000-0000-0000-000000000404";
 
 struct ArithmeticStep {
     descriptor: ComponentDescriptor,
+    label: String,
     add: i64,
     multiply: i64,
     trace: PathBuf,
@@ -77,6 +82,7 @@ impl TransactionalTransformer for ArithmeticStep {
         input: ChangeEnvelope,
         context: &TransactionContext<'_>,
     ) -> Result<ChangeEnvelope> {
+        assert_eq!(context.step_id(), self.descriptor.id());
         let count = match context.get("counter").await? {
             None => 1,
             Some(ElementValue::Integer(previous)) => previous + 1,
@@ -91,9 +97,9 @@ impl TransactionalTransformer for ArithmeticStep {
             .create(true)
             .append(true)
             .open(&self.trace)?;
-        writeln!(trace, "{}:{count}", context.step_id())?;
+        writeln!(trace, "{}:{count}", self.label)?;
         trace.sync_all()?;
-        if self.crash_before_commit && context.step_id().as_str() == "second" {
+        if self.crash_before_commit && self.label == "second" {
             // Bypass rollback guards and destructors after both steps staged writes.
             std::process::exit(CRASH_EXIT);
         }
@@ -111,14 +117,14 @@ impl TransactionalTransformer for ArithmeticStep {
             let value = (value + self.add) * self.multiply;
             properties.insert("value", ElementValue::Integer(value));
             properties.insert(
-                &format!("{}_count", context.step_id()),
+                &format!("{}_count", self.label),
                 ElementValue::Integer(count),
             );
         }
         Ok(GraphChangeCodec::derive_changes(
             &input,
             &changes,
-            StreamId::try_new(format!("{}/out", context.step_id()))?,
+            StreamId::try_new(format!("{}/out", self.label))?,
             input.system().sequence(),
         )?)
     }
@@ -158,6 +164,10 @@ impl TransactionalTransformerFactory for ArithmeticFactory {
                     ),
                 ],
             )?,
+            label: step.configuration["label"]
+                .as_str()
+                .context("missing step label")?
+                .to_owned(),
             add: step.configuration["add"].as_i64().context("missing add")?,
             multiply: step.configuration["multiply"]
                 .as_i64()
@@ -191,19 +201,22 @@ async fn transaction_unstarted(
     let subject = TransactionTransformer::new(
         TransactionTransformerDefinition {
             graph_id: "transaction-crash".into(),
-            id: ComponentId::try_new("sequence")?,
+            id: ComponentId::try_new(TRANSACTION_ID)?,
             output_stream: StreamId::try_new("sequence/out")?,
-            steps: [("first", 2, 1), ("second", 0, 4)]
-                .into_iter()
-                .map(|(name, add, multiply)| {
-                    Ok(TransactionStepDefinition {
-                        id: ComponentId::try_new(name)?,
-                        implementation: factory.implementation(),
-                        configuration_version: 1,
-                        configuration: json!({"add": add, "multiply": multiply}),
-                    })
+            steps: [
+                ("00000000-0000-0000-0000-000000000405", "first", 2, 1),
+                ("00000000-0000-0000-0000-000000000406", "second", 0, 4),
+            ]
+            .into_iter()
+            .map(|(id, label, add, multiply)| {
+                Ok(TransactionStepDefinition {
+                    id: ComponentId::try_new(id)?,
+                    implementation: factory.implementation(),
+                    configuration_version: 1,
+                    configuration: json!({"label": label, "add": add, "multiply": multiply}),
                 })
-                .collect::<Result<_>>()?,
+            })
+            .collect::<Result<_>>()?,
             outbox_capacity: NonZeroUsize::new(4).expect("transaction capacity"),
         },
         Arc::new(registry),
@@ -234,17 +247,21 @@ fn input(sequence: u64, value: i64) -> Result<InputEnvelope> {
     })
 }
 
-async fn query(root: &Path, name: &str) -> Result<ContinuousQueryTransformer> {
-    let mut subject = query_unstarted(root, name).await?;
+async fn query(root: &Path, name: &str, id: ComponentId) -> Result<ContinuousQueryTransformer> {
+    let mut subject = query_unstarted(root, name, id).await?;
     subject.start().await?;
     Ok(subject)
 }
 
-async fn query_unstarted(root: &Path, name: &str) -> Result<ContinuousQueryTransformer> {
+async fn query_unstarted(
+    root: &Path,
+    name: &str,
+    id: ComponentId,
+) -> Result<ContinuousQueryTransformer> {
     let subject = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "transaction-crash".into(),
-            id: ComponentId::try_new(name)?,
+            id,
             query: "MATCH (n:Item) RETURN n.value AS value, n.first_count AS first_count, n.second_count AS second_count".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new(format!("{name}/out"))?,
@@ -343,49 +360,76 @@ impl EnvelopeSink for CrashSink {
 async fn connected_pipeline(root: &Path, boundary: &str, crash: bool) -> Result<()> {
     let profiles: Vec<_> = boundary.split('-').skip(1).collect();
     anyhow::ensure!(profiles.len() == 2, "expected two downstream pipe profiles");
+    let source_id = ComponentId::try_new("ba12c37d-5d98-534f-b2d1-8d22f57cba08")?;
+    let transaction_id = ComponentId::try_new(TRANSACTION_ID)?;
+    let query_id = ComponentId::try_new(CONNECTED_QUERY_ID)?;
+    let sink_id = ComponentId::try_new("04136f2d-e10f-57e8-a2ff-d8150254a16f")?;
     let mut builder = ComputationGraph::builder("transaction-crash")
-        .transformer(Box::new(transaction_unstarted(root, false).await?))
-        .transformer(Box::new(query_unstarted(root, "connected-query").await?))
-        .sink(Box::new(CrashSink {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("sink")?,
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::new([
-                        PipeCapability::DurableAcceptance,
-                        PipeCapability::ExplicitAcknowledgement,
-                    ]),
-                )],
-            )?,
-            root: root.to_owned(),
-            crash,
-        }));
+        .transformer(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                .expect("fixture component name"),
+            Box::new(transaction_unstarted(root, false).await?),
+        )
+        .transformer(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-2")
+                .expect("fixture component name"),
+            Box::new(query_unstarted(root, "connected-query", query_id.clone()).await?),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(CrashSink {
+                descriptor: ComponentDescriptor::try_new(
+                    sink_id.clone(),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::new([
+                            PipeCapability::DurableAcceptance,
+                            PipeCapability::ExplicitAcknowledgement,
+                        ]),
+                    )],
+                )?,
+                root: root.to_owned(),
+                crash,
+            }),
+        );
     let mut accepted_source = 0;
-    for (from, to, schema, profile) in [
-        ("source", "sequence", GraphChangeCodec::schema(), "qos"),
+    for (name, from, to, schema, profile, owner) in [
+        (
+            "source",
+            &source_id,
+            &transaction_id,
+            GraphChangeCodec::schema(),
+            "qos",
+            "00000000-0000-0000-0000-000000000401",
+        ),
         (
             "sequence",
-            "connected-query",
+            &transaction_id,
+            &query_id,
             GraphChangeCodec::schema(),
             profiles[0],
+            "00000000-0000-0000-0000-000000000407",
         ),
         (
             "connected-query",
-            "sink",
+            &query_id,
+            &sink_id,
             QueryChangeCodec::schema(),
             profiles[1],
+            "00000000-0000-0000-0000-000000000402",
         ),
     ] {
         let indexes = storage(&root.join("pipes"))
-            .create_indexes("connected", from)
+            .create_indexes("connected", &ComponentId::try_new(owner)?)
             .await?;
         let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).expect("codec limit"));
         codec.register_schema(schema)?;
-        let id = ResourceId::try_new(from)?;
+        let id = ResourceId::try_new(name)?;
         let capacity = NonZeroUsize::new(1).expect("single-event capacity");
-        let stream = StreamId::try_new(format!("{from}/out"))?;
+        let stream = StreamId::try_new(format!("{name}/out"))?;
         let (provider, resource): (Box<dyn PipeProvider>, ResourceHandle) = match profile {
             "qos" => {
                 let definition = QosChannelDefinition {
@@ -400,7 +444,7 @@ async fn connected_pipeline(root: &Path, boundary: &str, crash: bool) -> Result<
                 };
                 let channel =
                     QosChannel::persistent(definition.clone(), indexes, codec, "journal").await?;
-                if from == "source" {
+                if name == "source" {
                     // Resume at durable acceptance: unhandled accepted input remains in this journal.
                     accepted_source = channel.progress().await?.producer_sequence.unwrap_or(0);
                 }
@@ -438,34 +482,35 @@ async fn connected_pipeline(root: &Path, boundary: &str, crash: bool) -> Result<
                 id: id.clone(),
                 role: ResourceRole::StateStore,
                 ownership: ResourceOwnership::Graph,
-                binding: Arc::from(from),
+                binding: Arc::from(name),
             })?
             .provide_resource(id, resource)?
-            .bind_stream(
-                Endpoint::new(ComponentId::try_new(from)?, PortId::try_new("out")?),
-                stream,
-            )
+            .bind_stream(Endpoint::new(from.clone(), PortId::try_new("out")?), stream)
             .connect(
                 EdgeDefinition::new(
-                    Endpoint::new(ComponentId::try_new(from)?, PortId::try_new("out")?),
-                    Endpoint::new(ComponentId::try_new(to)?, PortId::try_new("in")?),
+                    Endpoint::new(from.clone(), PortId::try_new("out")?),
+                    Endpoint::new(to.clone(), PortId::try_new("in")?),
                 ),
                 provider,
             );
     }
     let mut graph = builder
-        .source(Box::new(ReplaySource {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("source")?,
-                vec![PortDescriptor::new(
-                    PortId::try_new("out")?,
-                    PortDirection::Output,
-                    GraphChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::new([PipeCapability::DurableAcceptance]),
-                )],
-            )?,
-            sequence: accepted_source,
-        }))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(ReplaySource {
+                descriptor: ComponentDescriptor::try_new(
+                    source_id,
+                    vec![PortDescriptor::new(
+                        PortId::try_new("out")?,
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::new([PipeCapability::DurableAcceptance]),
+                    )],
+                )?,
+                sequence: accepted_source,
+            }),
+        )
         .build()?;
     tokio::time::timeout(Duration::from_secs(20), graph.start()?).await??;
     anyhow::ensure!(
@@ -476,7 +521,7 @@ async fn connected_pipeline(root: &Path, boundary: &str, crash: bool) -> Result<
     graph.dispose().await?;
     drop(graph);
 
-    let mut restored = query(root, "connected-query").await?;
+    let mut restored = query(root, "connected-query", query_id).await?;
     assert_eq!(rows(&restored)?, [(20, 1, 1), (24, 2, 2), (28, 3, 3)]);
     assert!(!restored.has_pending_emissions());
     restored.stop().await?;
@@ -577,8 +622,13 @@ async fn transaction_crash_worker() -> Result<()> {
     }
     let precommit = boundary == "before-commit";
     let mut subject = transaction(&root, precommit && phase == "seed").await?;
-    let mut first = query(&root, "first-query").await?;
-    let mut second = query(&root, "second-query").await?;
+    let mut first = query(&root, "first-query", ComponentId::try_new(FIRST_QUERY_ID)?).await?;
+    let mut second = query(
+        &root,
+        "second-query",
+        ComponentId::try_new(SECOND_QUERY_ID)?,
+    )
+    .await?;
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("codec limit"));
     codec.register_schema(GraphChangeCodec::schema())?;
 

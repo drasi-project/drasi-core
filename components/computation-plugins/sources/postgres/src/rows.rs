@@ -181,7 +181,7 @@ impl RowEmission {
                 .map_err(|_| anyhow::anyhow!("PostgreSQL row transport sequence exhausted"))?
                 + 1;
             let event = SourceEventWrapper::new(
-                transaction.source.to_string(),
+                transaction.source.clone(),
                 SourceEvent::Change(change),
                 timestamp,
                 self.sequence,

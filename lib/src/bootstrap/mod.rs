@@ -20,15 +20,8 @@
 //! configuration object. These are the existing Source/Reaction-family
 //! interfaces. Native dynamic bootstrap providers use `NativeBootstrapProvider`
 //! from `drasi-computation-plugin-sdk`.
-//!
-//! # Included Providers
-//!
-//! - [`ComponentGraphBootstrapProvider`]: Bootstraps from a [`ComponentGraphView`](crate::ComponentGraphView) snapshot
-//!   for the built-in component graph source.
 
-pub mod component_graph;
-pub use component_graph::ComponentGraphBootstrapProvider;
-
+use crate::ComponentId;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -40,7 +33,7 @@ use std::sync::Arc;
 /// Request for bootstrap data from a query
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapRequest {
-    pub query_id: String,
+    pub query_id: ComponentId,
     /// Node labels requested by the query. Unmapped labels are sent to every source;
     /// providers must filter out labels they do not own.
     pub node_labels: Vec<String>,
@@ -66,7 +59,7 @@ pub struct BootstrapContext {
     /// Unique server ID for logging and tracing
     pub server_id: String,
     /// Source ID for labeling bootstrap events
-    pub source_id: String,
+    pub source_id: ComponentId,
     /// Sequence counter for bootstrap events
     pub sequence_counter: Arc<AtomicU64>,
     /// Optional properties that can be set by plugins if needed
@@ -78,7 +71,7 @@ impl BootstrapContext {
     ///
     /// This is the preferred constructor. Bootstrap providers should have their
     /// own configuration - they don't need access to source config.
-    pub fn new_minimal(server_id: String, source_id: String) -> Self {
+    pub fn new_minimal(server_id: String, source_id: ComponentId) -> Self {
         Self {
             server_id,
             source_id,
@@ -94,7 +87,7 @@ impl BootstrapContext {
     /// typed configuration.
     pub fn with_properties(
         server_id: String,
-        source_id: String,
+        source_id: ComponentId,
         properties: HashMap<String, serde_json::Value>,
     ) -> Self {
         Self {

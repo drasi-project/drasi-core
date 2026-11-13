@@ -10,6 +10,10 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::{oneshot, Notify};
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 fn schema() -> SchemaDescriptor {
     QueryChangeCodec::schema().descriptor().clone()
 }
@@ -32,7 +36,7 @@ fn input(sequence: u64) -> InputEnvelope {
         )
         .append_context(
             ContextEntry::try_new(
-                ComponentId::try_new("query").unwrap(),
+                ComponentId::try_new("c3d89288-3aef-5b10-b9dc-403318ae9a4e").unwrap(),
                 "request",
                 ContextValue::Unsigned(sequence),
             )
@@ -45,9 +49,10 @@ fn input(sequence: u64) -> InputEnvelope {
 #[test]
 fn descriptor_and_completion_do_not_invent_recovery_or_configuration() {
     let (channel, _receiver) =
-        ApplicationReaction::channel("channel", schema(), NonZeroUsize::new(1).unwrap()).unwrap();
+        ApplicationReaction::channel(component_id(297), schema(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
     let callback =
-        ApplicationReaction::callback("callback", schema(), |_| async { Ok(()) }).unwrap();
+        ApplicationReaction::callback(component_id(290), schema(), |_| async { Ok(()) }).unwrap();
     assert_eq!(channel.completion(), SinkCompletion::Accepted);
     assert_eq!(callback.completion(), SinkCompletion::Handled);
     for reaction in [&channel, &callback] {
@@ -65,10 +70,9 @@ fn descriptor_and_completion_do_not_invent_recovery_or_configuration() {
         &PipeRequirements::new([PipeCapability::ExplicitAcknowledgement])
     )
     .is_err());
-    assert!(ApplicationReaction::channel("", schema(), NonZeroUsize::new(1).unwrap()).is_err());
     let oversized = NonZeroUsize::new(tokio::sync::Semaphore::MAX_PERMITS + 1).unwrap();
     assert!(matches!(
-        ApplicationReaction::channel("oversized", schema(), oversized)
+        ApplicationReaction::channel(component_id(950), schema(), oversized)
             .err()
             .unwrap()
             .downcast_ref(),
@@ -80,7 +84,8 @@ fn descriptor_and_completion_do_not_invent_recovery_or_configuration() {
 #[tokio::test(flavor = "current_thread")]
 async fn channel_backpressure_cancellation_and_three_restarts_preserve_envelopes() {
     let (mut reaction, mut receiver) =
-        ApplicationReaction::channel("channel", schema(), NonZeroUsize::new(1).unwrap()).unwrap();
+        ApplicationReaction::channel(component_id(297), schema(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
     for sequence in 1..=3 {
         reaction.start().await.unwrap();
         assert!(reaction
@@ -125,9 +130,10 @@ async fn channel_backpressure_cancellation_and_three_restarts_preserve_envelopes
 fn explicit_properties_are_metadata_without_serializing_the_application_binding() {
     let properties = HashMap::from([("owner".into(), serde_json::json!("test-host"))]);
     let (channel, _receiver) =
-        ApplicationReaction::channel("channel", schema(), NonZeroUsize::new(1).unwrap()).unwrap();
+        ApplicationReaction::channel(component_id(297), schema(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
     let callback =
-        ApplicationReaction::callback("callback", schema(), |_| async { Ok(()) }).unwrap();
+        ApplicationReaction::callback(component_id(290), schema(), |_| async { Ok(()) }).unwrap();
     for reaction in [channel, callback] {
         let reaction = reaction.with_properties(properties.clone());
         assert_eq!(
@@ -141,7 +147,8 @@ fn explicit_properties_are_metadata_without_serializing_the_application_binding(
 #[tokio::test(flavor = "current_thread")]
 async fn closed_receiver_fails_delivery_without_success_fallback() {
     let (mut reaction, receiver) =
-        ApplicationReaction::channel("channel", schema(), NonZeroUsize::new(1).unwrap()).unwrap();
+        ApplicationReaction::channel(component_id(297), schema(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
     reaction.start().await.unwrap();
     drop(receiver);
     assert!(matches!(
@@ -155,7 +162,7 @@ async fn closed_receiver_fails_delivery_without_success_fallback() {
 async fn validates_lifecycle_port_and_full_schema_before_calling_application() {
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
-    let mut reaction = ApplicationReaction::callback("callback", schema(), move |_| {
+    let mut reaction = ApplicationReaction::callback(component_id(290), schema(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         async { Ok(()) }
     })
@@ -205,7 +212,7 @@ async fn cancelled_callback_and_stop_retain_submitted_blocking_work() {
     let completed = Arc::new(AtomicUsize::new(0));
     let observed = completed.clone();
     let mut job = Some((started, blocked));
-    let mut reaction = ApplicationReaction::callback("callback", schema(), move |_| {
+    let mut reaction = ApplicationReaction::callback(component_id(290), schema(), move |_| {
         let (started, blocked) = job.take().expect("callback invoked only once");
         let completed = observed.clone();
         async move {
@@ -263,7 +270,7 @@ struct ApplicationFailure;
 async fn callback_errors_remain_typed_in_handling_and_cancelled_cleanup() {
     let release = Arc::new(Notify::new());
     let gate = release.clone();
-    let mut reaction = ApplicationReaction::callback("callback", schema(), move |_| {
+    let mut reaction = ApplicationReaction::callback(component_id(290), schema(), move |_| {
         let gate = gate.clone();
         async move {
             gate.notified().await;
@@ -305,12 +312,12 @@ async fn callback_errors_remain_typed_in_handling_and_cancelled_cleanup() {
 #[tokio::test(flavor = "current_thread")]
 async fn callback_factory_and_future_panics_poison_only_their_binding() {
     let factory = ApplicationReaction::callback(
-        "factory-panic",
+        component_id(786),
         schema(),
         |_| -> std::future::Ready<anyhow::Result<()>> { panic!("factory panic") },
     )
     .unwrap();
-    let future = ApplicationReaction::callback("future-panic", schema(), |_| async {
+    let future = ApplicationReaction::callback(component_id(787), schema(), |_| async {
         tokio::task::yield_now().await;
         panic!("future panic");
     })
@@ -328,7 +335,7 @@ async fn callback_factory_and_future_panics_poison_only_their_binding() {
         ));
     }
     let mut healthy =
-        ApplicationReaction::callback("healthy", schema(), |_| async { Ok(()) }).unwrap();
+        ApplicationReaction::callback(component_id(788), schema(), |_| async { Ok(()) }).unwrap();
     for sequence in 1..=3 {
         healthy.start().await.unwrap();
         healthy.handle(input(sequence)).await.unwrap();

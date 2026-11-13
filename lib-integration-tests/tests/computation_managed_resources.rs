@@ -20,6 +20,23 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::{computation::v1::*, management::*, DrasiLib};
 use drasi_state_store_redb::RedbConfigurationStore;
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
+fn topology_component_id(name: &str) -> ComponentId {
+    component_id(match name {
+        "producer" => 422,
+        "consumer" => 423,
+        "mirror" => 424,
+        "heartbeat" => 425,
+        "observer" => 426,
+        "changed-user" => 500,
+        "unrelated-user" => 501,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
+
 struct Journals {
     indexes: Arc<dyn ComputationIndexProvider>,
     latest: Mutex<Option<Weak<QosChannel>>>,
@@ -69,7 +86,7 @@ impl ManagementResourceResolver for Journals {
         let definition: QosChannelDefinition = serde_json::from_value(configuration.clone())?;
         let indexes = self
             .indexes
-            .create_indexes(graph, specification.id.as_str())
+            .create_indexes(graph, &component_id(749))
             .await?;
         let channel = QosChannel::persistent(
             definition,
@@ -359,6 +376,8 @@ struct Listeners {
     wrong_role: AtomicBool,
     created: std::sync::atomic::AtomicUsize,
     user_creations: std::sync::atomic::AtomicUsize,
+    reject_update: AtomicBool,
+    update_plan: Mutex<Option<ComponentUpdatePlan>>,
 }
 
 impl Listeners {
@@ -374,6 +393,36 @@ impl Listeners {
 
 #[async_trait]
 impl ManagementResourceResolver for Listeners {
+    fn plan_update(
+        &self,
+        resource: &ResourceId,
+        previous: &DesiredTopology,
+        desired: &DesiredTopology,
+    ) -> Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            !self.reject_update.load(Ordering::Acquire),
+            "listener owner refused update"
+        );
+        for topology in [previous, desired] {
+            let configuration = &topology.resource_configurations[resource];
+            anyhow::ensure!(
+                configuration
+                    .as_object()
+                    .is_some_and(|fields| fields.len() == 1)
+                    && configuration["listen"].as_str().is_some(),
+                "listener owner updates require only a listen address"
+            );
+        }
+        Ok(self
+            .update_plan
+            .lock()
+            .expect("owner update plan")
+            .unwrap_or(ComponentUpdatePlan {
+                mode: ComponentUpdateMode::Recreate,
+                data: ComponentUpdateData::Preserve,
+            }))
+    }
+
     async fn resolve(
         &self,
         _: &str,
@@ -423,6 +472,21 @@ impl ManagementResourceResolver for Listeners {
             specification.role
         };
         Ok(ResourceHandle::new(role, listener.clone()).with_cleanup(listener))
+    }
+
+    async fn resolve_with_dependencies(
+        &self,
+        instance: &str,
+        graph: &str,
+        specification: &ResourceSpecification,
+        configuration: &serde_json::Value,
+        dependencies: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<ResourceHandle> {
+        for dependency in dependencies.values() {
+            dependency.get::<Listener>()?.connect().await?;
+        }
+        self.resolve(instance, graph, specification, configuration)
+            .await
     }
 }
 
@@ -530,9 +594,10 @@ fn listener_desired() -> Result<DesiredInstance> {
             .resource_configurations
             .insert(id.clone(), serde_json::json!({"listen":"127.0.0.1:0"}));
         let descriptor =
-            ComponentDescriptor::try_new(ComponentId::try_new(format!("{name}-user"))?, vec![])?;
+            ComponentDescriptor::try_new(topology_component_id(&format!("{name}-user")), vec![])?;
         target.components.push(DesiredComponent {
             descriptor: descriptor.clone(),
+            name: ComponentName::try_new(format!("{name}-user"))?,
             role: ComponentRole::Service,
             completion: None,
             streams: BTreeMap::new(),
@@ -560,6 +625,292 @@ async fn listeners() -> Result<(DrasiLib, Arc<Listeners>, DesiredInstance)> {
     assert!(core.reconcile_desired_state().await?.converged());
     core.start().await?;
     Ok((core, resolver, desired))
+}
+
+async fn assert_listener_converged(core: &DrasiLib) -> Result<()> {
+    core.reconcile_desired_state().await?;
+    assert_listener_ready(core).await
+}
+
+async fn assert_listener_ready(core: &DrasiLib) -> Result<()> {
+    let status = core.management_status().await?;
+    if !status.converged() {
+        assert!(
+            status.applied && status.error.is_none() && status.resource_errors.is_empty(),
+            "{status:?}"
+        );
+        let graph = core.computation_control()?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            graph.subscribe_observed().wait_for(|state| {
+                ["changed-user", "unrelated-user"].iter().all(|name| {
+                    state
+                        .components
+                        .get(&topology_component_id(name))
+                        .is_some_and(|node| {
+                            node.realization == RealizationState::Created
+                                && node.failure.is_none()
+                                && (node.lifecycle == ComponentLifecycle::Running
+                                    || node.lifecycle == ComponentLifecycle::Stopped
+                                        && node.lifecycle_requested)
+                        })
+                })
+            }),
+        )
+        .await??;
+    }
+    let status = core.management_status().await?;
+    assert!(
+        status.converged(),
+        "{status:?}; {:?}",
+        core.computation_control()?.observed()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_owner_assessment_rejects_unsupported_plans_before_effects() -> Result<()> {
+    let (core, resolver, mut desired) = listeners().await?;
+    let old = resolver.listener("changed")?;
+    let before = core.desired_configuration()?;
+    desired.topology.resource_configurations.insert(
+        ResourceId::try_new("changed")?,
+        serde_json::json!({"listen":old.address.to_string()}),
+    );
+    resolver.reject_update.store(true, Ordering::Release);
+    let error = core
+        .apply_desired_state(1, "refused", desired.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("listener owner refused update"),
+        "{error:#}"
+    );
+    resolver.reject_update.store(false, Ordering::Release);
+    for (request, plan) in [
+        (
+            "retained",
+            ComponentUpdatePlan {
+                mode: ComponentUpdateMode::Restart,
+                data: ComponentUpdateData::Preserve,
+            },
+        ),
+        (
+            "reset",
+            ComponentUpdatePlan {
+                mode: ComponentUpdateMode::Recreate,
+                data: ComponentUpdateData::Reset,
+            },
+        ),
+    ] {
+        *resolver.update_plan.lock().unwrap() = Some(plan);
+        let error = core
+            .apply_desired_state(1, request, desired.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("resource owner updates require Recreate with Preserve"),
+            "{error:#}"
+        );
+        assert!(core.configuration_receipt(request).await?.is_none());
+    }
+    *resolver.update_plan.lock().unwrap() = None;
+    let ComponentConstruction::Factory(consumer) = &mut desired.topology.components[0].construction
+    else {
+        anyhow::bail!("listener user has no factory recipe");
+    };
+    consumer.configuration.insert(
+        "consumer-change".into(),
+        ConfigurationValue::Literal(serde_json::json!(true)),
+    );
+    let error = core
+        .apply_desired_state(1, "consumer-change", desired)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not support managed updates"),
+        "{error:#}"
+    );
+    assert!(core
+        .configuration_receipt("consumer-change")
+        .await?
+        .is_none());
+    assert_eq!(core.desired_configuration()?, before);
+    assert!(core.configuration_receipt("refused").await?.is_none());
+    assert_eq!(old.cleanup_attempts.load(Ordering::Acquire), 0);
+    assert_eq!(old.stops.load(Ordering::Acquire), 0);
+    assert_eq!(resolver.created.load(Ordering::Acquire), 2);
+    assert_eq!(resolver.user_creations.load(Ordering::Acquire), 2);
+    old.connect().await?;
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_owner_update_rejects_borrowed_takeover_before_effects() -> Result<()> {
+    let (core, resolver, mut desired) = listeners().await?;
+    let before = core.desired_configuration()?;
+    let old = resolver.listener("changed")?;
+    desired
+        .topology
+        .resources
+        .iter_mut()
+        .find(|resource| resource.id.as_str() == "changed")
+        .context("changed provider")?
+        .ownership = ResourceOwnership::Borrowed;
+    let error = core
+        .apply_desired_state(1, "borrowed", desired)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("provider ownership changes require explicit removal and addition"),
+        "{error:#}"
+    );
+    assert_eq!(core.desired_configuration()?, before);
+    assert!(core.configuration_receipt("borrowed").await?.is_none());
+    assert_eq!(old.cleanup_attempts.load(Ordering::Acquire), 0);
+    assert_eq!(old.stops.load(Ordering::Acquire), 0);
+    old.connect().await?;
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_owner_update_reconstructs_dependents_but_retains_prerequisites() -> Result<()> {
+    let (core, resolver) = open_listeners(None).await?;
+    let mut desired = listener_desired()?;
+    let changed = ResourceId::try_new("changed")?;
+    let unrelated = ResourceId::try_new("unrelated")?;
+    let dependent = ResourceId::try_new("dependent")?;
+    desired.topology.resource_dependencies.insert(
+        changed.clone(),
+        BTreeMap::from([(unrelated.clone(), ResourceRole::StateStore)]),
+    );
+    desired.topology.resources.push(ResourceSpecification {
+        id: dependent.clone(),
+        role: ResourceRole::StateStore,
+        ownership: ResourceOwnership::Graph,
+        binding: "dependent".into(),
+    });
+    desired.topology.resource_configurations.insert(
+        dependent.clone(),
+        serde_json::json!({"listen":"127.0.0.1:0"}),
+    );
+    desired.topology.resource_dependencies.insert(
+        dependent.clone(),
+        BTreeMap::from([(changed.clone(), ResourceRole::StateStore)]),
+    );
+    core.apply_desired_state(0, "initial", desired.clone())
+        .await?;
+    assert_listener_converged(&core).await?;
+    core.start().await?;
+    let old = resolver.listener("changed")?;
+    let old_dependent = resolver.listener("dependent")?;
+    let prerequisite = resolver.listener("unrelated")?;
+    desired.topology.resource_configurations.insert(
+        changed,
+        serde_json::json!({"listen":old.address.to_string()}),
+    );
+    core.apply_desired_state(1, "transitive", desired).await?;
+    assert_listener_converged(&core).await?;
+    assert_eq!(old.cleanup_attempts.load(Ordering::Acquire), 1);
+    assert_eq!(old_dependent.cleanup_attempts.load(Ordering::Acquire), 1);
+    assert_eq!(prerequisite.cleanup_attempts.load(Ordering::Acquire), 0);
+    assert_eq!(prerequisite.stops.load(Ordering::Acquire), 0);
+    assert!(Arc::ptr_eq(&prerequisite, &resolver.listener("unrelated")?));
+    assert_eq!(resolver.created.load(Ordering::Acquire), 5);
+    assert_eq!(resolver.user_creations.load(Ordering::Acquire), 3);
+    resolver.listener("changed")?.connect().await?;
+    resolver.listener("dependent")?.connect().await?;
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resource_owner_update_preserves_stopped_consumer_intent() -> Result<()> {
+    let (core, resolver, mut desired) = listeners().await?;
+    let changed = core.component_by_name(&ComponentName::try_new("changed-user")?)?;
+    changed.stop().await?;
+    let old = resolver.listener("changed")?;
+    let unrelated = resolver.listener("unrelated")?;
+    desired.topology.resource_configurations.insert(
+        ResourceId::try_new("changed")?,
+        serde_json::json!({"listen":old.address.to_string()}),
+    );
+    let receipt = core
+        .apply_desired_state(1, "stopped-owner-update", desired)
+        .await?;
+    assert!(
+        receipt.updates.is_empty(),
+        "unchanged consumers are not configuration updates"
+    );
+    let status = core.reconcile_desired_state().await?;
+    assert!(status.converged(), "{status:?}");
+    assert_eq!(
+        core.component_by_name(&ComponentName::try_new("changed-user")?)?
+            .observed()?
+            .realization,
+        RealizationState::Created
+    );
+    let replacement = resolver.listener("changed")?;
+    assert_eq!(replacement.starts.load(Ordering::Acquire), 0);
+    assert_eq!(
+        core.component_by_name(&ComponentName::try_new("changed-user")?)?
+            .observed()?
+            .lifecycle,
+        ComponentLifecycle::Stopped
+    );
+    assert!(Arc::ptr_eq(&unrelated, &resolver.listener("unrelated")?));
+    assert_eq!(unrelated.stops.load(Ordering::Acquire), 0);
+    assert_eq!(resolver.user_creations.load(Ordering::Acquire), 3);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_owner_retry_preserves_manual_start_with_auto_start_disabled() -> Result<()> {
+    let (core, resolver) = open_listeners(None).await?;
+    let mut desired = listener_desired()?;
+    desired.topology.components[0].lifecycle.auto_start = false;
+    core.apply_desired_state(0, "initial", desired.clone())
+        .await?;
+    assert_listener_converged(&core).await?;
+    core.start().await?;
+    let old = resolver.listener("changed")?;
+    assert_eq!(old.starts.load(Ordering::Acquire), 0);
+    core.component_by_name(&ComponentName::try_new("changed-user")?)?
+        .start()
+        .await?;
+    assert_eq!(old.starts.load(Ordering::Acquire), 1);
+    old.fail_cleanup.store(true, Ordering::Release);
+    desired.topology.resource_configurations.insert(
+        ResourceId::try_new("changed")?,
+        serde_json::json!({"listen":old.address.to_string()}),
+    );
+    core.apply_desired_state(1, "manual", desired).await?;
+    core.configuration_receipt("manual").await?;
+    assert!(!core.management_status().await?.converged());
+    assert_listener_converged(&core).await?;
+    assert_eq!(
+        resolver.listener("changed")?.starts.load(Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        resolver
+            .listener("unrelated")?
+            .stops
+            .load(Ordering::Acquire),
+        0
+    );
+    assert_eq!(resolver.user_creations.load(Ordering::Acquire), 3);
+    core.shutdown().await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -593,7 +944,7 @@ async fn listener_resolution_timeout_releases_partial_acquisition_and_preserves_
     assert_eq!(resolver.user_creations.load(Ordering::Acquire), 2);
     // The timed-out constructor owned a real bound socket, not just a pending future.
     drop(std::net::TcpListener::bind(old.address)?);
-    assert!(core.reconcile_desired_state().await?.converged());
+    assert_listener_converged(&core).await?;
     resolver.listener("changed")?.connect().await?;
     assert!(Arc::ptr_eq(&unrelated, &resolver.listener("unrelated")?));
     assert_eq!(unrelated.stops.load(Ordering::Acquire), 0);
@@ -627,7 +978,7 @@ async fn external_listener_contention_does_not_lose_accepted_target_or_restart_u
     assert_eq!(resolver.user_creations.load(Ordering::Acquire), 2);
     unrelated.connect().await?;
     drop(competitor);
-    assert!(core.reconcile_desired_state().await?.converged());
+    assert_listener_converged(&core).await?;
     resolver.listener("changed")?.connect().await?;
     assert!(Arc::ptr_eq(&unrelated, &resolver.listener("unrelated")?));
     assert_eq!(unrelated.stops.load(Ordering::Acquire), 0);
@@ -771,6 +1122,26 @@ async fn listener_handover_retries_cleanup_and_survives_cancelled_wait_without_r
     assert_eq!(old.cleanup_attempts.load(Ordering::Acquire), 1);
     old.connect().await?;
 
+    let accepted = core.desired_configuration()?;
+    let mut conflicting = accepted.desired.clone();
+    conflicting.topology.resource_configurations.insert(
+        ResourceId::try_new("changed")?,
+        serde_json::json!({"listen":"127.0.0.1:0"}),
+    );
+    let error = core
+        .apply_desired_state(2, "overlapping", conflicting)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("overlaps unfinished provider cleanup"),
+        "{error:#}"
+    );
+    assert_eq!(core.desired_configuration()?, accepted);
+    assert!(core.configuration_receipt("overlapping").await?.is_none());
+    assert_eq!(old.cleanup_attempts.load(Ordering::Acquire), 1);
+
     let gate = Arc::new(Gate::default());
     *resolver.gate.lock().unwrap() = Some(gate.clone());
     let waiter = tokio::spawn({
@@ -789,7 +1160,7 @@ async fn listener_handover_retries_cleanup_and_survives_cancelled_wait_without_r
     gate.release.notify_one();
     core.configuration_receipt("replace").await?;
 
-    assert!(core.management_status().await?.converged());
+    assert_listener_ready(&core).await?;
     let replacement = resolver.listener("changed")?;
     assert_eq!(replacement.address, old.address);
     replacement.connect().await?;
@@ -829,7 +1200,7 @@ async fn wrong_role_resource_is_not_injected_and_retains_cleanup_ownership_until
         ResourceRealization::CleanupRequired
     );
     assert_eq!(
-        graph.observed().components[&ComponentId::try_new("changed-user")?].realization,
+        graph.observed().components[&topology_component_id("changed-user")].realization,
         RealizationState::Blocked
     );
     assert_eq!(resolver.user_creations.load(Ordering::Acquire), 2);
@@ -838,7 +1209,7 @@ async fn wrong_role_resource_is_not_injected_and_retains_cleanup_ownership_until
     assert!(!core.reconcile_desired_state().await?.converged());
     assert_eq!(resolver.created.load(Ordering::Acquire), 3);
     assert!(invalid.socket.lock().await.is_some());
-    assert!(core.reconcile_desired_state().await?.converged());
+    assert_listener_converged(&core).await?;
     assert!(invalid.socket.lock().await.is_none());
     assert_eq!(invalid.cleanup_attempts.load(Ordering::Acquire), 2);
     let replacement = resolver.listener("changed")?;
@@ -963,7 +1334,7 @@ impl EnvelopeSink for TrafficNode {
 
 struct TrafficFactory {
     descriptor: FactoryDescriptor,
-    probes: BTreeMap<String, Arc<TrafficProbe>>,
+    probes: BTreeMap<ComponentId, Arc<TrafficProbe>>,
 }
 
 #[async_trait]
@@ -974,13 +1345,42 @@ impl ComponentFactory for TrafficFactory {
     fn validate(&self, _: &ComponentSpecification) -> Result<()> {
         Ok(())
     }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current.descriptor == proposed.descriptor
+                && current.role == proposed.role
+                && current.completion == proposed.completion
+                && current.implementation == proposed.implementation
+                && current.configuration_version == proposed.configuration_version
+                && current.dependencies == proposed.dependencies,
+            "traffic fixture updates may only change the version"
+        );
+        for specification in [current, proposed] {
+            anyhow::ensure!(
+                specification.configuration.len() == 1
+                    && matches!(
+                        specification.configuration.get("version"),
+                        Some(ConfigurationValue::Literal(version)) if version.as_u64().is_some()
+                    ),
+                "invalid traffic version"
+            );
+        }
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
     async fn create(
         &self,
         context: ConstructionContext,
     ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
         let probe = self
             .probes
-            .get(context.component_id.as_str())
+            .get(&context.component_id)
             .context("undeclared traffic fixture")
             .map_err(ComponentCreationError::terminal)?
             .clone();
@@ -1022,6 +1422,7 @@ fn traffic_factory(
                 fields: BTreeMap::from([(
                     Arc::from("version"),
                     ConfigurationField {
+                        constraint: None,
                         value_type: ConfigurationType::Integer,
                         required: true,
                         secret: false,
@@ -1031,7 +1432,10 @@ fn traffic_factory(
             },
             dependencies: BTreeMap::new(),
         },
-        probes,
+        probes: probes
+            .into_iter()
+            .map(|(name, probe)| (topology_component_id(&name), probe))
+            .collect(),
     })
 }
 
@@ -1054,7 +1458,7 @@ fn traffic_desired(capacity: usize, version: u64) -> Result<DesiredInstance> {
         ("heartbeat", true),
         ("observer", false),
     ] {
-        let component = ComponentId::try_new(id)?;
+        let component = topology_component_id(id);
         let descriptor = ComponentDescriptor::try_new(
             component.clone(),
             vec![PortDescriptor::new(
@@ -1075,6 +1479,7 @@ fn traffic_desired(capacity: usize, version: u64) -> Result<DesiredInstance> {
         };
         graph.topology.components.push(DesiredComponent {
             descriptor: descriptor.clone(),
+            name: ComponentName::try_new(id)?,
             role,
             completion: (!source).then_some(SinkCompletion::Handled),
             streams: if source {
@@ -1119,8 +1524,8 @@ fn traffic_desired(capacity: usize, version: u64) -> Result<DesiredInstance> {
     ] {
         graph.topology.relationships.push(DesiredRelationship {
             definition: EdgeDefinition::new(
-                Endpoint::new(ComponentId::try_new(source)?, PortId::try_new("out")?),
-                Endpoint::new(ComponentId::try_new(sink)?, PortId::try_new("in")?),
+                Endpoint::new(topology_component_id(source), PortId::try_new("out")?),
+                Endpoint::new(topology_component_id(sink), PortId::try_new("in")?),
             ),
             policy: RelationshipPolicy::default(),
             pipe: if source == "producer" {
@@ -1250,11 +1655,11 @@ async fn live_traffic_transition(
             )
             .await?;
         assert!(receipt.durable);
-        let paused = ComponentId::try_new(if replace_journal {
+        let paused = topology_component_id(if replace_journal {
             "producer"
         } else {
             "consumer"
-        })?;
+        });
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
             graph.subscribe_observed().wait_for(|state| {
@@ -1317,7 +1722,17 @@ async fn live_traffic_transition(
                 "retired storage must not remain usable"
             );
         }
-        let status = core.reconcile_desired_state().await?;
+        core.reconcile_desired_state().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            for name in probes.keys() {
+                core.component_by_id(&topology_component_id(name))?
+                    .wait_started()
+                    .await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        let status = core.management_status().await?;
         assert!(status.converged(), "{status:?}");
         let current = resolver.channel()?;
         if replace_journal {
@@ -1345,7 +1760,7 @@ async fn live_traffic_transition(
         capacity = new_capacity;
         let observed = graph.observed();
         for id in ["producer", "mirror", "heartbeat", "observer"] {
-            let component = ComponentId::try_new(id)?;
+            let component = topology_component_id(id);
             assert_eq!(
                 observed.components[&component].generation,
                 before.components[&component].generation
@@ -1489,7 +1904,7 @@ async fn active_handover_crash_worker() -> Result<()> {
     assert!(receipt.durable);
     assert_eq!(receipt.revision, 2);
     let graph = core.computation_control()?;
-    let producer = ComponentId::try_new("producer")?;
+    let producer = topology_component_id("producer");
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
         graph.subscribe_observed().wait_for(|state| {

@@ -17,6 +17,7 @@ use drasi_core::{
     computation::{ComputationIndexes, ComputationTransaction},
     interface::{CheckpointStore, FailureMode, SourceCheckpoint},
 };
+use drasi_core_types::CheckpointKey;
 use drasi_lib::computation::v1::{
     CommittedProgressPublication, GraphInputProgress, QuerySourceProgress,
 };
@@ -27,11 +28,8 @@ pub(super) const TRANSPORT_PREFIX: &str = "\0computation:processing-transport:v1
 pub(super) const RESET_GENERATION: &str = "\0computation:processing-reset-generation:v1";
 const INPUT_PRODUCER: &str = "\0native-query:input-producer:v1:";
 
-fn producer_key(stream: &StreamId) -> Result<String> {
-    Ok(format!(
-        "{INPUT_PRODUCER}{}",
-        serde_json::to_string(stream)?
-    ))
+fn producer_key(stream: &StreamId) -> CheckpointKey {
+    CheckpointKey::Stream(stream.clone()).associated(INPUT_PRODUCER)
 }
 
 async fn read_producer(
@@ -39,7 +37,7 @@ async fn read_producer(
     stream: &StreamId,
 ) -> Result<Option<drasi_computation_contracts::GraphProducerIdentity>> {
     store
-        .read_checkpoint(&producer_key(stream)?)
+        .read_checkpoint(&producer_key(stream))
         .await?
         .map(|saved| {
             anyhow::ensure!(saved.sequence == 1, "invalid input producer version");
@@ -206,7 +204,7 @@ impl Drop for Call {
 
 impl Progress {
     pub(super) fn new(graph: String, component: ComponentId, port: PortId) -> Result<Self> {
-        Self::with_reader(graph, component, port, None, false, false)
+        Self::with_reader(graph, component, port, None, false, false, false)
     }
 
     pub(super) fn with_reader(
@@ -216,6 +214,7 @@ impl Progress {
         reader: Option<Arc<QuerySourceProgress>>,
         volatile: bool,
         non_atomic: bool,
+        replacement: bool,
     ) -> Result<Self> {
         let reader = match reader {
             Some(reader) => {
@@ -227,7 +226,13 @@ impl Progress {
             }
             None => Arc::new(QuerySourceProgress::new(graph.clone(), component.clone())?),
         };
-        let publication = Arc::new(if volatile {
+        let publication = Arc::new(if volatile && replacement {
+            CommittedProgressPublication::for_replacement_volatile_reader(reader)?
+        } else if non_atomic && replacement {
+            CommittedProgressPublication::for_replacement_non_atomic_reader(reader)?
+        } else if replacement {
+            CommittedProgressPublication::for_replacement_reader(reader)?
+        } else if volatile {
             CommittedProgressPublication::for_volatile_reader(reader)?
         } else if non_atomic {
             CommittedProgressPublication::for_non_atomic_reader(reader)?
@@ -380,6 +385,15 @@ impl Progress {
         })
     }
 
+    pub(super) fn cleanup_call(&self) -> Result<Call> {
+        // Cleanup must remain possible after a failed call revoked or fenced this epoch.
+        Ok(Call {
+            epoch: self.epoch()?,
+            complete: false,
+            failure: None,
+        })
+    }
+
     pub(super) fn ready(&self) -> Result<()> {
         let epoch = self.epoch()?;
         epoch.ensure_current()?;
@@ -389,8 +403,15 @@ impl Progress {
     pub(super) fn suspend(&self) -> Result<()> {
         let epoch = self.epoch()?;
         if !epoch.revoked.swap(true, Ordering::AcqRel) {
-            epoch.fail(None);
+            self.publication.suspend(epoch.generation)?;
         }
+        Ok(())
+    }
+
+    pub(super) fn fail(&self) -> Result<()> {
+        let epoch = self.epoch()?;
+        epoch.revoked.store(true, Ordering::Release);
+        epoch.fail(None);
         Ok(())
     }
 
@@ -418,21 +439,19 @@ impl Progress {
         Ok(())
     }
 
-    pub(super) fn key(&self, key: &SourceProgressKey) -> Result<String> {
-        if let SourceProgressKey::Source(source) = key {
-            anyhow::ensure!(!source.is_empty(), "source progress key must not be empty");
-        }
-        Ok(format!(
-            "{PREFIX}{}",
-            serde_json::to_string(&(&self.port, key))?
-        ))
+    pub(super) fn key(&self, key: &SourceProgressKey) -> Result<CheckpointKey> {
+        let key = match key {
+            SourceProgressKey::Source(id) => CheckpointKey::Source(id.clone()),
+            SourceProgressKey::Stream(stream) => CheckpointKey::Stream(stream.clone()),
+        };
+        Ok(key.associated(format!("{PREFIX}{}", serde_json::to_string(&self.port)?)))
     }
 
-    fn transport_key(&self, stream: &StreamId) -> Result<String> {
-        Ok(format!(
+    fn transport_key(&self, stream: &StreamId) -> Result<CheckpointKey> {
+        Ok(CheckpointKey::Stream(stream.clone()).associated(format!(
             "{TRANSPORT_PREFIX}{}",
-            serde_json::to_string(&(&self.port, stream))?
-        ))
+            serde_json::to_string(&self.port)?
+        )))
     }
 }
 
@@ -670,7 +689,7 @@ impl Draft {
         if let Some(producer) = input.producer() {
             self.checkpoint_store(resources)?
                 .stage_checkpoint(
-                    &producer_key(input.owner_stream())?,
+                    &producer_key(input.owner_stream()),
                     1,
                     Some(&serde_json::to_vec(producer)?.into()),
                 )
@@ -712,7 +731,7 @@ impl Draft {
             );
             store
                 .stage_checkpoint(
-                    &producer_key(producer.stream())?,
+                    &producer_key(producer.stream()),
                     1,
                     Some(&serde_json::to_vec(&producer)?.into()),
                 )
@@ -721,7 +740,7 @@ impl Draft {
         Ok(())
     }
 
-    pub(super) fn key(&self, key: &SourceProgressKey) -> Result<String> {
+    pub(super) fn key(&self, key: &SourceProgressKey) -> Result<CheckpointKey> {
         self.progress.key(key)
     }
 
@@ -755,7 +774,7 @@ impl Draft {
             ..Default::default()
         };
         for (key, checkpoint) in store.read_all_checkpoints().await? {
-            if key == RESET_GENERATION {
+            if key.metadata_name() == Some(RESET_GENERATION) {
                 anyhow::ensure!(
                     checkpoint.source_position.is_none(),
                     "invalid processing reset generation"
@@ -763,7 +782,7 @@ impl Draft {
                 snapshot.reset_generation = checkpoint.sequence;
                 continue;
             }
-            if key == BOOTSTRAP_COMPLETE_CHECKPOINT {
+            if key.metadata_name() == Some(BOOTSTRAP_COMPLETE_CHECKPOINT) {
                 anyhow::ensure!(
                     checkpoint.sequence <= 1 && checkpoint.source_position.is_none(),
                     "invalid committed bootstrap marker"
@@ -776,23 +795,38 @@ impl Draft {
                     Some(snapshot.bootstrap_complete);
                 continue;
             }
-            if let Some(encoded) = key.strip_prefix(TRANSPORT_PREFIX) {
-                let (port, stream): (PortId, StreamId) = serde_json::from_str(encoded)?;
+            let CheckpointKey::Associated {
+                checkpoint: identity,
+                name,
+            } = &key
+            else {
+                continue;
+            };
+            if let Some(encoded) = name.strip_prefix(TRANSPORT_PREFIX) {
+                let port: PortId = serde_json::from_str(encoded)?;
+                let CheckpointKey::Stream(stream) = identity.as_ref() else {
+                    anyhow::bail!("stored input transport is not a stream checkpoint");
+                };
                 anyhow::ensure!(
                     port == self.progress.port
-                        && key == self.progress.transport_key(&stream)?
+                        && key == self.progress.transport_key(stream)?
                         && checkpoint.source_position.is_none(),
                     "invalid stored input transport"
                 );
                 snapshot
                     .transport_sequences
-                    .insert(stream, checkpoint.sequence);
+                    .insert(stream.clone(), checkpoint.sequence);
                 continue;
             }
-            let Some(encoded) = key.strip_prefix(PREFIX) else {
+            let Some(encoded) = name.strip_prefix(PREFIX) else {
                 continue;
             };
-            let (port, input): (PortId, SourceProgressKey) = serde_json::from_str(encoded)?;
+            let port: PortId = serde_json::from_str(encoded)?;
+            let input = match identity.as_ref() {
+                CheckpointKey::Source(id) => SourceProgressKey::Source(id.clone()),
+                CheckpointKey::Stream(stream) => SourceProgressKey::Stream(stream.clone()),
+                _ => anyhow::bail!("stored input progress has an invalid identity domain"),
+            };
             anyhow::ensure!(
                 port == self.progress.port,
                 "stored input progress belongs to another port"
@@ -828,9 +862,6 @@ impl Draft {
                 .is_none_or(|position| position.len() <= MAX_SOURCE_POSITION_BYTES),
             "input progress position exceeds its byte limit"
         );
-        if let SourceProgressKey::Source(source) = &key {
-            anyhow::ensure!(!source.is_empty(), "source progress key must not be empty");
-        }
         if let Some(saved) = snapshot.checkpoints.get(&key) {
             anyhow::ensure!(
                 checkpoint.sequence >= saved.sequence
@@ -934,7 +965,11 @@ impl Draft {
             "bootstrap completion can change only before readiness"
         );
         self.checkpoint_store(resources)?
-            .stage_checkpoint(BOOTSTRAP_COMPLETE_CHECKPOINT, u64::from(complete), None)
+            .stage_checkpoint(
+                &CheckpointKey::Metadata(BOOTSTRAP_COMPLETE_CHECKPOINT.into()),
+                u64::from(complete),
+                None,
+            )
             .await?;
         *self
             .bootstrap

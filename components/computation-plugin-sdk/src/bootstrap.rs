@@ -46,8 +46,7 @@ pub struct BootstrapFactoryMetadata {
 }
 impl BootstrapFactoryMetadata {
     pub fn validate(&self, plugin: &PluginIdentity) -> anyhow::Result<()> {
-        ComponentId::try_new(self.implementation.name.as_ref())?;
-        ComponentId::try_new(self.implementation.version.as_ref())?;
+        self.implementation.validate()?;
         anyhow::ensure!(
             self.implementation.plugin.as_ref() == Some(plugin),
             "bootstrap factory plugin provenance mismatch"
@@ -57,7 +56,7 @@ impl BootstrapFactoryMetadata {
             "invalid bootstrap configuration version"
         );
         for name in self.configuration.fields.keys() {
-            ComponentId::try_new(name.as_str())?;
+            drasi_computation_contracts::validate_identifier("configuration field", name)?;
         }
         Ok(())
     }
@@ -68,8 +67,8 @@ impl BootstrapFactoryMetadata {
             "bootstrap implementation/configuration version mismatch"
         );
         if let Some(scope) = &request.scope {
-            ComponentId::try_new(scope.graph_id.as_str())?;
-            ComponentId::try_new(scope.instance_id.as_str())?;
+            drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
+            drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
         }
         self.configuration.validate(&request.configuration)
     }
@@ -192,7 +191,7 @@ impl From<Preparation> for BootstrapPreparation {
 #[serde(deny_unknown_fields)]
 pub struct Watermark {
     pub stream: StreamId,
-    pub source_id: Option<String>,
+    pub source_id: Option<ComponentId>,
     pub sequence: u64,
     pub position: Option<serde_bytes::ByteBuf>,
     pub producer: Option<drasi_computation_contracts::GraphProducerIdentity>,
@@ -265,15 +264,15 @@ pub fn validate_watermarks(values: &[Watermark]) -> anyhow::Result<()> {
     for value in values {
         drasi_computation_contracts::validate_bootstrap_watermark(
             &value.stream,
-            value.source_id.as_deref(),
+            value.source_id.as_ref(),
             value.position.as_ref().map(|position| position.as_slice()),
             value.producer.as_ref(),
         )?;
-        let key = value.source_id.as_deref().unwrap_or(value.stream.as_str());
-        anyhow::ensure!(
-            !key.is_empty() && keys.insert((value.source_id.is_some(), key)),
-            "duplicate or empty bootstrap watermark"
-        );
+        let key = match &value.source_id {
+            Some(source) => drasi_computation_contracts::SourceProgressKey::Source(source.clone()),
+            None => drasi_computation_contracts::SourceProgressKey::Stream(value.stream.clone()),
+        };
+        anyhow::ensure!(keys.insert(key), "duplicate or empty bootstrap watermark");
     }
     Ok(())
 }
@@ -750,7 +749,7 @@ mod tests {
         let producer = GraphProducerIdentity::volatile(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("producer")?,
+            ComponentId::try_new("0b751a8f-0746-486a-b991-73ba3c255ca1")?,
             StreamId::try_new("producer/out")?,
         )?;
         let cursor = OutputCursor::try_new(producer.clone(), 0)?;
@@ -761,7 +760,10 @@ mod tests {
         watermark.validate()?;
         assert_eq!(watermark.producer.as_ref(), Some(&producer));
         assert_eq!(watermark.sequence, 0);
-        watermark.source_id = Some("other".into());
+        watermark.source_id = Some(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000029a")
+                .expect("fixture UUID"),
+        );
         assert!(watermark.validate().is_err());
         let mixed: Watermark = watermark.into();
         assert!(validate_watermarks(&[mixed]).is_err());
@@ -780,7 +782,13 @@ mod tests {
             sequence: u64::MAX,
             position: Some(vec![0, 255].into()),
         };
-        let values = vec![make(None), make(Some("same".into()))];
+        let values = vec![
+            make(None),
+            make(Some(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000339")
+                    .expect("fixture UUID"),
+            )),
+        ];
         validate_watermarks(&values)?;
         let values: Vec<Watermark> = decode(&encode(&values)?)?;
         assert_eq!(values[1].sequence, u64::MAX);

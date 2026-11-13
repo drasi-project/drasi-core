@@ -114,7 +114,7 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -151,7 +151,7 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
             api_version,
         };
 
-        let mut source = crate::DataverseSourceBuilder::new(id)
+        let mut source = crate::DataverseSourceBuilder::new(id.clone())
             .with_environment_url(config.environment_url.clone())
             .with_tenant_id(config.tenant_id.clone())
             .with_client_id(config.client_id.clone())

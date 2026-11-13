@@ -44,7 +44,10 @@ async fn update(graph: &Graph, sequence: u64) -> Result<()> {
 }
 
 fn assert_result(result: &QueryResult, sequence: u64) {
-    assert_eq!(result.query_id, COMPONENT);
+    assert_eq!(
+        result.query_id,
+        component_id().expect("fixture component ID")
+    );
     assert_eq!(result.sequence, sequence);
     let [diff] = result.results.as_slice() else {
         panic!("expected one aggregate change: {result:?}");
@@ -77,11 +80,18 @@ async fn subscription_and_restart() -> Result<()> {
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>();
-            let subscription = graph.core.subscribe_query_results(COMPONENT).await?;
+            let subscription = graph
+                .core
+                .subscribe_query_results_by_name(&component_name()?)
+                .await?;
             assert_eq!(subscription.snapshot.as_of_sequence, 0);
             assert_eq!(subscription.snapshot.to_vec(), [json!({"total": 30.0})]);
             let mut first = subscription.stream;
-            let mut second = graph.core.subscribe_query_results(COMPONENT).await?.stream;
+            let mut second = graph
+                .core
+                .subscribe_query_results_by_name(&component_name()?)
+                .await?
+                .stream;
             assert_eq!(
                 control
                     .observed()
@@ -102,14 +112,15 @@ async fn subscription_and_restart() -> Result<()> {
             next(&mut second, 2).await?;
 
             let catalog = graph.catalog.as_ref().context("missing result catalogue")?;
-            let view = catalog.snapshot(COMPONENT, DEADLINE).await?;
+            let component_id = component_id()?;
+            let view = catalog.snapshot(&component_id, DEADLINE).await?;
             assert_eq!(view.as_of_sequence, 2);
             assert_eq!(view.rows.len(), 1);
-            assert_eq!(catalog.replay(COMPONENT, 0, DEADLINE).await?.len(), 2);
+            assert_eq!(catalog.replay(&component_id, 0, DEADLINE).await?.len(), 2);
 
             // Coordinated capture and its sole progress owner have a shared lifecycle.
             graph.source.stop().await?;
-            graph.core.stop_query(COMPONENT).await?;
+            graph.core.stop_query_by_name(&component_name()?).await?;
             {
                 let waiting = second.next();
                 tokio::pin!(waiting);
@@ -118,7 +129,7 @@ async fn subscription_and_restart() -> Result<()> {
                         .await
                         .is_err()
                 );
-                graph.core.start_query(COMPONENT).await?;
+                graph.core.start_query_by_name(&component_name()?).await?;
                 graph.query.wait_started().await?;
                 graph.provider.freeze_for_retirement()?.resume();
                 graph.source.start().await?;
@@ -132,9 +143,14 @@ async fn subscription_and_restart() -> Result<()> {
             let query = graph
                 .core
                 .query_manager()
-                .get_query_instance(COMPONENT)
+                .get_query_instance_by_name(&component_name()?)
                 .await?;
-            let mut ordinary = query.subscribe("ordinary-reader".into()).await?;
+            let mut ordinary = query
+                .subscribe(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000033f")
+                        .expect("fixture UUID"),
+                )
+                .await?;
             assert_eq!(ordinary.as_of_sequence, 3);
             update(&graph, 4).await?;
             let result = tokio::time::timeout(DEADLINE, ordinary.receiver.recv()).await??;
@@ -161,7 +177,10 @@ async fn channel_backpressure() -> Result<()> {
     let (_directory, graph) = fixture(DispatchMode::Channel, 64).await?;
     let exercise = async {
         graph.start().await?;
-        let unread = graph.core.subscribe_query_results(COMPONENT).await?;
+        let unread = graph
+            .core
+            .subscribe_query_results_by_name(&component_name()?)
+            .await?;
         let producing = async {
             for sequence in 1..=24 {
                 update(&graph, sequence).await?;
@@ -197,7 +216,11 @@ async fn broadcast_recovery() -> Result<()> {
         let (_directory, graph) = fixture(DispatchMode::Broadcast, retention).await?;
         let exercise = async {
             graph.start().await?;
-            let mut stream = graph.core.subscribe_query_results(COMPONENT).await?.stream;
+            let mut stream = graph
+                .core
+                .subscribe_query_results_by_name(&component_name()?)
+                .await?
+                .stream;
             for sequence in 1..=8 {
                 update(&graph, sequence).await?;
             }
@@ -241,8 +264,11 @@ async fn snapshot_handoff() -> Result<()> {
             graph.output(15).await?;
             Ok::<_, anyhow::Error>(())
         };
-        let (subscription, produced) =
-            tokio::join!(graph.core.subscribe_query_results(COMPONENT), produce,);
+        let query_name = component_name()?;
+        let (subscription, produced) = tokio::join!(
+            graph.core.subscribe_query_results_by_name(&query_name),
+            produce,
+        );
         produced?;
         let subscription = subscription?;
         let cutoff = subscription.snapshot.as_of_sequence;
@@ -293,7 +319,8 @@ async fn subscription_during_bootstrap() -> Result<()> {
             result = &mut starting => anyhow::bail!("bootstrap did not pause: {result:?}"),
             _ = gate.reached.notified() => {}
         }
-        let subscribing = graph.core.subscribe_query_results(COMPONENT);
+        let query_name = component_name()?;
+        let subscribing = graph.core.subscribe_query_results_by_name(&query_name);
         tokio::pin!(subscribing);
         assert!(
             tokio::time::timeout(Duration::from_millis(30), &mut subscribing).await.is_err(),
@@ -352,19 +379,30 @@ async fn ordinary_reaction() -> Result<()> {
         graph
             .core
             .add_reaction(
-                HttpReaction::builder("ordinary-http")
-                    .with_query(COMPONENT)
-                    .with_base_url(url)
-                    .with_auto_start(false)
-                    .build()?,
+                drasi_core_types::ComponentName::try_new("ordinary-http")
+                    .expect("fixture component name"),
+                HttpReaction::builder(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ef")
+                        .expect("fixture UUID"),
+                )
+                .with_query_by_name(component_name()?)
+                .with_base_url(url)
+                .with_auto_start(false)
+                .build()?,
             )
             .await?;
-        graph.core.start_reaction("ordinary-http").await?;
+        graph
+            .core
+            .start_reaction_by_name(
+                &drasi_core_types::ComponentName::try_new("ordinary-http")
+                    .expect("fixture component name"),
+            )
+            .await?;
         update(&graph, 2).await?;
         let notification = tokio::time::timeout(DEADLINE, received.recv())
             .await?
             .context("ordinary reaction did not receive the native query result")?;
-        assert_eq!(notification["queryId"], COMPONENT);
+        assert_eq!(notification["queryId"], COMPONENT_ID);
         assert_eq!(notification["sequenceId"], 2);
         assert_eq!(notification["before"]["total"].as_f64(), Some(31.0));
         assert_eq!(notification["after"]["total"].as_f64(), Some(32.0));

@@ -21,6 +21,7 @@ bincode = "1.3"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 im = { workspace = true }
+jsonschema = { version = "0.18", default-features = false }
 futures-core = "0.3"
 log = "0.4"
 rmp-serde = "1"

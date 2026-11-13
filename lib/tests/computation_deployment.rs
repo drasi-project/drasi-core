@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::{
@@ -38,7 +42,7 @@ fn implementation() -> ImplementationIdentity {
     ImplementationIdentity::try_new("test/source", "1").expect("implementation")
 }
 
-fn specification(id: &str) -> ComponentSpecification {
+fn specification(id: &drasi_core_types::ComponentId) -> ComponentSpecification {
     ComponentSpecification {
         descriptor: descriptor(id, &[], &["out"]),
         role: ComponentRole::Source,
@@ -96,8 +100,8 @@ impl ComponentFactory for SourceFactory {
             );
         }
         Ok(ConstructedComponent::source(Box::new(FiniteSource::new(
-            context.component_id.as_str(),
-            vec![output(root(context.component_id.as_str(), 1, &[3]))],
+            context.component_id.clone(),
+            vec![output(root(&context.component_id, "deployed-source", 1, &[3]))],
         ))))
     }
 }
@@ -106,17 +110,24 @@ fn graph_builder(
     spec: ComponentSpecification,
     factory: Arc<dyn ComponentFactory>,
 ) -> ComputationGraphBuilder {
-    let id = spec.descriptor.id().as_str().to_owned();
+    let id = spec.descriptor.id().clone();
+    let name = fixture_support::component_name();
     ComputationGraph::builder("declarative")
-        .component(spec, factory)
-        .sink(Box::new(CollectSink::new(
+        .component(name, spec, factory)
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             Received::default(),
         )))
-        .bind_stream(endpoint(&id, "out"), stream(&id))
+        .bind_stream(endpoint(&id, "out"), stream("deployed-source"))
         .connect(
-            edge(&id, "sink"),
+            edge(
+                &id,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
 }
@@ -136,13 +147,16 @@ fn entire_definition_preflight_happens_before_any_factory_call() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut factory = factory(false, calls.clone());
-        let mut spec = specification("source");
+        let mut spec = specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         match fault {
             "version" => spec.configuration_version = 2,
             "role" => spec.role = ComponentRole::Sink,
             "schema" => {
                 spec.descriptor = ComponentDescriptor::try_new(
-                    component("source"),
+                    component(77),
                     vec![PortDescriptor::new(
                         port("out"),
                         PortDirection::Output,
@@ -191,6 +205,7 @@ fn entire_definition_preflight_happens_before_any_factory_call() {
                     .insert(
                         Arc::from("credential"),
                         ConfigurationField {
+                            constraint: None,
                             value_type: ConfigurationType::String,
                             required: true,
                             secret: true,
@@ -245,7 +260,10 @@ async fn missing_resource_waits_without_calling_the_factory() {
             ResourceRequirement::exactly_one::<usize>(ResourceRole::StateStore),
         );
     let resource = ResourceId::try_new("later-state").expect("resource id");
-    let mut spec = specification("source");
+    let mut spec = specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
     spec.dependencies
         .insert(Arc::from("state"), vec![resource.clone()]);
     let mut graph = graph_builder(spec, factory)
@@ -257,11 +275,11 @@ async fn missing_resource_waits_without_calling_the_factory() {
     let (result, ()) = tokio::join!(run, async {
         let deployment = control.deployment_report().await.expect("deployment");
         assert!(matches!(
-            deployment.components[&component("source")],
+            deployment.components[&component(77)],
             CreationOutcome::Blocked { .. }
         ));
         let observed = control.observed();
-        let source = &observed.components[&component("source")];
+        let source = &observed.components[&component(77)];
         assert!(source.failure.is_none());
         assert!(source.waiting_for.contains(&DependencyWait::Resource {
             id: resource.clone()
@@ -276,12 +294,18 @@ async fn missing_resource_waits_without_calling_the_factory() {
 #[tokio::test]
 async fn valid_specs_are_constructed_and_bound_before_activation() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut graph = graph_builder(specification("source"), factory(false, calls.clone()))
-        .build()
-        .expect("valid graph");
+    let mut graph = graph_builder(
+        specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        ),
+        factory(false, calls.clone()),
+    )
+    .build()
+    .expect("valid graph");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        graph.observed().components[&component("source")].realization,
+        graph.observed().components[&component(77)].realization,
         RealizationState::Pending
     );
     let run = graph.run().expect("controller");
@@ -291,15 +315,21 @@ async fn valid_specs_are_constructed_and_bound_before_activation() {
         assert_eq!(deployed.summary, OperationSummary::Completed);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(matches!(
-            deployed.components[&component("source")],
+            deployed.components[&component(77)],
             CreationOutcome::Created
         ));
         assert_eq!(
-            control.observed().components[&component("source")].lifecycle,
+            control.observed().components[&component(77)].lifecycle,
             ComponentLifecycle::Stopped
         );
         assert_eq!(
-            control.observed().relationships[&edge("source", "sink")].binding,
+            control.observed().relationships[&edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID")
+            )]
+                .binding,
             BindingState::Bound
         );
         let startup = control
@@ -317,20 +347,47 @@ async fn failed_creation_retains_desired_spec_and_independent_instances() {
     let bad_calls = Arc::new(AtomicUsize::new(0));
     let good_calls = Arc::new(AtomicUsize::new(0));
     let received = Received::default();
-    let mut graph = graph_builder(specification("bad"), factory(true, bad_calls.clone()))
-        .component(specification("good"), factory(false, good_calls.clone()))
-        .sink(Box::new(CollectSink::new(
-            "good-sink",
-            &["in"],
-            received.clone(),
-        )))
-        .bind_stream(endpoint("good", "out"), stream("good"))
-        .connect(
-            edge("good", "good-sink"),
-            Box::new(BoundedPipeConfig { capacity: 1 }),
-        )
-        .build()
-        .expect("valid declarations");
+    let mut graph = graph_builder(
+        specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                .expect("fixture UUID"),
+        ),
+        factory(true, bad_calls.clone()),
+    )
+    .component(
+        ComponentName::try_new("good").expect("fixture name"),
+        specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                .expect("fixture UUID"),
+        ),
+        factory(false, good_calls.clone()),
+    )
+    .fixture_sink(Box::new(CollectSink::new(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000002d7")
+            .expect("fixture UUID"),
+        "good-sink",
+        &["in"],
+        received.clone(),
+    )))
+    .bind_stream(
+        endpoint(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                .expect("fixture UUID"),
+            "out",
+        ),
+        stream("good"),
+    )
+    .connect(
+        edge(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                .expect("fixture UUID"),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002d7")
+                .expect("fixture UUID"),
+        ),
+        Box::new(BoundedPipeConfig { capacity: 1 }),
+    )
+    .build()
+    .expect("valid declarations");
     let run = graph.run().expect("controller");
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
@@ -338,17 +395,16 @@ async fn failed_creation_retains_desired_spec_and_independent_instances() {
             .deployment_report()
             .await
             .expect("deployment results");
-        let CreationOutcome::CreationFailed(failure) = &deployed.components[&component("bad")]
-        else {
+        let CreationOutcome::CreationFailed(failure) = &deployed.components[&component(453)] else {
             panic!("explicit failure");
         };
         assert_eq!(failure.disposition, FailureDisposition::Terminal);
         assert!(matches!(
-            deployed.components[&component("sink")],
+            deployed.components[&component(101)],
             CreationOutcome::Blocked { .. }
         ));
         assert!(matches!(
-            deployed.components[&component("good")],
+            deployed.components[&component(463)],
             CreationOutcome::Created
         ));
         assert_eq!(control.desired_snapshot().specifications.len(), 2);
@@ -357,11 +413,11 @@ async fn failed_creation_retains_desired_spec_and_independent_instances() {
             .await
             .expect("partial startup");
         assert!(matches!(
-            started.components[&component("bad")],
+            started.components[&component(453)],
             StartOutcome::NotCreated
         ));
         assert!(matches!(
-            started.components[&component("good")],
+            started.components[&component(463)],
             StartOutcome::Started
         ));
         assert_eq!(bad_calls.load(Ordering::SeqCst), 1);
@@ -402,13 +458,17 @@ async fn secret_resolution_is_runtime_only_and_missing_resource_stays_visible() 
             .insert(
                 Arc::from("credential"),
                 ConfigurationField {
+                    constraint: None,
                     value_type: ConfigurationType::String,
                     required: true,
                     secret: true,
                 },
             );
         let id = ResourceId::try_new("secrets").expect("resource");
-        let mut spec = specification("source");
+        let mut spec = specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        );
         spec.configuration.insert(
             Arc::from("credential"),
             ConfigurationValue::Reference {
@@ -444,13 +504,13 @@ async fn secret_resolution_is_runtime_only_and_missing_resource_stays_visible() 
             assert_eq!(calls.load(Ordering::SeqCst), usize::from(supplied));
             if supplied {
                 assert!(matches!(
-                    deployment.components[&component("source")],
+                    deployment.components[&component(77)],
                     CreationOutcome::Created
                 ));
                 assert_eq!(deployment.resources[&id], ResourceRealization::Created);
             } else {
                 assert!(matches!(
-                    deployment.components[&component("source")],
+                    deployment.components[&component(77)],
                     CreationOutcome::Blocked { .. }
                 ));
                 assert_eq!(deployment.resources[&id], ResourceRealization::Pending);
@@ -477,7 +537,10 @@ async fn explicit_disposal_cleans_owned_resources_but_never_borrowed_resources()
     let owned = Arc::new(AtomicUsize::new(0));
     let borrowed = Arc::new(AtomicUsize::new(0));
     let mut builder = graph_builder(
-        specification("source"),
+        specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        ),
         factory(false, Arc::new(AtomicUsize::new(0))),
     );
     for (id, ownership, counter) in [
@@ -501,7 +564,13 @@ async fn explicit_disposal_cleans_owned_resources_but_never_borrowed_resources()
             .expect("resource");
     }
     let mut graph = builder.build().expect("graph");
-    graph.start().expect("scope").await.expect("finite drain");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        graph.start().expect("scope"),
+    )
+    .await
+    .expect("finite graph must finish")
+    .expect("finite drain");
     graph.dispose().await.expect("explicit resource disposal");
     graph.dispose().await.expect("idempotent disposal");
     assert_eq!(owned.load(Ordering::SeqCst), 1);
@@ -552,7 +621,10 @@ async fn dropping_a_pending_construction_retains_desired_state_and_cancels_scope
         .descriptor
         .clone();
     let mut graph = graph_builder(
-        specification("source"),
+        specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        ),
         Arc::new(PendingFactory {
             descriptor,
             entered: entered.clone(),
@@ -568,7 +640,7 @@ async fn dropping_a_pending_construction_retains_desired_state_and_cancels_scope
         _ = entered.notified() => {}
     }
     assert_eq!(
-        control.observed().components[&component("source")].realization,
+        control.observed().components[&component(77)].realization,
         RealizationState::Creating
     );
     assert_eq!(active.load(Ordering::SeqCst), 1);
@@ -610,7 +682,10 @@ async fn failed_resource_cleanup_is_visible_and_explicitly_retryable() {
     let counter = Arc::new(AtomicUsize::new(0));
     let resource = ResourceId::try_new("state").expect("id");
     let mut graph = graph_builder(
-        specification("source"),
+        specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        ),
         factory(false, Arc::new(AtomicUsize::new(0))),
     )
     .declare_resource(ResourceSpecification {
@@ -628,7 +703,13 @@ async fn failed_resource_cleanup_is_visible_and_explicitly_retryable() {
     .expect("resource")
     .build()
     .expect("graph");
-    graph.start().expect("scope").await.expect("drain");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        graph.start().expect("scope"),
+    )
+    .await
+    .expect("finite graph must finish")
+    .expect("drain");
     assert!(matches!(
         graph.dispose().await,
         Err(GraphError::Cleanup { .. })

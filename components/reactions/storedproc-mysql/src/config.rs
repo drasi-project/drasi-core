@@ -222,15 +222,24 @@ impl MySqlStoredProcReactionConfig {
     /// Empty templates are treated as "not configured" and skipped.
     pub fn resolve_command_template(
         &self,
-        query_id: &str,
+        emission: &drasi_lib::channels::QueryResult,
         operation: common::OperationType,
     ) -> Option<String> {
-        drasi_mysql_common::storedproc::resolve_template(
-            &self.routes,
-            self.default_template.as_ref(),
-            query_id,
-            operation,
-        )
+        match common::input_alias(
+            emission.input_alias.as_deref(),
+            emission.query_name.as_ref(),
+        ) {
+            Some(alias) => drasi_mysql_common::storedproc::resolve_template(
+                &self.routes,
+                self.default_template.as_ref(),
+                alias,
+                operation,
+            ),
+            None => self
+                .default_template
+                .as_ref()
+                .and_then(|config| Self::get_spec_from_config(config, operation)),
+        }
         .map(|template| template.template.clone())
     }
 

@@ -11,14 +11,14 @@ use std::{
 };
 use tokio::sync::Notify;
 
-fn component(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("component")
+fn component(value: u128) -> ComponentId {
+    crate::test_helpers::component_id(value)
 }
 fn resource(name: &str) -> ResourceId {
     ResourceId::try_new(name).expect("resource")
 }
 fn owner() -> Arc<QuerySourceProgress> {
-    Arc::new(QuerySourceProgress::new("graph", component("query")).expect("owner"))
+    Arc::new(QuerySourceProgress::new("graph", component(1)).expect("owner"))
 }
 
 #[derive(Default)]
@@ -50,6 +50,7 @@ struct LeafLifecycle {
 }
 struct Leaf {
     name: String,
+    source_id: ComponentId,
     reader: Option<SourceProgressReader>,
     outcomes: Mutex<VecDeque<BootstrapPreparation>>,
     lifecycle: Arc<Mutex<LeafLifecycle>>,
@@ -71,8 +72,27 @@ struct Leaf {
 }
 impl Leaf {
     fn new(name: &str, reader: Option<SourceProgressReader>, metadata: bool) -> Arc<Self> {
+        let source_id = match name {
+            "first" => component(101),
+            "second" => component(102),
+            "impostor" => component(103),
+            "one" => component(104),
+            "two" => component(105),
+            "different" => component(106),
+            other => panic!("missing explicit fixture component ID for {other}"),
+        };
+        Self::with_source_id(name, source_id, reader, metadata)
+    }
+
+    fn with_source_id(
+        name: &str,
+        source_id: ComponentId,
+        reader: Option<SourceProgressReader>,
+        metadata: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             name: name.into(),
+            source_id,
             reader,
             outcomes: Mutex::new(VecDeque::new()),
             lifecycle: Arc::new(Mutex::new(LeafLifecycle::default())),
@@ -151,7 +171,7 @@ impl Drop for LeafLease {
 impl ComputationBootstrapProvider for Leaf {
     fn validate_query_scope(&self, instance: &str, graph: &str, query: &ComponentId) -> Result<()> {
         anyhow::ensure!(
-            instance == "instance" && graph == "graph" && query == &component("query"),
+            instance == "instance" && graph == "graph" && query == &component(1),
             "wrong scope"
         );
         Ok(())
@@ -221,7 +241,7 @@ impl ComputationBootstrapProvider for Leaf {
         Ok(vec![BootstrapWatermark {
             producer: None,
             stream: StreamId::try_new(self.name.as_str())?,
-            source_id: Some(self.name.clone()),
+            source_id: Some(self.source_id.clone()),
             sequence: 2,
             position: Some(Bytes::from(self.name.clone())),
         }])
@@ -263,7 +283,7 @@ fn compose(leaves: &[Arc<Leaf>]) -> Result<CompositeBootstrapProvider> {
     CompositeBootstrapProvider::new(
         "instance",
         "graph",
-        component("query"),
+        component(1),
         leaves
             .iter()
             .map(|leaf| {
@@ -376,13 +396,20 @@ fn scope_membership_and_real_reader_identity_are_required() -> Result<()> {
         .expect("reader")
         .same_owner(&actual.clone().into()));
     assert!(composite
-        .validate_query_scope("other", "graph", &component("query"))
+        .validate_query_scope("other", "graph", &component(1))
         .is_err());
     assert!(compose(&[first.clone(), Leaf::new("impostor", Some(owner().into()), false)]).is_err());
     assert!(compose(&[first.clone(), first]).is_err());
     assert!(compose(&[]).is_err());
     let too_many: Vec<_> = (0..=MAX_COMPOSITE_BOOTSTRAP_PROVIDERS)
-        .map(|index| Leaf::new(&format!("member-{index}"), None, false))
+        .map(|index| {
+            Leaf::with_source_id(
+                &format!("member-{index}"),
+                component(1_000 + index as u128),
+                None,
+                false,
+            )
+        })
         .collect();
     assert!(compose(&too_many).is_err());
     Ok(())

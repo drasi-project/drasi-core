@@ -15,8 +15,9 @@
 #[cfg(test)]
 pub(crate) mod manager_tests {
     use crate::channels::*;
+    use crate::test_helpers::creation::BuilderFixtures;
     use crate::test_helpers::managers::ReactionManager;
-    use crate::test_helpers::wait_for_component_status;
+    use crate::test_helpers::wait_for_component_status_by_id;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -24,26 +25,46 @@ pub(crate) mod manager_tests {
     use std::time::Duration;
     /// A simple test mock reaction for unit testing the ReactionManager.
     pub struct TestMockReaction {
-        id: String,
-        queries: Vec<String>,
+        id: drasi_core_types::ComponentId,
+        queries: Vec<drasi_computation_contracts::ComponentReference>,
         auto_start: bool,
         /// Status handle — always available, wired to graph during initialize().
         status_handle: crate::component_graph::ComponentStatusHandle,
     }
 
     impl TestMockReaction {
-        pub fn new(id: String, queries: Vec<String>) -> Self {
-            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
-            Self {
-                id,
-                queries,
-                auto_start: true,
-                status_handle,
-            }
+        pub(crate) fn fixture(
+            name: drasi_core_types::ComponentName,
+            queries: Vec<crate::ComponentName>,
+            auto_start: bool,
+        ) -> crate::test_helpers::creation::ReactionFixture<Self> {
+            let inputs: Vec<_> = queries
+                .into_iter()
+                .map(crate::config::ComponentReference::by_name)
+                .collect();
+            crate::test_helpers::creation::ReactionFixture::new(
+                name,
+                inputs,
+                auto_start,
+                move |id, resolved_inputs| {
+                    Ok(Self::with_auto_start(
+                        id,
+                        resolved_inputs
+                            .into_iter()
+                            .map(crate::config::ComponentReference::by_id)
+                            .collect(),
+                        auto_start,
+                    ))
+                },
+            )
         }
 
-        pub fn with_auto_start(id: String, queries: Vec<String>, auto_start: bool) -> Self {
-            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+        pub fn with_auto_start(
+            id: drasi_core_types::ComponentId,
+            queries: Vec<drasi_computation_contracts::ComponentReference>,
+            auto_start: bool,
+        ) -> Self {
+            let status_handle = crate::component_graph::ComponentStatusHandle::new(id.clone());
             Self {
                 id,
                 queries,
@@ -55,7 +76,7 @@ pub(crate) mod manager_tests {
 
     #[async_trait]
     impl crate::reactions::Reaction for TestMockReaction {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             &self.id
         }
 
@@ -67,7 +88,7 @@ pub(crate) mod manager_tests {
             HashMap::new()
         }
 
-        fn query_ids(&self) -> Vec<String> {
+        fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
             self.queries.clone()
         }
 
@@ -75,7 +96,7 @@ pub(crate) mod manager_tests {
             self.auto_start
         }
 
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
 
@@ -121,8 +142,11 @@ pub(crate) mod manager_tests {
     }
 
     /// Helper to create a TestMockReaction instance
-    pub fn create_test_mock_reaction(id: String, queries: Vec<String>) -> TestMockReaction {
-        TestMockReaction::new(id, queries)
+    pub fn create_test_mock_reaction(
+        name: drasi_core_types::ComponentName,
+        queries: Vec<crate::ComponentName>,
+    ) -> crate::test_helpers::creation::ReactionFixture<TestMockReaction> {
+        TestMockReaction::fixture(name, queries, true)
     }
 
     async fn create_test_manager() -> (
@@ -136,20 +160,14 @@ pub(crate) mod manager_tests {
         )
     }
 
-    /// Create a test manager that also returns the shared graph for event subscription.
-    async fn create_test_manager_with_graph() -> (
-        Arc<ReactionManager>,
-        crate::component_graph::ComponentGraphView,
-    ) {
-        create_test_manager().await
-    }
-
     /// Helper: register a reaction in the graph, then provision it in the manager.
     /// Registers placeholder query nodes for any referenced queries not already in the graph.
     async fn add_reaction(
         manager: &ReactionManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        reaction: impl crate::reactions::Reaction + 'static,
+        reaction: crate::test_helpers::creation::ReactionFixture<
+            impl crate::reactions::Reaction + 'static,
+        >,
     ) -> anyhow::Result<()> {
         manager.add(reaction).await
     }
@@ -158,18 +176,23 @@ pub(crate) mod manager_tests {
     async fn delete_reaction(
         manager: &ReactionManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        id: &str,
+        id: &drasi_core_types::ComponentName,
         cleanup: bool,
     ) -> anyhow::Result<()> {
-        manager.delete(id, cleanup).await
+        manager.teardown_reaction_by_name(id, cleanup).await
     }
 
     #[tokio::test]
     async fn test_add_reaction() {
         let (manager, graph) = create_test_manager().await;
 
-        let reaction =
-            create_test_mock_reaction("test-reaction".to_string(), vec!["query1".to_string()]);
+        let reaction = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("test-reaction")
+                .expect("fixture component name"),
+            vec![
+                drasi_core_types::ComponentName::try_new("query1").expect("fixture component name")
+            ],
+        );
         let result = add_reaction(&manager, &graph, reaction).await;
 
         assert!(result.is_ok());
@@ -177,54 +200,67 @@ pub(crate) mod manager_tests {
         // Verify reaction was added
         let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 1);
-        assert_eq!(reactions[0].0, "test-reaction");
+        assert_eq!(
+            reactions[0].name,
+            drasi_core_types::ComponentName::try_new("test-reaction")
+                .expect("fixture component name")
+        );
     }
 
     #[tokio::test]
     async fn test_add_duplicate_reaction() {
         let (manager, graph) = create_test_manager().await;
 
-        let reaction1 = create_test_mock_reaction("test-reaction".to_string(), vec![]);
-        let reaction2 = create_test_mock_reaction("test-reaction".to_string(), vec![]);
+        let reaction1 = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("test-reaction")
+                .expect("fixture component name"),
+            vec![],
+        );
+        let reaction2 = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("test-reaction")
+                .expect("fixture component name"),
+            vec![],
+        );
 
         // Add reaction first time
         assert!(add_reaction(&manager, &graph, reaction1).await.is_ok());
+        let name = crate::ComponentName::try_new("test-reaction").unwrap();
+        let admitted_id = manager.0.component_by_name(&name).unwrap().id().clone();
 
         // Try to add same reaction again
         let result = add_reaction(&manager, &graph, reaction2).await;
         assert!(result.is_err());
         let error = result.unwrap_err();
-        {
-            use crate::computation::v1::GraphError;
-
-            let GraphError::AdditionRejected { cause, addition } = error
-                .downcast_ref::<GraphError>()
-                .expect("native graph error")
-            else {
-                panic!("expected a rejected addition: {error:?}");
-            };
-            assert!(
-                matches!(cause.as_ref(), GraphError::Topology { reason }
-                        if reason == "duplicate component test-reaction"),
-                "unexpected rejection cause: {cause:?}"
-            );
-            let rejected = addition.take().await.expect("retained rejected reaction");
-            assert_eq!(
-                rejected.definition.descriptor.id().as_str(),
-                "test-reaction"
-            );
-        }
+        assert!(
+            format!("{error:#}").contains("component name already belongs to 'test-reaction'"),
+            "unexpected duplicate-reaction error: {error:#}"
+        );
+        assert_eq!(
+            manager.0.component_by_name(&name).unwrap().id(),
+            &admitted_id
+        );
     }
 
     #[tokio::test]
     async fn test_delete_reaction() {
         let (manager, graph) = create_test_manager().await;
 
-        let reaction = create_test_mock_reaction("test-reaction".to_string(), vec![]);
+        let reaction = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("test-reaction")
+                .expect("fixture component name"),
+            vec![],
+        );
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Delete the reaction
-        let result = delete_reaction(&manager, &graph, "test-reaction", false).await;
+        let result = delete_reaction(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("test-reaction")
+                .expect("fixture component name"),
+            false,
+        )
+        .await;
         assert!(result.is_ok());
 
         // Verify reaction was removed
@@ -236,7 +272,14 @@ pub(crate) mod manager_tests {
     async fn test_delete_nonexistent_reaction() {
         let (manager, graph) = create_test_manager().await;
 
-        let result = delete_reaction(&manager, &graph, "nonexistent", false).await;
+        let result = delete_reaction(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("nonexistent")
+                .expect("fixture component name"),
+            false,
+        )
+        .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -244,18 +287,55 @@ pub(crate) mod manager_tests {
     #[tokio::test]
     async fn test_get_reaction_info() {
         let (manager, graph) = create_test_manager().await;
+        let query = manager
+            .0
+            .add_query_with_handle(
+                crate::Query::cypher(crate::ComponentName::try_new("query1").unwrap())
+                    .query("RETURN 1 AS value")
+                    .auto_start(false)
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-        let reaction =
-            create_test_mock_reaction("test-reaction".to_string(), vec!["query1".to_string()]);
+        let reaction = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("test-reaction")
+                .expect("fixture component name"),
+            vec![
+                drasi_core_types::ComponentName::try_new("query1").expect("fixture component name")
+            ],
+        );
         add_reaction(&manager, &graph, reaction).await.unwrap();
+        let reaction = manager
+            .0
+            .component_by_name(&crate::ComponentName::try_new("test-reaction").unwrap())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), reaction.wait_created())
+            .await
+            .unwrap()
+            .unwrap();
 
-        let retrieved = manager.get_reaction("test-reaction".to_string()).await;
+        let retrieved = manager
+            .get_reaction_by_name(
+                &drasi_core_types::ComponentName::try_new("test-reaction")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(retrieved.is_ok());
 
         let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.id, "test-reaction");
+        assert_eq!(
+            &retrieved.id,
+            manager.0.component_by_name(&retrieved.name).unwrap().id()
+        );
+        assert_eq!(retrieved.name.as_str(), "test-reaction");
         assert_eq!(retrieved.reaction_type, "log");
-        assert_eq!(retrieved.queries, vec!["query1".to_string()]);
+        assert_eq!(
+            retrieved.queries,
+            vec![crate::config::ComponentReference::by_id(query.id().clone())]
+        );
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -263,8 +343,14 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Add multiple reactions
-        let reaction1 = create_test_mock_reaction("reaction1".to_string(), vec![]);
-        let reaction2 = create_test_mock_reaction("reaction2".to_string(), vec![]);
+        let reaction1 = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("reaction1").expect("fixture component name"),
+            vec![],
+        );
+        let reaction2 = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("reaction2").expect("fixture component name"),
+            vec![],
+        );
 
         add_reaction(&manager, &graph, reaction1).await.unwrap();
         add_reaction(&manager, &graph, reaction2).await.unwrap();
@@ -273,8 +359,8 @@ pub(crate) mod manager_tests {
         assert_eq!(reactions.len(), 2);
 
         // Both should be in Added state initially
-        for (_, status) in reactions {
-            assert!(matches!(status, ComponentStatus::Added));
+        for entry in reactions {
+            assert!(matches!(entry.status, ComponentStatus::Added));
         }
     }
 
@@ -282,11 +368,18 @@ pub(crate) mod manager_tests {
     async fn test_get_reaction_status() {
         let (manager, graph) = create_test_manager().await;
 
-        let reaction = create_test_mock_reaction("test-reaction".to_string(), vec![]);
+        let reaction = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("test-reaction")
+                .expect("fixture component name"),
+            vec![],
+        );
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         let status = manager
-            .get_reaction_status("test-reaction".to_string())
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("test-reaction")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(status.is_ok());
         assert!(matches!(status.unwrap(), ComponentStatus::Added));
@@ -296,7 +389,12 @@ pub(crate) mod manager_tests {
     async fn test_get_nonexistent_reaction_status() {
         let (manager, _graph) = create_test_manager().await;
 
-        let status = manager.get_reaction_status("nonexistent".to_string()).await;
+        let status = manager
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("nonexistent")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(status.is_err());
         assert!(status.unwrap_err().to_string().contains("not found"));
     }
@@ -314,7 +412,11 @@ pub(crate) mod manager_tests {
             let manager_clone = manager.clone();
             let graph_clone = graph.clone();
             handles.push(tokio::spawn(async move {
-                let reaction = create_test_mock_reaction("same-reaction".to_string(), vec![]);
+                let reaction = create_test_mock_reaction(
+                    drasi_core_types::ComponentName::try_new("same-reaction")
+                        .expect("fixture component name"),
+                    vec![],
+                );
                 let result = add_reaction(&manager_clone, &graph_clone, reaction).await;
                 (i, result.is_ok())
             }));
@@ -339,7 +441,11 @@ pub(crate) mod manager_tests {
         // Verify only one reaction exists
         let reactions = manager.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 1);
-        assert_eq!(reactions[0].0, "same-reaction");
+        assert_eq!(
+            reactions[0].name,
+            drasi_core_types::ComponentName::try_new("same-reaction")
+                .expect("fixture component name")
+        );
     }
 
     /// Test that concurrent add_reaction calls with different IDs all succeed.
@@ -353,7 +459,11 @@ pub(crate) mod manager_tests {
             let manager_clone = manager.clone();
             let graph_clone = graph.clone();
             handles.push(tokio::spawn(async move {
-                let reaction = create_test_mock_reaction(format!("reaction-{i}"), vec![]);
+                let reaction = create_test_mock_reaction(
+                    drasi_core_types::ComponentName::try_new(format!("reaction-{i}"))
+                        .expect("fixture component name"),
+                    vec![],
+                );
                 add_reaction(&manager_clone, &graph_clone, reaction).await
             }));
         }
@@ -382,13 +492,21 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Add reaction with auto_start=true
-        let reaction1 =
-            TestMockReaction::with_auto_start("auto-start-reaction".to_string(), vec![], true);
+        let reaction1 = TestMockReaction::fixture(
+            drasi_core_types::ComponentName::try_new("auto-start-reaction")
+                .expect("fixture component name"),
+            vec![],
+            true,
+        );
         add_reaction(&manager, &graph, reaction1).await.unwrap();
 
         // Add reaction with auto_start=false
-        let reaction2 =
-            TestMockReaction::with_auto_start("no-auto-start-reaction".to_string(), vec![], false);
+        let reaction2 = TestMockReaction::fixture(
+            drasi_core_types::ComponentName::try_new("no-auto-start-reaction")
+                .expect("fixture component name"),
+            vec![],
+            false,
+        );
         add_reaction(&manager, &graph, reaction2).await.unwrap();
 
         // Subscribe BEFORE the operation that triggers status changes
@@ -398,9 +516,10 @@ pub(crate) mod manager_tests {
         manager.start_all().await.unwrap();
 
         // Wait for the auto-start reaction to reach Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "auto-start-reaction",
+            &graph,
+            &crate::ComponentName::try_new("auto-start-reaction").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
@@ -408,11 +527,17 @@ pub(crate) mod manager_tests {
 
         // Check statuses
         let status1 = manager
-            .get_reaction_status("auto-start-reaction".to_string())
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("auto-start-reaction")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let status2 = manager
-            .get_reaction_status("no-auto-start-reaction".to_string())
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("no-auto-start-reaction")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
@@ -432,10 +557,13 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Create reaction using default constructor (should have auto_start=true)
-        let reaction = create_test_mock_reaction("default-reaction".to_string(), vec![]);
+        let reaction = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("default-reaction")
+                .expect("fixture component name"),
+            vec![],
+        );
 
         // Verify auto_start is true
-        use crate::reactions::Reaction;
         assert!(reaction.auto_start(), "Default auto_start should be true");
 
         add_reaction(&manager, &graph, reaction).await.unwrap();
@@ -447,16 +575,20 @@ pub(crate) mod manager_tests {
         manager.start_all().await.unwrap();
 
         // Wait for the reaction to reach Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "default-reaction",
+            &graph,
+            &crate::ComponentName::try_new("default-reaction").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
         .await;
 
         let status = manager
-            .get_reaction_status("default-reaction".to_string())
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("default-reaction")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -471,8 +603,12 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Add reaction with auto_start=false
-        let reaction =
-            TestMockReaction::with_auto_start("manual-reaction".to_string(), vec![], false);
+        let reaction = TestMockReaction::fixture(
+            drasi_core_types::ComponentName::try_new("manual-reaction")
+                .expect("fixture component name"),
+            vec![],
+            false,
+        );
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // start_all should not start it
@@ -482,7 +618,10 @@ pub(crate) mod manager_tests {
         tokio::task::yield_now().await;
 
         let status = manager
-            .get_reaction_status("manual-reaction".to_string())
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-reaction")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -495,21 +634,28 @@ pub(crate) mod manager_tests {
 
         // Manually start the reaction
         manager
-            .start_reaction("manual-reaction".to_string())
+            .start_reaction_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-reaction")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
         // Wait for the reaction to reach Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "manual-reaction",
+            &graph,
+            &crate::ComponentName::try_new("manual-reaction").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
         .await;
 
         let status = manager
-            .get_reaction_status("manual-reaction".to_string())
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-reaction")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -526,27 +672,41 @@ pub(crate) mod manager_tests {
     #[tokio::test]
     async fn test_delete_reaction_cleans_up_event_history() {
         let (manager, graph) = create_test_manager().await;
+        let reaction_name = drasi_core_types::ComponentName::try_new("cleanup-events-reaction")
+            .expect("fixture component name");
 
         // Add a reaction
-        let reaction = create_test_mock_reaction("cleanup-events-reaction".to_string(), vec![]);
+        let reaction = create_test_mock_reaction(reaction_name.clone(), vec![]);
         add_reaction(&manager, &graph, reaction).await.unwrap();
+        let reaction_id = manager
+            .0
+            .component_by_name(&reaction_name)
+            .unwrap()
+            .id()
+            .clone();
 
         manager
-            .start_reaction("cleanup-events-reaction".into())
+            .start_reaction_by_name(&reaction_name)
             .await
             .unwrap();
 
         // Verify events exist
-        let events = manager.get_reaction_events("cleanup-events-reaction").await;
+        let events = manager
+            .get_reaction_events_by_name(&reaction_name)
+            .await
+            .unwrap();
         assert!(!events.is_empty(), "Expected events after recording");
 
         // Delete the reaction
-        delete_reaction(&manager, &graph, "cleanup-events-reaction", false)
+        delete_reaction(&manager, &graph, &reaction_name, false)
             .await
             .unwrap();
 
         // Verify events are cleaned up
-        let events_after = manager.get_reaction_events("cleanup-events-reaction").await;
+        let events_after = manager
+            .get_reaction_events_by_id(&reaction_id)
+            .await
+            .unwrap();
         assert!(events_after.is_empty(), "Expected no events after deletion");
     }
 
@@ -556,20 +716,40 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Add a reaction
-        let reaction = create_test_mock_reaction("cleanup-logs-reaction".to_string(), vec![]);
+        let reaction = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("cleanup-logs-reaction")
+                .expect("fixture component name"),
+            vec![],
+        );
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Subscribe to create the channel
-        let result = manager.subscribe_logs("cleanup-logs-reaction").await;
+        let result = manager
+            .subscribe_logs_by_name(
+                &drasi_core_types::ComponentName::try_new("cleanup-logs-reaction")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_ok(), "Expected to subscribe to reaction logs");
 
         // Delete the reaction
-        delete_reaction(&manager, &graph, "cleanup-logs-reaction", false)
-            .await
-            .unwrap();
+        delete_reaction(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("cleanup-logs-reaction")
+                .expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Verify logs are cleaned up (subscribe should fail for non-existent reaction)
-        let result = manager.subscribe_logs("cleanup-logs-reaction").await;
+        let result = manager
+            .subscribe_logs_by_name(
+                &drasi_core_types::ComponentName::try_new("cleanup-logs-reaction")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_err(),
             "Expected an error for deleted reaction logs"
@@ -582,39 +762,45 @@ pub(crate) mod manager_tests {
 
     /// A test reaction that tracks deprovision calls.
     struct DeprovisionTestReaction {
-        id: String,
-        queries: Vec<String>,
+        id: drasi_core_types::ComponentId,
+        queries: Vec<drasi_computation_contracts::ComponentReference>,
         status_handle: crate::component_graph::ComponentStatusHandle,
         deprovision_called: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl DeprovisionTestReaction {
-        fn new(id: &str) -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+        fn new(
+            name: drasi_core_types::ComponentName,
+        ) -> (
+            crate::test_helpers::creation::ReactionFixture<Self>,
+            Arc<std::sync::atomic::AtomicBool>,
+        ) {
             let deprovision_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let called = deprovision_called.clone();
             (
-                Self {
-                    id: id.to_string(),
-                    queries: vec![],
-                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                    deprovision_called: deprovision_called.clone(),
-                },
+                crate::test_helpers::creation::ReactionFixture::new(
+                    name,
+                    vec![],
+                    false,
+                    move |id, _| {
+                        Ok(Self {
+                            id: id.clone(),
+                            queries: vec![],
+                            status_handle: crate::component_graph::ComponentStatusHandle::new(
+                                id.clone(),
+                            ),
+                            deprovision_called: called,
+                        })
+                    },
+                ),
                 deprovision_called,
             )
-        }
-
-        fn new_simple(id: &str) -> Self {
-            Self {
-                id: id.to_string(),
-                queries: vec![],
-                status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                deprovision_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }
         }
     }
 
     #[async_trait]
     impl crate::reactions::Reaction for DeprovisionTestReaction {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             &self.id
         }
 
@@ -626,7 +812,7 @@ pub(crate) mod manager_tests {
             HashMap::new()
         }
 
-        fn query_ids(&self) -> Vec<String> {
+        fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
             self.queries.clone()
         }
 
@@ -634,7 +820,7 @@ pub(crate) mod manager_tests {
             false
         }
 
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
 
@@ -656,7 +842,7 @@ pub(crate) mod manager_tests {
             self.status_handle.get_status().await
         }
 
-        async fn deprovision(&self) -> anyhow::Result<()> {
+        async fn delete_owned_resources(&self) -> anyhow::Result<()> {
             self.deprovision_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -671,12 +857,21 @@ pub(crate) mod manager_tests {
     async fn test_delete_reaction_with_cleanup_calls_deprovision() {
         let (manager, graph) = create_test_manager().await;
 
-        let (reaction, deprovision_flag) = DeprovisionTestReaction::new("deprovision-reaction");
+        let (reaction, deprovision_flag) = DeprovisionTestReaction::new(
+            drasi_core_types::ComponentName::try_new("deprovision-reaction")
+                .expect("fixture component name"),
+        );
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
-        delete_reaction(&manager, &graph, "deprovision-reaction", true)
-            .await
-            .unwrap();
+        delete_reaction(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("deprovision-reaction")
+                .expect("fixture component name"),
+            true,
+        )
+        .await
+        .unwrap();
 
         assert!(
             deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -688,12 +883,21 @@ pub(crate) mod manager_tests {
     async fn test_delete_reaction_without_cleanup_skips_deprovision() {
         let (manager, graph) = create_test_manager().await;
 
-        let (reaction, deprovision_flag) = DeprovisionTestReaction::new("no-deprovision-reaction");
+        let (reaction, deprovision_flag) = DeprovisionTestReaction::new(
+            drasi_core_types::ComponentName::try_new("no-deprovision-reaction")
+                .expect("fixture component name"),
+        );
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
-        delete_reaction(&manager, &graph, "no-deprovision-reaction", false)
-            .await
-            .unwrap();
+        delete_reaction(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("no-deprovision-reaction")
+                .expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(
             !deprovision_flag.load(std::sync::atomic::Ordering::SeqCst),
@@ -707,121 +911,150 @@ pub(crate) mod manager_tests {
 
     #[tokio::test]
     async fn test_update_reaction_replaces_stopped_reaction() {
-        let (manager, graph) = create_test_manager().await;
-
-        let reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
-        add_reaction(&manager, &graph, reaction).await.unwrap();
-
-        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
-        manager
-            .update_reaction("reconfig-stopped-reaction".to_string(), new_reaction)
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let reaction_name = drasi_core_types::ComponentName::try_new("reconfig-stopped-reaction")
+            .expect("fixture component name");
+        let old = updates::add(&core, reaction_name.clone(), true).await;
+        core.reaction_manager()
+            .update_reaction_by_name(
+                &reaction_name,
+                updates::definition(old.id().clone(), reaction_name.clone(), true, 1),
+            )
             .await
             .unwrap();
-
-        let status = manager
-            .get_reaction_status("reconfig-stopped-reaction".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        updates::settle(&core).await;
+        let current = core.component_by_id(old.id()).unwrap();
+        assert_eq!(current.id(), old.id());
+        assert_ne!(current.generation(), old.generation());
+        assert_eq!(
+            current.observed().unwrap().lifecycle,
+            crate::computation::v1::ComponentLifecycle::Stopped
+        );
+        assert_eq!(
+            trace.events(),
+            ["create", "bind", "initialize", "dispose", "create", "bind", "initialize"]
+        );
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_reaction_stops_and_restarts_running_reaction() {
-        let (manager, graph) = create_test_manager().await;
-
-        let reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
-        add_reaction(&manager, &graph, reaction).await.unwrap();
-
-        // Subscribe BEFORE the operation that triggers status change
-        let mut event_rx = graph.subscribe().unwrap();
-
-        manager
-            .start_reaction("reconfig-running-reaction".to_string())
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let reaction_name = drasi_core_types::ComponentName::try_new("reconfig-running-reaction")
+            .expect("fixture component name");
+        let old = updates::add(&core, reaction_name.clone(), true).await;
+        old.start().await.unwrap();
+        old.wait_started().await.unwrap();
+        core.reaction_manager()
+            .update_reaction_by_name(
+                &reaction_name,
+                updates::definition(old.id().clone(), reaction_name.clone(), true, 1),
+            )
             .await
             .unwrap();
-        // Wait for async graph update to propagate
-        wait_for_component_status(
-            &mut event_rx,
-            "reconfig-running-reaction",
-            ComponentStatus::Running,
-            Duration::from_secs(5),
-        )
-        .await;
-        let status = manager
-            .get_reaction_status("reconfig-running-reaction".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Running);
-
-        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
-        manager
-            .update_reaction("reconfig-running-reaction".to_string(), new_reaction)
-            .await
-            .unwrap();
-
-        // Wait for async graph update to propagate
-        wait_for_component_status(
-            &mut event_rx,
-            "reconfig-running-reaction",
-            ComponentStatus::Running,
-            Duration::from_secs(5),
-        )
-        .await;
-        let status = manager
-            .get_reaction_status("reconfig-running-reaction".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Running);
+        updates::settle(&core).await;
+        let current = core.component_by_id(old.id()).unwrap();
+        let started = current.wait_started().await;
+        assert!(
+            started.is_ok(),
+            "{started:?}; state={:?}; hooks={:?}; management={:?}",
+            current.observed(),
+            trace.events(),
+            core.management_status().await
+        );
+        assert_eq!(
+            core.reaction_manager()
+                .get_reaction_status_by_name(&reaction_name)
+                .await
+                .unwrap(),
+            ComponentStatus::Running
+        );
+        assert_eq!(
+            trace.events(),
+            [
+                "create",
+                "bind",
+                "initialize",
+                "start",
+                "stop",
+                "dispose",
+                "create",
+                "bind",
+                "initialize",
+                "start"
+            ]
+        );
+        assert!(old.start().await.is_err());
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_reaction_emits_reconfiguring_event() {
-        let (manager, graph) = create_test_manager_with_graph().await;
-
-        // Subscribe to graph events BEFORE adding reaction
-        let mut event_rx = graph.subscribe().unwrap();
-
-        let reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
-        add_reaction(&manager, &graph, reaction).await.unwrap();
-
-        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
-        manager
-            .update_reaction("reconfig-event-reaction".to_string(), new_reaction)
+        use crate::test_helpers::updates;
+        let (core, _) = updates::core().await;
+        let reaction_name = drasi_core_types::ComponentName::try_new("reconfig-event-reaction")
+            .expect("fixture component name");
+        let reaction = updates::add(&core, reaction_name.clone(), true).await;
+        reaction.start().await.unwrap();
+        reaction.wait_started().await.unwrap();
+        let mut event_rx = core.component_graph().subscribe().unwrap();
+        core.reaction_manager()
+            .update_reaction_by_name(
+                &reaction_name,
+                updates::definition(reaction.id().clone(), reaction_name.clone(), true, 1),
+            )
             .await
             .unwrap();
 
         // Wait for the Reconfiguring event via the broadcast channel
-        wait_for_component_status(
+        wait_for_component_status_by_id(
             &mut event_rx,
-            "reconfig-event-reaction",
+            reaction.id(),
             ComponentStatus::Reconfiguring,
             Duration::from_secs(5),
         )
         .await;
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_reaction_rejects_mismatched_id() {
-        let (manager, graph) = create_test_manager().await;
-
-        let reaction = DeprovisionTestReaction::new_simple("original-reaction");
-        add_reaction(&manager, &graph, reaction).await.unwrap();
-
-        let new_reaction = DeprovisionTestReaction::new_simple("different-id");
-        let result = manager
-            .update_reaction("original-reaction".to_string(), new_reaction)
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let reaction_name = drasi_core_types::ComponentName::try_new("original-reaction")
+            .expect("fixture component name");
+        let _reaction = updates::add(&core, reaction_name.clone(), true).await;
+        let before = trace.events();
+        let result = core
+            .reaction_manager()
+            .update_reaction_by_name(
+                &reaction_name,
+                updates::definition(
+                    crate::config::ComponentId::generate(),
+                    reaction_name.clone(),
+                    true,
+                    1,
+                ),
+            )
             .await;
         assert!(result.is_err(), "Expected error for mismatched IDs");
-        assert!(result.unwrap_err().to_string().contains("does not match"));
+        assert!(result.unwrap_err().to_string().contains("UUID"));
+        assert_eq!(trace.events(), before);
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_nonexistent_reaction() {
         let (manager, _graph) = create_test_manager().await;
-
-        let new_reaction = DeprovisionTestReaction::new_simple("nonexistent");
+        let id = crate::config::ComponentId::generate();
+        let reaction_name = drasi_core_types::ComponentName::try_new("nonexistent")
+            .expect("fixture component name");
+        let definition =
+            crate::test_helpers::updates::definition(id.clone(), reaction_name.clone(), true, 1);
         let result = manager
-            .update_reaction("nonexistent".to_string(), new_reaction)
+            .update_reaction_by_name(&reaction_name, definition)
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
@@ -834,8 +1067,8 @@ pub(crate) mod manager_tests {
 
     /// A reaction that captures snapshot data during bootstrap for verification.
     struct SnapshotTestReaction {
-        id: String,
-        queries: Vec<String>,
+        id: drasi_core_types::ComponentId,
+        queries: Vec<drasi_computation_contracts::ComponentReference>,
         status_handle: crate::component_graph::ComponentStatusHandle,
         captured_snapshot: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
         bootstrap_called: Arc<std::sync::atomic::AtomicBool>,
@@ -843,23 +1076,39 @@ pub(crate) mod manager_tests {
 
     impl SnapshotTestReaction {
         fn new(
-            id: &str,
-            queries: Vec<String>,
+            name: crate::ComponentName,
+            queries: Vec<crate::ComponentName>,
         ) -> (
-            Self,
+            crate::test_helpers::creation::ReactionFixture<Self>,
             Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
             Arc<std::sync::atomic::AtomicBool>,
         ) {
             let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
             let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let captured_instance = captured.clone();
+            let called_instance = called.clone();
+            let inputs: Vec<_> = queries
+                .into_iter()
+                .map(crate::config::ComponentReference::by_name)
+                .collect();
             (
-                Self {
-                    id: id.to_string(),
-                    queries,
-                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                    captured_snapshot: captured.clone(),
-                    bootstrap_called: called.clone(),
-                },
+                crate::test_helpers::creation::ReactionFixture::new(
+                    name,
+                    inputs,
+                    false,
+                    move |id, resolved_inputs| {
+                        Ok(Self {
+                            id: id.clone(),
+                            queries: resolved_inputs
+                                .into_iter()
+                                .map(crate::config::ComponentReference::by_id)
+                                .collect(),
+                            status_handle: crate::component_graph::ComponentStatusHandle::new(id),
+                            captured_snapshot: captured_instance,
+                            bootstrap_called: called_instance,
+                        })
+                    },
+                ),
                 captured,
                 called,
             )
@@ -868,7 +1117,7 @@ pub(crate) mod manager_tests {
 
     #[async_trait]
     impl crate::reactions::Reaction for SnapshotTestReaction {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             &self.id
         }
         fn type_name(&self) -> &str {
@@ -877,13 +1126,13 @@ pub(crate) mod manager_tests {
         fn properties(&self) -> HashMap<String, serde_json::Value> {
             HashMap::new()
         }
-        fn query_ids(&self) -> Vec<String> {
+        fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
             self.queries.clone()
         }
         fn auto_start(&self) -> bool {
             false
         }
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
         async fn start(&self) -> Result<()> {
@@ -943,10 +1192,17 @@ pub(crate) mod manager_tests {
 
         let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
-        let source = create_test_bootstrap_mock_source("e2e-src".to_string(), bootstrap_rx);
+        let source = create_test_bootstrap_mock_source(
+            drasi_core_types::ComponentName::try_new("e2e-src").expect("fixture component name"),
+            bootstrap_rx,
+        );
 
-        let (reaction, captured_snapshot, bootstrap_called) =
-            SnapshotTestReaction::new("snap-reaction", vec!["e2e-query".to_string()]);
+        let (reaction, captured_snapshot, bootstrap_called) = SnapshotTestReaction::new(
+            drasi_core_types::ComponentName::try_new("snap-reaction")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("e2e-query")
+                .expect("fixture component name")],
+        );
 
         let core = crate::DrasiLib::builder()
             .with_query_factory(
@@ -962,20 +1218,32 @@ pub(crate) mod manager_tests {
                     .clone(),
             )
             .with_id("e2e-bootstrap")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
-                crate::Query::cypher("e2e-query")
-                    .query("MATCH (n:Person) RETURN n.name, n.age")
-                    .from_input("e2e-src")
-                    .build(),
+                crate::Query::cypher(
+                    drasi_core_types::ComponentName::try_new("e2e-query")
+                        .expect("fixture component name"),
+                )
+                .query("MATCH (n:Person) RETURN n.name, n.age")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("e2e-src")
+                        .expect("fixture component name"),
+                )
+                .build()
+                .unwrap(),
             )
-            .with_reaction(reaction)
+            .with_reaction_fixture(reaction)
             .build()
             .await
             .unwrap();
 
         // Subscribe to component events before starting.
         let mut event_rx = core.subscribe_all_component_events();
+        let source_id = core
+            .component_by_name(&crate::ComponentName::try_new("e2e-src").unwrap())
+            .unwrap()
+            .id()
+            .clone();
 
         // Start — auto-starts source (auto_start=true) and query (auto_start=true by
         // default). The reaction has auto_start=false, so it stays provisioned.
@@ -1003,7 +1271,7 @@ pub(crate) mod manager_tests {
             };
             bootstrap_tx
                 .send(BootstrapEvent {
-                    source_id: "e2e-src".to_string(),
+                    source_id: source_id.clone(),
                     change: SourceChange::Insert { element },
                     timestamp: chrono::Utc::now(),
                     sequence: (i + 1) as u64,
@@ -1014,16 +1282,23 @@ pub(crate) mod manager_tests {
         drop(bootstrap_tx);
 
         // Wait for the query to reach Running (bootstrap complete).
-        crate::test_helpers::wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "e2e-query",
+            &core.component_graph(),
+            &crate::ComponentName::try_new("e2e-query").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
         .await;
 
         // Sanity check: the real query should have 3 result rows.
-        let results = core.get_query_results("e2e-query").await.unwrap();
+        let results = core
+            .get_query_results_by_name(
+                &drasi_core_types::ComponentName::try_new("e2e-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             results.len(),
             3,
@@ -1031,7 +1306,12 @@ pub(crate) mod manager_tests {
         );
 
         // --- Start the reaction — triggers bootstrap → fetch_snapshot ---
-        core.start_reaction("snap-reaction").await.unwrap();
+        core.start_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("snap-reaction")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
 
         // --- Verify bootstrap was called and snapshot data matches ---
         assert!(
@@ -1056,5 +1336,7 @@ pub(crate) mod manager_tests {
                 "Snapshot should contain person '{expected_name}', got: {captured_names:?}"
             );
         }
+        drop(captured);
+        core.shutdown().await.unwrap();
     }
 }

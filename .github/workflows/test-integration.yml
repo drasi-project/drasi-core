@@ -42,7 +42,7 @@ jobs:
   discover:
     name: Discover integration tests
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_jobs: ${{ steps.matrix.outputs.has_jobs }}
@@ -81,7 +81,7 @@ jobs:
       - name: Build integration test matrix
         id: matrix
         run: |
-          matrix="$(cargo run -p xtask --quiet -- list-integration-test-matrix)"
+          matrix="$(cargo run --locked -p xtask --quiet -- list-integration-test-matrix)"
           {
             echo "matrix<<EOF"
             echo "${matrix}"
@@ -102,7 +102,7 @@ jobs:
       ${{ !cancelled()
         && needs.discover.result == 'success'
         && needs.discover.outputs.has_jobs == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -114,10 +114,17 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
+          sudo apt-get install -y jq libjq-dev libonig-dev
+
+      - name: Install pinned Protobuf compiler
+        uses: ./.github/actions/setup-protoc
 
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
+      - name: Install Podman for fixtures that use its CLI
+        if: contains(matrix.extra, 'podman')
+        run: sudo apt-get install -y podman
 
       - name: Install Oracle Instant Client
         if: contains(matrix.extra, 'oracle')
@@ -174,23 +181,28 @@ jobs:
         if: contains(matrix.extra, 'plugins')
         run: |
           set -euo pipefail
-          mkdir -p target/debug/plugins
+          make build-test-plugins
           pkg="${{ matrix.package }}"
-          packages="$pkg"
-          case "$pkg" in
-            drasi-source-*)
-              packages="$packages drasi-bootstrap-${pkg#drasi-source-}"
-              ;;
-          esac
+          packages="$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -r --arg package "$pkg" '
+              .packages[] |
+              select(.name == $package or
+                ($package | startswith("drasi-source-")) and
+                .name == ($package | sub("^drasi-source-"; "drasi-bootstrap-"))) |
+              select(.features | has("dynamic-plugin")) | .name')"
           for build_pkg in $packages; do
-            cargo build --lib -p "$build_pkg" --features "$build_pkg/dynamic-plugin"
+            cargo build --locked --lib -p "$build_pkg" --features "$build_pkg/dynamic-plugin"
+            artifact="lib${build_pkg//-/_}.so"
+            test -s "target/debug/$artifact"
+            cp "target/debug/$artifact" "target/debug/plugins/$artifact"
           done
-          for src in target/debug/libdrasi_*.so target/debug/drasi_*.so; do
-            [ -f "$src" ] || continue
-            cp "$src" target/debug/plugins/
-          done
-          ls -la target/debug/plugins
 
       - name: Run ignored integration tests
         run: |
-          cargo test -p ${{ matrix.package }} --test ${{ matrix.test }} -- --ignored --nocapture --test-threads=1
+          features=()
+          for feature in computation garnet-tests; do
+            if [[ ",${{ matrix.extra }}," == *",$feature,"* ]]; then
+              features+=(--features "$feature")
+            fi
+          done
+          cargo test --locked -p ${{ matrix.package }} --test ${{ matrix.test }} "${features[@]}" -- --ignored --nocapture --test-threads=1

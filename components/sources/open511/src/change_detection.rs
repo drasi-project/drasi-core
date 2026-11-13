@@ -47,7 +47,7 @@ pub struct PollCycleResult {
 pub fn detect_incremental(
     previous: &PollState,
     changed_events: Vec<Open511Event>,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     auto_delete_archived: bool,
 ) -> PollCycleResult {
     let mut next_state = previous.clone();
@@ -95,7 +95,7 @@ pub fn detect_incremental(
 pub fn detect_full_sweep(
     previous: &PollState,
     current_events: Vec<Open511Event>,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     auto_delete_archived: bool,
 ) -> PollCycleResult {
     let mut next_state = previous.clone();
@@ -191,7 +191,8 @@ mod tests {
         let result = detect_incremental(
             &previous,
             vec![event("e1", "2026-01-01T00:00:00Z")],
-            "s1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
             false,
         );
         assert!(!result.changes.is_empty());
@@ -208,7 +209,8 @@ mod tests {
         let result = detect_incremental(
             &previous,
             vec![event("e1", "2026-01-02T00:00:00Z")],
-            "s1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
             false,
         );
         assert!(!result.changes.is_empty());
@@ -221,7 +223,13 @@ mod tests {
             .events_by_id
             .insert("e1".to_string(), event("e1", "2026-01-01T00:00:00Z"));
 
-        let result = detect_full_sweep(&previous, vec![], "s1", false);
+        let result = detect_full_sweep(
+            &previous,
+            vec![],
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            false,
+        );
         assert!(!result.changes.is_empty());
         let has_delete = result
             .changes
@@ -240,7 +248,13 @@ mod tests {
         let mut archived = event("e1", "2026-01-02T00:00:00Z");
         archived.status = "ARCHIVED".to_string();
 
-        let result = detect_incremental(&previous, vec![archived], "s1", true);
+        let result = detect_incremental(
+            &previous,
+            vec![archived],
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            true,
+        );
 
         let has_delete = result
             .changes
@@ -263,7 +277,13 @@ mod tests {
         let mut archived = event("e1", "2026-01-02T00:00:00Z");
         archived.status = "ARCHIVED".to_string();
 
-        let result = detect_incremental(&previous, vec![archived], "s1", false);
+        let result = detect_incremental(
+            &previous,
+            vec![archived],
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            false,
+        );
 
         let has_update = result
             .changes
@@ -286,7 +306,13 @@ mod tests {
         let mut archived = event("e1", "2026-01-02T00:00:00Z");
         archived.status = "ARCHIVED".to_string();
 
-        let result = detect_full_sweep(&previous, vec![archived], "s1", true);
+        let result = detect_full_sweep(
+            &previous,
+            vec![archived],
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            true,
+        );
 
         let has_delete = result
             .changes

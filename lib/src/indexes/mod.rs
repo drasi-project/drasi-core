@@ -72,11 +72,11 @@
 //! # async fn example() -> anyhow::Result<()> {
 //! let provider = RocksDbIndexProvider::new("/data/drasi", true, false)
 //!     .with_memory_budget_bytes(512 << 20)?;
-//! let query = Query::cypher("my_query")
+//! let query = Query::cypher(drasi_lib::ComponentName::try_new("my_query")?)
 //!     .query("MATCH (n) RETURN n")
-//!     .from_input("my_source")
+//!     .from_input_by_name(drasi_lib::ComponentName::try_new("my_source")?)
 //!     .with_storage_backend(StorageBackendRef::Named("rocksdb".to_string()))
-//!     .build();
+//!     .build()?;
 //! let core = DrasiLib::builder()
 //!     .with_index_provider("rocksdb", Arc::new(provider))
 //!     .with_query(query)
@@ -106,7 +106,7 @@ pub use config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use factory::{IndexError, IndexFactory};
 
 pub(crate) fn operation_error(
-    query: &str,
+    query: &crate::ComponentId,
     operation: &str,
     error: drasi_core::interface::IndexError,
 ) -> drasi_core::interface::IndexError {
@@ -118,7 +118,7 @@ pub(crate) fn operation_error(
 }
 
 pub(crate) fn check_clear(
-    query: &str,
+    query: &crate::ComponentId,
     operation: &str,
     result: Result<(), drasi_core::interface::IndexError>,
 ) -> Result<(), drasi_core::interface::IndexError> {

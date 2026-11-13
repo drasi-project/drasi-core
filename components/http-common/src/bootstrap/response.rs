@@ -62,7 +62,7 @@ pub enum MappedChange {
 pub fn map_items_to_elements(
     items: &[JsonValue],
     mappings: &[ElementMappingConfig],
-    source_id: &str,
+    source_id: &drasi_core_types::ComponentId,
     engine: &TemplateEngine,
 ) -> Vec<Result<MappedChange>> {
     mapped_items(items, mappings, source_id, engine).collect()
@@ -72,14 +72,14 @@ pub fn map_items_to_elements(
 pub fn mapped_items<'a>(
     items: &'a [JsonValue],
     mappings: &'a [ElementMappingConfig],
-    source_id: &'a str,
+    source_id: &'a drasi_core_types::ComponentId,
     engine: &'a TemplateEngine,
 ) -> impl Iterator<Item = Result<MappedChange>> + 'a {
     items.iter().enumerate().flat_map(move |(index, item)| {
         let context = TemplateContext {
             item: item.clone(),
             index,
-            source_id: source_id.to_string(),
+            source_id: source_id.clone(),
         };
 
         mappings
@@ -92,7 +92,7 @@ pub fn mapped_items<'a>(
 fn map_single_item(
     context: &TemplateContext,
     mapping: &ElementMappingConfig,
-    source_id: &str,
+    source_id: &drasi_core_types::ComponentId,
     engine: &TemplateEngine,
 ) -> Result<MappedChange> {
     let template = &mapping.template;
@@ -122,7 +122,7 @@ fn map_single_item(
     // property and relation endpoint rendering.
     if is_delete {
         let metadata = ElementMetadata {
-            reference: ElementReference::new(source_id, &id),
+            reference: ElementReference::new(source_id.as_str(), &id),
             labels: labels.into(),
             effective_from: 0,
         };
@@ -143,7 +143,7 @@ fn map_single_item(
     let element = match mapping.element_type {
         ElementType::Node => {
             let metadata = ElementMetadata {
-                reference: ElementReference::new(source_id, &id),
+                reference: ElementReference::new(source_id.as_str(), &id),
                 labels: labels.into(),
                 effective_from: 0,
             };
@@ -170,7 +170,7 @@ fn map_single_item(
                 .context("Failed to render 'to' template")?;
 
             let metadata = ElementMetadata {
-                reference: ElementReference::new(source_id, &id),
+                reference: ElementReference::new(source_id.as_str(), &id),
                 labels: labels.into(),
                 effective_from: 0,
             };
@@ -178,8 +178,8 @@ fn map_single_item(
             Element::Relation {
                 metadata,
                 properties,
-                in_node: ElementReference::new(source_id, &from_rendered),
-                out_node: ElementReference::new(source_id, &to_rendered),
+                in_node: ElementReference::new(source_id.as_str(), &from_rendered),
+                out_node: ElementReference::new(source_id.as_str(), &to_rendered),
             }
         }
     };
@@ -277,7 +277,13 @@ mod tests {
         }];
 
         let engine = TemplateEngine::new();
-        let results = map_items_to_elements(&items, &mappings, "test-source", &engine);
+        let results = map_items_to_elements(
+            &items,
+            &mappings,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            &engine,
+        );
         assert_eq!(results.len(), 2);
 
         let mapped = results[0].as_ref().unwrap();
@@ -311,7 +317,13 @@ mod tests {
         }];
 
         let engine = TemplateEngine::new();
-        let results = map_items_to_elements(&items, &mappings, "test-source", &engine);
+        let results = map_items_to_elements(
+            &items,
+            &mappings,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            &engine,
+        );
         assert_eq!(results.len(), 1);
 
         let mapped = results[0].as_ref().unwrap();

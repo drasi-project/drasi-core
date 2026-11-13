@@ -276,7 +276,7 @@ impl ProfilingConfig {
 /// Configuration for a profiler reaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfilerReactionConfig {
-    pub query_id: String,
+    pub query_id: crate::ComponentId,
     pub output_format: OutputFormat,
     pub output_interval_seconds: Option<u64>,
     pub output_interval_events: Option<usize>,

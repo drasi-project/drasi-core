@@ -140,7 +140,7 @@ pub struct QuerySources {
     pub middleware: Vec<SourceMiddlewareConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceMiddlewareConfig {
     #[serde(
         serialize_with = "serialize_arc_str",

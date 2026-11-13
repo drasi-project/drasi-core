@@ -4,6 +4,10 @@
 use super::*;
 use tokio::{sync::oneshot, time::timeout};
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 fn config(output: SqliteOutput) -> SqliteConfig {
     SqliteConfig {
         path: None,
@@ -24,7 +28,7 @@ fn config(output: SqliteOutput) -> SqliteConfig {
 }
 fn source(config: SqliteConfig) -> Result<SqliteSource> {
     SqliteSource::new(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
         StreamId::try_new("changes")?,
         config,
     )
@@ -116,15 +120,11 @@ async fn shared_factory_requires_exact_scope_resources_and_exclusive_progress() 
         max_transactions: NonZeroUsize::new(8).unwrap(),
         max_bytes: NonZeroUsize::new(1 << 20).unwrap(),
     });
-    let id = |name| ComponentId::try_new(name).unwrap();
-    let owner = Arc::new(QuerySourceProgress::new("graph", id("query"))?);
-    let consumers = Arc::new(ConsumerProgressSet::new(
-        "graph",
-        id("sqlite"),
-        [owner.clone()],
-    )?);
+    let id = component_id;
+    let owner = Arc::new(QuerySourceProgress::new("graph", id(46))?);
+    let consumers = Arc::new(ConsumerProgressSet::new("graph", id(832), [owner.clone()])?);
     let (producer, snapshots) = SqliteSource::coordinated_with_consumers(
-        id("sqlite"),
+        id(832),
         StreamId::try_new("changes")?,
         settings.clone(),
         consumers.clone(),
@@ -138,24 +138,24 @@ async fn shared_factory_requires_exact_scope_resources_and_exclusive_progress() 
         !settings.path.as_ref().unwrap().exists(),
         "construction must not touch SQLite"
     );
-    assert!(snapshots.for_consumer(&id("missing")).is_err());
-    let snapshot = snapshots.for_consumer(&id("query"))?;
-    snapshot.validate_query_scope("instance", "graph", &id("query"))?;
+    assert!(snapshots.for_consumer(&id(738)).is_err());
+    let snapshot = snapshots.for_consumer(&id(46))?;
+    snapshot.validate_query_scope("instance", "graph", &id(46))?;
     assert!(snapshot
-        .validate_query_scope("instance", "wrong", &id("query"))
+        .validate_query_scope("instance", "wrong", &id(46))
         .is_err());
     assert!(snapshot
-        .validate_query_scope("instance", "graph", &id("other"))
+        .validate_query_scope("instance", "graph", &id(666))
         .is_err());
-    let substitute = Arc::new(ConsumerProgressSet::new("graph", id("sqlite"), [owner])?);
+    let substitute = Arc::new(ConsumerProgressSet::new("graph", id(832), [owner])?);
     let substitute_source = SqliteSource::new_replayable_with_consumers(
-        id("sqlite"),
+        id(832),
         StreamId::try_new("changes")?,
         settings.clone(),
         substitute,
     )?;
     assert!(snapshots.validate_source(&substitute_source).is_err());
-    let client = Arc::new(SqliteClientResource::new(id("sqlite"), settings.clone())?);
+    let client = Arc::new(SqliteClientResource::new(id(832), settings.clone())?);
     let factory = SqliteSourceFactory::default();
     let mut specification = ComponentSpecification {
         descriptor: producer.descriptor().clone(),
@@ -239,7 +239,7 @@ async fn shared_factory_requires_exact_scope_resources_and_exclusive_progress() 
 
 #[test]
 fn shared_cursor_order_validates_journal_epochs_and_logical_positions() -> Result<()> {
-    let source = ComponentId::try_new("source")?;
+    let source = ComponentId::try_new("70e337a1-4f44-5f7b-b47e-7452e3c9c2ed")?;
     let policy = journal::position_policy(&source)?;
     let epoch = uuid::Uuid::new_v4();
     let first = journal::identity(epoch, 2)?;
@@ -291,7 +291,10 @@ async fn native_configuration_and_factory_reject_incompatible_bounds_and_resourc
     let factory = SqliteSourceFactory::default();
     let settings = config(SqliteOutput::Transactions);
     let specification = ComponentSpecification {
-        descriptor: SqliteSource::describe(ComponentId::try_new("sqlite")?, settings.output)?,
+        descriptor: SqliteSource::describe(
+            ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
+            settings.output,
+        )?,
         role: ComponentRole::Source,
         completion: None,
         implementation: factory.descriptor().implementation.clone(),
@@ -315,8 +318,10 @@ async fn native_configuration_and_factory_reject_incompatible_bounds_and_resourc
     // Both outputs publish the standard graph schema, so the descriptor cannot
     // select (or contradict) transaction mode; the configured output does.
     let mut same_schema = specification.clone();
-    same_schema.descriptor =
-        SqliteSource::describe(ComponentId::try_new("sqlite")?, SqliteOutput::Changes)?;
+    same_schema.descriptor = SqliteSource::describe(
+        ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
+        SqliteOutput::Changes,
+    )?;
     factory.validate(&same_schema)?;
     for invalid in ["progress", "snapshot", "flag", "rest-shape", "rest-host"] {
         let mut specification = specification.clone();
@@ -364,7 +369,7 @@ async fn paired_snapshot_requires_the_actual_source_configuration_and_progress_o
     let owner = || -> Result<_> {
         Ok(Arc::new(QuerySourceProgress::new(
             "test",
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("25bb17f9-d478-549e-8d5b-dfcc952a37a1")?,
         )?))
     };
     let progress = owner()?;
@@ -376,14 +381,14 @@ async fn paired_snapshot_requires_the_actual_source_configuration_and_progress_o
     });
     let make = |settings, progress| {
         SqliteSource::new_replayable(
-            ComponentId::try_new("sqlite")?,
+            ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
             StreamId::try_new("changes")?,
             settings,
             progress,
         )
     };
     let (producer, snapshot) = SqliteSource::coordinated(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
         StreamId::try_new("changes")?,
         settings.clone(),
         progress.clone(),
@@ -399,14 +404,14 @@ async fn paired_snapshot_requires_the_actual_source_configuration_and_progress_o
         .validate_source(&make(changed.clone(), progress.clone())?)
         .is_err());
     let mismatched = Arc::new(SqliteClientResource::new(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
         changed,
     )?);
     assert!(make(settings.clone(), progress.clone())?
         .with_client_resource(mismatched)
         .is_err());
     let client = Arc::new(SqliteClientResource::new(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
         settings.clone(),
     )?);
     let bound = producer.with_client_resource(client.clone())?;
@@ -453,20 +458,18 @@ async fn explicit_key_configuration_is_validated_without_changing_default_bindin
         serde_json::from_value::<SqliteConfig>(serialized)?,
         settings
     );
-    let source_id = ComponentId::try_new("sqlite")?;
+    let source_id = ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?;
     let output = StreamId::try_new("changes")?;
-    let owner: SourceProgressReader = Arc::new(QuerySourceProgress::new(
-        "test",
-        ComponentId::try_new("query")?,
-    )?)
-    .into();
+    let query_id = ComponentId::try_new("25bb17f9-d478-549e-8d5b-dfcc952a37a1")?;
+    let owner: SourceProgressReader =
+        Arc::new(QuerySourceProgress::new("test", query_id.clone())?).into();
     let owner = owner.read_only();
     let original = serde_json::to_string(&(
         1u32,
-        "sqlite",
-        "changes",
+        source_id.as_str(),
+        output.as_str(),
         "test",
-        "query",
+        query_id.as_str(),
         Vec::<String>::new(),
     ))?;
     assert_eq!(
@@ -1160,7 +1163,7 @@ async fn cancelled_and_timed_out_stop_retains_a_submitted_commit_and_client_owne
     config.path = Some(directory.path().join("source.db"));
     config.shutdown_timeout_ms = NonZeroU64::new(30).unwrap();
     let client = Arc::new(SqliteClientResource::new(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
         config.clone(),
     )?);
     let mut source = source(config.clone())?.with_client_resource(client.clone())?;
@@ -1189,7 +1192,7 @@ async fn cancelled_and_timed_out_stop_retains_a_submitted_commit_and_client_owne
     assert!(source.start().await.is_err());
     assert_eq!(client.owner.available_permits(), 0);
     assert!(SqliteSource::new(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
         StreamId::try_new("changes")?,
         config.clone()
     )?
@@ -1206,7 +1209,7 @@ async fn cancelled_and_timed_out_stop_retains_a_submitted_commit_and_client_owne
     drop(source);
     assert_eq!(client.owner.available_permits(), 1);
     let mut replacement = SqliteSource::new(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
         StreamId::try_new("changes")?,
         config,
     )?

@@ -83,7 +83,7 @@ impl GrpcSinkConfig {
         };
         use serde_json::json;
         ConfigDefinition::try_new([
-            Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming graph edge is accepted whether or not it is aliased; the graph supplies the producing component, output port and stream. An unaliased output is named after its producing component. The alias names the output in templates."),
+            Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming graph edge is accepted whether or not it is aliased; the graph supplies the producing component, output port and stream. An unaliased output is named after its producing component. The alias names the output in templates.").constraint(drasi_computation_contracts::ConfigurationConstraint::output_aliases()),
             Field::new("endpoint", String, false, "Plaintext grpc:// or http:// destination; TLS endpoints are not supported.").default(endpoint()),
             Field::new("metadata", Object, false, "ASCII gRPC request metadata; the x-drasi-component and x-drasi-port identity metadata are supplied automatically and may not be set.").default(json!({})),
             Field::new("timeoutMs", Integer, false, "gRPC request timeout in milliseconds; must be representable by the system clock.").default(timeout_ms()).minimum(1),
@@ -217,17 +217,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const COMPONENT_ID: &str = "63d14bfc-2827-577e-aed6-d4e1f755df25";
+
     fn outputs() -> Value {
-        json!({"q": {"component": "q", "port": "out"}})
+        json!({"q": {"component": COMPONENT_ID, "port": "out"}})
     }
 
     #[test]
     fn stale_producer_keys_and_implicit_ports_are_rejected() {
         for stale in [
-            json!({"producer": "q"}),
-            json!({"producers": {"q": "q/out"}}),
-            json!({"outputs": {"q": {"component": "q", "stream": "q/out"}}}),
-            json!({"outputs": {"bad id": {"component": "q"}}}),
+            json!({"producer": COMPONENT_ID}),
+            json!({"producers": {"q": format!("{COMPONENT_ID}/out")}}),
+            json!({"outputs": {"q": {"component": COMPONENT_ID, "stream": "q/out"}}}),
+            json!({"outputs": {"bad id": {"component": COMPONENT_ID}}}),
         ] {
             assert!(GrpcSinkConfig::parse(stale.clone()).is_err(), "{stale}");
         }

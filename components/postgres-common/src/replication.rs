@@ -137,7 +137,7 @@ pub fn read_position(
 ) -> Result<Option<Position>> {
     let Some(checkpoint) = snapshot
         .checkpoints
-        .get(&SourceProgressKey::Source(source.as_str().into()))
+        .get(&SourceProgressKey::Source(source.clone()))
     else {
         return Ok(None);
     };

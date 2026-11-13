@@ -12,12 +12,12 @@ readme = "README.md"
 
 [features]
 default = []
-sse = ["dep:anyhow", "dep:drasi-computation-contracts", "dep:handlebars", "dep:serde_json"]
+sse = ["dep:anyhow", "dep:handlebars", "dep:serde_json"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 anyhow = { version = "1", optional = true }
-drasi-computation-contracts = { workspace = true, optional = true }
+drasi-computation-contracts = { workspace = true }
 handlebars = { version = "5.1", optional = true }
 serde_json = { version = "1", optional = true }
 

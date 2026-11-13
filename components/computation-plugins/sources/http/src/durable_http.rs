@@ -39,7 +39,8 @@ fn response<T: serde::Serialize>(result: Result<T, AdmissionError>) -> Response 
     }
 }
 fn check(ingress: &Ingress, source: &str) -> Result<(), AdmissionError> {
-    if source != ingress.config.source_id {
+    let source = ComponentId::try_new(source).map_err(invalid)?;
+    if source != ingress.source_id {
         return Err(invalid("source ID mismatch"));
     }
     ingress.admission_service()?;
@@ -209,7 +210,7 @@ async fn submit(
                 if timestamp.is_none() {
                     return Err(invalid("durable HTTP events require an explicit timestamp"));
                 }
-                wire::http_change(event, source).map_err(invalid)
+                wire::http_change(event, &ingress.source_id).map_err(invalid)
             })
             .collect::<Result<Vec<_>, _>>()?;
         ingress.admit_durable(&session, sequence, changes).await

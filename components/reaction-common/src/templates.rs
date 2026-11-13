@@ -224,6 +224,26 @@ impl<T: Default> Default for QueryConfig<T> {
     }
 }
 
+/// Resolve presentation routing without substituting a query UUID for its name.
+pub fn input_alias<'a>(
+    alias: Option<&'a str>,
+    name: Option<&'a drasi_computation_contracts::ComponentName>,
+) -> Option<&'a str> {
+    alias.or_else(|| name.map(|name| name.as_str()))
+}
+
+/// Default presentation aliases for explicitly declared input references.
+/// An ID-selected input uses its UUID text as an alias, not a component name.
+pub fn input_aliases(inputs: &[drasi_computation_contracts::ComponentReference]) -> Vec<String> {
+    inputs
+        .iter()
+        .map(|input| match input {
+            drasi_computation_contracts::ComponentReference::Name(name) => name.to_string(),
+            drasi_computation_contracts::ComponentReference::Id { id } => id.to_string(),
+        })
+        .collect()
+}
+
 /// Template routing configuration for reactions.
 ///
 /// Provides a way to configure templates at two levels:
@@ -268,14 +288,14 @@ where
     /// Get the default template configuration
     fn default_template(&self) -> Option<&QueryConfig<T>>;
 
-    /// Get the template spec for a specific query and operation type
+    /// Get the template spec for an input alias and operation type.
     fn get_template_spec(
         &self,
-        query_id: &str,
+        output_alias: &str,
         operation: OperationType,
     ) -> Option<&TemplateSpec<T>> {
         // First check query-specific routes
-        if let Some(query_config) = self.routes().get(query_id) {
+        if let Some(query_config) = self.routes().get(output_alias) {
             if let Some(spec) = Self::get_spec_from_config(query_config, operation) {
                 return Some(spec);
             }
@@ -287,6 +307,20 @@ where
         }
 
         None
+    }
+
+    /// Route an ordinary result using its alias/name while preserving its UUID.
+    fn get_result_template_spec(
+        &self,
+        result: &drasi_computation_contracts::exchange::QueryResult,
+        operation: OperationType,
+    ) -> Option<&TemplateSpec<T>> {
+        match input_alias(result.input_alias.as_deref(), result.query_name.as_ref()) {
+            Some(alias) => self.get_template_spec(alias, operation),
+            None => self
+                .default_template()
+                .and_then(|config| Self::get_spec_from_config(config, operation)),
+        }
     }
 
     /// Helper to get spec from a QueryConfig based on operation type

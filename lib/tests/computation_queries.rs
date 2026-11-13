@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 #[path = "fixtures/query_semantics.rs"]
 mod query_semantics;
 
@@ -124,7 +128,26 @@ impl EnvelopeSink for Sink {
 }
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("id")
+    fixture_support::component_id(match value {
+        "query" => 1,
+        "floor" => 2,
+        "building" => 3,
+        "source" => 4,
+        "left" => 5,
+        "right" => 6,
+        "another-source" => 7,
+        "relay" => 8,
+        "sink" => 9,
+        "ahead" => 10,
+        "left-one" => 11,
+        "left-two" => 12,
+        "right-one" => 13,
+        "right-two" => 14,
+        "ahead-sink" => 15,
+        "joining" => 16,
+        "joining-sink" => 17,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 fn port(value: &str) -> PortId {
     PortId::try_new(value).expect("port")
@@ -425,9 +448,9 @@ async fn run_query(
     let results = query.results();
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut graph = ComputationGraph::builder("query-graph")
-        .source(Box::new(source(changes)))
-        .transformer(Box::new(query))
-        .sink(Box::new(sink("sink", events.clone())))
+        .fixture_source(Box::new(source(changes)))
+        .fixture_transformer(Box::new(query))
+        .fixture_sink(Box::new(sink("sink", events.clone())))
         .bind_stream(endpoint("source", "out"), stream("source/out"))
         .bind_stream(endpoint("query", "out"), stream("query/out"))
         .connect(
@@ -515,7 +538,7 @@ async fn source_fanout_to_real_queries_and_multiple_sinks(fault: Option<(&str, &
         let results = query.results();
         owners.push(progress);
         builder = builder
-            .transformer(Box::new(query))
+            .fixture_transformer(Box::new(query))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -526,10 +549,12 @@ async fn source_fanout_to_real_queries_and_multiple_sinks(fault: Option<(&str, &
             let sink_name = format!("{name}-{suffix}");
             let events = Arc::new(Mutex::new(Vec::new()));
             subscribers.push(events.clone());
-            builder = builder.sink(Box::new(sink(&sink_name, events))).connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink_name, "in")),
-                Box::new(BoundedPipeConfig { capacity: 1 }),
-            );
+            builder = builder
+                .fixture_sink(Box::new(sink(&sink_name, events)))
+                .connect(
+                    EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink_name, "in")),
+                    Box::new(BoundedPipeConfig { capacity: 1 }),
+                );
         }
         observations.push((name, alias, results, subscribers));
     }
@@ -555,7 +580,7 @@ async fn source_fanout_to_real_queries_and_multiple_sinks(fault: Option<(&str, &
     }
     let progress = Arc::new(ConsumerProgressSet::new(graph_id, producer, owners).unwrap());
     input.progress = Some(progress.clone());
-    let graph = builder.source(Box::new(input)).build();
+    let graph = builder.fixture_source(Box::new(input)).build();
     if let Some((kind, expected)) = fault {
         let error = match graph {
             Ok(_) => panic!("accepted invalid consumer progress: {kind}"),
@@ -578,7 +603,7 @@ async fn source_fanout_to_real_queries_and_multiple_sinks(fault: Option<(&str, &
         assert_eq!(second.len(), 3, "{name}");
         for (left, right) in first.iter().zip(second.iter()) {
             assert!(Arc::ptr_eq(left.event(), right.event()));
-            assert_eq!(QueryChangeCodec::metadata(left).unwrap().query_id, name);
+            assert_eq!(QueryChangeCodec::metadata(left).unwrap().query_id, id(name));
         }
         let changes: Vec<_> = first
             .iter()
@@ -615,9 +640,10 @@ async fn real_query_fanout_multi_thread() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn consumer_progress_requires_every_actual_owner_in_the_producer_graph() {
+    let missing = format!("does not cover required branch {}", id("right"));
     for fault in [
         ("impostor", "actual committed-input owner"),
-        ("omitted", "does not cover required branch right"),
+        ("omitted", missing.as_str()),
         ("foreign", "another graph"),
         ("producer", "another producer"),
     ] {
@@ -649,7 +675,7 @@ async fn consumer_changes_await_the_feedback_producer_stop() {
                 .unwrap();
         owners.push(owner);
         builder = builder
-            .transformer(Box::new(query))
+            .fixture_transformer(Box::new(query))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -658,7 +684,7 @@ async fn consumer_changes_await_the_feedback_producer_stop() {
         for suffix in ["one", "two"] {
             let sink_id = format!("{name}-{suffix}");
             builder = builder
-                .sink(Box::new(sink(&sink_id, Arc::new(Mutex::new(Vec::new())))))
+                .fixture_sink(Box::new(sink(&sink_id, Arc::new(Mutex::new(Vec::new())))))
                 .connect(
                     EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink_id, "in")),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
@@ -668,7 +694,7 @@ async fn consumer_changes_await_the_feedback_producer_stop() {
     input.progress = Some(Arc::new(
         ConsumerProgressSet::new("query-graph", id("source"), owners).unwrap(),
     ));
-    let mut graph = builder.source(Box::new(input)).build().unwrap();
+    let mut graph = builder.fixture_source(Box::new(input)).build().unwrap();
     let run = graph.start().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
@@ -777,7 +803,10 @@ impl ComputationBootstrapProvider for SeedAtPosition {
             watermarks: vec![BootstrapWatermark {
                 producer: None,
                 stream: stream("source/out"),
-                source_id: Some("source".into()),
+                source_id: Some(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                ),
                 sequence: self.logical,
                 position: self
                     .cursor
@@ -850,7 +879,8 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
             position
         };
         let event = SourceEventWrapper::new(
-            "source".into(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             SourceEvent::Change(change),
             chrono::Utc::now(),
             sequence,
@@ -873,7 +903,7 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
         .bind_stream(endpoint("source", "out"), stream("source/out"));
     if relay {
         builder = builder
-            .transformer(Box::new(GraphRelay {
+            .fixture_transformer(Box::new(GraphRelay {
                 descriptor: ComponentDescriptor::try_new(
                     id("relay"),
                     vec![
@@ -927,8 +957,8 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink_id = format!("{name}-sink");
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(sink(&sink_id, events.clone())))
+            .fixture_transformer(Box::new(query))
+            .fixture_sink(Box::new(sink(&sink_id, events.clone())))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint(upstream, "out"), endpoint(name, "in")),
@@ -946,13 +976,16 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
     input.positions = positions.then(|| {
         Arc::new(
             InputPositionPolicy::new(
-                SourceProgressKey::Source("source".into()),
+                SourceProgressKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                ),
                 Arc::new(OrdinalPosition),
             )
             .unwrap(),
         )
     });
-    let mut graph = builder.source(Box::new(input)).build().unwrap();
+    let mut graph = builder.fixture_source(Box::new(input)).build().unwrap();
     tokio::time::timeout(Duration::from_secs(15), graph.start().unwrap())
         .await
         .expect("position-filtered fanout must drain")
@@ -978,7 +1011,10 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
             .all(|change| matches!(change, ResultDiff::Update { .. })));
     }
     for state in progress.snapshot().unwrap().consumers.values() {
-        let checkpoint = &state.checkpoints[&SourceProgressKey::Source("source".into())];
+        let checkpoint = &state.checkpoints[&SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        )];
         assert_eq!(checkpoint.sequence, if positions { 103 } else { 30 });
         assert_eq!(
             checkpoint.source_position.as_deref(),
@@ -1040,9 +1076,10 @@ async fn scheduled_result_times_and_provenance() {
     assert_eq!(
         QueryChangeCodec::metadata(&output[0])
             .expect("metadata")
-            .source_id
-            .as_deref(),
-        Some("people")
+            .input_origin,
+        Some(drasi_computation_contracts::QueryInputOrigin::Scheduled(
+            ElementReference::new("people", "one")
+        ))
     );
     assert_eq!(
         output[0]
@@ -1139,7 +1176,7 @@ mod atomic_failure {
     use super::*;
     use drasi_core::{
         computation::{ComputationIndexes, ComputationResource, TransactionDomain},
-        interface::{IndexError, IndexSet, OutboxWriter},
+        interface::{IndexError, IndexSet, OutboxWriter, OutputPartition},
     };
     use drasi_index_rocksdb::{
         computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
@@ -1154,32 +1191,40 @@ mod atomic_failure {
     }
     #[async_trait]
     impl OutboxWriter for FailingOutbox {
-        async fn append(&self, query: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+        async fn append(
+            &self,
+            output: &OutputPartition,
+            sequence: u64,
+            data: &[u8],
+        ) -> Result<(), IndexError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fail.swap(false, Ordering::SeqCst) {
                 return Err(IndexError::CorruptedData);
             }
-            self.inner.append(query, sequence, data).await
+            self.inner.append(output, sequence, data).await
         }
         async fn read_from(
             &self,
-            query: &str,
+            output: &OutputPartition,
             after: u64,
         ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-            self.inner.read_from(query, after).await
+            self.inner.read_from(output, after).await
         }
-        async fn read_latest_sequence(&self, query: &str) -> Result<Option<u64>, IndexError> {
-            self.inner.read_latest_sequence(query).await
+        async fn read_latest_sequence(
+            &self,
+            output: &OutputPartition,
+        ) -> Result<Option<u64>, IndexError> {
+            self.inner.read_latest_sequence(output).await
         }
-        async fn clear(&self, query: &str) -> Result<(), IndexError> {
-            self.inner.clear(query).await
+        async fn clear(&self, output: &OutputPartition) -> Result<(), IndexError> {
+            self.inner.clear(output).await
         }
         async fn trim_to_capacity(
             &self,
-            query: &str,
+            output: &OutputPartition,
             capacity: usize,
         ) -> Result<usize, IndexError> {
-            self.inner.trim_to_capacity(query, capacity).await
+            self.inner.trim_to_capacity(output, capacity).await
         }
     }
 
@@ -1193,7 +1238,7 @@ mod atomic_failure {
         async fn create_indexes(
             &self,
             graph: &str,
-            query: &str,
+            query: &ComponentId,
         ) -> Result<ComputationIndexes, IndexError> {
             let original = self.inner.create_indexes(graph, query).await?;
             let set = original.indexes();

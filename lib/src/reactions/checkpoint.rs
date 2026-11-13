@@ -22,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::state_store::StateStoreProvider;
+use crate::{ComponentId, StorePartition};
 
 /// Persisted progress marker for a reaction's subscription to a single query.
 ///
@@ -44,11 +45,14 @@ pub struct ReactionCheckpoint {
 /// Returns `Ok(None)` if the key does not exist.
 pub(crate) async fn read_checkpoint(
     store: &dyn StateStoreProvider,
-    reaction_id: &str,
-    query_id: &str,
+    reaction_id: &ComponentId,
+    query_id: &ComponentId,
 ) -> anyhow::Result<Option<ReactionCheckpoint>> {
     let key = format!("checkpoint:{query_id}");
-    match store.get(reaction_id, &key).await? {
+    match store
+        .get(&StorePartition::component(reaction_id.clone()), &key)
+        .await?
+    {
         Some(bytes) => {
             let cp: ReactionCheckpoint = bincode::deserialize(&bytes)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize checkpoint: {e}"))?;
@@ -61,24 +65,30 @@ pub(crate) async fn read_checkpoint(
 /// Read checkpoints for all given query IDs in a single batch.
 pub(crate) async fn read_checkpoints_batch(
     store: &dyn StateStoreProvider,
-    reaction_id: &str,
-    query_ids: &[String],
-) -> anyhow::Result<std::collections::HashMap<String, ReactionCheckpoint>> {
+    reaction_id: &ComponentId,
+    query_ids: &[ComponentId],
+) -> anyhow::Result<std::collections::HashMap<ComponentId, ReactionCheckpoint>> {
     let keys: Vec<String> = query_ids
         .iter()
         .map(|q| format!("checkpoint:{q}"))
         .collect();
     let key_refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
 
-    let raw = store.get_many(reaction_id, &key_refs).await?;
+    let requested: std::collections::HashMap<_, _> =
+        key_refs.iter().copied().zip(query_ids).collect();
+    let raw = store
+        .get_many(&StorePartition::component(reaction_id.clone()), &key_refs)
+        .await?;
 
     let mut result = std::collections::HashMap::new();
     for (key, bytes) in raw {
-        let qid = key.strip_prefix("checkpoint:").unwrap_or(&key).to_string();
+        let qid = requested.get(key.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("state store returned an unrequested checkpoint key {key:?}")
+        })?;
         let cp: ReactionCheckpoint = bincode::deserialize(&bytes).map_err(|e| {
             anyhow::anyhow!("Failed to deserialize checkpoint for query '{qid}': {e}")
         })?;
-        result.insert(qid, cp);
+        result.insert((*qid).clone(), cp);
     }
     Ok(result)
 }
@@ -86,14 +96,16 @@ pub(crate) async fn read_checkpoints_batch(
 /// Write a single checkpoint to the state store.
 pub(crate) async fn write_checkpoint(
     store: &dyn StateStoreProvider,
-    reaction_id: &str,
-    query_id: &str,
+    reaction_id: &ComponentId,
+    query_id: &ComponentId,
     checkpoint: &ReactionCheckpoint,
 ) -> anyhow::Result<()> {
     let key = format!("checkpoint:{query_id}");
     let bytes = bincode::serialize(checkpoint)
         .map_err(|e| anyhow::anyhow!("Failed to serialize checkpoint: {e}"))?;
-    store.set(reaction_id, &key, bytes).await?;
+    store
+        .set(&StorePartition::component(reaction_id.clone()), &key, bytes)
+        .await?;
     Ok(())
 }
 

@@ -84,21 +84,27 @@ async fn test_postgres_source_logs_captured_on_success() {
         .expect("Failed to create publication");
 
     // Create the PostgreSQL source
-    let source = PostgresReplicationSource::builder("test-pg-source")
-        .with_host(host.to_string())
-        .with_port(port)
-        .with_database("postgres")
-        .with_user("postgres")
-        .with_password("postgres")
-        .with_tables(vec!["test_items".to_string()])
-        .with_publication_name("drasi_pub")
-        .with_slot_name("test_slot")
-        .build()
-        .expect("Failed to build PostgreSQL source");
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000138")
+            .expect("fixture UUID"),
+    )
+    .with_host(host.to_string())
+    .with_port(port)
+    .with_database("postgres")
+    .with_user("postgres")
+    .with_password("postgres")
+    .with_tables(vec!["test_items".to_string()])
+    .with_publication_name("drasi_pub")
+    .with_slot_name("test_slot")
+    .build()
+    .expect("Failed to build PostgreSQL source");
 
     // Create DrasiLib and add the source
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("test-pg-source").expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
@@ -107,7 +113,10 @@ async fn test_postgres_source_logs_captured_on_success() {
     timeout(
         Duration::from_secs(10),
         drasi
-            .computation_component("test-pg-source")
+            .component_by_name(
+                &drasi_core::ComponentName::try_new("test-pg-source")
+                    .expect("fixture component name"),
+            )
             .expect("source handle")
             .wait_started(),
     )
@@ -117,7 +126,9 @@ async fn test_postgres_source_logs_captured_on_success() {
 
     // Use the DrasiLib public API to get logs
     let (mut history, mut receiver) = drasi
-        .subscribe_source_logs("test-pg-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("test-pg-source").expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
     timeout(Duration::from_secs(5), async {
@@ -176,26 +187,36 @@ async fn test_postgres_source_logs_captured_on_success() {
 #[serial]
 async fn test_postgres_source_logs_captured_on_connection_failure() {
     // Create a source pointing to a non-existent database
-    let source = PostgresReplicationSource::builder("failing-pg-source")
-        .with_host("localhost")
-        .with_port(59999) // Non-existent port
-        .with_database("nonexistent_db")
-        .with_user("postgres")
-        .with_password("postgres")
-        .with_tables(vec!["test_table".to_string()])
-        .build()
-        .expect("Failed to build PostgreSQL source");
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000139")
+            .expect("fixture UUID"),
+    )
+    .with_host("localhost")
+    .with_port(59999) // Non-existent port
+    .with_database("nonexistent_db")
+    .with_user("postgres")
+    .with_password("postgres")
+    .with_tables(vec!["test_table".to_string()])
+    .build()
+    .expect("Failed to build PostgreSQL source");
 
     // Create DrasiLib and add the source
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("failing-pg-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     let _ = drasi.start().await;
     let source = drasi
-        .computation_component("failing-pg-source")
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("failing-pg-source")
+                .expect("fixture component name"),
+        )
         .expect("source handle");
     let start_result = timeout(Duration::from_secs(5), source.wait_started())
         .await
@@ -206,13 +227,22 @@ async fn test_postgres_source_logs_captured_on_connection_failure() {
     );
 
     assert_eq!(
-        drasi.get_source_status("failing-pg-source").await.unwrap(),
+        drasi
+            .get_source_status_by_name(
+                &drasi_core::ComponentName::try_new("failing-pg-source")
+                    .expect("fixture component name")
+            )
+            .await
+            .unwrap(),
         ComponentStatus::Error
     );
 
     // Use the DrasiLib public API to get logs
     let (mut history, mut receiver) = drasi
-        .subscribe_source_logs("failing-pg-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("failing-pg-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
     timeout(Duration::from_secs(5), async {
@@ -267,25 +297,35 @@ async fn test_postgres_source_logs_captured_on_connection_failure() {
 #[serial]
 async fn test_postgres_source_log_streaming() {
     // Create a source pointing to a non-existent port (will fail quickly)
-    let source = PostgresReplicationSource::builder("streaming-pg-source")
-        .with_host("localhost")
-        .with_port(59998) // Non-existent port
-        .with_database("test_db")
-        .with_user("postgres")
-        .with_password("postgres")
-        .with_tables(vec!["test".to_string()])
-        .build()
-        .expect("Failed to build PostgreSQL source");
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000013a")
+            .expect("fixture UUID"),
+    )
+    .with_host("localhost")
+    .with_port(59998) // Non-existent port
+    .with_database("test_db")
+    .with_user("postgres")
+    .with_password("postgres")
+    .with_tables(vec!["test".to_string()])
+    .build()
+    .expect("Failed to build PostgreSQL source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("streaming-pg-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs BEFORE starting using the DrasiLib public API
     let (initial_history, mut log_stream) = drasi
-        .subscribe_source_logs("streaming-pg-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("streaming-pg-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 

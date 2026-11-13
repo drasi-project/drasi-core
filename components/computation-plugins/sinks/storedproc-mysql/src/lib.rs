@@ -10,7 +10,7 @@ mod tests;
 
 use anyhow::Result;
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, SinkCompletion,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, SinkCompletion,
 };
 use drasi_computation_plugin_sdk::{
     ActivationCredentialContext, Capabilities, Component, ConfigSchema, ConfigType, ControlSender,
@@ -61,6 +61,15 @@ impl Factory for MySqlStoredProcFactory {
     }
     fn metadata(&self) -> FactoryMetadata {
         let mut configuration = ConfigSchema::from_fields([("settings", ConfigType::Object, true)]);
+        configuration.constrain(
+            "settings",
+            drasi_computation_contracts::ConfigurationConstraint::try_new(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "outputs": drasi_computation_contracts::ConfigurationConstraint::output_aliases().schema(),
+                },
+            })).expect("constant stored procedure identity schema"),
+        ).expect("settings field");
         configuration
             .fields
             .get_mut("settings")
@@ -72,10 +81,7 @@ impl Factory for MySqlStoredProcFactory {
             role: ComponentRole::Sink,
             configuration_version: 1,
             configuration,
-            ports: MySqlStoredProcSink::describe(ComponentId::try_new("mysql").expect("id"))
-                .expect("descriptor")
-                .ports()
-                .to_vec(),
+            ports: MySqlStoredProcSink::ports().expect("constant port descriptor"),
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,

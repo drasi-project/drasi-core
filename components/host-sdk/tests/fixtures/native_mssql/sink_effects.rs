@@ -33,8 +33,8 @@ fn input(
         &ResultNodeProjector::try_new(&format!("test/native-mssql-sink/{query}"), None)?,
         &results,
         QueryOutputMetadata {
-            query_id: query.into(),
-            source_id: None,
+            query_id: id(query),
+            input_origin: None,
             timestamp: chrono::Utc::now(),
             metadata: Default::default(),
             profiling: None,

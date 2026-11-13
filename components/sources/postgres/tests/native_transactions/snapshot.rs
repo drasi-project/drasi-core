@@ -64,7 +64,7 @@ fn coordinated(
     progress: Arc<QuerySourceProgress>,
 ) -> Result<(PostgresTransactionSource, Arc<PostgresSnapshot>)> {
     PostgresTransactionSource::coordinated(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("2158a414-62d4-50b8-88a2-49b63b00f3fd")?,
         StreamId::try_new("changes")?,
         config,
         progress,
@@ -83,6 +83,7 @@ pub(super) async fn managed_slot(database: &Database) -> Result<String> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn exported_snapshot_and_concurrent_wal_have_no_gap_and_restart_uses_the_same_slot(
 ) -> Result<()> {
     let database = Database::new().await?;
@@ -174,6 +175,7 @@ async fn exported_snapshot_and_concurrent_wal_have_no_gap_and_restart_uses_the_s
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn interrupted_snapshot_requires_reset_and_replaces_only_its_owned_unfinished_slot(
 ) -> Result<()> {
     let database = Database::new().await?;
@@ -260,6 +262,7 @@ async fn interrupted_snapshot_requires_reset_and_replaces_only_its_owned_unfinis
 struct CrashSnapshot(Arc<PostgresSnapshot>);
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn completed_snapshot_refuses_missing_history_or_changed_publication_without_reinitializing(
 ) -> Result<()> {
     for damage in ["missing-slot", "publication-filter", "column-type"] {
@@ -334,6 +337,7 @@ async fn completed_snapshot_refuses_missing_history_or_changed_publication_witho
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn oversized_snapshot_row_never_completes_and_restarts_after_limit_increase() -> Result<()> {
     let database = Database::new().await?;
     database
@@ -403,6 +407,7 @@ impl ComputationBootstrapProvider for CrashSnapshot {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "subprocess worker launched by the snapshot crash driver"]
 async fn postgres_snapshot_process_exit_helper() -> Result<()> {
     let Ok(point) = std::env::var("DRASI_PG_SNAPSHOT_CRASH") else {
         return Ok(());
@@ -432,6 +437,7 @@ async fn postgres_snapshot_process_exit_helper() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn process_exit_during_or_after_snapshot_keeps_ownership_and_the_correct_recovery_boundary(
 ) -> Result<()> {
     for point in ["during", "completed"] {
@@ -447,6 +453,7 @@ async fn process_exit_during_or_after_snapshot_keeps_ownership_and_the_correct_r
                 .args([
                     "--exact",
                     "snapshot::postgres_snapshot_process_exit_helper",
+                    "--ignored",
                     "--nocapture",
                 ])
                 .env("DRASI_PG_SNAPSHOT_CRASH", point)

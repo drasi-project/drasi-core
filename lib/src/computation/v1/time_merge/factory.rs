@@ -68,6 +68,7 @@ impl Default for SourceTimeMergeFactory {
                         (
                             Arc::from("definition"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Object,
                                 required: true,
                                 secret: false,
@@ -76,6 +77,7 @@ impl Default for SourceTimeMergeFactory {
                         (
                             Arc::from("persistent"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Boolean,
                                 required: false,
                                 secret: false,

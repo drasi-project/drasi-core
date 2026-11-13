@@ -14,7 +14,7 @@ async fn reset_baselines_require_one_actual_bootstrap_reset_and_cannot_acknowled
         let mut binding = ProcessingBinding::new(
             super::super::consumer_tests::provider(directory.path())?,
             "native-consumer".into(),
-            "processor".into(),
+            ComponentId::try_new(super::PROCESSOR)?,
         )
         .with_publication(
             if non_atomic {
@@ -155,7 +155,7 @@ async fn initialized(
     let mut binding = ProcessingBinding::new(
         super::super::consumer_tests::provider(path)?,
         "native-consumer".into(),
-        "processor".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
     )
     .with_publication(QueryPublicationMode::NonAtomic, true)?
     .with_committed_input_progress(Some(PortId::try_new("in")?))?
@@ -325,7 +325,7 @@ async fn non_atomic_deferred_work_requires_explicit_negotiation() -> anyhow::Res
     let mut binding = ProcessingBinding::new(
         super::super::consumer_tests::provider(directory.path())?,
         "native-consumer".into(),
-        "processor".into(),
+        ComponentId::try_new(super::PROCESSOR)?,
     )
     .with_committed_input_progress(Some(PortId::try_new("in")?))?;
     binding.open().await?;

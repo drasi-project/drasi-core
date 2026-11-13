@@ -34,7 +34,7 @@ use crate::{
     },
     middleware::{
         MiddlewareContainer, MiddlewareTypeRegistry, SourceMiddlewarePipeline,
-        SourceMiddlewarePipelineCollection,
+        SourceMiddlewarePipelineCollection, SourcePipelineKey,
     },
     models::{QueryJoin, SourceMiddlewareConfig},
     path_solver::{match_path::MatchPath, MatchPathSolver},
@@ -53,7 +53,7 @@ pub struct QueryBuilder {
     joins: Vec<Arc<QueryJoin>>,
     middleware_registry: Option<Arc<MiddlewareTypeRegistry>>,
     source_middleware: Vec<Arc<SourceMiddlewareConfig>>,
-    source_pipelines: HashMap<Arc<str>, Vec<Arc<str>>>,
+    source_pipelines: HashMap<SourcePipelineKey, Vec<Arc<str>>>,
     session_control: Option<Arc<dyn SessionControl>>,
 
     query_source: String,
@@ -96,10 +96,25 @@ impl QueryBuilder {
         self
     }
 
-    pub fn with_source_pipeline(mut self, source: impl Into<String>, pipeline: &[String]) -> Self {
+    pub fn with_namespace_pipeline(
+        mut self,
+        namespace: impl Into<Arc<str>>,
+        pipeline: &[String],
+    ) -> Self {
         let pipeline = pipeline.iter().map(|s| Arc::from(s.as_str())).collect();
         self.source_pipelines
-            .insert(Arc::from(source.into()), pipeline);
+            .insert(SourcePipelineKey::Namespace(namespace.into()), pipeline);
+        self
+    }
+
+    pub fn with_component_pipeline(
+        mut self,
+        component: crate::ComponentId,
+        pipeline: &[String],
+    ) -> Self {
+        let pipeline = pipeline.iter().map(|s| Arc::from(s.as_str())).collect();
+        self.source_pipelines
+            .insert(SourcePipelineKey::Component(component), pipeline);
         self
     }
 

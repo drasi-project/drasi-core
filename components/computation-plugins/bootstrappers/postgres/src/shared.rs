@@ -286,7 +286,7 @@ impl NativeBootstrapProvider for PostgresSharedSnapshot {
         Ok(vec![BootstrapWatermark {
             producer: None,
             stream: self.stream.clone(),
-            source_id: Some(self.source.to_string()),
+            source_id: Some(self.source.clone()),
             sequence: position.sequence(),
             position: Some(position.encode()?.into()),
         }])

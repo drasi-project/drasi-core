@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use drasi_lib::channels::ResultDiff;
-use drasi_lib::computation::v1::{ComponentId, ComponentLifecycle};
+use drasi_lib::computation::v1::ComponentLifecycle;
 use drasi_lib::{ComponentStatus, DrasiLib, Query};
 use drasi_reaction_application::ApplicationReactionBuilder;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
@@ -63,13 +63,13 @@ async fn test_spawn_blocking_works_on_multi_thread_runtime() {
 }
 
 /// Wait for a component to reach Running status via event notification.
-async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+async fn wait_for_running(drasi: &DrasiLib, component_id: drasi_core::ComponentId) {
     let mut rx = drasi.subscribe_all_component_events();
     let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()
-        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
+        .any(|n| n.id.component_id() == Some(&component_id) && n.status == ComponentStatus::Running)
     {
         return;
     }
@@ -104,37 +104,76 @@ async fn run_source_query_diff_cycle(instance_id: &str) {
         properties: HashMap::new(),
         durability: None,
     };
-    let (app_source, app_handle) =
-        ApplicationSource::new("flavor-source", config).expect("create application source");
+    let (app_source, app_handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000013b")
+            .expect("fixture UUID"),
+        config,
+    )
+    .expect("create application source");
 
-    let (app_reaction, reaction_handle) = ApplicationReactionBuilder::new("flavor-reaction")
-        .with_query("flavor-query")
-        .with_auto_start(true)
-        .build();
+    let (app_reaction, reaction_handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000013c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("flavor-query").expect("fixture component name"),
+    )
+    .with_auto_start(true)
+    .build();
 
-    let query = Query::cypher("flavor-query")
-        .query("MATCH (i:Item) RETURN i.name AS name")
-        .from_input("flavor-source")
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("flavor-query").expect("fixture component name"),
+    )
+    .query("MATCH (i:Item) RETURN i.name AS name")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("flavor-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .build()
+    .expect("valid query configuration");
 
     let drasi = Arc::new(
         lib_integration_tests::query_builder()
             .with_id(instance_id)
-            .with_source(app_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("flavor-source")
+                    .expect("fixture component name"),
+                app_source,
+            )
             .with_query(query)
-            .with_reaction(app_reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("flavor-reaction")
+                    .expect("fixture component name"),
+                app_reaction,
+            )
             .build()
             .await
             .expect("build DrasiLib"),
     );
 
+    let query_id = drasi
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("flavor-query").expect("fixture component name"),
+        )
+        .expect("declared query")
+        .id()
+        .clone();
     drasi.start().await.expect("start DrasiLib");
 
-    wait_for_running(&drasi, "flavor-source").await;
-    wait_for_running(&drasi, "flavor-query").await;
-    wait_for_running(&drasi, "flavor-reaction").await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000013b")
+            .expect("fixture UUID"),
+    )
+    .await;
+    wait_for_running(&drasi, query_id.clone()).await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000013c")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let mut subscription = reaction_handle
         .subscribe_with_options(Default::default())
@@ -157,7 +196,7 @@ async fn run_source_query_diff_cycle(instance_id: &str) {
         .expect("timed out waiting for query result")
         .expect("reaction subscription closed without a result");
 
-    assert_eq!(result.query_id, "flavor-query");
+    assert_eq!(result.query_id, query_id);
     assert!(
         !result.results.is_empty(),
         "expected at least one result row from the query"
@@ -189,7 +228,8 @@ async fn test_source_query_diff_cycle_on_multi_thread_runtime() {
 async fn stop_query_helpers_after_native_stop(flavor: &str) -> anyhow::Result<()> {
     for operation in ["query", "query-instance", "all-queries", "instance"] {
         let (source, source_handle) = ApplicationSource::new(
-            "source",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             ApplicationSourceConfig {
                 properties: HashMap::new(),
                 durability: None,
@@ -198,25 +238,40 @@ async fn stop_query_helpers_after_native_stop(flavor: &str) -> anyhow::Result<()
         let query = |id| {
             Query::cypher(id)
                 .query("MATCH (i:Item) RETURN i.name AS name")
-                .from_input("source")
+                .from_input_by_name(
+                    drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+                )
                 .auto_start(true)
                 .enable_bootstrap(false)
                 .build()
         };
         let drasi = lib_integration_tests::query_builder()
             .with_id(format!("query-stop-{flavor}-{operation}"))
-            .with_source(source)
-            .with_query(query("query"))
-            .with_query(query("sibling"))
+            .with_source(
+                drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+                source,
+            )
+            .with_query(query(
+                drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+            )?)
+            .with_query(query(
+                drasi_core::ComponentName::try_new("sibling").expect("fixture component name"),
+            )?)
             .build()
             .await?;
         drasi.start().await?;
-        drasi
-            .computation_component("sibling")?
-            .wait_started()
-            .await?;
+        let sibling = drasi.component_by_name(
+            &drasi_core::ComponentName::try_new("sibling").expect("fixture component name"),
+        )?;
+        sibling.wait_started().await?;
+        let sibling_id = sibling.id().clone();
         let control = drasi.computation_control()?;
-        let id = ComponentId::try_new("query")?;
+        let id = drasi
+            .component_by_name(
+                &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+            )?
+            .id()
+            .clone();
         let desired = control.desired_snapshot();
         let members: BTreeSet<_> = std::iter::once(id.clone())
             .chain(desired.edges.iter().filter_map(|edge| {
@@ -231,26 +286,40 @@ async fn stop_query_helpers_after_native_stop(flavor: &str) -> anyhow::Result<()
             .collect();
         assert!(members.len() > 1);
         for member in &members {
-            control.component_handle(member)?.wait_started().await?;
+            control
+                .component_handle_by_id(member)?
+                .wait_started()
+                .await?;
         }
 
         // Native control can stop the evaluator without stopping its ordinary-API helpers.
-        control.component_handle(&id)?.stop().await?;
+        control.component_handle_by_id(&id)?.stop().await?;
         let stopped = control.observed();
         assert_eq!(
             stopped.components[&id].lifecycle,
-            ComponentLifecycle::Stopped
+            ComponentLifecycle::Stopped,
+            "{flavor}/{operation}: native evaluator stop observations: {stopped:#?}"
         );
         assert!(members
             .iter()
             .any(|member| { stopped.components[member].lifecycle == ComponentLifecycle::Running }));
 
         match operation {
-            "query" => drasi.stop_query("query").await?,
+            "query" => {
+                drasi
+                    .stop_query_by_name(
+                        &drasi_core::ComponentName::try_new("query")
+                            .expect("fixture component name"),
+                    )
+                    .await?
+            }
             "query-instance" => {
                 drasi
                     .query_manager()
-                    .get_query_instance("query")
+                    .get_query_instance_by_name(
+                        &drasi_core::ComponentName::try_new("query")
+                            .expect("fixture component name"),
+                    )
                     .await
                     .map_err(anyhow::Error::msg)?
                     .stop()
@@ -270,15 +339,25 @@ async fn stop_query_helpers_after_native_stop(flavor: &str) -> anyhow::Result<()
         }
         if matches!(operation, "query" | "query-instance") {
             assert_eq!(
-                drasi.get_query_status("sibling").await?,
+                drasi
+                    .get_query_status_by_name(
+                        &drasi_core::ComponentName::try_new("sibling")
+                            .expect("fixture component name")
+                    )
+                    .await?,
                 ComponentStatus::Running
             );
             let mut results = drasi
                 .query_manager()
-                .get_query_instance("sibling")
+                .get_query_instance_by_name(
+                    &drasi_core::ComponentName::try_new("sibling").expect("fixture component name"),
+                )
                 .await
                 .map_err(anyhow::Error::msg)?
-                .subscribe("sibling-progress".into())
+                .subscribe(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000355")
+                        .expect("fixture UUID"),
+                )
                 .await?
                 .receiver;
             source_handle
@@ -291,26 +370,35 @@ async fn stop_query_helpers_after_native_stop(flavor: &str) -> anyhow::Result<()
                 )
                 .await?;
             let result = timeout(Duration::from_secs(5), results.recv()).await??;
-            assert_eq!(result.query_id, "sibling");
+            assert_eq!(result.query_id, sibling_id);
             assert!(matches!(&result.results[..], [ResultDiff::Add { data, .. }]
                 if data == &serde_json::json!({"name": "widget"})));
         }
         if operation != "instance" {
             assert_eq!(
-                drasi.get_source_status("source").await?,
+                drasi
+                    .get_source_status_by_name(
+                        &drasi_core::ComponentName::try_new("source")
+                            .expect("fixture component name")
+                    )
+                    .await?,
                 ComponentStatus::Running
             );
         }
         if operation == "query" {
             let error = drasi
-                .stop_query("query")
+                .stop_query_by_name(
+                    &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+                )
                 .await
                 .expect_err("a fully stopped query must retain the already-stopped error");
             assert!(format!("{error:#}").contains("already stopped"));
         } else if operation == "query-instance" {
             drasi
                 .query_manager()
-                .get_query_instance("query")
+                .get_query_instance_by_name(
+                    &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+                )
                 .await
                 .map_err(anyhow::Error::msg)?
                 .stop()

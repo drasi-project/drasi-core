@@ -6,6 +6,8 @@ use bytes::Bytes;
 use drasi_computation_contracts::{SourceProgressKey, StreamId};
 use drasi_core_types::interface::SourceCheckpoint;
 
+const SOURCE_ID: &str = "f30c4348-e05b-5450-987e-f320584b70e3";
+
 fn position(version: u32, end: u32) -> Position {
     Position {
         version,
@@ -28,7 +30,12 @@ fn state(position: Option<Position>, transport: u64) -> Arc<SourceProgressSnapsh
             .into_iter()
             .map(|position| {
                 (
-                    SourceProgressKey::Source("source".into()),
+                    SourceProgressKey::Source(
+                        drasi_core_types::ComponentId::try_new(
+                            "f30c4348-e05b-5450-987e-f320584b70e3",
+                        )
+                        .expect("fixture UUID"),
+                    ),
                     SourceCheckpoint::new(
                         position.sequence().expect("sequence"),
                         Some(Bytes::from(
@@ -50,11 +57,17 @@ fn state(position: Option<Position>, transport: u64) -> Arc<SourceProgressSnapsh
 fn minimum_selects_one_actual_member_and_fresh_members_require_the_configured_floor() {
     let slow = state(Some(position(1, 100)), 900);
     let fast = state(Some(position(2, 200)), 3);
-    let source = ComponentId::try_new("source").expect("source");
+    let source = ComponentId::try_new(SOURCE_ID).expect("source");
     let mut group = ConsumerProgressSnapshot {
         consumers: BTreeMap::from([
-            (ComponentId::try_new("slow").expect("slow"), slow.clone()),
-            (ComponentId::try_new("fast").expect("fast"), fast),
+            (
+                ComponentId::try_new("d0d1cb21-454b-53ec-88ba-f9f5e17dfadc").expect("slow"),
+                slow.clone(),
+            ),
+            (
+                ComponentId::try_new("11df9c1a-d068-5463-983a-20fc0a2202e8").expect("fast"),
+                fast,
+            ),
         ]),
     };
     let initial = Starting::Consumers(group.clone());
@@ -66,9 +79,10 @@ fn minimum_selects_one_actual_member_and_fresh_members_require_the_configured_fl
         slow.as_ref(),
     ));
     let fresh = state(None, 1000);
-    group
-        .consumers
-        .insert(ComponentId::try_new("fresh").expect("fresh"), fresh.clone());
+    group.consumers.insert(
+        ComponentId::try_new("4e2c9aef-12e0-557b-9e83-2ab24efe5f1a").expect("fresh"),
+        fresh.clone(),
+    );
     let initial = Starting::Consumers(group);
     assert!(std::ptr::eq(
         initial
@@ -81,7 +95,7 @@ fn minimum_selects_one_actual_member_and_fresh_members_require_the_configured_fl
 
 #[test]
 fn every_member_must_have_valid_persistent_unfenced_progress_even_when_not_the_minimum() {
-    let source = ComponentId::try_new("source").expect("source");
+    let source = ComponentId::try_new(SOURCE_ID).expect("source");
     for fault in [
         "persistence",
         "failure",
@@ -98,7 +112,12 @@ fn every_member_must_have_valid_persistent_unfenced_progress_even_when_not_the_m
             "admission" => fast.admitting = false,
             "generation-shape" => {
                 fast.checkpoints
-                    .get_mut(&SourceProgressKey::Source("source".into()))
+                    .get_mut(&SourceProgressKey::Source(
+                        drasi_core_types::ComponentId::try_new(
+                            "f30c4348-e05b-5450-987e-f320584b70e3",
+                        )
+                        .expect("fixture UUID"),
+                    ))
                     .expect("checkpoint")
                     .sequence += 1;
             }
@@ -112,10 +131,13 @@ fn every_member_must_have_valid_persistent_unfenced_progress_even_when_not_the_m
         let group = Starting::Consumers(ConsumerProgressSnapshot {
             consumers: BTreeMap::from([
                 (
-                    ComponentId::try_new("slow").expect("slow"),
+                    ComponentId::try_new("d0d1cb21-454b-53ec-88ba-f9f5e17dfadc").expect("slow"),
                     state(Some(position(1, 100)), 999),
                 ),
-                (ComponentId::try_new("fast").expect("fast"), Arc::new(fast)),
+                (
+                    ComponentId::try_new("11df9c1a-d068-5463-983a-20fc0a2202e8").expect("fast"),
+                    Arc::new(fast),
+                ),
             ]),
         });
         assert!(group.minimum(&source, [7; 32]).is_err(), "{fault}");
@@ -164,7 +186,10 @@ fn physical_cursor_order_preserves_snapshot_boundaries_and_rejects_contradictory
 fn checkpoint_position_bounds_are_enforced_before_decoding() {
     let position = position(1, 100);
     let mut snapshot = state(Some(position.clone()), 1).as_ref().clone();
-    let key = SourceProgressKey::Source("source".into());
+    let key = SourceProgressKey::Source(
+        drasi_core_types::ComponentId::try_new("f30c4348-e05b-5450-987e-f320584b70e3")
+            .expect("fixture UUID"),
+    );
     let mut bytes = serde_json::to_vec(&position).expect("position");
     bytes.resize(drasi_computation_contracts::MAX_SOURCE_POSITION_BYTES, b' ');
     snapshot
@@ -175,7 +200,7 @@ fn checkpoint_position_bounds_are_enforced_before_decoding() {
     assert_eq!(
         source::checkpoint(
             &snapshot,
-            &ComponentId::try_new("source").expect("source"),
+            &ComponentId::try_new(SOURCE_ID).expect("source"),
             [7; 32]
         )
         .expect("exact bound"),
@@ -189,7 +214,7 @@ fn checkpoint_position_bounds_are_enforced_before_decoding() {
         .source_position = Some(Bytes::from(bytes));
     assert!(source::checkpoint(
         &snapshot,
-        &ComponentId::try_new("source").expect("source"),
+        &ComponentId::try_new(SOURCE_ID).expect("source"),
         [7; 32],
     )
     .expect_err("over bound")

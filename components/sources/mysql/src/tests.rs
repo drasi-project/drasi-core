@@ -13,7 +13,12 @@ mod tests {
         });
         for auto_start in [false, true] {
             let source = MySqlSourceDescriptor
-                .create_source("test-source", &config, auto_start)
+                .create_source(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                        .expect("fixture UUID"),
+                    &config,
+                    auto_start,
+                )
                 .await
                 .unwrap();
 
@@ -24,24 +29,30 @@ mod tests {
 
     #[test]
     fn test_builder_defaults_to_auto_start() {
-        let source = MySqlSourceBuilder::new("test-source")
-            .with_database("testdb")
-            .with_user("testuser")
-            .build()
-            .unwrap();
+        let source = MySqlSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_database("testdb")
+        .with_user("testuser")
+        .build()
+        .unwrap();
 
         assert!(source.auto_start());
     }
 
     #[test]
     fn test_builder_with_valid_config() {
-        let source = MySqlReplicationSource::builder("test-source")
-            .with_host("localhost")
-            .with_database("testdb")
-            .with_user("testuser")
-            .with_password("testpass")
-            .with_tables(vec!["users".to_string()])
-            .build();
+        let source = MySqlReplicationSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_host("localhost")
+        .with_database("testdb")
+        .with_user("testuser")
+        .with_password("testpass")
+        .with_tables(vec!["users".to_string()])
+        .build();
         assert!(source.is_ok());
     }
 
@@ -119,11 +130,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_rejects_incomplete_row_position() {
-        let source = MySqlSourceBuilder::new("mysql-invalid-resume")
-            .with_database("test")
-            .with_user("test")
-            .build()
-            .unwrap();
+        let source = MySqlSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000066")
+                .expect("fixture UUID"),
+        )
+        .with_database("test")
+        .with_user("test")
+        .build()
+        .unwrap();
+        let query_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID");
         let token = serde_json::json!({
             "binlog_file": "mysql-bin.000001",
             "binlog_position": 200,
@@ -133,8 +149,8 @@ mod tests {
         });
         let result = source
             .subscribe(drasi_lib::config::SourceSubscriptionSettings {
-                source_id: source.id().to_string(),
-                query_id: "query".to_string(),
+                source_id: source.id().clone(),
+                query_id: query_id.clone(),
                 enable_bootstrap: false,
                 nodes: Default::default(),
                 relations: Default::default(),
@@ -148,22 +164,30 @@ mod tests {
             .expect("incomplete row cursors must not fall back");
         assert_eq!(
             format!("{error:#}"),
-            "Invalid MySQL resume position for subscriber 'query' on source 'mysql-invalid-resume'"
+            format!(
+                "Invalid MySQL resume position for subscriber '{query_id}' on source '{}'",
+                source.id()
+            )
         );
         assert!(source.subscriber_resume_positions.read().await.is_empty());
     }
 
     #[tokio::test]
     async fn test_subscribe_rejects_oversized_position_before_storing_it() {
-        let source = MySqlSourceBuilder::new("mysql-large-resume")
-            .with_database("test")
-            .with_user("test")
-            .build()
-            .unwrap();
+        let source = MySqlSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000067")
+                .expect("fixture UUID"),
+        )
+        .with_database("test")
+        .with_user("test")
+        .build()
+        .unwrap();
+        let query_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID");
         let result = source
             .subscribe(drasi_lib::config::SourceSubscriptionSettings {
-                source_id: source.id().to_string(),
-                query_id: "query".to_string(),
+                source_id: source.id().clone(),
+                query_id: query_id.clone(),
                 enable_bootstrap: false,
                 nodes: Default::default(),
                 relations: Default::default(),
@@ -177,7 +201,10 @@ mod tests {
                 .err()
                 .expect("oversized position must fail")
                 .to_string(),
-            "Invalid MySQL resume position for subscriber 'query' on source 'mysql-large-resume'"
+            format!(
+                "Invalid MySQL resume position for subscriber '{query_id}' on source '{}'",
+                source.id()
+            )
         );
         assert!(source.subscriber_resume_positions.read().await.is_empty());
     }
@@ -186,8 +213,10 @@ mod tests {
         position: Option<bytes::Bytes>,
     ) -> drasi_lib::config::SourceSubscriptionSettings {
         drasi_lib::config::SourceSubscriptionSettings {
-            source_id: "mysql-resume".into(),
-            query_id: "query".into(),
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000068")
+                .expect("fixture UUID"),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
             enable_bootstrap: false,
             nodes: Default::default(),
             relations: Default::default(),
@@ -200,12 +229,15 @@ mod tests {
     #[tokio::test]
     async fn partial_checkpoint_requires_channel_dispatch() {
         for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
-            let source = MySqlSourceBuilder::new("mysql-resume")
-                .with_database("test")
-                .with_user("test")
-                .with_dispatch_mode(mode)
-                .build()
-                .unwrap();
+            let source = MySqlSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000068")
+                    .expect("fixture UUID"),
+            )
+            .with_database("test")
+            .with_user("test")
+            .with_dispatch_mode(mode)
+            .build()
+            .unwrap();
             let position = ReplicationState::new("mysql-bin.000001", 200, None, 0)
                 .with_transaction_row(4, 1)
                 .unwrap()
@@ -234,12 +266,15 @@ mod tests {
             None,
             Some(ReplicationState::new("mysql-bin.000001", 200, None, 0).to_position_bytes()),
         ] {
-            let source = MySqlSourceBuilder::new("mysql-resume")
-                .with_database("test")
-                .with_user("test")
-                .with_dispatch_mode(DispatchMode::Broadcast)
-                .build()
-                .unwrap();
+            let source = MySqlSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000068")
+                    .expect("fixture UUID"),
+            )
+            .with_database("test")
+            .with_user("test")
+            .with_dispatch_mode(DispatchMode::Broadcast)
+            .build()
+            .unwrap();
             assert!(source.subscribe(resume_settings(position)).await.is_ok());
         }
     }
@@ -253,11 +288,14 @@ mod tests {
                     serde_json::json!(""),
                     serde_json::json!(" \t"),
                 ] {
-                    let source = MySqlSourceBuilder::new("mysql-resume")
-                        .with_database("test")
-                        .with_user("test")
-                        .build()
-                        .unwrap();
+                    let source = MySqlSourceBuilder::new(
+                        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000068")
+                            .expect("fixture UUID"),
+                    )
+                    .with_database("test")
+                    .with_user("test")
+                    .build()
+                    .unwrap();
                     let token = serde_json::json!({
                         "binlog_file": file,
                         "binlog_position": position,
@@ -282,7 +320,7 @@ mod tests {
         use bytes::Bytes;
         use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
         use drasi_lib::channels::BootstrapEventSender;
-        use drasi_lib::component_graph::{wait_for_status, ComponentUpdate};
+        use drasi_lib::component_graph::{wait_for_status_by_id, ComponentUpdate};
         use drasi_lib::config::SourceSubscriptionSettings;
         use drasi_lib::DrasiLib;
         use std::time::Duration;
@@ -307,14 +345,16 @@ mod tests {
 
         #[tokio::test]
         async fn managed_lifecycle_cleans_failed_source() {
-            for action in ["stop", "stop_all", "remove", "update"] {
-                let source = MySqlSourceBuilder::new("managed-source")
+            for action in ["stop", "stop_all", "remove"] {
+                let source_id = drasi_lib::config::ComponentId::generate();
+                let source = MySqlSourceBuilder::new(source_id.clone())
                     .with_database("test")
                     .with_user("test")
                     .with_bootstrap_provider(InvalidBoundaryBootstrap)
                     .build()
                     .unwrap();
                 let core = DrasiLib::builder()
+                    .with_allow_external_component_ids(true)
                     .with_query_factory(
                         drasi_lib::computation::v1::FactoryRegistry::standard()
                             .get(
@@ -327,7 +367,11 @@ mod tests {
                             .expect("reference query factory")
                             .clone(),
                     )
-                    .with_source(source)
+                    .with_source(
+                        drasi_core::ComponentName::try_new("managed-source")
+                            .expect("fixture component name"),
+                        source,
+                    )
                     .build()
                     .await
                     .unwrap();
@@ -335,7 +379,7 @@ mod tests {
                 let graph = core.component_graph();
                 let runtime = core
                     .source_manager()
-                    .get_source_instance("managed-source")
+                    .get_source_instance_by_id(&source_id)
                     .await
                     .unwrap();
                 let source = runtime
@@ -344,8 +388,11 @@ mod tests {
                     .unwrap();
                 let mut subscription = source
                     .subscribe(SourceSubscriptionSettings {
-                        source_id: source.id().into(),
-                        query_id: "test-query".into(),
+                        source_id: source.id().clone(),
+                        query_id: drasi_core::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000050",
+                        )
+                        .expect("fixture UUID"),
                         enable_bootstrap: true,
                         nodes: Default::default(),
                         relations: Default::default(),
@@ -355,7 +402,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                wait_for_status(
+                wait_for_status_by_id(
                     &graph,
                     source.id(),
                     &[ComponentStatus::Error],
@@ -371,31 +418,28 @@ mod tests {
                     .unwrap()
                     .abort_handle();
 
-                for attempt in 0..2 {
-                    let result = match action {
-                        "stop" => core.stop_source(source.id()).await,
-                        "stop_all" => core.stop().await,
-                        "remove" => core.remove_source(source.id(), false).await,
-                        "update" => {
-                            core.update_source(
-                                source.id(),
-                                MySqlSourceBuilder::new(source.id())
-                                    .with_database("test")
-                                    .with_user("test")
-                                    .build()
-                                    .unwrap(),
-                            )
-                            .await
+                if action == "remove" {
+                    assert!(
+                        core.remove_source_by_id(&source_id, false).await.is_err(),
+                        "remove must preserve the replication failure"
+                    );
+                    let status = core.reconcile_desired_state().await.unwrap();
+                    assert!(status.converged(), "{status:?}");
+                } else {
+                    for attempt in 0..2 {
+                        let result = match action {
+                            "stop" => core.stop_source_by_id(&source_id).await,
+                            "stop_all" => core.stop().await,
+                            _ => unreachable!(),
+                        };
+                        if attempt == 0 {
+                            assert!(
+                                result.is_err(),
+                                "{action} must preserve the replication failure"
+                            );
+                        } else {
+                            result.unwrap();
                         }
-                        _ => unreachable!(),
-                    };
-                    if attempt == 0 {
-                        assert!(
-                            result.is_err(),
-                            "{action} must preserve the replication failure"
-                        );
-                    } else {
-                        result.unwrap();
                     }
                 }
 
@@ -413,9 +457,9 @@ mod tests {
                         .is_err()
                 );
                 if action == "remove" {
-                    assert!(!graph.snapshot().await.unwrap().contains(source.id()));
+                    assert!(!graph.snapshot().await.unwrap().contains_by_id(source.id()));
                 } else {
-                    wait_for_status(
+                    wait_for_status_by_id(
                         &graph,
                         source.id(),
                         &[ComponentStatus::Stopped],
@@ -424,7 +468,7 @@ mod tests {
                     .await
                     .unwrap();
                     assert!(
-                        core.stop_source(source.id()).await.is_err(),
+                        core.stop_source_by_id(&source_id).await.is_err(),
                         "managed repeated stop is rejected"
                     );
                 }
@@ -437,11 +481,14 @@ mod tests {
 
         #[tokio::test]
         async fn stop_cleans_starting_source() {
-            let source = MySqlSourceBuilder::new("starting-source")
-                .with_database("test")
-                .with_user("test")
-                .build()
-                .unwrap();
+            let source = MySqlSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000069")
+                    .expect("fixture UUID"),
+            )
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
             source.start().await.unwrap();
             source
                 .base
@@ -456,7 +503,8 @@ mod tests {
                 .abort_handle();
             let mut receiver = source.base.create_streaming_receiver().await.unwrap();
             source.subscriber_resume_positions.write().await.insert(
-                "old-query".into(),
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000032c")
+                    .expect("fixture UUID"),
                 ReplicationState::new("binlog.000001", 4, None, 0),
             );
 
@@ -476,20 +524,36 @@ mod tests {
 
         #[tokio::test]
         async fn stop_cleans_up_after_replication_failure() {
-            let source = MySqlSourceBuilder::new("failed-source")
-                .with_host("127.0.0.1")
-                .with_database("test")
-                .with_user("test")
-                .with_bootstrap_provider(InvalidBoundaryBootstrap)
-                .build()
-                .unwrap();
+            let source = MySqlSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006a")
+                    .expect("fixture UUID"),
+            )
+            .with_host("127.0.0.1")
+            .with_database("test")
+            .with_user("test")
+            .with_bootstrap_provider(InvalidBoundaryBootstrap)
+            .build()
+            .unwrap();
+            let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
+            source
+                .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
+                    "mysql-replication-failure-test",
+                    source.id().clone(),
+                    None,
+                    updates,
+                    None,
+                ))
+                .await;
 
             for _ in 0..2 {
                 source.start().await.unwrap();
                 let mut subscription = source
                     .subscribe(SourceSubscriptionSettings {
-                        source_id: source.id().to_string(),
-                        query_id: "test-query".to_string(),
+                        source_id: source.id().clone(),
+                        query_id: drasi_core::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000050",
+                        )
+                        .expect("fixture UUID"),
                         enable_bootstrap: true,
                         nodes: Default::default(),
                         relations: Default::default(),
@@ -530,11 +594,14 @@ mod tests {
 
         #[tokio::test]
         async fn stop_joins_replication_task_before_returning() {
-            let source = MySqlSourceBuilder::new("stopping-source")
-                .with_database("test")
-                .with_user("test")
-                .build()
-                .unwrap();
+            let source = MySqlSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006b")
+                    .expect("fixture UUID"),
+            )
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
             for _ in 0..2 {
                 source.start().await.unwrap();
                 assert_eq!(source.status().await, ComponentStatus::Running);
@@ -557,11 +624,14 @@ mod tests {
 
         #[tokio::test]
         async fn stop_reports_unexpected_task_failure_after_cleanup() {
-            let source = MySqlSourceBuilder::new("panicked-source")
-                .with_database("test")
-                .with_user("test")
-                .build()
-                .unwrap();
+            let source = MySqlSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006c")
+                    .expect("fixture UUID"),
+            )
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
             source.start().await.unwrap();
             source.stop().await.unwrap();
             source.base.set_status(ComponentStatus::Running, None).await;

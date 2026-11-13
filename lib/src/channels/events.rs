@@ -13,18 +13,27 @@
 // limitations under the License.
 
 use drasi_core::models::SourceChange;
+use drasi_core_types::{ComponentId, StreamId};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 /// Trait for types that have a timestamp, required for priority queue ordering
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OrderingStream {
+    Component(ComponentId),
+    Stream(StreamId),
+    Scheduled,
+}
+
+/// Timestamp and producer ordering facts used by the priority queue.
 pub trait Timestamped {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
 
     /// Logical producer identity and sequence. Timestamp merging may compare
     /// stream heads, but must not move a later sequence ahead of its own head.
-    fn ordering_stream(&self) -> Option<(&str, u64)> {
+    fn ordering_stream(&self) -> Option<(OrderingStream, u64)> {
         None
     }
 
@@ -77,9 +86,9 @@ pub enum ComponentType {
 ///
 /// Status is available through runtime information methods on [`DrasiLib`](crate::DrasiLib):
 ///
-/// - [`get_source_status()`](crate::DrasiLib::get_source_status)
-/// - [`get_query_status()`](crate::DrasiLib::get_query_status)
-/// - [`get_reaction_status()`](crate::DrasiLib::get_reaction_status)
+/// - [`get_source_status_by_name()`](crate::DrasiLib::get_source_status_by_name)
+/// - [`get_query_status_by_name()`](crate::DrasiLib::get_query_status_by_name)
+/// - [`get_reaction_status_by_name()`](crate::DrasiLib::get_reaction_status_by_name)
 ///
 /// And through runtime info structs:
 ///
@@ -99,7 +108,7 @@ pub enum ComponentType {
 /// core.start().await?;
 ///
 /// // Check source status
-/// let source_status = core.get_source_status("orders_db").await?;
+/// let source_status = core.get_source_status_by_name(&drasi_lib::ComponentName::try_new("orders_db")?).await?;
 /// match source_status {
 ///     ComponentStatus::Running => println!("Source is running"),
 ///     ComponentStatus::Error => println!("Source has errors"),
@@ -108,7 +117,7 @@ pub enum ComponentType {
 /// }
 ///
 /// // Get detailed info with status
-/// let source_info = core.get_source_info("orders_db").await?;
+/// let source_info = core.get_source_info_by_name(&drasi_lib::ComponentName::try_new("orders_db")?).await?;
 /// if source_info.status == ComponentStatus::Error {
 ///     if let Some(error) = source_info.error_message {
 ///         eprintln!("Error: {}", error);
@@ -126,11 +135,11 @@ pub enum ComponentType {
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let core = DrasiLib::builder().with_id("my-server").build().await?;
-/// core.start_source("orders_db").await?;
+/// core.start_source_by_name(&drasi_lib::ComponentName::try_new("orders_db")?).await?;
 ///
 /// // Poll until source is running
 /// loop {
-///     let status = core.get_source_status("orders_db").await?;
+///     let status = core.get_source_status_by_name(&drasi_lib::ComponentName::try_new("orders_db")?).await?;
 ///     match status {
 ///         ComponentStatus::Running => break,
 ///         ComponentStatus::Error => return Err("Source failed to start".into()),
@@ -153,20 +162,20 @@ pub enum ComponentType {
 ///
 /// // Check all sources
 /// let sources = core.list_sources().await?;
-/// for (id, status) in sources {
-///     println!("Source {}: {:?}", id, status);
+/// for component in sources {
+///     println!("Source {}: {:?}", component.id, component.status);
 /// }
 ///
 /// // Check all queries
 /// let queries = core.list_queries().await?;
-/// for (id, status) in queries {
-///     println!("Query {}: {:?}", id, status);
+/// for component in queries {
+///     println!("Query {}: {:?}", component.id, component.status);
 /// }
 ///
 /// // Check all reactions
 /// let reactions = core.list_reactions().await?;
-/// for (id, status) in reactions {
-///     println!("Reaction {}: {:?}", id, status);
+/// for component in reactions {
+///     println!("Reaction {}: {:?}", component.id, component.status);
 /// }
 /// # Ok(())
 /// # }
@@ -188,7 +197,7 @@ pub enum ComponentStatus {
 /// A source change event with metadata for dispatching to queries.
 #[derive(Debug, Clone)]
 pub struct SourceChangeEvent {
-    pub source_id: String,
+    pub source_id: ComponentId,
     pub change: SourceChange,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// WAL-assigned sequence number, if durability is enabled for this source.
@@ -204,12 +213,12 @@ impl Timestamped for SourceEventWrapper {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
         self.timestamp
     }
-    fn ordering_stream(&self) -> Option<(&str, u64)> {
+    fn ordering_stream(&self) -> Option<(OrderingStream, u64)> {
         Some((
             if matches!(self.event, SourceEvent::Control(SourceControl::FuturesDue)) {
-                "\0scheduled"
+                OrderingStream::Scheduled
             } else {
-                &self.source_id
+                OrderingStream::Component(self.source_id.clone())
             },
             self.sequence,
         ))
@@ -222,7 +231,7 @@ pub type ArcSourceEvent = Arc<SourceEventWrapper>;
 /// Bootstrap event wrapper for dedicated bootstrap channels
 #[derive(Debug, Clone)]
 pub struct BootstrapEvent {
-    pub source_id: String,
+    pub source_id: ComponentId,
     pub change: SourceChange,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub sequence: u64,
@@ -231,8 +240,8 @@ pub struct BootstrapEvent {
 /// Subscription request from Query to Source
 #[derive(Debug, Clone)]
 pub struct SubscriptionRequest {
-    pub query_id: String,
-    pub source_id: String,
+    pub query_id: ComponentId,
+    pub source_id: ComponentId,
     pub enable_bootstrap: bool,
     pub node_labels: Vec<String>,
     pub relation_labels: Vec<String>,
@@ -240,8 +249,8 @@ pub struct SubscriptionRequest {
 
 /// Subscription response from Source to Query
 pub struct SubscriptionResponse {
-    pub query_id: String,
-    pub source_id: String,
+    pub query_id: ComponentId,
+    pub source_id: ComponentId,
     pub receiver: Box<dyn super::ChangeReceiver<SourceEventWrapper>>,
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
     /// Shared handle for the query to report its last durably-processed sequence position.
@@ -259,7 +268,7 @@ pub struct SubscriptionResponse {
 
 /// Subscription response from Query to Reaction
 pub struct QuerySubscriptionResponse {
-    pub query_id: String,
+    pub query_id: ComponentId,
     pub receiver: Box<dyn super::ChangeReceiver<QueryResult>>,
     /// Query result sequence at subscribe time. Trigger fresh start uses this
     /// as the skip cutoff so later live results already in `receiver` are not
@@ -274,8 +283,11 @@ impl Timestamped for QueryResult {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
         self.timestamp
     }
-    fn ordering_stream(&self) -> Option<(&str, u64)> {
-        Some((&self.query_id, self.sequence))
+    fn ordering_stream(&self) -> Option<(OrderingStream, u64)> {
+        Some((
+            OrderingStream::Component(self.query_id.clone()),
+            self.sequence,
+        ))
     }
 }
 
@@ -288,7 +300,7 @@ pub type ArcQueryResult = Arc<QueryResult>;
 /// Used for monitoring, logging, and reactive lifecycle coordination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentEvent {
-    pub component_id: String,
+    pub component_id: ComponentId,
     pub component_type: ComponentType,
     pub status: ComponentStatus,
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -298,16 +310,15 @@ pub struct ComponentEvent {
 /// Control messages for component lifecycle management.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
-    Start(String),
-    Stop(String),
-    Status(String),
+    Start(ComponentId),
+    Stop(ComponentId),
+    Status(ComponentId),
     Shutdown,
 }
 
 pub type ComponentEventBroadcastSender = broadcast::Sender<ComponentEvent>;
 pub type ComponentEventBroadcastReceiver = broadcast::Receiver<ComponentEvent>;
-/// Backward-compatible mpsc channel types used by host-sdk plugin callbacks.
-/// New code should use `ComponentUpdateSender` from `component_graph` instead.
+/// MPSC event transport used by ordinary Host SDK callbacks.
 pub type ComponentEventSender = mpsc::Sender<ComponentEvent>;
 pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
 pub type ControlMessageReceiver = mpsc::Receiver<ControlMessage>;
@@ -329,11 +340,11 @@ pub type BootstrapEventReceiver = mpsc::Receiver<BootstrapEvent>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlSignal {
     /// Query has entered running state
-    Running { query_id: String },
+    Running { query_id: ComponentId },
     /// Query has stopped
-    Stopped { query_id: String },
+    Stopped { query_id: ComponentId },
     /// Query has been deleted
-    Deleted { query_id: String },
+    Deleted { query_id: ComponentId },
 }
 
 /// Wrapper for control signals with metadata
@@ -424,7 +435,8 @@ mod tests {
             ..Default::default()
         };
         let mut wrapper = SourceEventWrapper::with_sequence(
-            "test-source".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             SourceEvent::Change(change.clone()),
             timestamp,
             42,
@@ -434,7 +446,11 @@ mod tests {
         wrapper.set_source_position(source_position.clone());
         let parts = wrapper.into_parts();
 
-        assert_eq!(parts.source_id, "test-source");
+        assert_eq!(
+            parts.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert_eq!(parts.event, SourceEvent::Change(change));
         assert_eq!(parts.timestamp, timestamp);
         assert_eq!(parts.profiling, Some(profiling));
@@ -442,9 +458,9 @@ mod tests {
         assert_eq!(parts.source_position, Some(source_position));
     }
 
-    fn stamped(source_id: &str, sequence: u64) -> SourceEventWrapper {
+    fn stamped(source_id: drasi_core_types::ComponentId, sequence: u64) -> SourceEventWrapper {
         SourceEventWrapper::new(
-            source_id.to_string(),
+            source_id,
             SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
             sequence,
@@ -453,11 +469,19 @@ mod tests {
 
     #[test]
     fn test_stamped_event_into_parts() {
-        let event = stamped("test-source", 7);
+        let event = stamped(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            7,
+        );
 
         let parts = event.into_parts();
 
-        assert_eq!(parts.source_id, "test-source");
+        assert_eq!(
+            parts.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert!(matches!(parts.event, SourceEvent::Change(_)));
         assert!(parts.profiling.is_none());
         assert_eq!(parts.sequence, 7);
@@ -465,20 +489,32 @@ mod tests {
 
     #[test]
     fn test_try_unwrap_arc_sole_owner() {
-        let arc = Arc::new(stamped("test-source", 1));
+        let arc = Arc::new(stamped(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            1,
+        ));
 
         // With sole ownership, try_unwrap_arc should succeed
         let result = SourceEventWrapper::try_unwrap_arc(arc);
         assert!(result.is_ok());
 
         let parts = result.unwrap();
-        assert_eq!(parts.source_id, "test-source");
+        assert_eq!(
+            parts.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert!(matches!(parts.event, SourceEvent::Change(_)));
     }
 
     #[test]
     fn test_try_unwrap_arc_shared() {
-        let arc = Arc::new(stamped("test-source", 1));
+        let arc = Arc::new(stamped(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            1,
+        ));
         let _arc2 = arc.clone(); // Create another reference
 
         // With shared ownership, try_unwrap_arc should fail and return the Arc
@@ -487,13 +523,21 @@ mod tests {
 
         // The returned Arc should still be valid
         let returned_arc = result.unwrap_err();
-        assert_eq!(returned_arc.source_id, "test-source");
+        assert_eq!(
+            returned_arc.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_zero_copy_extraction_path() {
         // Simulate the zero-copy extraction path used in query processing
-        let arc = Arc::new(stamped("test-source", 3));
+        let arc = Arc::new(stamped(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            3,
+        ));
 
         // This is the zero-copy path - when we have sole ownership
         let parts = match SourceEventWrapper::try_unwrap_arc(arc) {
@@ -517,14 +561,19 @@ mod tests {
             _ => None,
         };
 
-        assert_eq!(parts.source_id, "test-source");
+        assert_eq!(
+            parts.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert!(source_change.is_some());
     }
 
     #[test]
     fn test_constructor_preserves_sequence() {
         let event = SourceEventWrapper::new(
-            "test-source".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
             42,
@@ -539,7 +588,8 @@ mod tests {
     #[test]
     fn test_wrapper_has_no_source_position_by_default() {
         let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
             1,
@@ -553,7 +603,8 @@ mod tests {
         let mut profiling = ProfilingMetadata::new();
         profiling.source_send_ns = Some(123);
         let wrapper = SourceEventWrapper::with_profiling(
-            "test-source".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
             profiling,
@@ -586,9 +637,15 @@ mod tests {
         use std::collections::HashSet;
         let position_bytes = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]);
         let settings = crate::config::SourceSubscriptionSettings {
-            source_id: "test-source".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000001d",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap: false,
-            query_id: "test-query".to_string(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000050",
+            )
+            .expect("fixture UUID"),
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from: Some(position_bytes.clone()),

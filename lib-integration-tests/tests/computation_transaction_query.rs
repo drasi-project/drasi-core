@@ -29,11 +29,15 @@ fn provider(root: &Path) -> Arc<dyn ComputationIndexProvider> {
     LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)))
 }
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 async fn query(root: &Path) -> Result<ContinuousQueryTransformer> {
     let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "transaction-query".into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new("d873f787-5a45-5cc3-831e-0656a13f3a75")?,
             query: "MATCH (n:Item) RETURN count(n) AS total".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -67,7 +71,14 @@ async fn channel(root: &Path, key: &str, subscribers: &[&str]) -> Result<Arc<Qos
     Ok(QosChannel::persistent(
         definition(key, subscribers),
         provider(root)
-            .create_indexes("transaction-query", &format!("pipe-{key}"))
+            .create_indexes(
+                "transaction-query",
+                &component_id(match key {
+                    "input" => 0x501,
+                    "query" => 0x502,
+                    _ => 0x503,
+                }),
+            )
             .await?,
         FactoryRegistry::standard()
             .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
@@ -155,11 +166,12 @@ impl EnvelopeSink for Sink {
 async fn sink(
     root: &Path,
     name: &str,
+    id: &ComponentId,
     store: Arc<RedbStateStoreProvider>,
 ) -> Result<CheckpointedSink> {
     let sink = Sink {
         descriptor: ComponentDescriptor::try_new(
-            ComponentId::try_new(name)?,
+            id.clone(),
             vec![PortDescriptor::new(
                 PortId::try_new("in")?,
                 PortDirection::Input,
@@ -173,7 +185,7 @@ async fn sink(
         Box::new(sink),
         Arc::new(StateStoreConsumerProgress::new(
             "transaction-query",
-            name,
+            id,
             store,
         )?),
     )?;
@@ -264,11 +276,11 @@ async fn query_handoff_worker() -> Result<()> {
         .await?;
     assert_eq!(total(&query)?, 1);
     let store = Arc::new(RedbStateStoreProvider::new(root.join("consumers.redb"))?);
-    for name in ["fast", "slow"] {
+    for (name, id) in [("fast", component_id(0x504)), ("slow", component_id(0x505))] {
         let mut output_endpoint =
             endpoint(&outgoing, &definition("query", &["fast", "slow"]), name)?;
         let mut receiver = output_endpoint.pipe.take_receiver()?;
-        let mut sink = sink(&root, name, store.clone()).await?;
+        let mut sink = sink(&root, name, &id, store.clone()).await?;
         let count = outgoing.progress().await?.accepted;
         for _ in 0..count {
             consume(receiver.as_mut(), &mut sink).await?;
@@ -324,7 +336,7 @@ async fn scheduled_query_worker() -> Result<()> {
     let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "scheduled-query".into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new("d873f787-5a45-5cc3-831e-0656a13f3a75")?,
             query: "MATCH (n:Item) WHERE drasi.trueLater(true, 2000) RETURN n".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -339,7 +351,7 @@ async fn scheduled_query_worker() -> Result<()> {
     .with_delivery_tracking()
     .with_scheduling(scheduling.clone())?;
     let mut source = QueryScheduledSource::new(
-        ComponentId::try_new("clock")?,
+        ComponentId::try_new("afa4d65a-2e30-54a8-b9ca-84cf8cf78dd5")?,
         StreamId::try_new("clock/out")?,
         scheduling,
     )?;
@@ -488,7 +500,7 @@ async fn scheduled_pair(
     let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "timer-pressure".into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new("d873f787-5a45-5cc3-831e-0656a13f3a75")?,
             query: "MATCH (n:Item) WHERE drasi.trueLater(n.active, n.due) RETURN n.name AS name"
                 .into(),
             language: ComputationQueryLanguage::Cypher,
@@ -505,7 +517,7 @@ async fn scheduled_pair(
     .with_scheduling(scheduling.clone())?
     .with_source_progress(progress)?;
     let mut source = QueryScheduledSource::new(
-        ComponentId::try_new("clock")?,
+        ComponentId::try_new("afa4d65a-2e30-54a8-b9ca-84cf8cf78dd5")?,
         StreamId::try_new("clock/out")?,
         scheduling,
     )?;
@@ -519,7 +531,7 @@ async fn timer_burst_reconstruction() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let progress = Arc::new(QuerySourceProgress::new(
         "timer-pressure",
-        ComponentId::try_new("query")?,
+        ComponentId::try_new("d873f787-5a45-5cc3-831e-0656a13f3a75")?,
     )?);
     let mut sequence = 0;
     {
@@ -632,14 +644,18 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
     let directory = tempfile::tempdir()?;
     let progress = Arc::new(QuerySourceProgress::new(
         "timer-pressure",
-        ComponentId::try_new("query")?,
+        ComponentId::try_new("d873f787-5a45-5cc3-831e-0656a13f3a75")?,
     )?);
     let mut output_definition = definition("query", &["receiver"]);
     output_definition.capacity = NonZeroUsize::new(1).expect("one-slot output");
     let outgoing = QosChannel::persistent(
         output_definition.clone(),
         provider(directory.path())
-            .create_indexes("timer-pressure", "output")
+            .create_indexes(
+                "timer-pressure",
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000137")
+                    .expect("fixture UUID"),
+            )
             .await?,
         FactoryRegistry::standard()
             .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,

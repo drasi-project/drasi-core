@@ -52,13 +52,13 @@ pub struct KubernetesSource {
 }
 
 impl KubernetesSource {
-    pub fn builder(id: impl Into<String>) -> KubernetesSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> KubernetesSourceBuilder {
         KubernetesSourceBuilder::new(id)
     }
 
-    pub fn new(id: impl Into<String>, config: KubernetesSourceConfig) -> Result<Self> {
+    pub fn new(id: drasi_lib::ComponentId, config: KubernetesSourceConfig) -> Result<Self> {
         config.validate()?;
-        let params = SourceBaseParams::new(id.into());
+        let params = SourceBaseParams::new(id.clone());
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
@@ -77,7 +77,7 @@ impl KubernetesSource {
 
 #[async_trait]
 impl Source for KubernetesSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -318,8 +318,8 @@ impl Source for KubernetesSource {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(&self, provider: Box<dyn BootstrapProvider + 'static>) {
@@ -328,7 +328,7 @@ impl Source for KubernetesSource {
 }
 
 pub struct KubernetesSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: KubernetesSourceConfig,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -338,9 +338,9 @@ pub struct KubernetesSourceBuilder {
 }
 
 impl KubernetesSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: KubernetesSourceConfig::default(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -620,7 +620,7 @@ struct SourceStream {
 }
 
 async fn prepare_source_stream(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &KubernetesSourceConfig,
     client: Client,
     state_store: Option<Arc<dyn StateStoreProvider>>,
@@ -662,7 +662,7 @@ async fn prepare_source_stream(
 }
 
 async fn run_source_stream(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: KubernetesSourceConfig,
     base: SourceBase,
     stream: SourceStream,
@@ -754,7 +754,7 @@ async fn run_source_stream(
                                 if let Some(uid) = extract_uid(&obj) {
                                     seen_uids.remove(&uid);
                                 }
-                                let changes = build_delete_changes(source_id, &target.kind, &obj, &config)?;
+                                let changes = build_delete_changes(source_id.as_str(), &target.kind, &obj, &config)?;
                                 dispatch_changes(source_id, &base, changes).await?;
                             }
                         }
@@ -779,7 +779,7 @@ async fn run_source_stream(
 }
 
 async fn process_apply_object(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &KubernetesSourceConfig,
     target: &WatchTarget,
     obj: DynamicObject,
@@ -790,9 +790,9 @@ async fn process_apply_object(
     let is_insert = !seen_uids.contains(&uid);
     let changes = if is_insert {
         seen_uids.insert(uid.clone());
-        build_insert_changes(source_id, &target.kind, &obj, config)?
+        build_insert_changes(source_id.as_str(), &target.kind, &obj, config)?
     } else {
-        build_update_changes(source_id, &target.kind, &obj, config)?
+        build_update_changes(source_id.as_str(), &target.kind, &obj, config)?
     };
 
     dispatch_changes(source_id, base, changes).await?;
@@ -800,7 +800,7 @@ async fn process_apply_object(
 }
 
 pub(crate) async fn dispatch_changes(
-    _source_id: &str,
+    _source_id: &drasi_lib::ComponentId,
     base: &SourceBase,
     changes: Vec<drasi_core::models::SourceChange>,
 ) -> Result<()> {
@@ -811,14 +811,17 @@ pub(crate) async fn dispatch_changes(
 }
 
 async fn load_seen_uids(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<HashSet<String>> {
     let Some(store) = state_store else {
         return Ok(HashSet::new());
     };
     let raw = store
-        .get(source_id, SEEN_UIDS_KEY)
+        .get(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            SEEN_UIDS_KEY,
+        )
         .await
         .map_err(|e| anyhow!("StateStore get '{SEEN_UIDS_KEY}' failed: {e}"))?;
     let Some(bytes) = raw else {
@@ -830,7 +833,7 @@ async fn load_seen_uids(
 }
 
 async fn save_seen_uids(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     seen_uids: &HashSet<String>,
 ) -> Result<()> {
@@ -841,7 +844,11 @@ async fn save_seen_uids(
     sorted.sort_unstable();
     let bytes = serde_json::to_vec(&sorted)?;
     store
-        .set(source_id, SEEN_UIDS_KEY, bytes)
+        .set(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            SEEN_UIDS_KEY,
+            bytes,
+        )
         .await
         .map_err(|e| anyhow!("StateStore set '{SEEN_UIDS_KEY}' failed: {e}"))?;
     Ok(())
@@ -874,11 +881,16 @@ mod tests {
                 seen_uids: HashSet::new(),
                 state_store: None,
             };
-            let base = SourceBase::new(SourceBaseParams::new("test-source")).unwrap();
+            let base = SourceBase::new(SourceBaseParams::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+            ))
+            .unwrap();
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             shutdown_tx.send(()).unwrap();
             run_source_stream(
-                "test-source",
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
                 KubernetesSourceConfig::default(),
                 base,
                 stream,

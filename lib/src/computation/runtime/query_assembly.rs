@@ -4,8 +4,30 @@
 use super::*;
 use crate::computation::v1::OrdinaryQueryDeclaration;
 
-fn declaration_id(query: &str) -> anyhow::Result<ResourceId> {
-    let encoded: String = query.bytes().map(|byte| format!("{byte:02x}")).collect();
+pub(super) fn bind_inputs(
+    config: &mut QueryConfig,
+    publication: &GraphRegistrySnapshot,
+) -> Vec<DependencyWait> {
+    let mut waiting = Vec::new();
+    for input in &mut config.inputs {
+        if let Some(name) = input.component.as_name() {
+            if let Some(node) = publication.desired.component_by_name(name) {
+                input.component =
+                    crate::config::ComponentReference::by_id(node.descriptor.id().clone());
+            } else {
+                waiting.push(DependencyWait::ComponentName { name: name.clone() });
+            }
+        }
+    }
+    waiting
+}
+
+fn declaration_id(query: &ComponentId) -> anyhow::Result<ResourceId> {
+    let encoded: String = query
+        .as_str()
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     Ok(ResourceId::try_new(format!("query-declaration/{encoded}"))?)
 }
 
@@ -23,6 +45,7 @@ impl Runtime {
             let mut candidate = None;
             for (query, declaration) in self.ordinary_queries_at(&publication)? {
                 if attempted.contains(&query)
+                    || declaration.managed.is_some()
                     || declaration.failure.is_some()
                     || publication
                         .observed
@@ -34,10 +57,16 @@ impl Runtime {
                 {
                     continue;
                 }
-                let config = self.native_query_configuration_at(&publication, query.as_str())?;
+                let mut config = self.native_query_configuration_at(&publication, &query)?;
+                let original_inputs = config.inputs.clone();
+                bind_inputs(&mut config, &publication);
+                if original_inputs != config.inputs {
+                    candidate = Some((query, config, Vec::new(), true));
+                    break;
+                }
                 let waiting_for_native = config.inputs.iter().any(|input| {
                     let available = publication.desired.nodes.iter().any(|node| {
-                        node.descriptor.id().as_str() == input.component
+                        input.component.as_id() == Some(node.descriptor.id())
                             && node
                                 .descriptor
                                 .ports()
@@ -45,11 +74,11 @@ impl Runtime {
                                 .any(|port| port.direction() == PortDirection::Output)
                     });
                     let connected = publication.desired.edges.iter().any(|edge| {
-                        edge.definition.from.component.as_str() == input.component
+                        input.component.as_id() == Some(&edge.definition.from.component)
                             && edge.definition.to.component == query
                     }) || publication.desired.unbound_relationships.iter().any(
                         |edge| {
-                            edge.definition.from.component.as_str() == input.component
+                            input.component.as_id() == Some(&edge.definition.from.component)
                                 && edge.definition.to.component == query
                         },
                     );
@@ -61,7 +90,7 @@ impl Runtime {
                         .iter()
                         .filter(|input| {
                             publication.desired.nodes.iter().any(|node| {
-                                node.descriptor.id().as_str() == input.component
+                                input.component.as_id() == Some(node.descriptor.id())
                                     && node
                                         .descriptor
                                         .ports()
@@ -69,7 +98,7 @@ impl Runtime {
                                         .any(|port| port.direction() == PortDirection::Output)
                             })
                         })
-                        .map(|input| input.component.clone())
+                        .filter_map(|input| input.component.as_id().cloned())
                         .collect();
                     candidate = Some((query, config, producers, true));
                     break;
@@ -78,6 +107,10 @@ impl Runtime {
             if candidate.is_none() {
                 for (query, specification) in &publication.desired.specifications {
                     if attempted.contains(query)
+                        || self
+                            .ordinary_queries_at(&publication)?
+                            .get(query)
+                            .is_some_and(|declaration| declaration.managed.is_some())
                         || !publication.has_query_authoring(specification)
                         || !specification.configuration.contains_key("query_config")
                         || publication
@@ -90,13 +123,15 @@ impl Runtime {
                     {
                         continue;
                     }
-                    let config =
-                        self.native_query_configuration_at(&publication, query.as_str())?;
+                    let config = self.native_query_configuration_at(&publication, query)?;
                     let mut producers = Vec::new();
                     for input in &config.inputs {
+                        if input.component.as_id().is_none() {
+                            continue;
+                        }
                         let pending = ComputationPipelineBuilder::pending_native_endpoint(
-                            query.as_str(),
-                            &input.component,
+                            query,
+                            input.id()?,
                         )?;
                         if publication
                             .desired
@@ -107,7 +142,7 @@ impl Runtime {
                                     && edge.definition.to.component == *query
                             })
                             && publication.desired.nodes.iter().any(|node| {
-                                node.descriptor.id().as_str() == input.component
+                                input.component.as_id() == Some(node.descriptor.id())
                                     && node
                                         .descriptor
                                         .ports()
@@ -115,7 +150,7 @@ impl Runtime {
                                         .any(|port| port.direction() == PortDirection::Output)
                             })
                         {
-                            producers.push(input.component.clone());
+                            producers.push(input.id()?.to_owned());
                         }
                     }
                     if !producers.is_empty() {
@@ -124,21 +159,24 @@ impl Runtime {
                     }
                 }
             }
-            let Some((query, config, producers, ordinary)) = candidate else {
+            let Some((query, config, producers, _ordinary)) = candidate else {
                 return Ok(());
             };
-            let plan = if ordinary {
-                self.ordinary_query_update_plan(&publication, query.as_str(), config, false)
-                    .await?
-            } else {
-                self.native_query_update_plan(query.as_str(), config)
-                    .await?
-            };
-            let report = control
-                .mutate_members(plan.members, plan.changes, plan.bindings, BTreeSet::new())
+            let generation = control.component_handle_by_id(&query)?.generation();
+            let owner = self.configuration_owner()?;
+            let owner = owner
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("configuration owner is unavailable"))?;
+            owner
+                .accept_auto(crate::management::AuthoringOperation::QueryUpdate {
+                    id: query.clone(),
+                    generation,
+                    configuration: config,
+                })
                 .await?;
+            let report = owner.reconcile().await?;
             anyhow::ensure!(
-                report.committed && report.summary == OperationSummary::Completed,
+                report.applied && report.error.is_none(),
                 "resolving query input endpoints is incomplete: {report:?}"
             );
             attempted.insert(query.clone());
@@ -162,19 +200,11 @@ impl Runtime {
                                     .iter()
                                     .map(|edge| &edge.definition)
                             )
-                            .any(|edge| edge.from.component.as_str() == producer
+                            .any(|edge| edge.from.component == producer
                                 && edge.to.component == query),
                         "resolved query '{query}' omitted its input connection from '{producer}'"
                     );
                 }
-            }
-            if plan.running {
-                control
-                    .request_member_activation(super::native_query::query_members(
-                        &control.registry_snapshot(),
-                        &query,
-                    ))
-                    .await?;
             }
         }
     }
@@ -182,7 +212,7 @@ impl Runtime {
     pub(crate) fn component_handle(&self, id: &ComponentId) -> anyhow::Result<ComponentHandle> {
         let control = self.control()?;
         let publication = control.registry_snapshot();
-        let handle = control.component_handle(id)?;
+        let handle = control.component_handle_by_id(id)?;
         if self.ordinary_queries_at(&publication)?.contains_key(id) {
             return Ok(handle
                 .with_lifecycle_members(super::native_query::query_members(&publication, id))?);
@@ -211,30 +241,24 @@ impl Runtime {
             .get(handle.id())
             .is_some_and(|declaration| declaration.failure.is_some())
         {
-            let config = self.native_query_configuration_at(&publication, handle.id().as_str())?;
-            let plan = self
-                .ordinary_query_update_plan(&publication, handle.id().as_str(), config, false)
-                .await?;
-            for resource in plan
-                .bindings
-                .resources
-                .values()
-                .filter(|resource| resource.is::<OrdinaryQueryDeclaration>())
+            let owner = self.configuration_owner()?;
+            let owner = owner
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("configuration owner is unavailable"))?;
+            let status = owner.reconcile().await?;
+            anyhow::ensure!(
+                status.error.is_none(),
+                "query retry failed: {:?}",
+                status.error
+            );
+            if let Some(cause) = self
+                .ordinary_queries_at(&control.registry_snapshot())?
+                .get(handle.id())
+                .and_then(|declaration| declaration.failure.clone())
             {
-                if let Some(cause) = &resource.get::<OrdinaryQueryDeclaration>()?.failure {
-                    return Err(GraphError::Reported {
-                        cause: cause.clone(),
-                    }
-                    .into());
-                }
+                return Err(GraphError::Reported { cause }.into());
             }
-            let report = control
-                .mutate_members(plan.members, plan.changes, plan.bindings, BTreeSet::new())
-                .await?;
-            if !report.committed {
-                return Err(LifecycleReportError::Reconciliation(report).into());
-            }
-            selected = control.component_handle(handle.id())?;
+            selected = control.component_handle_by_id(handle.id())?;
         }
         let current = control.registry_snapshot();
         let members = super::native_query::query_members(&current, selected.id());
@@ -301,15 +325,14 @@ impl Runtime {
     pub(super) async fn ordinary_query_update_plan(
         &self,
         publication: &GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
         config: QueryConfig,
-        reset_configuration: bool,
     ) -> anyhow::Result<super::native_query::NativeQueryUpdate> {
         anyhow::ensure!(
-            config.id == id,
+            &config.id == id,
             "replacement query ID does not match '{id}'"
         );
-        let query = ComponentId::try_new(id)?;
+        let query = id.clone();
         let mut members = super::native_query::query_members(publication, &query);
         let outlet_implementation = QueryResultsOutletFactory::default()
             .descriptor()
@@ -362,7 +385,7 @@ impl Runtime {
             .enumerate()
             .filter(|(_, input)| {
                 publication.desired.nodes.iter().any(|node| {
-                    node.descriptor.id().as_str() == input.component
+                    input.component.as_id() == Some(node.descriptor.id())
                         && node
                             .descriptor
                             .ports()
@@ -371,14 +394,11 @@ impl Runtime {
                 })
             })
             .map(|(rank, input)| {
-                let explicit = input.port.as_deref().map(PortId::try_new).transpose()?;
-                let endpoint = publication.output_endpoint(
-                    &ComponentId::try_new(input.component.as_str())?,
-                    explicit.as_ref(),
-                )?;
+                let explicit = input.port.clone();
+                let endpoint = publication.output_endpoint(input.id()?, explicit.as_ref())?;
                 Ok((endpoint, rank))
             })
-            .collect::<GraphResult<_>>()?;
+            .collect::<anyhow::Result<_>>()?;
         let scheduled = QueryScheduledSourceFactory::default()
             .descriptor()
             .implementation
@@ -421,20 +441,6 @@ impl Runtime {
             "query '{id}' has custom input connections; use computation topology operations"
         );
         let mut batch = self.ordinary_query_batch(&config, catalog).await?;
-        if reset_configuration {
-            for component in &mut batch.definition.components {
-                if component.descriptor.id() == &query {
-                    if let ComponentConstruction::Factory(specification) =
-                        &mut component.construction
-                    {
-                        specification.configuration.insert(
-                            "reset_configuration".into(),
-                            ConfigurationValue::Literal(true.into()),
-                        );
-                    }
-                }
-            }
-        }
         if !outlets.is_empty() {
             let generated_outlets: BTreeSet<_> = batch.definition.components.iter()
                 .filter(|node| matches!(&node.construction, ComponentConstruction::Factory(spec) if spec.implementation == outlet_implementation))
@@ -582,7 +588,6 @@ impl Runtime {
             members,
             changes,
             bindings: batch.bindings,
-            running: super::native_query::query_activation_requested(publication, &query),
         })
     }
 
@@ -606,7 +611,17 @@ impl Runtime {
                 .resource(&resources[0])?
                 .get::<OrdinaryQueryDeclaration>()?;
             anyhow::ensure!(&declaration.id == id, "query declaration identity mismatch");
-            result.insert(id.clone(), declaration);
+            if declaration.managed.is_some() {
+                let config = self.native_query_configuration_at(publication, id)?;
+                let mut declaration = (*declaration).clone();
+                declaration.managed = Some(
+                    crate::management::OrdinaryComponentDefinition::query(config.into_authoring())?
+                        .with_assigned_id(id.clone()),
+                );
+                result.insert(id.clone(), Arc::new(declaration));
+            } else {
+                result.insert(id.clone(), declaration);
+            }
         }
         Ok(result)
     }
@@ -616,10 +631,55 @@ impl Runtime {
         config: &QueryConfig,
         catalog: Option<QueryResultsCatalog>,
     ) -> anyhow::Result<ComponentBatch> {
+        self.ordinary_query_batch_with_context(config, catalog, None)
+            .await
+    }
+
+    pub(super) async fn ordinary_query_batch_with_context(
+        &self,
+        config: &QueryConfig,
+        catalog: Option<QueryResultsCatalog>,
+        managed: Option<&super::managed::ManagedQueryContext<'_>>,
+    ) -> anyhow::Result<ComponentBatch> {
         let factory = self.query_factory().ok_or(QueryFactoryNotRegistered)?;
         let publication = self.control()?.registry_snapshot();
-        let id = ComponentId::try_new(config.id.as_str())?;
+        let mut bound = config.clone();
+        let waiting = if managed.is_some() {
+            bound
+                .inputs
+                .iter()
+                .filter_map(|input| {
+                    input
+                        .component
+                        .as_name()
+                        .map(|name| DependencyWait::ComponentName { name: name.clone() })
+                })
+                .collect()
+        } else {
+            bind_inputs(&mut bound, &publication)
+        };
+        let config = &bound;
+        let id = config.id.clone();
+        #[cfg(feature = "test-support")]
+        let test_control = self
+            .ordinary_queries_at(&publication)?
+            .get(&id)
+            .and_then(|declaration| declaration.test_control.clone())
+            .or_else(|| {
+                self.test_controls
+                    .get()
+                    .and_then(|controls| controls.get(&config.name))
+                    .cloned()
+            });
         let prepared = async {
+            anyhow::ensure!(waiting.is_empty(), "query is awaiting named inputs");
+            anyhow::ensure!(
+                config
+                    .inputs
+                    .iter()
+                    .all(|input| input.component.as_id() != Some(&id)),
+                "a query cannot subscribe to itself"
+            );
             if let Some(crate::indexes::StorageBackendRef::Inline(specification)) =
                 &config.storage_backend
             {
@@ -651,66 +711,113 @@ impl Runtime {
                 builder = builder.with_catalog(catalog);
             }
             #[cfg(feature = "test-support")]
-            if let Some(control) = self
-                .test_controls
-                .get()
-                .and_then(|controls| controls.get(&config.id))
-            {
+            if let Some(control) = &test_control {
                 builder = builder.with_test_control(control.clone());
             }
             for source in &config.inputs {
+                if let Some(context) = managed {
+                    if let Some(host) = context.sources.get(source.id()?) {
+                        anyhow::ensure!(
+                            source
+                                .port
+                                .as_ref()
+                                .is_none_or(|port| port.as_str() == "out"),
+                            "source '{}' has no output port '{}'",
+                            source.component,
+                            source.port.as_ref().map(PortId::as_str).unwrap_or_default()
+                        );
+                        builder = builder.source_binding(
+                            source.id()?,
+                            Some(host.clone()),
+                            SourceSubscriptionOptions {
+                                borrowed_recovery: true,
+                                allow_broadcast_loss: true,
+                                ..Default::default()
+                            },
+                        )?;
+                        continue;
+                    }
+                    if let Some(component) =
+                        context.components.get(source.id()?).filter(|component| {
+                            component
+                                .descriptor
+                                .ports()
+                                .iter()
+                                .any(|port| port.direction() == PortDirection::Output)
+                        })
+                    {
+                        let primaries = &component.primary_ports;
+                        let explicit = source.port.clone();
+                        let port = primaries.resolve(
+                            component.descriptor.ports(),
+                            PortDirection::Output,
+                            explicit.as_ref(),
+                        )?;
+                        builder =
+                            builder.native_source(Endpoint::new(source.id()?.clone(), port))?;
+                        continue;
+                    }
+                }
                 let declared = publication
                     .desired
                     .nodes
                     .iter()
-                    .find(|node| node.descriptor.id().as_str() == source.component);
-                if declared.is_none() && source.port.as_deref().is_some_and(|port| port != "out") {
+                    .find(|node| source.component.as_id() == Some(node.descriptor.id()));
+                if declared.is_none()
+                    && source
+                        .port
+                        .as_ref()
+                        .is_some_and(|port| port.as_str() != "out")
+                {
                     builder = builder.native_source(Endpoint::new(
-                        ComponentId::try_new(source.component.as_str())?,
-                        PortId::try_new(source.port.as_deref().expect("explicit port"))?,
+                        source.id()?.clone(),
+                        source.port.clone().expect("explicit port"),
                     ))?;
                     continue;
                 }
                 if publication.desired.nodes.iter().any(|node| {
-                    node.descriptor.id().as_str() == source.component
+                    source.component.as_id() == Some(node.descriptor.id())
                         && node
                             .descriptor
                             .ports()
                             .iter()
                             .any(|port| port.direction() == PortDirection::Output)
                 }) {
-                    let component = ComponentId::try_new(source.component.as_str())?;
-                    let explicit = source.port.as_deref().map(PortId::try_new).transpose()?;
+                    let component = source.id()?.clone();
+                    let explicit = source.port.clone();
                     let output = publication.output_endpoint(&component, explicit.as_ref())?;
                     builder = builder.native_source(output)?;
                     continue;
                 }
                 anyhow::ensure!(
-                    source.port.as_deref().is_none_or(|port| port == "out"),
+                    source
+                        .port
+                        .as_ref()
+                        .is_none_or(|port| port.as_str() == "out"),
                     "source '{}' has no output port '{}'",
                     source.component,
-                    source.port.as_deref().unwrap_or_default()
+                    source.port.as_ref().map(PortId::as_str).unwrap_or_default()
                 );
-                let host =
-                    match self.source_host(&source.component).await {
-                        Ok(host) => Some(host),
-                        Err(error)
-                            if error
-                                .downcast_ref::<crate::error::ComponentNotFoundError>()
-                                .is_some()
-                                && !publication.desired.nodes.iter().any(|node| {
-                                    node.descriptor.id().as_str() == source.component
-                                }) =>
-                        {
-                            None
-                        }
-                        Err(error) => {
-                            return Err(error
-                                .context(format!("Source '{}' is unavailable", source.component)))
-                        }
-                    };
+                let host = match self.source_host(source.id()?).await {
+                    Ok(host) => Some(host),
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::error::ComponentNotFoundError>()
+                            .is_some()
+                            && !publication.desired.nodes.iter().any(|node| {
+                                source.component.as_id() == Some(node.descriptor.id())
+                            }) =>
+                    {
+                        None
+                    }
+                    Err(error) => {
+                        return Err(
+                            error.context(format!("Source '{}' is unavailable", source.component))
+                        )
+                    }
+                };
                 builder = builder.source_binding(
-                    &source.component,
+                    source.id()?,
                     host,
                     SourceSubscriptionOptions {
                         borrowed_recovery: true,
@@ -727,25 +834,36 @@ impl Runtime {
             Ok(batch) => (batch, None),
             Err(error) => {
                 let factory = factory.clone();
-                let specification = factory.specification_from_config(
-                    id.clone(),
-                    serde_json::json!({
-                        "query": config.query,
-                        "language": match config.query_language {
-                            crate::config::QueryLanguage::Cypher => "cypher",
-                            crate::config::QueryLanguage::GQL => "gql",
-                        },
-                        "stream": format!("{}/out", config.id),
-                        "outbox_capacity": config.outbox_capacity.clamp(1, 1_000_000),
-                        "execution": QueryExecutionSettings::from_legacy_config(config),
-                        "query_config": config,
-                        "defer_build": true
-                    }),
-                )?;
+                let mut deferred = serde_json::json!({
+                    "query": config.query,
+                    "language": match config.query_language {
+                        crate::config::QueryLanguage::Cypher => "cypher",
+                        crate::config::QueryLanguage::GQL => "gql",
+                    },
+                    "stream": format!("{}/out", config.id),
+                    "outbox_capacity": config.outbox_capacity.clamp(1, 1_000_000),
+                    "query_config": config,
+                    "defer_build": true
+                });
+                // Unresolved authoring references are not execution inputs.
+                if config
+                    .inputs
+                    .iter()
+                    .all(|input| input.component.as_id().is_some())
+                {
+                    deferred["execution"] =
+                        serde_json::to_value(QueryExecutionSettings::from_configuration(config)?)?;
+                }
+                let specification = factory.specification_from_config(id.clone(), deferred)?;
+                anyhow::ensure!(
+                    specification.descriptor.id() == &id,
+                    "query factory substituted its assigned UUID"
+                );
                 let mut definition = publication
                     .desired
                     .select(GraphSelection::Exact(Vec::new()))?;
                 definition.components.push(DesiredComponent {
+                    name: config.name.clone(),
                     descriptor: specification.descriptor.clone(),
                     role: ComponentRole::Transformer,
                     completion: None,
@@ -766,16 +884,18 @@ impl Runtime {
                         definition,
                         bindings,
                     },
-                    Some(Arc::new(GraphError::Creation {
-                        component: id.clone(),
-                        disposition: FailureDisposition::Terminal,
-                        source: error,
-                    })),
+                    waiting.is_empty().then(|| {
+                        Arc::new(GraphError::Creation {
+                            component: id.clone(),
+                            disposition: FailureDisposition::Terminal,
+                            source: error,
+                        })
+                    }),
                 )
             }
         };
         let declaration = declaration_id(&config.id)?;
-        let valid = failure.is_none();
+        let valid = failure.is_none() && waiting.is_empty();
         let backend = self
             .config
             .index_factory
@@ -800,12 +920,16 @@ impl Runtime {
                 Arc::new(OrdinaryQueryDeclaration {
                     id: id.clone(),
                     failure,
+                    waiting,
                     backend: backend.as_ref().map(|(_, provider)| provider.clone()),
                     default_dispatch_capacity: self
                         .config
                         .global_dispatch_buffer_capacity
                         .unwrap_or(1_000),
                     sources,
+                    managed: managed.map(|context| context.record.clone()),
+                    #[cfg(feature = "test-support")]
+                    test_control,
                 }),
             ),
         );
@@ -839,85 +963,27 @@ impl Runtime {
             }
         }
         if valid {
-            self.bind_batch_source_dependencies(&mut batch).await?;
+            if managed.is_some() {
+                for input in &config.inputs {
+                    let producer = input.id()?.clone();
+                    let reader = ComputationPipelineBuilder::source_component_id(&id, &producer)?;
+                    if batch
+                        .definition
+                        .components
+                        .iter()
+                        .any(|node| node.descriptor.id() == &reader)
+                    {
+                        batch
+                            .definition
+                            .subscriptions
+                            .extend([(producer.clone(), id.clone()), (producer, reader)]);
+                    }
+                }
+            } else {
+                self.bind_batch_source_dependencies(&mut batch).await?;
+            }
         }
         batch.bindings.deferred_management_validation = true;
         Ok(batch)
-    }
-
-    pub(super) async fn install_ordinary_query(
-        &self,
-        mut batch: ComponentBatch,
-        id: ComponentId,
-        start: bool,
-    ) -> anyhow::Result<ComponentHandle> {
-        let control = self.control()?;
-        let publication = control.registry_snapshot();
-        let mut shared = BTreeSet::new();
-        for resource in &batch.definition.resources {
-            if let Some(existing) = publication.desired.resources.get(&resource.id) {
-                let matches = if let Some(supplied) = batch.bindings.resources.get(&resource.id) {
-                    publication
-                        .resource(&resource.id)?
-                        .same_shared_instance(supplied)
-                } else {
-                    publication
-                        .observed
-                        .resources
-                        .get(&resource.id)
-                        .is_some_and(|state| {
-                            state.realization == ResourceRealization::Pending
-                                && state.failure.is_none()
-                        })
-                };
-                anyhow::ensure!(
-                    existing == resource && matches,
-                    "query resource '{}' conflicts with an existing binding",
-                    resource.id
-                );
-                shared.insert(resource.id.clone());
-            }
-        }
-        batch
-            .definition
-            .resources
-            .retain(|resource| !shared.contains(&resource.id));
-        batch
-            .bindings
-            .resources
-            .retain(|resource, _| !shared.contains(resource));
-        batch.bindings.defer_activation |= !start;
-        let owner = self
-            .instance_owner
-            .get()
-            .and_then(Weak::upgrade)
-            .ok_or_else(|| anyhow::anyhow!("instance ownership is unavailable"))?;
-        let pending = owner.retain(batch, Some(control.clone()));
-        let result = async {
-            owner.get().await?;
-            control.require_configuration_write()?;
-            let report = control.add_components(pending.take().await?).await?;
-            if !report.committed {
-                return Err(LifecycleReportError::Reconciliation(report).into());
-            }
-            self.component_handle(&id)
-        }
-        .await;
-        match result {
-            Ok(handle) => {
-                if let Err(error) = pending.cleanup().await {
-                    return Err(super::super::instance::components_cleanup_error(
-                        pending, error, None,
-                    )
-                    .into());
-                }
-                Ok(handle)
-            }
-            Err(error) => Err(
-                super::super::instance::reject_components(pending, error.into())
-                    .await
-                    .into(),
-            ),
-        }
     }
 }

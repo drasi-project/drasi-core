@@ -101,7 +101,7 @@ impl ComputationIndexProvider for ObservedProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         let original = self.inner.create_indexes(graph, component).await?;
         original
@@ -166,7 +166,7 @@ fn query(
     let directory = tempfile::tempdir()?;
     let calls = Arc::new(Calls::default());
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({
             "query": if bootstrap { TEXT } else { QUERY },
             "bootstrap": bootstrap,
@@ -203,6 +203,7 @@ async fn reused_across_bootstrap_live_and_restart() -> Result<()> {
     for language in ["cypher", "gql"] {
         let (_directory, mut query, calls) = query(true, language)?;
         assert_eq!(calls.setups.load(Ordering::Acquire), 0);
+        query.initialize().await?;
         query.start().await?;
         assert_eq!(
             calls.setups.load(Ordering::Acquire),
@@ -284,6 +285,7 @@ async fn retained_evaluator_bootstrap_live_and_restart_multi_thread() -> Result<
 #[tokio::test(flavor = "current_thread")]
 async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> {
     let (directory, mut original, calls) = query(true, "cypher")?;
+    original.initialize().await?;
     original.start().await?;
     let producer = reader(&original)?
         .snapshot()
@@ -299,7 +301,7 @@ async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> 
     gate.release();
     gate.fresh_snapshot.store(true, Ordering::Release);
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({
             "query": TEXT,
             "bootstrap": true,
@@ -312,6 +314,7 @@ async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> 
             calls: calls.clone(),
         }),
     )?;
+    query.initialize().await?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(Arc::new(
         lifecycle::PausedProvider {
             inner: file_provider(&database, 2)?,
@@ -347,6 +350,7 @@ async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> 
 async fn retained_evaluator_recovers_after_setup_and_processing_failures() -> Result<()> {
     let (_directory, mut query, calls) = query(false, "cypher")?;
     calls.fail_setup.store(true, Ordering::Release);
+    query.initialize().await?;
     query
         .start()
         .await

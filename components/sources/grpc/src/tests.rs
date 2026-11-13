@@ -31,10 +31,18 @@ async fn restored_log_waits_for_the_slow_subscriber() -> anyhow::Result<()> {
     };
     {
         let seed = drasi_wal_redb::RedbWalProvider::new(directory.path());
-        seed.register(id, durability.to_wal_config()).await?;
+        seed.register(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+                .expect("fixture UUID"),
+            durability.to_wal_config(),
+        )
+        .await?;
         for sequence in 1..=100 {
             seed.append(
-                id,
+                &drasi_core::interface::StorageScope::default(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+                    .expect("fixture UUID"),
                 &SourceChange::Insert {
                     element: Element::Node {
                         metadata: ElementMetadata {
@@ -51,7 +59,8 @@ async fn restored_log_waits_for_the_slow_subscriber() -> anyhow::Result<()> {
     }
     let wal = Arc::new(drasi_wal_redb::RedbWalProvider::new(directory.path()));
     let source = GrpcSource::new(
-        id,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+            .expect("fixture UUID"),
         GrpcSourceConfig {
             host: "127.0.0.1".into(),
             port: 0,
@@ -60,44 +69,97 @@ async fn restored_log_waits_for_the_slow_subscriber() -> anyhow::Result<()> {
         },
     )?;
     let (updates, _observer) = tokio::sync::mpsc::channel(16);
-    let mut context = drasi_lib::SourceRuntimeContext::new("fixture", id, None, updates, None);
+    let mut context = drasi_lib::SourceRuntimeContext::new(
+        "fixture",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+            .expect("fixture UUID"),
+        None,
+        updates,
+        None,
+    );
     context.wal_provider = Some(wal.clone());
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await?;
     source.start().await?;
-    let settings = |query: &str, sequence| drasi_lib::config::SourceSubscriptionSettings {
-        source_id: id.into(),
-        query_id: query.into(),
-        nodes: Default::default(),
-        relations: Default::default(),
-        enable_bootstrap: false,
-        resume_from: None,
-        resume_sequence: Some(sequence),
-        request_position_handle: true,
-    };
-    let fast = source.subscribe(settings("fast", 100)).await?;
+    let settings =
+        |query: drasi_core::ComponentId, sequence| drasi_lib::config::SourceSubscriptionSettings {
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+                .expect("fixture UUID"),
+            query_id: query,
+            nodes: Default::default(),
+            relations: Default::default(),
+            enable_bootstrap: false,
+            resume_from: None,
+            resume_sequence: Some(sequence),
+            request_position_handle: true,
+        };
+    let fast = source
+        .subscribe(settings(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000001")
+                .expect("fixture UUID"),
+            100,
+        ))
+        .await?;
     source.base.prune_confirmed_wal(wal.as_ref()).await?;
     assert_eq!(
-        wal.event_count(id).await?,
+        wal.event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+                .expect("fixture UUID"),
+        )
+        .await?,
         100,
         "unregistered recovery consumer was pruned"
     );
-    let mut slow = source.subscribe(settings("slow", 80)).await?;
+    let mut slow = source
+        .subscribe(settings(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000002")
+                .expect("fixture UUID"),
+            80,
+        ))
+        .await?;
     source.on_subscriptions_complete().await;
     source.base.prune_confirmed_wal(wal.as_ref()).await?;
-    assert_eq!(wal.event_count(id).await?, 20);
+    assert_eq!(
+        wal.event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+                .expect("fixture UUID"),
+        )
+        .await?,
+        20
+    );
     for sequence in 81..=100 {
         let event = tokio::time::timeout(Duration::from_secs(2), slow.receiver.recv()).await??;
         assert_eq!(event.sequence, sequence);
-        assert_eq!(event.source_id, id);
+        assert_eq!(
+            event.source_id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+                .expect("fixture UUID")
+        );
     }
     slow.position_handle
         .as_ref()
         .unwrap()
         .store(100, Ordering::Release);
     source.base.prune_confirmed_wal(wal.as_ref()).await?;
-    assert_eq!(wal.event_count(id).await?, 0);
+    assert_eq!(
+        wal.event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+                .expect("fixture UUID"),
+        )
+        .await?,
+        0
+    );
     assert!(matches!(
-        wal.read_from(id, 81).await,
+        wal.read_from(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000424")
+                .expect("fixture UUID"),
+            81,
+        )
+        .await,
         Err(drasi_lib::WalError::PositionUnavailable {
             oldest_available: None,
             ..
@@ -120,7 +182,12 @@ async fn wal_restart_preserves_late_subscriber_multiple_threads() -> anyhow::Res
 
 #[tokio::test]
 async fn stop_joins_the_wal_pruner() {
-    let source = GrpcSource::new("pruner", GrpcSourceConfig::default()).unwrap();
+    let source = GrpcSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000080")
+            .expect("fixture UUID"),
+        GrpcSourceConfig::default(),
+    )
+    .unwrap();
     let (started, ready) = tokio::sync::oneshot::channel();
     let mut stopping = source.base.subscribe_wal_pruning_stop();
     let task = tokio::spawn(async move {
@@ -137,7 +204,12 @@ async fn stop_joins_the_wal_pruner() {
 
 #[tokio::test]
 async fn cancelled_stop_retains_submitted_pruning_and_rejects_restart() {
-    let source = GrpcSource::new("pruner", GrpcSourceConfig::default()).unwrap();
+    let source = GrpcSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000080")
+            .expect("fixture UUID"),
+        GrpcSourceConfig::default(),
+    )
+    .unwrap();
     let (submitted, submission) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
     let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -169,7 +241,11 @@ mod construction {
     #[test]
     fn test_new_with_valid_config() {
         let config = GrpcSourceConfig::default();
-        let source = GrpcSource::new("test-source", config);
+        let source = GrpcSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            config,
+        );
         assert!(source.is_ok());
     }
 
@@ -182,21 +258,35 @@ mod construction {
             timeout_ms: 10000,
             durability: None,
         };
-        let source = GrpcSource::new("custom-source", config).unwrap();
-        assert_eq!(source.id(), "custom-source");
+        let source = GrpcSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000171")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000171")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_with_dispatch_creates_source() {
         let config = GrpcSourceConfig::default();
         let source = GrpcSource::with_dispatch(
-            "dispatch-source",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009b")
+                .expect("fixture UUID"),
             config,
             Some(DispatchMode::Channel),
             Some(1000),
         );
         assert!(source.is_ok());
-        assert_eq!(source.unwrap().id(), "dispatch-source");
+        assert_eq!(
+            source.unwrap().id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000009b")
+                .expect("fixture UUID")
+        );
     }
 }
 
@@ -206,14 +296,28 @@ mod properties {
     #[test]
     fn test_id_returns_correct_value() {
         let config = GrpcSourceConfig::default();
-        let source = GrpcSource::new("my-grpc-source", config).unwrap();
-        assert_eq!(source.id(), "my-grpc-source");
+        let source = GrpcSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000299")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000299")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_type_name_returns_grpc() {
         let config = GrpcSourceConfig::default();
-        let source = GrpcSource::new("test", config).unwrap();
+        let source = GrpcSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         assert_eq!(source.type_name(), "grpc");
     }
 
@@ -226,7 +330,12 @@ mod properties {
             timeout_ms: 5000,
             durability: None,
         };
-        let source = GrpcSource::new("test", config).unwrap();
+        let source = GrpcSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -248,7 +357,12 @@ mod properties {
             timeout_ms: 5000,
             durability: None,
         };
-        let source = GrpcSource::new("test", config).unwrap();
+        let source = GrpcSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let props = source.properties();
 
         assert_eq!(
@@ -266,7 +380,12 @@ mod properties {
             timeout_ms: 5000,
             durability: None,
         };
-        let source = GrpcSource::new("test", config).unwrap();
+        let source = GrpcSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let props = source.properties();
 
         assert!(!props.contains_key("endpoint"));
@@ -279,7 +398,12 @@ mod lifecycle {
     #[tokio::test]
     async fn test_initial_status_is_stopped() {
         let config = GrpcSourceConfig::default();
-        let source = GrpcSource::new("test", config).unwrap();
+        let source = GrpcSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         assert_eq!(source.status().await, ComponentStatus::Stopped);
     }
 }
@@ -289,7 +413,12 @@ mod builder {
 
     #[test]
     fn test_builder_defaults() {
-        let source = GrpcSourceBuilder::new("test-grpc").build().unwrap();
+        let source = GrpcSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
         assert_eq!(source.config.host, "0.0.0.0");
         assert_eq!(source.config.port, 50051);
         assert_eq!(source.config.endpoint, None);
@@ -298,29 +427,38 @@ mod builder {
 
     #[test]
     fn test_builder_with_host() {
-        let source = GrpcSourceBuilder::new("test-grpc")
-            .with_host("192.168.1.100")
-            .build()
-            .unwrap();
+        let source = GrpcSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
+        )
+        .with_host("192.168.1.100")
+        .build()
+        .unwrap();
         assert_eq!(source.config.host, "192.168.1.100");
     }
 
     #[test]
     fn test_builder_with_port() {
-        let source = GrpcSourceBuilder::new("test-grpc")
-            .with_port(9999)
-            .build()
-            .unwrap();
+        let source = GrpcSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
+        )
+        .with_port(9999)
+        .build()
+        .unwrap();
         assert_eq!(source.config.port, 9999);
     }
 
     #[test]
     fn test_builder_chaining() {
-        let source = GrpcSourceBuilder::new("test-grpc")
-            .with_host("grpc.example.com")
-            .with_port(443)
-            .build()
-            .unwrap();
+        let source = GrpcSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
+        )
+        .with_host("grpc.example.com")
+        .with_port(443)
+        .build()
+        .unwrap();
 
         assert_eq!(source.config.host, "grpc.example.com");
         assert_eq!(source.config.port, 443);
@@ -328,12 +466,19 @@ mod builder {
 
     #[test]
     fn test_builder_id() {
-        let source = GrpcSource::builder("my-grpc-source")
-            .with_host("localhost")
-            .build()
-            .unwrap();
+        let source = GrpcSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000299")
+                .expect("fixture UUID"),
+        )
+        .with_host("localhost")
+        .build()
+        .unwrap();
 
-        assert_eq!(source.base.id, "my-grpc-source");
+        assert_eq!(
+            source.base.id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000299")
+                .expect("fixture UUID")
+        );
     }
 }
 
@@ -541,14 +686,19 @@ mod proto_conversion {
         let nanos: u64 = 1_771_000_000_000_000_000;
         let proto_meta = proto::ElementMetadata {
             reference: Some(proto::ElementReference {
-                source_id: "src".to_string(),
+                namespace: "src".to_string(),
                 element_id: "e1".to_string(),
             }),
             labels: vec!["Test".to_string()],
             effective_from: nanos,
         };
 
-        let core_meta = convert_proto_metadata_to_core(&proto_meta, "test-src").unwrap();
+        let core_meta = convert_proto_metadata_to_core(
+            &proto_meta,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000241")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         assert!(
             validate_effective_from(core_meta.effective_from).is_ok(),
             "gRPC effective_from ({}) should be in millisecond range after ns->ms conversion",

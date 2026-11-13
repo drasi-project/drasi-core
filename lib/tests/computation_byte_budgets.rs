@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::{
@@ -31,7 +35,7 @@ fn larger(mut envelope: ChangeEnvelope) -> ChangeEnvelope {
     envelope
         .append_annotation(
             ContextEntry::try_new(
-                component("context"),
+                component(745),
                 "payload",
                 ContextValue::Bytes(Arc::from(vec![7; 4096])),
             )
@@ -50,10 +54,18 @@ fn size_counts_the_exact_full_frame_without_a_schema_registry() {
             Arc::new(ReadingValidator(schema_descriptor())),
         )))
         .unwrap();
-    let mut envelope = root("source", 1, &[1, 2, 3]);
+    let mut envelope = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        1,
+        &[1, 2, 3],
+    );
     for length in [0, 31, 32, 255, 256, 65_535, 65_536] {
         envelope = derived(
             &envelope,
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000002ea")
+                .expect("fixture UUID"),
             "next",
             length as u64 + 1,
             envelope.changes().clone(),
@@ -61,7 +73,7 @@ fn size_counts_the_exact_full_frame_without_a_schema_registry() {
         envelope
             .append_annotation(
                 ContextEntry::try_new(
-                    component("context"),
+                    component(745),
                     "data",
                     ContextValue::Bytes(Arc::from(vec![9; length])),
                 )
@@ -71,7 +83,13 @@ fn size_counts_the_exact_full_frame_without_a_schema_registry() {
         assert_eq!(size(&envelope), codec.encode(&envelope).unwrap().len());
         assert_eq!(size(&envelope.clone()), size(&envelope));
     }
-    let root = root("metadata", 8, &[1]);
+    let root = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000002eb")
+            .expect("fixture UUID"),
+        "metadata",
+        8,
+        &[1],
+    );
     assert!(size(&larger(root.clone())) > size(&root));
     let with_position = ChangeEnvelope::new(
         root.id().clone(),
@@ -138,8 +156,20 @@ fn count_only_configuration_shape_is_unchanged_and_byte_policy_is_explicit() {
 }
 
 async fn exact_budget_and_oversized_singleton() {
-    let normal = root("source", 1, &[1]);
-    let oversized = larger(root("source", 2, &[2]));
+    let normal = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        1,
+        &[1],
+    );
+    let oversized = larger(root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        2,
+        &[2],
+    ));
     let limit = size(&normal) * 2;
     assert!(size(&oversized) > limit);
     let mut provided = configured(8, limit);
@@ -240,7 +270,13 @@ async fn exact_budget_and_oversized_singleton_multi_thread() {
 
 #[tokio::test]
 async fn exact_byte_boundary_and_count_capacity_are_independent() {
-    let event = root("source", 1, &[1]);
+    let event = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        1,
+        &[1],
+    );
     for (capacity, bytes) in [(1, size(&event) * 100), (8, size(&event))] {
         let mut provided = configured(capacity, bytes);
         let sender = provided.pipe.sender();
@@ -257,7 +293,13 @@ async fn exact_byte_boundary_and_count_capacity_are_independent() {
 
 #[tokio::test]
 async fn cancelled_admission_and_receive_do_not_leak_byte_or_count_capacity() {
-    let event = root("source", 1, &[1]);
+    let event = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        1,
+        &[1],
+    );
     for (capacity, bytes) in [(2, size(&event)), (1, size(&event) * 4)] {
         let mut provided = configured(capacity, bytes);
         let sender = provided.pipe.sender();
@@ -285,13 +327,25 @@ async fn cancelled_admission_and_receive_do_not_leak_byte_or_count_capacity() {
 #[tokio::test]
 async fn close_cancel_and_receiver_drop_wake_waiters_and_preserve_rejection_identity() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        let event = root("source", 1, &[1]);
+        let event = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        );
         for operation in ["close", "cancel", "drop"] {
             let mut provided = configured(2, size(&event));
             let sender = provided.pipe.sender();
             let mut receiver = provided.pipe.take_receiver().unwrap();
             sender.send(event.clone()).await.unwrap();
-            let rejected = larger(root("source", 2, &[2]));
+            let rejected = larger(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                2,
+                &[2],
+            ));
             let mut waiting = Box::pin(sender.send(rejected.clone()));
             assert!(poll!(&mut waiting).is_pending());
             match operation {
@@ -331,7 +385,13 @@ async fn natural_sender_closure_drains_without_a_sender_owned_by_control() {
     let mut provided = configured(1, 1);
     let sender = provided.pipe.sender();
     let mut receiver = provided.pipe.take_receiver().unwrap();
-    let event = root("source", 1, &[1]);
+    let event = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        1,
+        &[1],
+    );
     sender.send(event.clone()).await.unwrap();
     drop(provided.pipe);
     drop(sender);
@@ -346,17 +406,50 @@ async fn natural_sender_closure_drains_without_a_sender_owned_by_control() {
 #[tokio::test]
 async fn graph_export_restores_byte_policy_without_external_pipe_bindings() {
     let received = Arc::new(Mutex::new(Vec::new()));
-    let events = vec![output(root("source", 1, &[1])), output(larger(root("source", 2, &[2])))];
+    let events = vec![
+        output(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        )),
+        output(larger(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            2,
+            &[2],
+        ))),
+    ];
     let graph = ComputationGraph::builder("byte-policy")
-        .source(Box::new(FiniteSource::new("source", events.clone())))
-        .sink(Box::new(CollectSink::new(
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            events.clone(),
+        )))
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             received.clone(),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(ByteBoundedPipeConfig {
                 capacity: 8,
                 max_bytes: 1,
@@ -365,11 +458,8 @@ async fn graph_export_restores_byte_policy_without_external_pipe_bindings() {
         .build()
         .unwrap();
     let desired = graph.snapshot().select(GraphSelection::All).unwrap();
-    let mut topology = ComputationTopologySource::new(
-        component("topology"),
-        stream("topology"),
-        graph.inspector(),
-    );
+    let mut topology =
+        ComputationTopologySource::new(component(733), stream("topology"), graph.inspector());
     topology.start().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -416,10 +506,16 @@ async fn graph_export_restores_byte_policy_without_external_pipe_bindings() {
         let ComponentConstruction::External { binding } = &declaration.construction else {
             panic!("expected a supplied component");
         };
-        let instance = if declaration.descriptor.id() == &component("source") {
-            ConstructedComponent::source(Box::new(FiniteSource::new("source", events.clone())))
+        let instance = if declaration.descriptor.id() == &component(77) {
+            ConstructedComponent::source(Box::new(FiniteSource::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                events.clone(),
+            )))
         } else {
             ConstructedComponent::sink(Box::new(CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
                 "sink",
                 &["in"],
                 received.clone(),

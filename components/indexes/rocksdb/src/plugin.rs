@@ -34,9 +34,11 @@
 use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
+use drasi_core_types::{ComponentId, StorageScope};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::checkpoint::{self, RocksDbCheckpointStore};
 use crate::element_index::{self, RocksDbElementIndex};
@@ -50,7 +52,6 @@ use crate::{
 };
 
 const MAX_STORAGE_SEGMENT_BYTES: usize = 255;
-const LONG_ID_KEY: &[u8] = b"\0drasi:storage-identifier:v1";
 
 pub(crate) fn storage_directory(base: &Path, identifier: &str) -> PathBuf {
     if identifier.len() <= MAX_STORAGE_SEGMENT_BYTES {
@@ -71,34 +72,24 @@ pub(crate) fn storage_directory(base: &Path, identifier: &str) -> PathBuf {
 /// # Arguments
 ///
 /// * `path` - Base directory for RocksDB data files
-/// * `query_id` - Unique identifier for the query
+/// * `scope` - Storage namespace, separate from the component owner
+/// * `query_id` - Typed component owner
 /// * `options` - RocksDB index options and shared memory budget
 ///
 /// # Directory Structure
 ///
-/// IDs up to 255 UTF-8 bytes retain `{path}/{query_id}/`. Longer scoped IDs use
-/// a stable SHA-256 directory below `{path}/.drasi-long-identifiers-v1/`; their
-/// full identity is verified inside the database, never truncated.
+/// The scope and owner encode a path-safe storage key. Keys longer than 255
+/// bytes use a SHA-256 directory below `.drasi-long-identifiers-v1/`; the
+/// database verifies its full scope and owner. Unversioned nonempty storage
+/// is rejected before use, not treated as an empty namespace.
 pub fn open_unified_db(
     path: &str,
-    query_id: &str,
+    scope: &StorageScope,
+    query_id: &ComponentId,
     options: &RocksIndexOptions,
 ) -> Result<Arc<IndexDb>, IndexError> {
-    // `query_id` is used directly as a directory name under `path`. Reject values
-    // that could escape the base directory or otherwise misbehave as a path
-    // segment (separators, parent/current-dir references, NUL, or empty).
-    if query_id.is_empty()
-        || query_id == "."
-        || query_id == ".."
-        || query_id.contains('/')
-        || query_id.contains('\\')
-        || query_id.contains('\0')
-    {
-        return Err(IndexError::other(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("Invalid query_id '{query_id}' for RocksDB path segment"),
-        )));
-    }
+    crate::storage_format::prepare_root(Path::new(path))?;
+    let storage_key = scope.component_key(query_id);
 
     let block_cache = options.memory_budget().block_cache();
     let mut db_opts = rocksdb::Options::default();
@@ -108,11 +99,21 @@ pub fn open_unified_db(
     db_opts.set_use_direct_reads(options.direct_io());
     db_opts.set_use_direct_io_for_flush_and_compaction(options.direct_io());
 
-    let db_path = storage_directory(Path::new(path), query_id);
+    let db_path = storage_directory(Path::new(path), &storage_key);
     let db_path = match db_path.to_str() {
         Some(p) => p.to_string(),
         None => return Err(IndexError::NotSupported),
     };
+    static OPEN_DATABASES: OnceLock<Mutex<HashMap<String, Weak<IndexDb>>>> = OnceLock::new();
+    let open_databases = OPEN_DATABASES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(db) = open_databases
+        .lock()
+        .map_err(|_| IndexError::other(std::io::Error::other("RocksDB cache poisoned")))?
+        .get(&db_path)
+        .and_then(Weak::upgrade)
+    {
+        return Ok(db);
+    }
 
     let mut cfs = element_index::element_cf_descriptors(options);
     cfs.extend(result_index::result_cf_descriptors(options));
@@ -132,23 +133,24 @@ pub fn open_unified_db(
     ));
 
     let txn_db_opts = rocksdb::TransactionDBOptions::default();
+    let columns = cfs
+        .iter()
+        .map(|column| column.name().to_owned())
+        .collect::<Vec<_>>();
     let db = IndexDb::open_cf_descriptors(&db_opts, &txn_db_opts, db_path, cfs)
         .map_err(IndexError::other)?;
-    if query_id.len() > MAX_STORAGE_SEGMENT_BYTES {
-        match db.get(LONG_ID_KEY).map_err(IndexError::other)? {
-            Some(stored) if stored != query_id.as_bytes() => {
-                return Err(IndexError::other(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "RocksDB storage identifier does not match its directory",
-                )));
-            }
-            Some(_) => {}
-            None => db
-                .put(LONG_ID_KEY, query_id.as_bytes())
-                .map_err(IndexError::other)?,
-        }
-    }
-    Ok(Arc::new(db))
+    crate::storage_format::verify_database(&db, scope, query_id, &columns)?;
+    let db = Arc::new(db);
+    open_databases
+        .lock()
+        .map_err(|_| IndexError::other(std::io::Error::other("RocksDB cache poisoned")))?
+        .insert(
+            storage_directory(Path::new(path), &storage_key)
+                .to_string_lossy()
+                .into_owned(),
+            Arc::downgrade(&db),
+        );
+    Ok(db)
 }
 
 /// RocksDB index backend provider.
@@ -239,6 +241,11 @@ impl RocksDbIndexProvider {
         &self.path
     }
 
+    /// Resolve a scoped component's database directory, including bounded paths for long keys.
+    pub fn database_path(&self, scope: &StorageScope, query_id: &ComponentId) -> PathBuf {
+        storage_directory(&self.path, &scope.component_key(query_id))
+    }
+
     /// Check if archive is enabled.
     pub fn is_archive_enabled(&self) -> bool {
         self.enable_archive
@@ -252,7 +259,16 @@ impl RocksDbIndexProvider {
 
 #[async_trait]
 impl IndexBackendPlugin for RocksDbIndexProvider {
-    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
+    async fn create_indexes(&self, query_id: &ComponentId) -> Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(&StorageScope::default(), query_id)
+            .await
+    }
+
+    async fn create_scoped_indexes(
+        &self,
+        scope: &StorageScope,
+        query_id: &ComponentId,
+    ) -> Result<CreatedIndexes, IndexError> {
         let path = self.path.to_string_lossy().to_string();
         let options = RocksIndexOptions::new(
             self.enable_archive,
@@ -260,7 +276,7 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
             self.memory_budget.clone(),
         );
 
-        let db = open_unified_db(&path, query_id, &options).map_err(|e| {
+        let db = open_unified_db(&path, scope, query_id, &options).map_err(|e| {
             log::error!(
                 "Failed to open unified RocksDB for query '{query_id}' at path '{path}': {e}"
             );
@@ -421,7 +437,12 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
 
-        let result = provider.create_indexes("test_query").await;
+        let result = provider
+            .create_indexes(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
         assert!(result.is_ok());
     }
 
@@ -430,9 +451,24 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
 
-        let result1 = provider.create_indexes("query1").await;
-        let result2 = provider.create_indexes("query2").await;
-        let result3 = provider.create_indexes("query3").await;
+        let result1 = provider
+            .create_indexes(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000052")
+                    .expect("fixture UUID"),
+            )
+            .await;
+        let result2 = provider
+            .create_indexes(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e5")
+                    .expect("fixture UUID"),
+            )
+            .await;
+        let result3 = provider
+            .create_indexes(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e6")
+                    .expect("fixture UUID"),
+            )
+            .await;
 
         assert!(result1.is_ok());
         assert!(result2.is_ok());
@@ -445,22 +481,13 @@ mod tests {
         let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
 
         let path = temp_dir.path().to_string_lossy().to_string();
-        let result = open_unified_db(&path, "test_query", &options);
+        let result = open_unified_db(
+            &path,
+            &drasi_core_types::StorageScope::default(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                .expect("fixture UUID"),
+            &options,
+        );
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_open_unified_db_rejects_unsafe_query_id() {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
-        let path = temp_dir.path().to_string_lossy().to_string();
-
-        for bad in ["", ".", "..", "a/b", "../escape", "a\\b", "with\0nul"] {
-            let result = open_unified_db(&path, bad, &options);
-            assert!(
-                result.is_err(),
-                "query_id '{bad}' should be rejected as a path segment"
-            );
-        }
     }
 }

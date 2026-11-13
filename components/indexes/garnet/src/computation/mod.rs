@@ -28,6 +28,7 @@ use drasi_core::{
     },
     interface::{IndexError, IndexSet, SessionControl},
 };
+use drasi_core::{interface::StorageScope, ComponentId};
 
 use crate::{
     element_index::GarnetElementIndex, future_queue::GarnetFutureQueue,
@@ -51,8 +52,8 @@ impl GarnetComputationProvider {
     }
 }
 
-fn partition(graph_id: &str, query_id: &str) -> Result<String, IndexError> {
-    for id in [graph_id, query_id] {
+fn partition(graph_id: &str) -> Result<StorageScope, IndexError> {
+    for id in [graph_id] {
         if id.is_empty()
             || id
                 .chars()
@@ -64,12 +65,7 @@ fn partition(graph_id: &str, query_id: &str) -> Result<String, IndexError> {
             )));
         }
     }
-    let encode = |id: &str| -> String { id.bytes().map(|byte| format!("{byte:02x}")).collect() };
-    Ok(format!(
-        "computation-v1:{}:{}",
-        encode(graph_id),
-        encode(query_id)
-    ))
+    Ok(StorageScope::new("computation").nested(&StorageScope::new(graph_id)))
 }
 
 #[async_trait]
@@ -77,30 +73,34 @@ impl ComputationIndexProvider for GarnetComputationProvider {
     async fn create_indexes(
         &self,
         graph_id: &str,
-        query_id: &str,
+        query_id: &ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
-        let partition = partition(graph_id, query_id)?;
+        let partition = partition(graph_id)?;
         let connection = redis::Client::open(self.connection_string.as_str())
             .map_err(IndexError::connection_failed)?
             .get_multiplexed_async_connection()
             .await
             .map_err(IndexError::connection_failed)?;
+        crate::storage_format::ensure_current(&connection).await?;
         let session = Arc::new(GarnetSessionState::new(connection.clone()));
         let control: Arc<dyn SessionControl> = Arc::new(GarnetSessionControl::new(session.clone()));
         let domain = TransactionDomain::new(control.clone());
         let elements = Arc::new(GarnetElementIndex::new(
             &partition,
+            query_id,
             connection.clone(),
             self.enable_archive,
             session.clone(),
         ));
         let results = Arc::new(GarnetResultIndex::new(
             &partition,
+            query_id,
             connection.clone(),
             session.clone(),
         ));
         let futures = Arc::new(GarnetFutureQueue::new(
             &partition,
+            query_id,
             connection.clone(),
             session.clone(),
         ));
@@ -116,6 +116,7 @@ impl ComputationIndexProvider for GarnetComputationProvider {
             Some(ComputationResource::participating(
                 Arc::new(ComputationCheckpointStore::new(
                     &partition,
+                    query_id,
                     connection.clone(),
                     session.clone(),
                 )),
@@ -123,16 +124,14 @@ impl ComputationIndexProvider for GarnetComputationProvider {
             )),
             Some(ComputationResource::participating(
                 Arc::new(
-                    GarnetOutboxWriter::new(&partition, connection.clone())
-                        .with_query_id(query_id)
+                    GarnetOutboxWriter::new(&partition, query_id, connection.clone())
                         .with_session_state(session.clone()),
                 ),
                 &domain,
             )),
             Some(ComputationResource::participating(
                 Arc::new(
-                    GarnetLiveResultsWriter::new(&partition, connection)
-                        .with_query_id(query_id)
+                    GarnetLiveResultsWriter::new(&partition, query_id, connection)
                         .with_session_state(session),
                 ),
                 &domain,

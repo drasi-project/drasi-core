@@ -21,7 +21,8 @@ use drasi_lib::{channels::ResultDiff, ComponentStatus, DrasiLib, Query, Source};
 use drasi_reaction_application::ApplicationReaction;
 use mysql_async::prelude::*;
 use mysql_async::Conn;
-use testcontainers::{runners::AsyncRunner, ImageExt};
+use shared_tests::fixture_attribution::{Attribution, Fixture};
+use testcontainers::{runners::AsyncRunner, ContainerRequest, ImageExt};
 use testcontainers_modules::mysql::Mysql;
 use tokio::time::{sleep, timeout, Duration};
 
@@ -53,7 +54,12 @@ async fn test_mysql_source_change_detection() {
             "--enforce-gtid-consistency=ON",
         ]);
 
-    let container = mysql_image.start().await.unwrap();
+    let container = start_mysql_fixture(
+        mysql_image,
+        "components/sources/mysql/tests/integration_test.rs",
+    )
+    .await
+    .unwrap();
     let port = container.get_host_port_ipv4(3306).await.unwrap();
 
     let root_opts = mysql_async::OptsBuilder::default()
@@ -109,30 +115,44 @@ async fn test_mysql_source_change_detection() {
         .build()
         .unwrap();
 
-    let source = MySqlReplicationSource::builder("mysql-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_database("test")
-        .with_user("test")
-        .with_password("test")
-        .with_tables(vec!["users".to_string()])
-        .with_start_position(StartPosition::FromStart)
-        .with_bootstrap_provider(bootstrap)
-        .build()
-        .unwrap();
+    let source = MySqlReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000036")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_database("test")
+    .with_user("test")
+    .with_password("test")
+    .with_tables(vec!["users".to_string()])
+    .with_start_position(StartPosition::FromStart)
+    .with_bootstrap_provider(bootstrap)
+    .build()
+    .unwrap();
 
-    let query = Query::cypher("users-query")
-        .query("MATCH (u:users) RETURN u.id AS id, u.name AS name, u.email AS email")
-        .from_input("mysql-source")
-        .enable_bootstrap(true)
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("users-query").expect("fixture component name"),
+    )
+    .query("MATCH (u:users) RETURN u.id AS id, u.name AS name, u.email AS email")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("mysql-source").expect("fixture component name"),
+    )
+    .enable_bootstrap(true)
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReaction::builder("app-reaction")
-        .with_query("users-query")
-        .build();
+    let (reaction, handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000001")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("users-query").expect("fixture component name"),
+    )
+    .build();
 
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -145,9 +165,15 @@ async fn test_mysql_source_change_detection() {
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("mysql-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("app-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .unwrap();
@@ -260,7 +286,12 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
             "--enforce-gtid-consistency=ON",
         ]);
 
-    let container = mysql_image.start().await.unwrap();
+    let container = start_mysql_fixture(
+        mysql_image,
+        "components/sources/mysql/tests/integration_test.rs",
+    )
+    .await
+    .unwrap();
     let port = container.get_host_port_ipv4(3306).await.unwrap();
 
     // Setup: create table with diverse types and grant permissions
@@ -354,27 +385,32 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         .build()
         .unwrap();
 
-    let source = MySqlReplicationSource::builder("mysql-type-test")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_database("test")
-        .with_user("test")
-        .with_password("test")
-        .with_tables(vec!["type_test".to_string()])
-        .with_ssl_mode(SslMode::Disabled)
-        .with_start_position(StartPosition::FromEnd)
-        .add_table_key(TableKeyConfig {
-            table: "type_test".to_string(),
-            key_columns: vec!["id".to_string()],
-        })
-        .with_bootstrap_provider(bootstrap)
-        .build()
-        .unwrap();
+    let source = MySqlReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000037")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_database("test")
+    .with_user("test")
+    .with_password("test")
+    .with_tables(vec!["type_test".to_string()])
+    .with_ssl_mode(SslMode::Disabled)
+    .with_start_position(StartPosition::FromEnd)
+    .add_table_key(TableKeyConfig {
+        table: "type_test".to_string(),
+        key_columns: vec!["id".to_string()],
+    })
+    .with_bootstrap_provider(bootstrap)
+    .build()
+    .unwrap();
 
     // Query returns all typed columns
-    let query = Query::cypher("type-query")
-        .query(
-            "MATCH (t:type_test) RETURN
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("type-query").expect("fixture component name"),
+    )
+    .query(
+        "MATCH (t:type_test) RETURN
                 t.id AS id,
                 t.int_col AS int_col,
                 t.bigint_col AS bigint_col,
@@ -395,17 +431,26 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
                 t.set_col AS set_col,
                 t.json_col AS json_col,
                 t.marker AS marker",
-        )
-        .from_input("mysql-type-test")
-        .enable_bootstrap(true)
-        .auto_start(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("mysql-type-test").expect("fixture component name"),
+    )
+    .enable_bootstrap(true)
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReaction::builder("type-reaction")
-        .with_query("type-query")
-        .build();
+    let (reaction, handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000038")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("type-query").expect("fixture component name"),
+    )
+    .build();
 
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -418,9 +463,15 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("mysql-type-test").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("type-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .unwrap();
@@ -437,7 +488,12 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
     let mut bootstrap_data: Option<serde_json::Value> = None;
     for _ in 0..30 {
         sleep(Duration::from_secs(1)).await;
-        if let Ok(results) = drasi.get_query_results("type-query").await {
+        if let Ok(results) = drasi
+            .get_query_results_by_name(
+                &drasi_core::ComponentName::try_new("type-query").expect("fixture component name"),
+            )
+            .await
+        {
             for row in &results {
                 if row.get("marker").and_then(|v| v.as_str()) == Some("v1") {
                     bootstrap_data = Some(row.clone());
@@ -562,18 +618,31 @@ async fn test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() {
             .build()
             .unwrap();
 
-        let source = MySqlReplicationSource::builder("mysql-overlap-src")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_database("test")
-            .with_user("test")
-            .with_password("test")
-            .with_tables(vec!["items".to_string()])
-            .with_start_position(StartPosition::FromEnd)
-            .with_bootstrap_provider(bootstrap)
-            .build()
-            .unwrap();
+        let source = MySqlReplicationSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000039")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_database("test")
+        .with_user("test")
+        .with_password("test")
+        .with_tables(vec!["items".to_string()])
+        .with_start_position(StartPosition::FromEnd)
+        .with_bootstrap_provider(bootstrap)
+        .build()
+        .unwrap();
 
+        let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
+        source
+            .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
+                "mysql-overlap-test",
+                source.id().clone(),
+                None,
+                updates,
+                None,
+            ))
+            .await;
         source.start().await.unwrap();
         for _ in 0..50 {
             if source.status().await == ComponentStatus::Running {
@@ -583,9 +652,10 @@ async fn test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() {
         }
 
         let settings = SourceSubscriptionSettings {
-            source_id: "mysql-overlap-src".to_string(),
+            source_id: source.id().clone(),
             enable_bootstrap: true,
-            query_id: "q-handover".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003a")
+                .expect("fixture UUID"),
             nodes: HashSet::from(["items".to_string()]),
             relations: HashSet::new(),
             resume_from: None,
@@ -735,6 +805,29 @@ async fn test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() {
 use drasi_lib::indexes::config::StorageBackendRef;
 use drasi_reaction_application::subscription::SubscriptionOptions;
 
+async fn start_mysql_fixture(
+    mut request: ContainerRequest<Mysql>,
+    fixture_source: &'static str,
+) -> anyhow::Result<testcontainers::ContainerAsync<Mysql>> {
+    let attribution = Attribution::from_env(Fixture::new(
+        "mysql",
+        request.descriptor(),
+        fixture_source,
+        1,
+    ))?;
+    if let Some(owner) = &attribution {
+        request = request
+            .with_container_name(owner.container_name(1))
+            .with_labels(owner.labels(1));
+        owner.record_intent(1)?;
+    }
+    let container = request.start().await?;
+    if let Some(owner) = &attribution {
+        owner.record_started(1, container.id())?;
+    }
+    Ok(container)
+}
+
 /// Helper to start a MySQL container with replication and GTID enabled.
 #[allow(clippy::unwrap_used)]
 async fn setup_mysql_container() -> (testcontainers::ContainerAsync<Mysql>, u16) {
@@ -769,7 +862,12 @@ async fn setup_mysql_container_with_gtid(
             },
         ]);
 
-    let container = mysql_image.start().await.unwrap();
+    let container = start_mysql_fixture(
+        mysql_image,
+        "components/sources/mysql/tests/integration_test.rs",
+    )
+    .await
+    .unwrap();
     let port = container.get_host_port_ipv4(3306).await.unwrap();
     (container, port)
 }
@@ -898,7 +996,12 @@ async fn test_require_connects_to_tls12_only_server() {
         .with_env_var("MYSQL_ROOT_PASSWORD", "root")
         .with_cmd(vec!["--tls-version=TLSv1.2"]);
 
-    let container = mysql_image.start().await.unwrap();
+    let container = start_mysql_fixture(
+        mysql_image,
+        "components/sources/mysql/tests/integration_test.rs",
+    )
+    .await
+    .unwrap();
     let port = container.get_host_port_ipv4(3306).await.unwrap();
 
     let build_opts = || {
@@ -996,33 +1099,47 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
             .build()
             .unwrap();
 
-        let source = MySqlReplicationSource::builder("mysql-cp-src")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_database("test")
-            .with_user("test")
-            .with_password("test")
-            .with_tables(vec!["items".to_string()])
-            .with_start_position(StartPosition::FromEnd)
-            .with_bootstrap_provider(bootstrap)
-            .build()
-            .unwrap();
+        let source = MySqlReplicationSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003b")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_database("test")
+        .with_user("test")
+        .with_password("test")
+        .with_tables(vec!["items".to_string()])
+        .with_start_position(StartPosition::FromEnd)
+        .with_bootstrap_provider(bootstrap)
+        .build()
+        .unwrap();
 
-        let query = Query::cypher("cp-query")
-            .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
-            .from_input("mysql-cp-src")
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("cp-query").expect("fixture component name"),
+        )
+        .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("mysql-cp-src").expect("fixture component name"),
+        )
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+        .build()
+        .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("cp-reaction")
-            .with_query("cp-query")
-            .build();
+        let (reaction, handle) = ApplicationReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003c")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("cp-query").expect("fixture component name"),
+        )
+        .build();
 
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1036,9 +1153,15 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
                     .clone(),
             )
             .with_id("mysql-cp-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("mysql-cp-src").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("cp-reaction").expect("fixture component name"),
+                reaction,
+            )
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1059,7 +1182,13 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
         let mut bootstrap_done = false;
         for _ in 0..30 {
             sleep(Duration::from_secs(1)).await;
-            if let Ok(results) = core.get_query_results("cp-query").await {
+            if let Ok(results) = core
+                .get_query_results_by_name(
+                    &drasi_core::ComponentName::try_new("cp-query")
+                        .expect("fixture component name"),
+                )
+                .await
+            {
                 for row in &results {
                     if row.get("name").and_then(|v| v.as_str()) == Some("Seed1") {
                         bootstrap_done = true;
@@ -1088,9 +1217,17 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
         sleep(Duration::from_secs(2)).await;
 
         // Phase 2: Stop and restart the query
-        core.stop_query("cp-query").await.unwrap();
+        core.stop_query_by_name(
+            &drasi_core::ComponentName::try_new("cp-query").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         sleep(Duration::from_millis(500)).await;
-        core.start_query("cp-query").await.unwrap();
+        core.start_query_by_name(
+            &drasi_core::ComponentName::try_new("cp-query").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
 
         // Phase 3: Insert a new row post-restart to verify recovery.
         // Since the source is still running, new CDC events should flow
@@ -1151,33 +1288,47 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
             .build()
             .unwrap();
 
-        let source = MySqlReplicationSource::builder("mysql-bs-src")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_database("test")
-            .with_user("test")
-            .with_password("test")
-            .with_tables(vec!["items".to_string()])
-            .with_start_position(StartPosition::FromEnd)
-            .with_bootstrap_provider(bootstrap)
-            .build()
-            .unwrap();
+        let source = MySqlReplicationSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003d")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_database("test")
+        .with_user("test")
+        .with_password("test")
+        .with_tables(vec!["items".to_string()])
+        .with_start_position(StartPosition::FromEnd)
+        .with_bootstrap_provider(bootstrap)
+        .build()
+        .unwrap();
 
-        let query = Query::cypher("bs-query")
-            .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
-            .from_input("mysql-bs-src")
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("bs-query").expect("fixture component name"),
+        )
+        .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("mysql-bs-src").expect("fixture component name"),
+        )
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+        .build()
+        .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("bs-reaction")
-            .with_query("bs-query")
-            .build();
+        let (reaction, handle) = ApplicationReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003e")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("bs-query").expect("fixture component name"),
+        )
+        .build();
 
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1191,9 +1342,15 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
                     .clone(),
             )
             .with_id("mysql-bs-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("mysql-bs-src").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("bs-reaction").expect("fixture component name"),
+                reaction,
+            )
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1291,33 +1448,47 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
             .build()
             .unwrap();
 
-        let source = MySqlReplicationSource::builder("mysql-fr-src")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_database("test")
-            .with_user("test")
-            .with_password("test")
-            .with_tables(vec!["items".to_string()])
-            .with_start_position(StartPosition::FromEnd)
-            .with_bootstrap_provider(bootstrap)
-            .build()
-            .unwrap();
+        let source = MySqlReplicationSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003f")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_database("test")
+        .with_user("test")
+        .with_password("test")
+        .with_tables(vec!["items".to_string()])
+        .with_start_position(StartPosition::FromEnd)
+        .with_bootstrap_provider(bootstrap)
+        .build()
+        .unwrap();
 
-        let query = Query::cypher("fr-query")
-            .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
-            .from_input("mysql-fr-src")
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("fr-query").expect("fixture component name"),
+        )
+        .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("mysql-fr-src").expect("fixture component name"),
+        )
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+        .build()
+        .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("fr-reaction")
-            .with_query("fr-query")
-            .build();
+        let (reaction, handle) = ApplicationReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000040")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("fr-query").expect("fixture component name"),
+        )
+        .build();
 
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1331,9 +1502,15 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
                     .clone(),
             )
             .with_id("mysql-fr-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("mysql-fr-src").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("fr-reaction").expect("fixture component name"),
+                reaction,
+            )
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1401,8 +1578,10 @@ fn row_resume_settings(
     sequence: Option<u64>,
 ) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: "mysql-bulk".to_string(),
-        query_id: "bulk-query".to_string(),
+        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000041")
+            .expect("fixture UUID"),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000042")
+            .expect("fixture UUID"),
         enable_bootstrap: position.is_none(),
         nodes: ["items".to_string()].into_iter().collect(),
         relations: Default::default(),
@@ -1461,22 +1640,26 @@ async fn test_mysql_multi_row_transactions_and_partial_resume() {
             .with_tables(vec!["items".to_string()])
             .build()
             .unwrap();
-        let source = MySqlReplicationSource::builder("mysql-bulk")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_database("test")
-            .with_user("test")
-            .with_password("test")
-            .with_ssl_mode(SslMode::Disabled)
-            .with_tables(vec!["items".to_string()])
-            .with_bootstrap_provider(bootstrap)
-            .build()
-            .unwrap();
+        let source = MySqlReplicationSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000041")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_database("test")
+        .with_user("test")
+        .with_password("test")
+        .with_ssl_mode(SslMode::Disabled)
+        .with_tables(vec!["items".to_string()])
+        .with_bootstrap_provider(bootstrap)
+        .build()
+        .unwrap();
         let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
         source
-            .initialize(drasi_lib::context::SourceRuntimeContext::new(
+            .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
                 "mysql-bulk-test",
-                "mysql-bulk",
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000041")
+                    .expect("fixture UUID"),
                 None,
                 updates,
                 None,
@@ -1700,25 +1883,29 @@ async fn test_mysql_rollback_preserves_only_nontransactional_rows_and_partial_re
             .await
             .unwrap()
             .unwrap();
-        let source = MySqlReplicationSource::builder("mysql-bulk")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_database("test")
-            .with_user("test")
-            .with_password("test")
-            .with_ssl_mode(SslMode::Disabled)
-            .with_tables(vec!["items".to_string(), "transactional_items".to_string()])
-            .with_start_position(StartPosition::FromPosition {
-                file: status.get(0).unwrap(),
-                position: status.get(1).unwrap(),
-            })
-            .build()
-            .unwrap();
+        let source = MySqlReplicationSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000041")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_database("test")
+        .with_user("test")
+        .with_password("test")
+        .with_ssl_mode(SslMode::Disabled)
+        .with_tables(vec!["items".to_string(), "transactional_items".to_string()])
+        .with_start_position(StartPosition::FromPosition {
+            file: status.get(0).unwrap(),
+            position: status.get(1).unwrap(),
+        })
+        .build()
+        .unwrap();
         let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
         source
-            .initialize(drasi_lib::context::SourceRuntimeContext::new(
+            .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
                 "mysql-rollback-test",
-                "mysql-bulk",
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000041")
+                    .expect("fixture UUID"),
                 None,
                 updates,
                 None,

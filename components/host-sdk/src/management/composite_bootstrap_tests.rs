@@ -4,7 +4,9 @@
 use super::*;
 
 fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("component")
+    let owner =
+        ComponentId::try_new("075b5235-169f-55f2-9fd8-88b6d292490c").expect("component namespace");
+    ComponentId::derive_owned(&owner, name).expect("component")
 }
 fn resource(name: &str) -> ResourceId {
     ResourceId::try_new(name).expect("resource")
@@ -85,8 +87,9 @@ async fn composite_recipe_resolves_actual_ordered_children_and_query_owner() -> 
     let encoded = serde_json::to_value(&config)?;
     let decoded: CompositeBootstrapConfig = serde_json::from_value(encoded)?;
     assert_eq!(decoded.providers, config.providers);
+    let query = id("query");
     let recipe: Recipe = serde_json::from_value(serde_json::json!({
-        "kind":"compositeBootstrap","component":"query","providers":["postgres","http"],
+        "kind":"compositeBootstrap","component":query.as_str(),"providers":["postgres","http"],
     }))?;
     assert!(matches!(recipe, Recipe::CompositeBootstrap(_)));
     Ok(())

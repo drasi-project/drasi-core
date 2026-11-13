@@ -143,7 +143,13 @@ impl Profile {
 }
 
 pub fn timed_event(sequence: u64) -> ChangeEnvelope {
-    let original = super::computation_support::root("source", sequence, &[sequence as u16]);
+    let original = super::computation_support::root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        sequence,
+        &[sequence as u16],
+    );
     ChangeEnvelope::new(
         original.id().clone(),
         original.changes().clone(),

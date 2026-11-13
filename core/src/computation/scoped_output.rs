@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use super::ScopedIndex;
+use crate::interface::{CheckpointKey, OutputPartition};
 use crate::interface::{
     CheckpointStore, IndexError, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl,
     SourceCheckpoint,
 };
+use crate::ComponentId;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -47,7 +49,7 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
     }
     async fn stage_checkpoint(
         &self,
-        source: &str,
+        source: &CheckpointKey,
         sequence: u64,
         position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
@@ -62,14 +64,19 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
             })
             .await
     }
-    async fn read_checkpoint(&self, source: &str) -> Result<Option<SourceCheckpoint>, IndexError> {
+    async fn read_checkpoint(
+        &self,
+        source: &CheckpointKey,
+    ) -> Result<Option<SourceCheckpoint>, IndexError> {
         let inner = self.inner.clone();
         let source = source.to_owned();
         self.work
             .run_async(async move { inner.read_checkpoint(&source).await })
             .await
     }
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
         let inner = self.inner.clone();
         self.work
             .run_async(async move { inner.read_all_checkpoints().await })
@@ -99,21 +106,32 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
             .run_async(async move { inner.read_config_hash().await })
             .await
     }
-    async fn stage_result_sequence(&self, query: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(
+        &self,
+        query: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
             .run_async(async move { inner.stage_result_sequence(&query, sequence).await })
             .await
     }
-    async fn write_result_sequence(&self, query: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn write_result_sequence(
+        &self,
+        query: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
             .run_async(async move { inner.write_result_sequence(&query, sequence).await })
             .await
     }
-    async fn read_result_sequence(&self, query: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(
+        &self,
+        query: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
@@ -122,7 +140,7 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
     }
     async fn write_output_generation(
         &self,
-        query: &str,
+        query: &OutputPartition,
         generation: u64,
     ) -> Result<(), IndexError> {
         let inner = self.inner.clone();
@@ -131,7 +149,10 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
             .run_async(async move { inner.write_output_generation(&query, generation).await })
             .await
     }
-    async fn read_output_generation(&self, query: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_output_generation(
+        &self,
+        query: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
@@ -142,7 +163,12 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
 
 #[async_trait]
 impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
-    async fn append(&self, query: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        query: &OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         let data = data.to_vec();
@@ -152,7 +178,7 @@ impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
     }
     async fn append_and_trim(
         &self,
-        query: &str,
+        query: &OutputPartition,
         sequence: u64,
         data: &[u8],
         retain_from: u64,
@@ -168,14 +194,22 @@ impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
             })
             .await
     }
-    async fn trim_before(&self, query: &str, retain_from: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        query: &OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
             .run_async(async move { inner.trim_before(&query, retain_from).await })
             .await
     }
-    async fn read_from(&self, query: &str, after: u64) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_from(
+        &self,
+        query: &OutputPartition,
+        after: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
@@ -184,7 +218,7 @@ impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
     }
     async fn read_page(
         &self,
-        query: &str,
+        query: &OutputPartition,
         after: u64,
         limits: crate::interface::OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
@@ -194,21 +228,28 @@ impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
             .run_async(async move { inner.read_page(&query, after, limits).await })
             .await
     }
-    async fn read_latest_sequence(&self, query: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        query: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
             .run_async(async move { inner.read_latest_sequence(&query).await })
             .await
     }
-    async fn clear(&self, query: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query: &OutputPartition) -> Result<(), IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
             .run_async(async move { inner.clear(&query).await })
             .await
     }
-    async fn trim_to_capacity(&self, query: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        query: &OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
@@ -221,7 +262,7 @@ impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
 impl<T: LiveResultsWriter + ?Sized + 'static> LiveResultsWriter for ScopedIndex<T> {
     async fn read_page(
         &self,
-        query: &str,
+        query: &ComponentId,
         after: Option<u64>,
         limits: crate::interface::OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
@@ -234,7 +275,7 @@ impl<T: LiveResultsWriter + ?Sized + 'static> LiveResultsWriter for ScopedIndex<
 
     async fn apply_mutations(
         &self,
-        query: &str,
+        query: &ComponentId,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         let inner = self.inner.clone();
@@ -256,21 +297,21 @@ impl<T: LiveResultsWriter + ?Sized + 'static> LiveResultsWriter for ScopedIndex<
             })
             .await
     }
-    async fn read_snapshot(&self, query: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_snapshot(&self, query: &ComponentId) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
             .run_async(async move { inner.read_snapshot(&query).await })
             .await
     }
-    async fn clear(&self, query: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query: &ComponentId) -> Result<(), IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work
             .run_async(async move { inner.clear(&query).await })
             .await
     }
-    async fn row_count(&self, query: &str) -> Result<usize, IndexError> {
+    async fn row_count(&self, query: &ComponentId) -> Result<usize, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
         self.work

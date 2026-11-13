@@ -124,15 +124,34 @@ async fn separately_loaded_transformer_receives_live_input_bindings_case() -> Re
     let path = directory.path().join("input-bindings.jsonl");
     let (left, left_sender) = BindingSource::new("left")?;
     let (right, right_sender) = BindingSource::new("right")?;
+    let left_id = left.descriptor().id().clone();
+    let right_id = right.descriptor().id().clone();
     let mut graph = ComputationGraph::builder("native-input-bindings")
-        .source(Box::new(left))
-        .source(Box::new(right))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(left),
+        )
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-2")
+                .expect("fixture component name"),
+            Box::new(right),
+        )
         .component(
+            name("transformer"),
             factory.specification(id("transformer"), json!({"observations":path}))?,
             factory,
         )
-        .sink(capture("spare")?)
-        .sink(capture("terminal")?)
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            capture("spare")?,
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-2")
+                .expect("fixture component name"),
+            capture("terminal")?,
+        )
         .connect(
             edge("left", "transformer"),
             Box::new(BoundedPipeConfig { capacity: 2 }),
@@ -173,7 +192,7 @@ async fn separately_loaded_transformer_receives_live_input_bindings_case() -> Re
                     "stream":"left/out",
                     "bindings":[{
                         "input_port":"in",
-                        "output":{"component":"left","port":"out"},
+                        "output":{"component":left_id,"port":"out"},
                         "stream":"left/out"
                     }]
                 })
@@ -212,7 +231,7 @@ async fn separately_loaded_transformer_receives_live_input_bindings_case() -> Re
                     "stream":"right/out",
                     "bindings":[{
                         "input_port":"in",
-                        "output":{"component":"right","port":"out"},
+                        "output":{"component":right_id,"port":"out"},
                         "stream":"right/out"
                     }]
                 })
@@ -263,6 +282,7 @@ async fn separately_loaded_consumer_receives_input_bindings_case() -> Result<()>
             },
         )
         .await?;
+    consumer.initialize().await?;
     assert!(consumer.binds_inputs());
     for (producer, stream_name, before_start) in
         [("left", "left/out", true), ("right", "right/out", false)]

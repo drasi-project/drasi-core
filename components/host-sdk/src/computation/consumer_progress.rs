@@ -368,7 +368,8 @@ mod tests {
     use std::time::Duration;
 
     fn id(name: &str) -> ComponentId {
-        ComponentId::try_new(name).unwrap()
+        let owner = ComponentId::try_new("69ad3f77-ef7f-5a90-a90f-35b736ba92e7").unwrap();
+        ComponentId::derive_owned(&owner, name).unwrap()
     }
     fn owner() -> Arc<ConsumerProgressSet> {
         Arc::new(
@@ -424,7 +425,9 @@ mod tests {
         let binding = ConsumerProgressBinding::new(&owner)?;
         let handle = capability(&binding);
         let reader = handle.reader();
-        assert_eq!(handle.consumer_ids(), &[id("first"), id("second")]);
+        let mut expected = vec![id("first"), id("second")];
+        expected.sort();
+        assert_eq!(handle.consumer_ids(), expected.as_slice());
         assert!(reader.same_binding(&handle.clone().reader()));
         assert_eq!(reader.graph_id(), "graph");
         assert_eq!(reader.producer_id(), owner.producer_id());
@@ -464,7 +467,7 @@ mod tests {
                 .await?
                 .unwrap_err(),
         );
-        assert_eq!(handle.consumer_ids(), &[id("first"), id("second")]);
+        assert_eq!(handle.consumer_ids(), expected.as_slice());
         closed(&reader.snapshot().unwrap_err());
         assert!(reader.subscribe().is_err());
         let replacement = ConsumerProgressBinding::new(&owner)?;

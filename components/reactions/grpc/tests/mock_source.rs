@@ -67,7 +67,7 @@ impl MockSourceHandle {
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(self.source_id.as_str()),
+                    namespace: Arc::from(self.source_id.as_str()),
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
@@ -94,14 +94,17 @@ pub struct MockSource {
 
 impl MockSource {
     /// Create a new mock source and its handle
-    pub fn new(id: impl Into<String>) -> Result<(Self, MockSourceHandle)> {
-        let id = id.into();
-        let params = SourceBaseParams::new(id.clone());
+    pub fn new(
+        component_id: drasi_core::ComponentId,
+        namespace: impl Into<String>,
+    ) -> Result<(Self, MockSourceHandle)> {
+        let namespace = namespace.into();
+        let params = SourceBaseParams::new(component_id);
         let (app_tx, app_rx) = mpsc::channel(1000);
 
         let handle = MockSourceHandle {
             tx: app_tx.clone(),
-            source_id: id.clone(),
+            source_id: namespace,
         };
 
         let source = Self {
@@ -153,7 +156,7 @@ impl MockSource {
 
 #[async_trait]
 impl Source for MockSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         &self.base.id
     }
 
@@ -217,8 +220,8 @@ impl Source for MockSource {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(

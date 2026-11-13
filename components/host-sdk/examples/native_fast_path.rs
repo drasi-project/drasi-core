@@ -149,7 +149,11 @@ impl EnvelopeSink for Output {
 }
 
 fn id(value: &str) -> Result<ComponentId> {
-    Ok(ComponentId::try_new(value)?)
+    let owner = ComponentId::try_new("7fcff783-2109-55c7-a767-a135afd77af9")?;
+    Ok(ComponentId::derive_owned(&owner, value)?)
+}
+fn name(value: &str) -> Result<ComponentName> {
+    Ok(ComponentName::try_new(value)?)
 }
 fn endpoint(component: &str, port: &str) -> Result<Endpoint> {
     Ok(Endpoint::new(id(component)?, PortId::try_new(port)?))
@@ -190,18 +194,25 @@ async fn main() -> Result<()> {
     let (send, values) = mpsc::channel(64);
     let (output, mut receive) = mpsc::channel(64);
     let batch = ComputationGraph::builder("__drasi_lib_runtime__")
-        .source(Box::new(Input {
-            descriptor: descriptor("input", "out", PortDirection::Output)?,
-            values,
-        }))
+        .source(
+            name("input")?,
+            Box::new(Input {
+                descriptor: descriptor("input", "out", PortDirection::Output)?,
+                values,
+            }),
+        )
         .component(
+            name("native")?,
             factory.specification(id("native")?, json!({"stream":"native/out","add":1}))?,
             factory,
         )
-        .sink(Box::new(Output {
-            descriptor: descriptor("output", "in", PortDirection::Input)?,
-            values: output,
-        }))
+        .sink(
+            name("output")?,
+            Box::new(Output {
+                descriptor: descriptor("output", "in", PortDirection::Input)?,
+                values: output,
+            }),
+        )
         .bind_stream(endpoint("input", "out")?, StreamId::try_new("input/out")?)
         .bind_stream(endpoint("native", "out")?, StreamId::try_new("native/out")?)
         .connect(

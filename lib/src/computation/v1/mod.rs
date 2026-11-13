@@ -174,6 +174,7 @@
 //! with isolated step state and no internal pipes or independently scheduled nodes.
 
 pub use super::components::{ComponentBatch, ComponentBatchBuilder};
+pub use super::creation::ComponentIds;
 pub use super::instance::{ComputationCleanupError, ComputationInfo};
 pub use super::instance_ops::InstanceConfigurationSnapshot;
 

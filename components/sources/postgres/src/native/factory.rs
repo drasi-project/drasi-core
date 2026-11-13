@@ -40,6 +40,7 @@ impl Default for PostgresTransactionSourceFactory {
                         (
                             Arc::from("stream"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::String,
                                 required: true,
                                 secret: false,
@@ -48,6 +49,7 @@ impl Default for PostgresTransactionSourceFactory {
                         (
                             Arc::from("coordinated_snapshot"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Boolean,
                                 required: false,
                                 secret: false,
@@ -56,6 +58,7 @@ impl Default for PostgresTransactionSourceFactory {
                         (
                             Arc::from("settings"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Object,
                                 required: true,
                                 secret: true,

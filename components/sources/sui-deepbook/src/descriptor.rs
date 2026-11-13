@@ -121,7 +121,7 @@ impl SourcePluginDescriptor for SuiDeepBookSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -149,7 +149,7 @@ impl SourcePluginDescriptor for SuiDeepBookSourceDescriptor {
             }
         };
 
-        let source = SuiDeepBookSourceBuilder::new(id)
+        let source = SuiDeepBookSourceBuilder::new(id.clone())
             .with_rpc_endpoint(mapper.resolve_string(&dto.rpc_endpoint).await?)
             .with_deepbook_package_id(mapper.resolve_string(&dto.deepbook_package_id).await?)
             .with_poll_interval_ms(mapper.resolve_typed(&dto.poll_interval_ms).await?)

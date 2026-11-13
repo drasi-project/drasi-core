@@ -33,7 +33,7 @@ use crate::templates::{build_proto_item, QueryEmissionContext, TemplateEngine};
 use drasi_lib::reactions::common::{CheckpointState, FailureAction};
 
 pub(crate) struct FixedRunnerParams {
-    pub reaction_name: String,
+    pub reaction_id: drasi_lib::ComponentId,
     pub batch_size: usize,
     pub batch_flush_timeout_ms: u64,
     pub base: ReactionBase,
@@ -52,7 +52,7 @@ enum FlushControl {
 
 pub(crate) async fn run(params: FixedRunnerParams) {
     let FixedRunnerParams {
-        reaction_name,
+        reaction_id,
         batch_size,
         batch_flush_timeout_ms,
         base,
@@ -95,13 +95,13 @@ pub(crate) async fn run(params: FixedRunnerParams) {
         let query_result = tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
-                debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
+                debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
                 break;
             }
             _ = flush_timer.tick() => {
                 if pending.is_some()
                     && flush_pending(
-                        &reaction_name,
+                        &reaction_id,
                         &endpoint,
                         timeout_ms,
                         initial_connection_timeout_ms,
@@ -134,7 +134,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
         );
 
         if query_result.results.is_empty() {
-            debug!("[{reaction_name}] Received empty result set from query");
+            debug!("[{reaction_id}] Received empty result set from query");
             continue;
         }
 
@@ -142,19 +142,14 @@ pub(crate) async fn run(params: FixedRunnerParams) {
         let seq = query_result.sequence;
         trace!("Processing results for query_id: {query_id}");
 
-        let emission = QueryEmissionContext {
-            query_id: query_id.as_str(),
-            sequence: seq,
-            timestamp: query_result.timestamp,
-            metadata: &query_result.metadata,
-        };
+        let emission = QueryEmissionContext::from(query_result.as_ref());
 
         // Build all items first so the last one can be flagged terminal; the
         // checkpoint only advances once a result's terminal item is acked.
         let mut built_items: Vec<(BatchKey, crate::proto::ProtoQueryResultItem)> = Vec::new();
         for result in &query_result.results {
             if matches!(result, drasi_lib::channels::ResultDiff::Noop) {
-                debug!("[{reaction_name}] Ignoring noop result");
+                debug!("[{reaction_id}] Ignoring noop result");
                 continue;
             }
             let Some(built) =
@@ -175,7 +170,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 .as_ref()
                 .is_some_and(|batch| !batch.can_accept(&key))
                 && flush_pending(
-                    &reaction_name,
+                    &reaction_id,
                     &endpoint,
                     timeout_ms,
                     initial_connection_timeout_ms,
@@ -207,7 +202,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 .as_ref()
                 .is_some_and(|batch| batch.items.len() >= batch_size)
                 && flush_pending(
-                    &reaction_name,
+                    &reaction_id,
                     &endpoint,
                     timeout_ms,
                     initial_connection_timeout_ms,
@@ -233,9 +228,9 @@ pub(crate) async fn run(params: FixedRunnerParams) {
     }
 
     if pending.is_some() {
-        info!("[{reaction_name}] Sending final fixed batch before shutdown");
+        info!("[{reaction_id}] Sending final fixed batch before shutdown");
         if flush_pending(
-            &reaction_name,
+            &reaction_id,
             &endpoint,
             timeout_ms,
             initial_connection_timeout_ms,
@@ -259,14 +254,14 @@ pub(crate) async fn run(params: FixedRunnerParams) {
         }
     }
 
-    finish(&reaction_name, &status_handle).await;
+    finish(&reaction_id, &status_handle).await;
 }
 
 async fn finish(
-    reaction_name: &str,
+    reaction_id: &drasi_lib::ComponentId,
     status_handle: &drasi_lib::component_graph::ComponentStatusHandle,
 ) {
-    info!("[{reaction_name}] gRPC reaction processing task stopped");
+    info!("[{reaction_id}] gRPC reaction processing task stopped");
     status_handle
         .set_status(
             ComponentStatus::Stopped,
@@ -277,7 +272,7 @@ async fn finish(
 
 #[allow(clippy::too_many_arguments)]
 async fn flush_pending(
-    reaction_name: &str,
+    reaction_id: &drasi_lib::ComponentId,
     endpoint: &str,
     timeout_ms: u64,
     initial_connection_timeout_ms: u64,
@@ -319,7 +314,7 @@ async fn flush_pending(
         // No connection could be (re)established within the current backoff
         // window — treat as a sustained delivery failure.
         warn!(
-            "[{reaction_name}] No gRPC connection available for batch of {item_count} item(s) \
+            "[{reaction_id}] No gRPC connection available for batch of {item_count} item(s) \
              for query '{query_id}'"
         );
         false
@@ -332,7 +327,7 @@ async fn flush_pending(
             max_retries,
             endpoint,
             timeout_ms,
-            reaction_name,
+            reaction_id,
             connection_state,
             consecutive_failures,
             last_connection_attempt,
@@ -353,7 +348,7 @@ async fn flush_pending(
                 .await
             {
                 error!(
-                    "[{reaction_name}] Failed to write checkpoint for query '{query_id}' \
+                    "[{reaction_id}] Failed to write checkpoint for query '{query_id}' \
                      (seq {seq}): {e}"
                 );
                 base.status_handle()
@@ -375,7 +370,7 @@ async fn flush_pending(
     match FailureAction::from_policy(policy) {
         FailureAction::Stop => {
             error!(
-                "[{reaction_name}] Failed to deliver batch of {item_count} item(s) for query \
+                "[{reaction_id}] Failed to deliver batch of {item_count} item(s) for query \
                  '{query_id}' after retries; stopping per Strict recovery policy — the batch \
                  replays from the outbox on restart"
             );
@@ -391,7 +386,7 @@ async fn flush_pending(
         }
         FailureAction::SkipAndContinue => {
             warn!(
-                "[{reaction_name}] Failed to deliver batch of {item_count} item(s) for query \
+                "[{reaction_id}] Failed to deliver batch of {item_count} item(s) for query \
                  '{query_id}' after retries; skipping and advancing checkpoint per AutoSkipGap \
                  recovery policy"
             );
@@ -460,12 +455,12 @@ async fn ensure_client(
 async fn send_with_swap(
     client: &mut Option<ReactionServiceClient<Channel>>,
     batch: &[crate::proto::ProtoQueryResultItem],
-    query_id: &str,
+    query_id: &drasi_lib::ComponentId,
     metadata: &std::collections::HashMap<String, String>,
     max_retries: u32,
     endpoint: &str,
     timeout_ms: u64,
-    reaction_name: &str,
+    reaction_id: &drasi_lib::ComponentId,
     connection_state: &mut ConnectionState,
     consecutive_failures: &mut u32,
     last_connection_attempt: &mut std::time::Instant,
@@ -511,7 +506,7 @@ async fn send_with_swap(
                 }
             }
             Err(e) => {
-                error!("[{reaction_name}] Failed to send batch: {e}");
+                error!("[{reaction_id}] Failed to send batch: {e}");
                 return false;
             }
         }

@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod computation_support;
+
 use async_trait::async_trait;
+use computation_support::component as id;
 use drasi_lib::{computation::v1::*, DrasiLib, Query};
 use serde_json::json;
 use std::{
@@ -25,10 +28,6 @@ use std::{
 };
 use tokio::sync::Notify;
 
-fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("component ID")
-}
-
 struct Configured {
     descriptor: ComponentDescriptor,
     setting: String,
@@ -37,9 +36,9 @@ struct Configured {
 }
 
 impl Configured {
-    fn new(name: &str, setting: &str) -> Self {
+    fn new(id: ComponentId, setting: &str) -> Self {
         Self {
-            descriptor: ComponentDescriptor::try_new(id(name), vec![]).expect("descriptor"),
+            descriptor: ComponentDescriptor::try_new(id, vec![]).expect("descriptor"),
             setting: setting.into(),
             reads: Arc::new(AtomicUsize::new(0)),
             entered: Arc::new(Notify::new()),
@@ -62,8 +61,18 @@ impl ComputationComponent for Configured {
     async fn stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn reconfigure(&mut self, context: ConstructionContext) -> anyhow::Result<()> {
-        self.setting = context.configuration()["setting"]
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+        assert_eq!(
+            context.plan,
+            ComponentUpdatePlan {
+                mode: ComponentUpdateMode::InPlace,
+                data: ComponentUpdateData::Preserve,
+            }
+        );
+        assert_eq!(context.current.descriptor.id(), self.descriptor.id());
+        assert_eq!(&context.proposed.component_id, self.descriptor.id());
+        assert!(!context.operation_id.is_empty());
+        self.setting = context.proposed.configuration()["setting"]
             .as_str()
             .expect("validated string")
             .to_owned();
@@ -79,10 +88,9 @@ impl ComputationService for Configured {
     }
 }
 
-fn values(snapshot: &GraphConfigurationSnapshot, name: &str) -> serde_json::Value {
-    let CapturedComponentConfiguration::Available { values } = &snapshot.configurations[&id(name)]
-    else {
-        panic!("configuration must be available for {name}");
+fn values(snapshot: &GraphConfigurationSnapshot, id: &ComponentId) -> serde_json::Value {
+    let CapturedComponentConfiguration::Available { values } = &snapshot.configurations[id] else {
+        panic!("configuration must be available for {id}");
     };
     values.clone()
 }
@@ -104,21 +112,26 @@ async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing
         )
         .with_id("configuration-owner")
         .with_query(
-            Query::cypher("ordinary")
-                .query("RETURN 1")
-                .auto_start(false)
-                .build(),
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("ordinary")
+                    .expect("fixture component name"),
+            )
+            .query("RETURN 1")
+            .auto_start(false)
+            .build()
+            .expect("query definition"),
         )
         .build()
         .await
         .expect("instance");
-    let component = Configured::new("native", "private-property-value");
-    let entered = component.entered.clone();
-    let reads = component.reads.clone();
+    let factory = Arc::new(Factory::new(false));
+    let entered = factory.entered.clone();
+    let reads = factory.reads.clone();
+    core.register_component_factory(factory.clone())
+        .await
+        .expect("registered fixture factory");
     let handle = core
-        .add_computation_component(ComponentAddition::new(ConstructedComponent::service(
-            Box::new(component),
-        )))
+        .create_computation_component(factory.definition("native", "private-property-value"))
         .await
         .expect("native declaration");
     handle.wait_created().await.expect("native creation");
@@ -126,15 +139,40 @@ async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
         .expect("service is holding its processing lease");
-    let extra = ComponentBatch::builder()
-        .service(Box::new(Configured::new("extra-service", "second")))
-        .build()
-        .expect("extra graph");
-    core.add_components(extra.auto_start(false))
+    let extra = core
+        .create_components(move |ids| {
+            let id = ids.allocate()?;
+            Ok(ComponentBatch::builder()
+                .component(
+                    drasi_lib::ComponentName::try_new("extra-service")
+                        .expect("fixture component name"),
+                    factory.specification_for(id, "second"),
+                    factory,
+                )
+                .build()?
+                .auto_start(false))
+        })
         .await
-        .expect("extra component creation")
-        .ensure_committed()
-        .expect("desired topology committed");
+        .expect("extra component acceptance");
+    let extra_id = extra
+        .creation
+        .as_ref()
+        .expect("assigned creation")
+        .components[0]
+        .id
+        .clone();
+    assert_eq!(
+        extra.creation.as_ref().unwrap().components[0].name,
+        drasi_lib::ComponentName::try_new("extra-service").expect("fixture component name")
+    );
+    core.reconcile_desired_state()
+        .await
+        .expect("realize accepted batch");
+    core.component_by_id(&extra_id)
+        .unwrap()
+        .wait_created()
+        .await
+        .unwrap();
 
     let before = reads.load(Ordering::SeqCst);
     let snapshot = tokio::time::timeout(
@@ -144,7 +182,7 @@ async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing
     .await
     .expect("configuration export must not await a processing boundary")
     .expect("configuration");
-    assert_eq!(snapshot.version, 1);
+    assert_eq!(snapshot.version, 2);
     assert_eq!(snapshot.instance.instance_id, "configuration-owner");
     assert_eq!(snapshot.instance.queries[0].config.query, "RETURN 1");
     let root = snapshot.native_components.as_ref().expect("native root");
@@ -154,7 +192,7 @@ async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing
         "ordinary components are not duplicated"
     );
     assert_eq!(
-        values(root, "native"),
+        values(root, handle.id()),
         json!({"setting": "private-property-value"})
     );
     assert!(
@@ -162,12 +200,21 @@ async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing
             .topology
             .components
             .iter()
-            .find(|component| component.descriptor.id() == &id("extra-service"))
+            .find(|component| component.descriptor.id() == &extra_id)
             .unwrap()
             .lifecycle
             .auto_start
     );
-    assert_eq!(values(root, "extra-service"), json!({"setting": "second"}));
+    assert_eq!(values(root, &extra_id), json!({"setting": "second"}));
+    assert_eq!(
+        root.topology
+            .components
+            .iter()
+            .find(|node| node.descriptor.id() == handle.id())
+            .unwrap()
+            .name,
+        drasi_lib::ComponentName::try_new("native").expect("fixture component name")
+    );
     assert_eq!(
         reads.load(Ordering::SeqCst),
         before,
@@ -181,8 +228,8 @@ async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing
     let encoded = serde_json::to_string(&snapshot).expect("encode privileged configuration");
     let decoded: InstanceConfigurationSnapshot = serde_json::from_str(&encoded).expect("decode");
     assert_eq!(
-        values(decoded.native_components.as_ref().unwrap(), "native"),
-        values(root, "native")
+        values(decoded.native_components.as_ref().unwrap(), handle.id()),
+        values(root, handle.id())
     );
     core.shutdown().await.expect("shutdown");
 }
@@ -190,6 +237,8 @@ async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing
 struct Factory {
     descriptor: FactoryDescriptor,
     fail: bool,
+    reads: Arc<AtomicUsize>,
+    entered: Arc<Notify>,
 }
 
 impl Factory {
@@ -204,6 +253,7 @@ impl Factory {
                     fields: BTreeMap::from([(
                         "setting".into(),
                         ConfigurationField {
+                            constraint: None,
                             value_type: ConfigurationType::String,
                             required: true,
                             secret: false,
@@ -214,11 +264,17 @@ impl Factory {
                 dependencies: BTreeMap::new(),
             },
             fail,
+            reads: Arc::new(AtomicUsize::new(0)),
+            entered: Arc::new(Notify::new()),
         }
     }
     fn specification(&self, setting: &str) -> ComponentSpecification {
+        self.specification_for(id(730), setting)
+    }
+
+    fn specification_for(&self, id: ComponentId, setting: &str) -> ComponentSpecification {
         ComponentSpecification {
-            descriptor: ComponentDescriptor::try_new(id("configured"), vec![]).expect("descriptor"),
+            descriptor: ComponentDescriptor::try_new(id, vec![]).expect("descriptor"),
             role: ComponentRole::Service,
             completion: None,
             implementation: self.descriptor.implementation.clone(),
@@ -230,6 +286,18 @@ impl Factory {
             dependencies: BTreeMap::new(),
         }
     }
+
+    fn definition(&self, label: &str, setting: &str) -> drasi_lib::management::ComponentDefinition {
+        drasi_lib::management::ComponentDefinition {
+            id: None,
+            name: drasi_lib::ComponentName::try_new(label).expect("fixture component name"),
+            implementation: self.descriptor.implementation.clone(),
+            configuration: json!({"setting": setting}),
+            dependencies: BTreeMap::new(),
+            streams: BTreeMap::new(),
+            lifecycle: LifecyclePolicy { auto_start: false },
+        }
+    }
 }
 
 #[async_trait]
@@ -237,8 +305,38 @@ impl ComponentFactory for Factory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
-    fn supports_reconfiguration(&self) -> bool {
-        true
+    fn specification_from_config(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+    ) -> anyhow::Result<ComponentSpecification> {
+        Ok(self.specification_for(
+            id,
+            configuration["setting"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing setting"))?,
+        ))
+    }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current.descriptor == proposed.descriptor
+                && current.implementation == proposed.implementation
+                && current.dependencies == proposed.dependencies,
+            "fixture update changed its immutable interface or resources"
+        );
+        anyhow::ensure!(
+            matches!(proposed.configuration.get("setting"),
+            Some(ConfigurationValue::Literal(value)) if value.is_string()),
+            "invalid setting"
+        );
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::InPlace,
+            data: ComponentUpdateData::Preserve,
+        })
     }
     fn validate(&self, _: &ComponentSpecification) -> anyhow::Result<()> {
         Ok(())
@@ -252,12 +350,15 @@ impl ComponentFactory for Factory {
                 "construction rejected"
             )));
         }
-        Ok(ConstructedComponent::service(Box::new(Configured::new(
-            context.component_id.as_str(),
-            context.configuration()["setting"]
+        Ok(ConstructedComponent::service(Box::new(Configured {
+            descriptor: context.specification.descriptor.clone(),
+            setting: context.configuration()["setting"]
                 .as_str()
-                .expect("setting"),
-        ))))
+                .expect("setting")
+                .to_owned(),
+            reads: self.reads.clone(),
+            entered: self.entered.clone(),
+        })))
     }
 }
 
@@ -266,18 +367,18 @@ async fn factory_definition_survives_creation_failure_and_exports_without_an_ins
     let factory = Arc::new(Factory::new(true));
     let definition = factory.specification("retain-me");
     let mut graph = ComputationGraph::builder("failed-config")
-        .component(definition.clone(), factory.clone())
+        .component(
+            drasi_lib::ComponentName::try_new("configured").expect("fixture component name"),
+            definition.clone(),
+            factory.clone(),
+        )
         .build()
         .unwrap();
     assert!(matches!(
-        graph.configuration_snapshot().unwrap().configurations[&id("configured")],
+        graph.configuration_snapshot().unwrap().configurations[&id(730)],
         CapturedComponentConfiguration::Declared { .. }
     ));
     graph.dispose().await.unwrap();
-    let batch = ComponentBatch::builder()
-        .component(definition.clone(), factory)
-        .build()
-        .unwrap();
     let core = DrasiLib::builder()
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
@@ -294,15 +395,34 @@ async fn factory_definition_survives_creation_failure_and_exports_without_an_ins
         .build()
         .await
         .unwrap();
-    let report = core.add_components(batch.auto_start(false)).await.unwrap();
-    assert!(matches!(
-        report.creation[&id("configured")],
-        CreationOutcome::CreationFailed(_)
-    ));
+    let constructor = factory.clone();
+    let receipt = core
+        .create_components(move |ids| {
+            Ok(ComponentBatch::builder()
+                .component(
+                    drasi_lib::ComponentName::try_new("configured")
+                        .expect("fixture component name"),
+                    constructor.specification_for(ids.allocate()?, "retain-me"),
+                    constructor,
+                )
+                .build()?
+                .auto_start(false))
+        })
+        .await
+        .unwrap();
+    let assigned = receipt.creation.as_ref().unwrap().components[0].id.clone();
+    core.reconcile_desired_state().await.unwrap();
+    let handle = core.component_by_id(&assigned).unwrap();
+    assert!(handle.wait_created().await.is_err());
+    assert_eq!(
+        handle.observed().unwrap().realization,
+        RealizationState::CreationFailed
+    );
+    let definition = factory.specification_for(assigned.clone(), "retain-me");
     let snapshot = core.snapshot_computation_configuration().await.unwrap();
     let captured = snapshot.native_components.as_ref().unwrap();
     assert!(matches!(
-        &captured.configurations[&id("configured")],
+        &captured.configurations[&assigned],
         CapturedComponentConfiguration::Declared { values } if values == &definition.configuration
     ));
     assert!(matches!(
@@ -316,15 +436,25 @@ async fn factory_definition_survives_creation_failure_and_exports_without_an_ins
 async fn in_place_configuration_changes_publish_with_the_new_revision_not_old_snapshots() {
     let factory = Arc::new(Factory::new(false));
     let mut graph = ComputationGraph::builder("updates")
-        .component(factory.specification("before"), factory.clone())
+        .component(
+            drasi_lib::ComponentName::try_new("configured").expect("fixture component name"),
+            factory.specification("before"),
+            factory.clone(),
+        )
         .build()
         .unwrap();
     let run = graph.run().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.unwrap();
+        let started = control
+            .start_requested(control.desired_snapshot().revision, GraphSelection::All)
+            .await
+            .unwrap();
+        assert_eq!(started.summary, OperationSummary::Completed);
         let before = control.configuration_snapshot().unwrap();
-        assert_eq!(values(&before, "configured"), json!({"setting":"before"}));
+        assert_eq!(values(&before, &id(730)), json!({"setting":"before"}));
+        let generation = control.observed().components[&id(730)].generation;
         let mut updated = before.topology.components[0].clone();
         updated.construction = ComponentConstruction::Factory(factory.specification("after"));
         let preview = control
@@ -342,8 +472,12 @@ async fn in_place_configuration_changes_publish_with_the_new_revision_not_old_sn
             .expect("desired topology committed");
         let after = control.configuration_snapshot().unwrap();
         assert!(after.topology.revision > before.topology.revision);
-        assert_eq!(values(&after, "configured"), json!({"setting":"after"}));
-        assert_eq!(values(&before, "configured"), json!({"setting":"before"}));
+        assert_eq!(values(&after, &id(730)), json!({"setting":"after"}));
+        assert_eq!(values(&before, &id(730)), json!({"setting":"before"}));
+        assert_eq!(
+            control.observed().components[&id(730)].generation,
+            generation
+        );
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
@@ -353,7 +487,7 @@ async fn in_place_configuration_changes_publish_with_the_new_revision_not_old_sn
 #[tokio::test]
 async fn builtin_config_getters_preserve_definitions_and_do_not_include_processing_state() {
     let definition = MiddlewareTransformerDefinition {
-        id: id("middleware"),
+        id: id(731),
         output_stream: StreamId::try_new("middleware/out").unwrap(),
         middleware: vec![],
         pipeline: vec![],
@@ -364,6 +498,7 @@ async fn builtin_config_getters_preserve_definitions_and_do_not_include_processi
     )
     .unwrap();
     let before = middleware.configuration().unwrap();
+    middleware.initialize().await.unwrap();
     middleware.start().await.unwrap();
     assert_eq!(before, middleware.configuration().unwrap());
     assert_eq!(
@@ -371,11 +506,12 @@ async fn builtin_config_getters_preserve_definitions_and_do_not_include_processi
         json!({"stream":"middleware/out","middleware":[],"pipeline":[]})
     );
     middleware.stop().await.unwrap();
+    middleware.dispose().await.unwrap();
 
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "config".into(),
-            id: id("query"),
+            id: id(46),
             query: "MATCH (n) RETURN n".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out").unwrap(),
@@ -386,12 +522,14 @@ async fn builtin_config_getters_preserve_definitions_and_do_not_include_processi
     .await
     .unwrap();
     let before = query.configuration().unwrap();
+    query.initialize().await.unwrap();
     query.start().await.unwrap();
     assert_eq!(before, query.configuration().unwrap());
     assert_eq!(before["query"], "MATCH (n) RETURN n");
     assert_eq!(before["outbox_capacity"], 9);
     assert!(before.get("rows").is_none());
     query.stop().await.unwrap();
+    query.dispose().await.unwrap();
 }
 
 #[test]
@@ -399,7 +537,10 @@ fn resource_recipes_roundtrip_with_desired_topology_and_require_declared_resourc
     let resource = ResourceId::try_new("indexes").unwrap();
     let recipe = json!({"kind":"rocksdbIndexes","path":"data/native"});
     let graph = ComputationGraph::builder("resource-config")
-        .service(Box::new(Configured::new("service", "value")))
+        .service(
+            drasi_lib::ComponentName::try_new("service").expect("fixture component name"),
+            Box::new(Configured::new(id(432), "value")),
+        )
         .declare_resource(ResourceSpecification {
             id: resource.clone(),
             role: ResourceRole::IndexBackend,
@@ -417,7 +558,10 @@ fn resource_recipes_roundtrip_with_desired_topology_and_require_declared_resourc
     let decoded = DesiredTopology::from_json(&encoded).unwrap();
     assert_eq!(decoded.resource_configurations[&resource], recipe);
     assert!(ComputationGraph::builder("undeclared")
-        .service(Box::new(Configured::new("service", "value")))
+        .service(
+            drasi_lib::ComponentName::try_new("service").expect("fixture component name"),
+            Box::new(Configured::new(id(432), "value"))
+        )
         .resource_configuration(resource, recipe)
         .unwrap()
         .build()
@@ -446,19 +590,23 @@ fn opaque_components_export_an_explicit_configuration_error_not_an_empty_configu
         }
     }
     let graph = ComputationGraph::builder("opaque")
-        .service(Box::new(Opaque(
-            ComponentDescriptor::try_new(id("opaque"), vec![]).unwrap(),
-        )))
+        .service(
+            drasi_lib::ComponentName::try_new("opaque").expect("fixture component name"),
+            Box::new(Opaque(
+                ComponentDescriptor::try_new(id(732), vec![]).unwrap(),
+            )),
+        )
         .build()
         .unwrap();
     let snapshot = graph.configuration_snapshot().unwrap();
     assert!(matches!(
-        &snapshot.configurations[&id("opaque")],
+        &snapshot.configurations[&id(732)],
         CapturedComponentConfiguration::Unavailable { reason } if reason.contains("does not expose")
     ));
     assert!(matches!(
         &snapshot.topology.components[0].construction,
-        ComponentConstruction::External { binding } if binding == "opaque"
+        ComponentConstruction::External { binding }
+            if binding.to_string() != id(732).to_string()
     ));
 }
 
@@ -468,7 +616,11 @@ async fn resource_recipes_survive_component_updates_but_never_follow_a_rebound_p
     let resource = ResourceId::try_new("provider").unwrap();
     let recipe = json!({"kind":"example","setting":"old-provider"});
     let mut graph = ComputationGraph::builder("provider-recipes")
-        .component(factory.specification("before"), factory.clone())
+        .component(
+            drasi_lib::ComponentName::try_new("configured").expect("fixture component name"),
+            factory.specification("before"),
+            factory.clone(),
+        )
         .declare_resource(ResourceSpecification {
             id: resource.clone(),
             role: ResourceRole::StateStore,
@@ -489,6 +641,11 @@ async fn resource_recipes_survive_component_updates_but_never_follow_a_rebound_p
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.unwrap();
+        let started = control
+            .start_requested(control.desired_snapshot().revision, GraphSelection::All)
+            .await
+            .unwrap();
+        assert_eq!(started.summary, OperationSummary::Completed);
         let before = control.configuration_snapshot().unwrap();
         let mut changed = before.topology.components[0].clone();
         changed.construction = ComponentConstruction::Factory(factory.specification("after"));

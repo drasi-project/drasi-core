@@ -17,7 +17,7 @@ fn paired(
     settings: SqliteConfig,
     owner: Arc<QuerySourceProgress>,
 ) -> Result<(SqliteSource, Arc<SqliteSnapshot>)> {
-    SqliteSource::coordinated(id("source"), stream("changes"), settings, owner)
+    SqliteSource::coordinated(id(SOURCE_ID), stream("changes"), settings, owner)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -150,7 +150,10 @@ async fn empty_snapshot_commits_a_real_zero_boundary_before_the_first_live_trans
         .with_bootstrap(snapshot);
     consumer.start().await?;
     assert!(rows(&consumer).is_empty());
-    let checkpoint = &owner.snapshot().checkpoints[&SourceProgressKey::Source("source".into())];
+    let checkpoint = &owner.snapshot().checkpoints[&SourceProgressKey::Source(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    )];
     assert_eq!(checkpoint.sequence, 0);
     assert!(
         checkpoint.source_position.is_some(),
@@ -164,7 +167,11 @@ async fn empty_snapshot_commits_a_real_zero_boundary_before_the_first_live_trans
         [serde_json::json!({"id":1,"value":"first"})]
     );
     assert_eq!(
-        owner.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+        owner.snapshot().checkpoints[&SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")
+        )]
+            .sequence,
         1
     );
     producer.stop().await?;
@@ -198,7 +205,11 @@ async fn snapshot_and_live_changes_share_keys_and_resume_without_reinitializing(
     );
     assert!(owner.snapshot().bootstrap_complete);
     assert_eq!(
-        owner.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+        owner.snapshot().checkpoints[&SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")
+        )]
+            .sequence,
         0
     );
     producer.start().await?;
@@ -329,7 +340,7 @@ async fn coordinated_journals_reject_mode_changes_and_missing_initialization_ide
         consumer.start().await?;
         consumer.stop().await?;
         if fault == "reset" {
-            consumer.deprovision().await?;
+            consumer.delete_owned_resources().await?;
         }
         drop(producer);
         drop(consumer);
@@ -416,7 +427,7 @@ async fn cancelled_snapshot_keeps_the_client_lease_until_blocked_sqlite_cleanup_
     let mut settings = config(directory.path());
     settings.shutdown_timeout_ms = NonZeroU64::new(20).context("timeout")?;
     let owner = progress();
-    let client = Arc::new(SqliteClientResource::new(id("source"), settings.clone())?);
+    let client = Arc::new(SqliteClientResource::new(id(SOURCE_ID), settings.clone())?);
     let (producer, snapshot) = paired(settings.clone(), owner.clone())?;
     let producer = producer.with_client_resource(client.clone())?;
     let started = Arc::new(tokio::sync::Notify::new());

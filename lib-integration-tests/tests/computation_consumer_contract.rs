@@ -147,7 +147,7 @@ async fn producer(capacity: usize) -> Result<ContinuousQueryTransformer> {
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "consumer-contract".into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new("00000000-0000-0000-0000-00000000002e")?,
             query: "MATCH (n:Person) RETURN n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -197,8 +197,9 @@ async fn consumer(
     policy: ConsumerRecoveryPolicy,
 ) -> Result<(QueryReplayTransformer, CheckpointedSink)> {
     let mut replay = QueryReplayTransformer::new(
-        ComponentId::try_new("replay")?,
-        "query".into(),
+        ComponentId::try_new("3980ccaf-a77f-5bdf-b4df-7f85ade115a5")?,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID"),
         StreamId::try_new("replay/out")?,
         query.results(),
         progress.clone(),
@@ -207,7 +208,7 @@ async fn consumer(
     let mut sink = CheckpointedSink::new(
         Box::new(Sink {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("sink")?,
+                ComponentId::try_new("95f3fb76-63b4-5b28-a8d1-7c831bbc86a1")?,
                 vec![PortDescriptor::new(
                     PortId::try_new("in")?,
                     PortDirection::Input,
@@ -265,7 +266,14 @@ async fn recreated_volatile_query_cannot_reuse_a_consumers_same_numbered_checkpo
         deliver(&mut sink, replay.on_wakeup().await?).await?;
         assert_eq!(applied.names(), ["Alice"]);
         assert_eq!(
-            progress.load("query").await?.expect("checkpoint").sequence,
+            progress
+                .load(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID")
+                )
+                .await?
+                .expect("checkpoint")
+                .sequence,
             1
         );
         replay.stop().await?;
@@ -324,7 +332,10 @@ async fn recreated_volatile_query_cannot_reuse_a_consumers_same_numbered_checkpo
             );
             assert_eq!(
                 progress
-                    .load("query")
+                    .load(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                            .expect("fixture UUID")
+                    )
                     .await?
                     .expect("new checkpoint")
                     .sequence,
@@ -361,7 +372,12 @@ async fn live_sequence_gaps_recover_or_apply_the_explicit_policy_before_advancin
                 assert_eq!(applied.names(), ["Alice"]);
                 assert_eq!(
                     progress
-                        .load("query")
+                        .load(
+                            &drasi_core::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000002e"
+                            )
+                            .expect("fixture UUID")
+                        )
                         .await?
                         .expect("unchanged checkpoint")
                         .sequence,
@@ -379,7 +395,12 @@ async fn live_sequence_gaps_recover_or_apply_the_explicit_policy_before_advancin
                 );
                 assert_eq!(
                     progress
-                        .load("query")
+                        .load(
+                            &drasi_core::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000002e"
+                            )
+                            .expect("fixture UUID")
+                        )
                         .await?
                         .expect("handled checkpoint")
                         .sequence,
@@ -422,7 +443,14 @@ async fn checkpointed_sink_rejects_an_unexplained_live_gap_without_running_the_h
     assert_eq!(applied.calls.lock().expect("calls").len(), count);
     assert_eq!(applied.names(), ["Alice"]);
     assert_eq!(
-        progress.load("query").await?.expect("checkpoint").sequence,
+        progress
+            .load(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await?
+            .expect("checkpoint")
+            .sequence,
         1
     );
     replay.stop().await?;
@@ -455,7 +483,14 @@ async fn failed_gap_replay_does_not_checkpoint_the_unhandled_suffix() -> Result<
     assert!(error.to_string().contains("injected handling failure"));
     assert_eq!(applied.names(), ["Alice"]);
     assert_eq!(
-        progress.load("query").await?.expect("checkpoint").sequence,
+        progress
+            .load(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await?
+            .expect("checkpoint")
+            .sequence,
         1
     );
 
@@ -466,7 +501,14 @@ async fn failed_gap_replay_does_not_checkpoint_the_unhandled_suffix() -> Result<
     deliver(&mut sink, replay.on_wakeup().await?).await?;
     assert_eq!(applied.names(), ["Alice", "Bob", "Charlie"]);
     assert_eq!(
-        progress.load("query").await?.expect("checkpoint").sequence,
+        progress
+            .load(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await?
+            .expect("checkpoint")
+            .sequence,
         3
     );
     replay.stop().await?;

@@ -33,16 +33,30 @@ pub fn builder() -> DrasiLibBuilder {
 pub async fn wait_for_gap_recovery(
     core: &DrasiLib,
     store: &dyn drasi_lib::StateStoreProvider,
-    reaction: &str,
-    query: &str,
+    reaction: &drasi_core_types::ComponentName,
+    query: &drasi_core_types::ComponentName,
     produced: u64,
 ) -> anyhow::Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let output = core.get_query_output_metrics(query).await?;
+            let output = core.get_query_output_metrics_by_name(query).await?;
             // Covered broadcast lag can be replayed without recording an outbox gap.
             if output.outbox_latest_seq >= produced {
-                if let Some(bytes) = store.get(reaction, &format!("checkpoint:{query}")).await? {
+                let reaction_id = core
+                    .component_by_name(reaction)
+                    .map_err(|error| anyhow::anyhow!("reaction {reaction} not found: {error}"))?
+                    .id()
+                    .clone();
+                let query_id = core
+                    .component_by_name(query)
+                    .map_err(|error| anyhow::anyhow!("query {query} not found: {error}"))?
+                    .id()
+                    .clone();
+                let partition = drasi_core_types::StorePartition::component(reaction_id);
+                if let Some(bytes) = store
+                    .get(&partition, &format!("checkpoint:{query_id}"))
+                    .await?
+                {
                     let checkpoint: drasi_lib::reactions::checkpoint::ReactionCheckpoint =
                         bincode::deserialize(&bytes)?;
                     if checkpoint.sequence >= produced {

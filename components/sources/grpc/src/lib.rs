@@ -92,7 +92,7 @@
 //! };
 //!
 //! let source = Arc::new(GrpcSource::new("my-grpc-source", config)?);
-//! drasi.add_source(source).await?;
+//! drasi.add_source(drasi_lib::Source::id(&source).to_owned(), source).await?;
 //! ```
 //!
 //! # Client Example (using grpcurl)
@@ -172,7 +172,7 @@ impl GrpcSource {
     ///     .with_bootstrap_provider(my_provider)
     ///     .build()?;
     /// ```
-    pub fn builder(id: impl Into<String>) -> GrpcSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> GrpcSourceBuilder {
         GrpcSourceBuilder::new(id)
     }
 
@@ -208,8 +208,8 @@ impl GrpcSource {
     ///
     /// let source = GrpcSource::new("my-grpc-source", config)?;
     /// ```
-    pub fn new(id: impl Into<String>, config: GrpcSourceConfig) -> Result<Self> {
-        let id = id.into();
+    pub fn new(id: drasi_lib::ComponentId, config: GrpcSourceConfig) -> Result<Self> {
+        let id = id.clone();
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -224,12 +224,12 @@ impl GrpcSource {
     /// The event channel is automatically injected when the source is added
     /// to DrasiLib via `add_source()`.
     pub fn with_dispatch(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         config: GrpcSourceConfig,
         dispatch_mode: Option<DispatchMode>,
         dispatch_buffer_capacity: Option<usize>,
     ) -> Result<Self> {
-        let id = id.into();
+        let id = id.clone();
         let mut params = SourceBaseParams::new(id);
         if let Some(mode) = dispatch_mode {
             params = params.with_dispatch_mode(mode);
@@ -248,7 +248,7 @@ impl GrpcSource {
 
 #[async_trait]
 impl Source for GrpcSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -310,15 +310,19 @@ impl Source for GrpcSource {
                     .as_ref()
                     .expect("durability checked above")
                     .to_wal_config();
-                wal.register(&self.base.id, wal_config.clone())
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to register WAL for source '{}': {}",
-                            self.base.id,
-                            e
-                        )
-                    })?;
+                wal.register(
+                    &drasi_lib::StorageScope::default(),
+                    &self.base.id,
+                    wal_config.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to register WAL for source '{}': {}",
+                        self.base.id,
+                        e
+                    )
+                })?;
 
                 info!(
                     "[{}] WAL registered: max_events={}, policy={:?}",
@@ -327,7 +331,7 @@ impl Source for GrpcSource {
 
                 // Resume sequence counter from WAL head
                 let head = wal
-                    .head_sequence(&self.base.id)
+                    .head_sequence(&drasi_lib::StorageScope::default(), &self.base.id)
                     .await
                     .context("Cannot restore the committed gRPC WAL head")?;
                 self.base.begin_wal_subscriptions(head);
@@ -496,16 +500,17 @@ impl Source for GrpcSource {
         self.base.complete_wal_subscriptions();
     }
 
-    async fn deprovision(&self) -> Result<()> {
+    async fn delete_owned_resources(&self) -> Result<()> {
         // Delete WAL data if durability was enabled
         let wal_guard = self.wal.read().await;
         if let Some(ref wal) = *wal_guard {
-            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
-            if let Err(e) = wal.delete_wal(&self.base.id).await {
-                warn!(
-                    "[{}] Failed to delete WAL during deprovision: {}",
-                    self.base.id, e
-                );
+            info!("[{}] Deleting owned WAL data", self.base.id);
+            if let Err(e) = wal
+                .delete_wal(&drasi_lib::StorageScope::default(), &self.base.id)
+                .await
+            {
+                warn!("[{}] Failed to delete owned WAL data: {}", self.base.id, e);
+                return Err(e.into());
             }
         }
         drop(wal_guard);
@@ -516,8 +521,8 @@ impl Source for GrpcSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -533,7 +538,7 @@ impl Source for GrpcSource {
 /// Handles incoming gRPC requests and dispatches events to registered subscribers.
 struct GrpcSourceService {
     /// The source ID used for event attribution
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     /// Instance ID for log routing isolation
     instance_id: String,
     /// Owned SourceBase for allocating sequences and dispatching events
@@ -557,7 +562,14 @@ impl SourceService for GrpcSourceService {
                     let dispatch_guard = self.dispatch_order.lock().await;
                     // WAL append before ACK (if durability enabled)
                     let wal_seq = if let Some(ref wal) = self.wal {
-                        match wal.append(&self.source_id, &source_change).await {
+                        match wal
+                            .append(
+                                &drasi_lib::StorageScope::default(),
+                                &self.source_id,
+                                &source_change,
+                            )
+                            .await
+                        {
                             Ok(seq) => {
                                 trace!(
                                     "[{}] WAL append succeeded: sequence={}",
@@ -671,7 +683,7 @@ impl SourceService for GrpcSourceService {
                             let dispatch_guard = dispatch_order.lock().await;
                             // WAL append before dispatch (if durability enabled)
                             let wal_seq = if let Some(ref wal) = wal {
-                                match wal.append(&source_id, &source_change).await {
+                                match wal.append(&drasi_lib::StorageScope::default(), &source_id, &source_change).await {
                                     Ok(seq) => {
                                         trace!(
                                             "[{source_id}] WAL append succeeded (stream): sequence={seq}"
@@ -839,7 +851,7 @@ impl SourceService for GrpcSourceService {
 /// - Element data cannot be converted
 fn convert_proto_to_source_change(
     proto_change: &ProtoSourceChange,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
 ) -> Result<drasi_core::models::SourceChange> {
     use drasi_core::models::SourceChange;
     use proto::source_change::Change;
@@ -873,7 +885,7 @@ fn convert_proto_to_source_change(
 /// Handles both Node and Relation element types.
 fn convert_proto_element_to_core(
     proto_element: &proto::Element,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
 ) -> Result<drasi_core::models::Element> {
     use drasi_core::models::{Element, ElementReference};
     use proto::element::Element as ProtoElementType;
@@ -925,11 +937,11 @@ fn convert_proto_element_to_core(
                 metadata,
                 properties,
                 in_node: ElementReference {
-                    source_id: Arc::from(in_node.source_id.as_str()),
+                    namespace: Arc::from(in_node.namespace.as_str()),
                     element_id: Arc::from(in_node.element_id.as_str()),
                 },
                 out_node: ElementReference {
-                    source_id: Arc::from(out_node.source_id.as_str()),
+                    namespace: Arc::from(out_node.namespace.as_str()),
                     element_id: Arc::from(out_node.element_id.as_str()),
                 },
             })
@@ -941,7 +953,7 @@ fn convert_proto_element_to_core(
 /// Convert protobuf ElementMetadata to Drasi Core ElementMetadata
 fn convert_proto_metadata_to_core(
     proto_metadata: &proto::ElementMetadata,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
 ) -> Result<drasi_core::models::ElementMetadata> {
     use drasi_core::models::{ElementMetadata, ElementReference};
 
@@ -952,7 +964,7 @@ fn convert_proto_metadata_to_core(
 
     Ok(ElementMetadata {
         reference: ElementReference {
-            source_id: Arc::from(source_id),
+            namespace: Arc::from(source_id.as_str()),
             element_id: Arc::from(reference.element_id.as_str()),
         },
         labels: Arc::from(
@@ -1053,7 +1065,7 @@ fn proto_value_to_json(value: &prost_types::Value) -> serde_json::Value {
 ///     .build()?;
 /// ```
 pub struct GrpcSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     host: String,
     port: u16,
     endpoint: Option<String>,
@@ -1067,9 +1079,9 @@ pub struct GrpcSourceBuilder {
 
 impl GrpcSourceBuilder {
     /// Create a new gRPC source builder with the given ID and default values
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             host: "0.0.0.0".to_string(),
             port: 50051,
             endpoint: None,
@@ -1169,7 +1181,7 @@ impl GrpcSourceBuilder {
             durability: self.durability,
         };
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }

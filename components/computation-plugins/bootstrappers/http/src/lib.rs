@@ -41,7 +41,7 @@ impl BootstrapFactory for HttpBootstrapFactory {
                 .expect("constant implementation"),
             configuration_version: 1,
             configuration: ConfigSchema::from_fields([
-                ("source", ConfigType::String, true),
+                ("source", ConfigType::ComponentId, true),
                 ("stream", ConfigType::String, true),
                 ("settings", ConfigType::Object, true),
                 ("nodeLabels", ConfigType::Array, false),
@@ -71,8 +71,8 @@ impl BootstrapFactory for HttpBootstrapFactory {
             .scope
             .clone()
             .context("HTTP bootstrap requires query scope")?;
-        ComponentId::try_new(scope.instance_id.as_str())?;
-        ComponentId::try_new(scope.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+        drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
         let mut provider =
             HttpBootstrapProvider::new(serde_json::from_value(request.configuration.clone())?)?;
         provider.query_scope = Some((scope, request.id.clone()));

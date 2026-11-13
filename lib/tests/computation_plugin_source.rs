@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -81,6 +85,58 @@ fn row(id: &str) -> SourceChange {
         },
     }
 }
+
+#[test]
+fn subscription_replacement_preserves_the_source_and_rejects_rebinding() -> anyhow::Result<()> {
+    let factory = SourcePluginAdapterFactory::default();
+    let current = ComponentSpecification {
+        descriptor: ComponentDescriptor::try_new(
+            id("source"),
+            vec![PortDescriptor::new(
+                port("out"),
+                PortDirection::Output,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )?,
+        role: ComponentRole::Source,
+        completion: None,
+        implementation: factory.descriptor().implementation.clone(),
+        configuration_version: 1,
+        configuration: BTreeMap::from([(
+            Arc::from("stream"),
+            ConfigurationValue::Literal("app/out".into()),
+        )]),
+        dependencies: BTreeMap::from([
+            (Arc::from("source"), vec![resource("host")]),
+            (Arc::from("subscription"), vec![resource("subscription")]),
+        ]),
+    };
+    let mut proposed = current.clone();
+    proposed.dependencies.insert(
+        Arc::from("subscription"),
+        vec![resource("replacement-subscription")],
+    );
+    assert_eq!(
+        factory.plan_update(&current, &proposed)?,
+        ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        }
+    );
+    proposed
+        .dependencies
+        .insert(Arc::from("source"), vec![resource("another-host")]);
+    assert!(factory.plan_update(&current, &proposed).is_err());
+    proposed = current.clone();
+    proposed.configuration.insert(
+        Arc::from("stream"),
+        ConfigurationValue::Literal("another/out".into()),
+    );
+    assert!(factory.plan_update(&current, &proposed).is_err());
+    Ok(())
+}
+
 struct Sink {
     descriptor: ComponentDescriptor,
     output: mpsc::Sender<ChangeEnvelope>,
@@ -108,7 +164,18 @@ impl EnvelopeSink for Sink {
     }
 }
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("id")
+    match value {
+        "first" => {
+            ComponentId::try_new("00000000-0000-0000-0000-0000000001c3").expect("fixture UUID")
+        }
+        "second" => {
+            ComponentId::try_new("00000000-0000-0000-0000-000000000300").expect("fixture UUID")
+        }
+        "query" => fixture_support::component_id(46),
+        "source" | "app" => fixture_support::component_id(77),
+        "sink" => fixture_support::component_id(101),
+        other => panic!("missing explicit fixture component ID for {other}"),
+    }
 }
 fn port(value: &str) -> PortId {
     PortId::try_new(value).expect("port")
@@ -125,13 +192,14 @@ struct ApplicationFactory {
     durable: bool,
     subscription_control: bool,
     subscriptions: Arc<Mutex<Vec<drasi_lib::SourceSubscriptionSettings>>>,
-    removed: Arc<Mutex<Vec<String>>>,
+    removed: Arc<Mutex<Vec<ComponentId>>>,
 }
 #[async_trait]
 impl SourcePluginConstructor for ApplicationFactory {
     async fn create(&self) -> anyhow::Result<Box<dyn drasi_lib::Source>> {
         let (source, input) = ApplicationSource::new(
-            "app",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c4")
+                .expect("fixture UUID"),
             ApplicationSourceConfig {
                 properties: Default::default(),
                 durability: self.durable.then(|| drasi_lib::DurabilityConfig {
@@ -153,7 +221,7 @@ impl SourcePluginConstructor for ApplicationFactory {
 struct TrackedApplication {
     source: ApplicationSource,
     subscriptions: Arc<Mutex<Vec<drasi_lib::SourceSubscriptionSettings>>>,
-    removed: Arc<Mutex<Vec<String>>>,
+    removed: Arc<Mutex<Vec<ComponentId>>>,
     subscription_control: bool,
 }
 
@@ -177,7 +245,7 @@ impl drasi_lib::Source for TrackedApplication {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         self.source.id()
     }
     fn type_name(&self) -> &str {
@@ -189,8 +257,8 @@ impl drasi_lib::Source for TrackedApplication {
     fn supports_replay(&self) -> bool {
         self.source.supports_replay()
     }
-    async fn initialize(&self, context: drasi_lib::SourceRuntimeContext) {
-        self.source.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::SourceRuntimeContext) {
+        self.source.bind_runtime_context(context).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.source.start().await
@@ -228,7 +296,7 @@ impl drasi_lib::Source for TrackedApplication {
                 drasi_lib::channels::SourceEvent::Control(
                     drasi_lib::channels::SourceControl::Subscription {
                         query_id: settings.query_id.clone(),
-                        query_node_id: "subscription".into(),
+                        query_instance_id: "subscription".into(),
                         node_labels: vec![],
                         rel_labels: vec![],
                         operation: drasi_lib::channels::ControlOperation::Insert,
@@ -249,7 +317,7 @@ impl drasi_lib::Source for TrackedApplication {
         }
         Ok(response)
     }
-    async fn remove_position_handle(&self, id: &str) {
+    async fn remove_position_handle(&self, id: &drasi_core_types::ComponentId) {
         self.removed.lock().expect("removed").push(id.to_owned());
         self.source.remove_position_handle(id).await;
     }
@@ -260,6 +328,7 @@ impl drasi_lib::Source for TrackedApplication {
 
 async fn scenario() {
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -278,7 +347,7 @@ async fn scenario() {
         .expect("instance");
     let services = drasi.computation_plugin_services().expect("services");
     let factory = Arc::new(ApplicationFactory::default());
-    let host = SourcePluginHost::recreatable(factory.clone(), services.clone())
+    let host = SourcePluginHost::from_constructor(factory.clone(), services.clone())
         .await
         .expect("real source factory");
     let input = factory
@@ -308,7 +377,8 @@ async fn scenario() {
         },
         stream.clone(),
         Some(progress.clone()),
-        "query",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID"),
     )
     .expect("subscription");
     let bootstrap = LegacySourceBootstrap::new(vec![subscription.clone()]);
@@ -330,7 +400,14 @@ async fn scenario() {
     .with_bootstrap(bootstrap.clone());
     let results = query.results();
     let (sender, mut output) = mpsc::channel(8);
-    let source_factory = Arc::new(SourcePluginAdapterFactory::default());
+    let source_factory = FactoryRegistry::standard()
+        .get(
+            &SourcePluginAdapterFactory::default()
+                .descriptor()
+                .implementation,
+        )
+        .expect("registered source adapter factory")
+        .clone();
     let source_descriptor = ComponentDescriptor::try_new(
         id("source"),
         vec![PortDescriptor::new(
@@ -345,6 +422,7 @@ async fn scenario() {
         .declare(ComputationGraph::builder(instance_graph_id()))
         .expect("services")
         .component(
+            ComponentName::try_new("source").expect("fixture name"),
             ComponentSpecification {
                 descriptor: source_descriptor,
                 role: ComponentRole::Source,
@@ -367,8 +445,8 @@ async fn scenario() {
             },
             source_factory,
         )
-        .transformer(Box::new(query))
-        .sink(Box::new(Sink {
+        .fixture_transformer(Box::new(query))
+        .fixture_sink(Box::new(Sink {
             descriptor: ComponentDescriptor::try_new(
                 id("sink"),
                 vec![PortDescriptor::new(
@@ -545,7 +623,7 @@ struct QueryDelivery {
 async fn receive_queries(
     output: &mut tokio::sync::broadcast::Receiver<ChangeEnvelope>,
     sequence: u64,
-    deliveries: &mut BTreeMap<String, QueryDelivery>,
+    deliveries: &mut BTreeMap<ComponentId, QueryDelivery>,
     permitted_replay: Option<u64>,
 ) {
     let mut queries = std::collections::BTreeSet::new();
@@ -555,7 +633,7 @@ async fn receive_queries(
         let query = QueryChangeCodec::metadata(&envelope)
             .expect("metadata")
             .query_id;
-        assert!(["first", "second"].contains(&query.as_str()));
+        assert!([id("first"), id("second")].contains(&query));
         let logical = QueryChangeCodec::query_sequence(&envelope).expect("query position");
         let results = QueryChangeCodec::to_legacy_result(&envelope)
             .expect("logical result")
@@ -601,7 +679,12 @@ async fn receive_queries(
     }
     assert_eq!(
         queries,
-        std::collections::BTreeSet::from(["first".into(), "second".into()])
+        std::collections::BTreeSet::from([
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c3")
+                .expect("fixture UUID"),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000300")
+                .expect("fixture UUID")
+        ])
     );
 }
 
@@ -623,6 +706,7 @@ async fn persistent_shared_source() {
     let mut deliveries = BTreeMap::new();
     for generation in 0..2 {
         let drasi = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -645,19 +729,25 @@ async fn persistent_shared_source() {
         let services = pipeline.services();
         let catalog = pipeline.catalog();
         let mut output = catalog.subscribe();
-        let host = SourcePluginHost::recreatable(factory.clone(), services.clone())
+        let host = SourcePluginHost::from_constructor(factory.clone(), services.clone())
             .await
             .expect("source");
+        let source_id = host.id().clone();
         let mut pipeline = pipeline
             .source(host, SourceSubscriptionOptions::default())
             .expect("source binding");
         for query in ["first", "second"] {
             pipeline = pipeline.query(
-                drasi_lib::Query::cypher(query)
-                    .query("MATCH (n:Item) RETURN n.name AS name")
-                    .from_input("app")
-                    .enable_bootstrap(false)
-                    .build(),
+                drasi_lib::Query::cypher(
+                    drasi_core_types::ComponentName::try_new(query)
+                        .expect("fixture component name"),
+                )
+                .query("MATCH (n:Item) RETURN n.name AS name")
+                .from_input_by_id(source_id.clone())
+                .enable_bootstrap(false)
+                .build()
+                .expect("valid query")
+                .with_assigned_id(id(query)),
             );
         }
         let managed = InstalledComponents::add(
@@ -698,7 +788,11 @@ async fn persistent_shared_source() {
                     .wal
                     .as_ref()
                     .expect("WAL")
-                    .append("app", &row("offline"))
+                    .append(
+                        &drasi_core_types::StorageScope::default(),
+                        &source_id,
+                        &row("offline"),
+                    )
                     .await
                     .expect("offline WAL event"),
                 2
@@ -736,7 +830,13 @@ async fn persistent_shared_source() {
         } else {
             assert_eq!(
                 catalog
-                    .snapshot("first", Duration::from_secs(5))
+                    .snapshot(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-0000000001c3"
+                        )
+                        .expect("fixture UUID"),
+                        Duration::from_secs(5)
+                    )
                     .await
                     .expect("recovered")
                     .rows
@@ -771,7 +871,7 @@ async fn persistent_shared_source() {
             receive_queries(&mut output, 4, &mut deliveries, Some(3)).await;
             for query in ["first", "second"] {
                 let snapshot = catalog
-                    .snapshot(query, Duration::from_secs(5))
+                    .snapshot(&id(query), Duration::from_secs(5))
                     .await
                     .unwrap();
                 assert_eq!(snapshot.as_of_sequence, 4);
@@ -779,7 +879,13 @@ async fn persistent_shared_source() {
             }
         }
         assert_eq!(
-            wal.head_sequence("app").await.unwrap(),
+            services
+                .wal
+                .as_ref()
+                .expect("WAL")
+                .head_sequence(&drasi_core_types::StorageScope::default(), &source_id)
+                .await
+                .unwrap(),
             if generation == 0 { 3 } else { 4 }
         );
         drasi.shutdown().await.expect("dispose instance resources");
@@ -795,6 +901,7 @@ async fn actual_wal_plugin_replays_shared_source_and_recovers_reconstructed_nati
 
 async fn volatile_restart(subscription_control: bool) {
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -815,20 +922,25 @@ async fn volatile_restart(subscription_control: bool) {
         subscription_control,
         ..Default::default()
     });
-    let source = SourcePluginHost::recreatable(factory.clone(), pipeline.services())
+    let source = SourcePluginHost::from_constructor(factory.clone(), pipeline.services())
         .await
         .expect("source");
+    let source_id = source.id().clone();
     let catalog = pipeline.catalog();
     let mut results = catalog.subscribe();
     let graph = pipeline
         .source(source, SourceSubscriptionOptions::default())
         .expect("bind source")
         .query(
-            drasi_lib::Query::cypher("query")
-                .query("MATCH (n:Item) RETURN n.name AS name")
-                .from_input("app")
-                .enable_bootstrap(false)
-                .build(),
+            drasi_lib::Query::cypher(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .query("MATCH (n:Item) RETURN n.name AS name")
+            .from_input_by_id(source_id)
+            .enable_bootstrap(false)
+            .build()
+            .expect("valid query")
+            .with_assigned_id(id("query")),
         )
         .build()
         .expect("graph");

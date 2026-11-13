@@ -45,14 +45,17 @@ impl IncompleteBackend {
 
 #[async_trait]
 impl IndexBackendPlugin for IncompleteBackend {
-    async fn create_indexes(&self, query: &str) -> Result<CreatedIndexes, IndexError> {
+    async fn create_indexes(
+        &self,
+        query: &drasi_core_types::ComponentId,
+    ) -> Result<CreatedIndexes, IndexError> {
         Ok(self.omit(self.inner.create_indexes(query).await?))
     }
 
     async fn create_scoped_indexes(
         &self,
-        storage_scope: &str,
-        query: &str,
+        storage_scope: &drasi_core_types::StorageScope,
+        query: &drasi_core_types::ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         Ok(self.omit(
             self.inner
@@ -81,7 +84,7 @@ async fn open(
     let mut query = ContinuousQueryTransformer::construct(
         ContinuousQueryDefinition {
             graph_id: graph.into(),
-            id: ComponentId::try_new("query")?,
+            id: crate::test_helpers::component_id(46),
             query: TEXT.into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -274,7 +277,7 @@ async fn incomplete_storage_preserves_current_state() -> anyhow::Result<()> {
             let result = ContinuousQueryTransformer::construct(
                 ContinuousQueryDefinition {
                     graph_id: MAIN_GRAPH.into(),
-                    id: ComponentId::try_new("query")?,
+                    id: crate::test_helpers::component_id(46),
                     query: TEXT.into(),
                     language: ComputationQueryLanguage::Cypher,
                     output_stream: StreamId::try_new("query/out")?,
@@ -331,7 +334,7 @@ async fn incomplete_persistent_storage_is_rejected_on_multi_thread_runtime() -> 
 fn retired_query_execution_mode_is_rejected() -> anyhow::Result<()> {
     let factory = Arc::new(ContinuousQueryFactory::default());
     let mut specification = factory.specification_from_config(
-        ComponentId::try_new("query")?,
+        crate::test_helpers::component_id(46),
         serde_json::json!({
             "query": TEXT,
             "stream": "query/out",
@@ -358,7 +361,11 @@ fn retired_query_execution_mode_is_rejected() -> anyhow::Result<()> {
                 ))),
             ),
         )?
-        .component(specification, factory)
+        .component(
+            crate::config::ComponentName::try_new("query")?,
+            specification,
+            factory,
+        )
         .build();
     let error = match graph {
         Ok(_) => anyhow::bail!("removed execution mode must not be accepted"),
@@ -385,11 +392,30 @@ async fn reset_marker_requires_current_generation_without_rewriting_state() -> a
     query
         .query()?
         .resource_transaction(|| async {
-            outbox.append(&query_reset_key("query"), 1, &bytes).await
+            outbox
+                .append(
+                    &query_reset_key(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002e",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    1,
+                    &bytes,
+                )
+                .await
         })
         .await?;
     let saved = checkpoint.read_all_checkpoints().await?;
-    let retained = outbox.read_from("query", 0).await?;
+    let retained = outbox
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
+        .await?;
     for _ in 0..2 {
         let error = query
             .initialize_recovery()
@@ -404,9 +430,28 @@ async fn reset_marker_requires_current_generation_without_rewriting_state() -> a
         assert_eq!(actual.sequence, expected.sequence);
         assert_eq!(actual.source_position, expected.source_position);
     }
-    assert_eq!(outbox.read_from("query", 0).await?, retained);
     assert_eq!(
-        outbox.read_from(&query_reset_key("query"), 0).await?,
+        outbox
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await?,
+        retained
+    );
+    assert_eq!(
+        outbox
+            .read_from(
+                &query_reset_key(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await?,
         vec![(1, bytes)]
     );
     close(query, provider).await

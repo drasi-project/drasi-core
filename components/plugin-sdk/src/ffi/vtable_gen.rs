@@ -18,13 +18,12 @@
 //! trait implementations into FFI-safe vtables. Each `extern "C"` function pointer
 //! handles:
 //! - `catch_unwind` for panic safety at the FFI boundary
-//! - Async→sync bridging via `handle.spawn` + channel wait
+//! - Async→sync bridging by joining a task on the plugin runtime
 //! - Lifecycle event emission
 //! - Error → `FfiResult` conversion
 
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::sync::mpsc;
 use std::sync::Arc;
 
 use drasi_core::models::SourceChange;
@@ -35,11 +34,14 @@ use drasi_lib::channels::ComponentUpdateReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::sources::Source;
-use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext, StateStoreProvider};
+use drasi_lib::{
+    ComponentId, ComponentStatus, DispatchMode, SourceRuntimeContext, StateStoreProvider,
+};
 
 use super::bootstrap_proxy::FfiBootstrapProviderProxy;
 use super::callbacks::FfiLifecycleEvent;
 use super::callbacks::FfiLifecycleEventType;
+use super::lifecycle::{InitializationState, LifecycleOperation};
 use super::payload::{BootstrapEventPayload, SourceEventPayload};
 use super::state_store_proxy::FfiStateStoreProxy;
 use super::types::*;
@@ -49,7 +51,7 @@ use crate::descriptor::{
     SecretStorePluginDescriptor, SourcePluginDescriptor,
 };
 
-type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
+type LifecycleEmitterFn = fn(&ComponentId, FfiLifecycleEventType, &str);
 
 struct StatusTarget {
     callback: Option<super::callbacks::LifecycleCallbackFn>,
@@ -103,7 +105,7 @@ impl StatusForwarder {
                 let message = message.as_deref().unwrap_or("");
                 if let Some(callback) = target.callback {
                     let event = FfiLifecycleEvent {
-                        component_id: FfiStr::from_str(&component_id),
+                        component_id: FfiStr::from_str(component_id.as_str()),
                         component_type: FfiStr::from_str(target.component_type),
                         event_type: FfiLifecycleEventType::Error,
                         message: FfiStr::from_str(message),
@@ -266,7 +268,8 @@ const _: () = assert!(
 /// The vtable functions are `extern "C"` (synchronous) but are called from the
 /// host's async context. We cannot call `plugin_handle.block_on()` directly
 /// because tokio detects the nested runtime and panics. Instead we spawn a
-/// green thread on the plugin runtime and wait for the result via a channel.
+/// task on the plugin runtime and synchronously poll its retained join handle.
+/// The caller must run this synchronous callback off its async runtime thread.
 ///
 /// # Safety
 /// The future must not outlive any data it references. Since we block until
@@ -275,63 +278,122 @@ fn dispatch_to_runtime<R: Send + 'static>(
     handle: &tokio::runtime::Handle,
     future: impl std::future::Future<Output = R> + Send + 'static,
 ) -> R {
-    let (tx, rx) = mpsc::sync_channel::<R>(0);
-    handle.spawn(async move {
-        let result = future.await;
-        let _ = tx.send(result);
-    });
-    rx.recv().expect("plugin runtime task dropped unexpectedly")
-}
-
-#[derive(Default)]
-pub(crate) struct InitializationState {
-    failure: std::sync::OnceLock<String>,
-}
-
-impl InitializationState {
-    fn failure(&self) -> Option<&str> {
-        self.failure.get().map(String::as_str)
+    struct WakeCaller(std::thread::Thread);
+    impl std::task::Wake for WakeCaller {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
     }
 
-    fn run<T>(
-        &self,
-        prepare: impl FnOnce() -> T,
-        initialize: impl FnOnce(T) -> FfiResult,
-    ) -> Result<(), &str> {
-        let result = catch_panic_ffi(std::panic::AssertUnwindSafe(|| {
-            // Take ownership of transferred resources even when rejecting reuse.
-            let context = prepare();
-            match self.failure() {
-                Some(error) => FfiResult::err(error.to_owned()),
-                None => initialize(context),
+    let mut task = handle.spawn(future);
+    let waker = std::task::Waker::from(Arc::new(WakeCaller(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    loop {
+        match std::future::Future::poll(std::pin::Pin::new(&mut task), &mut context) {
+            std::task::Poll::Ready(Ok(result)) => return result,
+            std::task::Poll::Ready(Err(error)) if error.is_panic() => {
+                std::panic::resume_unwind(error.into_panic());
             }
-        }));
-        if let Err(error) = unsafe { result.into_result() } {
-            self.failure.get_or_init(|| {
-                format!("{error}; initialization failed: cleanup and recreate this plugin instance")
-            });
-        }
-        match self.failure() {
-            Some(error) => Err(error),
-            None => Ok(()),
+            std::task::Poll::Ready(Err(error)) => {
+                panic!("plugin runtime task interrupted: {error}");
+            }
+            std::task::Poll::Pending => std::thread::park(),
         }
     }
 }
 
-fn dispatch_initialization(
+fn dispatch_lifecycle(
     handle: &tokio::runtime::Handle,
-    future: impl std::future::Future<Output = ()> + Send + 'static,
+    future: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
 ) -> FfiResult {
-    // Joining preserves the original panic and waits for the initializer's
+    // Joining preserves the original panic and waits for the callback's
     // unwind before reporting failure across the synchronous C boundary.
-    let task = handle.spawn(future);
-    dispatch_to_runtime(handle, async move {
-        match task.await {
+    catch_panic_ffi(std::panic::AssertUnwindSafe(|| {
+        match dispatch_to_runtime(handle, future) {
             Ok(()) => FfiResult::ok(),
-            Err(error) if error.is_panic() => FfiResult::from_panic(error.into_panic()),
-            Err(error) => FfiResult::err(format!("plugin initialization interrupted: {error}")),
+            Err(error) => FfiResult::err(format!("{error:#}")),
         }
-    })
+    }))
+}
+
+// Both concrete and descriptor-created components must enforce the same
+// per-object contract. The state remains borrowed until dispatch has joined.
+macro_rules! component_lifecycle_functions {
+    ([$($generics:tt)*], [$($args:tt)*], $wrapper:ty, $emit:ident, $log:ident) => {
+        fn lifecycle_call $($generics)* (
+            state: *mut c_void,
+            operation: LifecycleOperation,
+        ) -> FfiResult {
+            catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const $wrapper) };
+            let result = w.initialization.run(operation, || {
+                match operation {
+                    LifecycleOperation::Start => $emit(w, FfiLifecycleEventType::Starting, ""),
+                    LifecycleOperation::Stop => $emit(w, FfiLifecycleEventType::Stopping, ""),
+                    _ => {}
+                }
+                let log_ctx = $log(w);
+                let handle = (w.runtime_handle)().handle().clone();
+                let ptr = SendPtr(state as *const $wrapper);
+                let result = dispatch_lifecycle(&handle, async move {
+                    set_instance_log_ctx(log_ctx);
+                    let inner = unsafe { ptr.as_ref() };
+                    let result = match operation {
+                        LifecycleOperation::Initialize => inner.inner.initialize().await,
+                        LifecycleOperation::Start => inner.inner.start().await,
+                        LifecycleOperation::Stop => inner.inner.stop().await,
+                        LifecycleOperation::Dispose => inner.inner.dispose().await,
+                        LifecycleOperation::PauseProcessing => inner.inner.pause_processing().await,
+                        LifecycleOperation::ResumeProcessing => inner.inner.resume_processing().await,
+                        LifecycleOperation::DeleteOwnedResources => inner.inner.delete_owned_resources().await,
+                    };
+                    clear_instance_log_ctx();
+                    result
+                });
+                if result.error_code == 0 {
+                    match operation {
+                        LifecycleOperation::Start => $emit(w, FfiLifecycleEventType::Started, ""),
+                        LifecycleOperation::Stop => $emit(w, FfiLifecycleEventType::Stopped, ""),
+                        _ => {}
+                    }
+                }
+                result
+            });
+            match result {
+                Ok(()) => FfiResult::ok(),
+                Err(error) => {
+                    $emit(w, FfiLifecycleEventType::Error, &error);
+                    FfiResult::err(error)
+                }
+            }
+            })
+        }
+
+        extern "C" fn initialize_fn $($generics)* (state: *mut c_void) -> FfiResult {
+            lifecycle_call $($args)* (state, LifecycleOperation::Initialize)
+        }
+        extern "C" fn start_fn $($generics)* (state: *mut c_void) -> FfiResult {
+            lifecycle_call $($args)* (state, LifecycleOperation::Start)
+        }
+        extern "C" fn stop_fn $($generics)* (state: *mut c_void) -> FfiResult {
+            lifecycle_call $($args)* (state, LifecycleOperation::Stop)
+        }
+        extern "C" fn dispose_fn $($generics)* (state: *mut c_void) -> FfiResult {
+            lifecycle_call $($args)* (state, LifecycleOperation::Dispose)
+        }
+        extern "C" fn pause_processing_fn $($generics)* (state: *mut c_void) -> FfiResult {
+            lifecycle_call $($args)* (state, LifecycleOperation::PauseProcessing)
+        }
+        extern "C" fn resume_processing_fn $($generics)* (state: *mut c_void) -> FfiResult {
+            lifecycle_call $($args)* (state, LifecycleOperation::ResumeProcessing)
+        }
+        extern "C" fn delete_owned_resources_fn $($generics)* (state: *mut c_void) -> FfiResult {
+            lifecycle_call $($args)* (state, LifecycleOperation::DeleteOwnedResources)
+        }
+    };
 }
 
 fn signal_result_push_exit(callback: FfiResultPushCallbackFn, context: *mut c_void) {
@@ -686,7 +748,7 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
 #[derive(Clone)]
 pub struct InstanceLogContext {
     pub instance_id: String,
-    pub component_id: String,
+    pub component_id: ComponentId,
     pub component_type: String,
     pub log_cb: Option<super::callbacks::LogCallbackFn>,
     pub log_ctx: *mut c_void,
@@ -727,18 +789,18 @@ fn clear_instance_log_ctx() {
 /// Internal wrapper holding a Source impl + runtime handle + lifecycle emitter.
 pub(crate) struct SourceWrapper<T: Source + 'static> {
     pub inner: T,
-    pub cached_id: String,
+    pub cached_id: ComponentId,
     pub cached_type_name: String,
     pub lifecycle_emitter: LifecycleEmitterFn,
     pub runtime_handle: fn() -> &'static tokio::runtime::Runtime,
     pub vtable_executor: AsyncExecutorFn,
-    /// Per-instance log callback (set during initialize, nullable).
+    /// Per-instance log callback (set during context binding, nullable).
     pub instance_log_cb: std::sync::atomic::AtomicPtr<()>,
     pub instance_log_ctx: std::sync::atomic::AtomicPtr<c_void>,
-    /// Per-instance lifecycle callback (set during initialize, nullable).
+    /// Per-instance lifecycle callback (set during context binding, nullable).
     pub instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
-    /// Cached instance_id from FfiRuntimeContext (set during initialize).
+    /// Cached instance_id from FfiRuntimeContext (set during context binding).
     pub instance_id: std::sync::RwLock<String>,
     pub status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
     pub initialization: InitializationState,
@@ -753,7 +815,7 @@ pub fn build_source_vtable<T: Source + 'static>(
 ) -> SourceVtable {
     extern "C" fn id_fn<T: Source + 'static>(state: *const c_void) -> FfiStr {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
-        FfiStr::from_str(&w.cached_id)
+        FfiStr::from_str(w.cached_id.as_str())
     }
 
     extern "C" fn type_name_fn<T: Source + 'static>(state: *const c_void) -> FfiStr {
@@ -808,7 +870,7 @@ pub fn build_source_vtable<T: Source + 'static>(
                 .instance_lifecycle_ctx
                 .load(std::sync::atomic::Ordering::Acquire);
             let event = FfiLifecycleEvent {
-                component_id: FfiStr::from_str(&w.cached_id),
+                component_id: FfiStr::from_str(w.cached_id.as_str()),
                 component_type: FfiStr::from_str("source"),
                 event_type,
                 message: FfiStr::from_str(message),
@@ -843,65 +905,10 @@ pub fn build_source_vtable<T: Source + 'static>(
         })
     }
 
-    extern "C" fn start_fn<T: Source + 'static>(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const SourceWrapper<T>) };
-            if let Some(error) = w.initialization.failure() {
-                emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
-                return FfiResult::err(error.to_owned());
-            }
-            emit_lifecycle_for(w, FfiLifecycleEventType::Starting, "");
-            let log_ctx = build_instance_log_ctx(w);
-            let handle = (w.runtime_handle)().handle().clone();
-            let ptr = SendPtr(state as *const SourceWrapper<T>);
-            let result = dispatch_to_runtime(&handle, async move {
-                set_instance_log_ctx(log_ctx);
-                let inner = unsafe { ptr.as_ref() };
-                let r = inner.inner.start().await;
-                clear_instance_log_ctx();
-                r
-            });
-            match result {
-                Ok(()) => {
-                    emit_lifecycle_for(w, FfiLifecycleEventType::Started, "");
-                    FfiResult::ok()
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    emit_lifecycle_for(w, FfiLifecycleEventType::Error, &msg);
-                    FfiResult::err(msg)
-                }
-            }
-        })
-    }
-
-    extern "C" fn stop_fn<T: Source + 'static>(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const SourceWrapper<T>) };
-            emit_lifecycle_for(w, FfiLifecycleEventType::Stopping, "");
-            let log_ctx = build_instance_log_ctx(w);
-            let handle = (w.runtime_handle)().handle().clone();
-            let ptr = SendPtr(state as *const SourceWrapper<T>);
-            let result = dispatch_to_runtime(&handle, async move {
-                set_instance_log_ctx(log_ctx);
-                let inner = unsafe { ptr.as_ref() };
-                let r = inner.inner.stop().await;
-                clear_instance_log_ctx();
-                r
-            });
-            match result {
-                Ok(()) => {
-                    emit_lifecycle_for(w, FfiLifecycleEventType::Stopped, "");
-                    FfiResult::ok()
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    emit_lifecycle_for(w, FfiLifecycleEventType::Error, &msg);
-                    FfiResult::err(msg)
-                }
-            }
-        })
-    }
+    component_lifecycle_functions!(
+        [<T: Source + 'static>], [::<T>], SourceWrapper<T>,
+        emit_lifecycle_for, build_instance_log_ctx
+    );
 
     extern "C" fn status_fn<T: Source + 'static>(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
@@ -915,22 +922,6 @@ pub fn build_source_vtable<T: Source + 'static>(
             inner.inner.status().await
         });
         component_status_to_ffi(status)
-    }
-
-    extern "C" fn deprovision_fn<T: Source + 'static>(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const SourceWrapper<T>) };
-            let handle = (w.runtime_handle)().handle().clone();
-            let ptr = SendPtr(state as *const SourceWrapper<T>);
-            let result = dispatch_to_runtime(&handle, async move {
-                let inner = unsafe { ptr.as_ref() };
-                inner.inner.deprovision().await
-            });
-            match result {
-                Ok(()) => FfiResult::ok(),
-                Err(e) => FfiResult::err(e.to_string()),
-            }
-        })
     }
 
     extern "C" fn subscribe_fn<T: Source + 'static>(
@@ -951,8 +942,20 @@ pub fn build_source_vtable<T: Source + 'static>(
             emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
             return std::ptr::null_mut();
         }
-        let source_id_str = unsafe { source_id.to_string() };
-        let qid = unsafe { query_id.to_string() };
+        let source_id_str = match decode_component_id(&source_id) {
+            Ok(id) => id,
+            Err(error) => {
+                log::error!("Invalid plugin component identity: {error}");
+                return std::ptr::null_mut();
+            }
+        };
+        let qid = match decode_component_id(&query_id) {
+            Ok(id) => id,
+            Err(error) => {
+                log::error!("Invalid plugin component identity: {error}");
+                return std::ptr::null_mut();
+            }
+        };
         let nodes_str = unsafe { nodes_json.to_string() };
         let rels_str = unsafe { relations_json.to_string() };
 
@@ -1002,56 +1005,69 @@ pub fn build_source_vtable<T: Source + 'static>(
         }
     }
 
-    extern "C" fn initialize_fn<T: Source + 'static>(
+    extern "C" fn bind_runtime_context_fn<T: Source + 'static>(
         state: *mut c_void,
         ctx: *const FfiRuntimeContext,
-    ) {
-        let w = unsafe { &*(state as *const SourceWrapper<T>) };
-        let ffi_ctx = unsafe { &*ctx };
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            let Some(ffi_ctx) = (unsafe { ctx.as_ref() }) else {
+                return FfiResult::err("null source runtime context".into());
+            };
 
-        // Capture per-instance callbacks from the runtime context
-        if let Some(log_cb) = ffi_ctx.log_callback {
-            w.instance_log_cb
-                .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
-            w.instance_log_ctx
-                .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
-        }
-        if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
-            w.instance_lifecycle_cb.store(
-                lifecycle_cb as *mut (),
-                std::sync::atomic::Ordering::Release,
+            let result = w.initialization.bind(
+                || build_source_runtime_context(ffi_ctx),
+                |prepared| {
+                    let (runtime_ctx, status_rx) = match prepared {
+                        Ok(context) => context,
+                        Err(error) => return FfiResult::err(error),
+                    };
+                    // Capture per-instance callbacks from the runtime context
+                    if let Some(log_cb) = ffi_ctx.log_callback {
+                        w.instance_log_cb
+                            .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
+                        w.instance_log_ctx
+                            .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
+                    }
+                    if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
+                        w.instance_lifecycle_cb.store(
+                            lifecycle_cb as *mut (),
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        w.instance_lifecycle_ctx
+                            .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
+                    }
+
+                    // Store instance_id for log context
+                    if let Ok(mut iid) = w.instance_id.write() {
+                        *iid = unsafe { ffi_ctx.instance_id.to_string() };
+                    }
+
+                    let handle = (w.runtime_handle)().handle().clone();
+                    forward_status(
+                        &w.status_forwarder,
+                        status_rx,
+                        ffi_ctx,
+                        "source",
+                        w.lifecycle_emitter,
+                        &handle,
+                    );
+                    let ptr = SendPtr(state as *const SourceWrapper<T>);
+                    dispatch_lifecycle(&handle, async move {
+                        let inner = unsafe { ptr.as_ref() };
+                        inner.inner.bind_runtime_context(runtime_ctx).await;
+                        Ok(())
+                    })
+                },
             );
-            w.instance_lifecycle_ctx
-                .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
-        }
-
-        // Store instance_id for log context
-        if let Ok(mut iid) = w.instance_id.write() {
-            *iid = unsafe { ffi_ctx.instance_id.to_string() };
-        }
-
-        let result = w.initialization.run(
-            || build_source_runtime_context(ffi_ctx),
-            |(runtime_ctx, status_rx)| {
-                let handle = (w.runtime_handle)().handle().clone();
-                forward_status(
-                    &w.status_forwarder,
-                    status_rx,
-                    ffi_ctx,
-                    "source",
-                    w.lifecycle_emitter,
-                    &handle,
-                );
-                let ptr = SendPtr(state as *const SourceWrapper<T>);
-                dispatch_initialization(&handle, async move {
-                    let inner = unsafe { ptr.as_ref() };
-                    inner.inner.initialize(runtime_ctx).await
-                })
-            },
-        );
-        if let Err(error) = result {
-            emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
-        }
+            match result {
+                Ok(()) => FfiResult::ok(),
+                Err(error) => {
+                    emit_lifecycle_for(w, FfiLifecycleEventType::Error, &error);
+                    FfiResult::err(error)
+                }
+            }
+        })
     }
 
     extern "C" fn set_bootstrap_provider_fn<T: Source + 'static>(
@@ -1097,7 +1113,10 @@ pub fn build_source_vtable<T: Source + 'static>(
     ) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const SourceWrapper<T>) };
-            let qid = unsafe { query_id.as_str() }.to_string();
+            let qid = match decode_component_id(&query_id) {
+                Ok(id) => id,
+                Err(error) => return FfiResult::err(error),
+            };
             let handle = (w.runtime_handle)().handle().clone();
             let ptr = SendPtr(state as *const SourceWrapper<T>);
             dispatch_to_runtime(&handle, async move {
@@ -1108,7 +1127,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         })
     }
 
-    let cached_id = source.id().to_string();
+    let cached_id = source.id().clone();
     let cached_type_name = source.type_name().to_string();
 
     let wrapper = Box::new(SourceWrapper {
@@ -1138,8 +1157,12 @@ pub fn build_source_vtable<T: Source + 'static>(
         describe_schema_fn: describe_schema_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
+        dispose_fn: dispose_fn::<T>,
+        pause_processing_fn: pause_processing_fn::<T>,
+        resume_processing_fn: resume_processing_fn::<T>,
         status_fn: status_fn::<T>,
-        deprovision_fn: deprovision_fn::<T>,
+        delete_owned_resources_fn: delete_owned_resources_fn::<T>,
+        bind_runtime_context_fn: bind_runtime_context_fn::<T>,
         initialize_fn: initialize_fn::<T>,
         subscribe_fn: subscribe_fn::<T>,
         set_bootstrap_provider_fn: set_bootstrap_provider_fn::<T>,
@@ -1162,7 +1185,7 @@ pub fn build_source_vtable_from_boxed(
 ) -> SourceVtable {
     struct DynSourceWrapper {
         inner: Box<dyn Source>,
-        cached_id: String,
+        cached_id: ComponentId,
         cached_type_name: String,
         lifecycle_emitter: LifecycleEmitterFn,
         runtime_handle: fn() -> &'static tokio::runtime::Runtime,
@@ -1178,7 +1201,7 @@ pub fn build_source_vtable_from_boxed(
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
-        FfiStr::from_str(&w.cached_id)
+        FfiStr::from_str(w.cached_id.as_str())
     }
 
     extern "C" fn type_name_fn(state: *const c_void) -> FfiStr {
@@ -1235,7 +1258,7 @@ pub fn build_source_vtable_from_boxed(
                 .instance_lifecycle_ctx
                 .load(std::sync::atomic::Ordering::Acquire);
             let event = FfiLifecycleEvent {
-                component_id: FfiStr::from_str(&w.cached_id),
+                component_id: FfiStr::from_str(w.cached_id.as_str()),
                 component_type: FfiStr::from_str("source"),
                 event_type,
                 message: FfiStr::from_str(message),
@@ -1266,65 +1289,13 @@ pub fn build_source_vtable_from_boxed(
         })
     }
 
-    extern "C" fn start_fn(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const DynSourceWrapper) };
-            if let Some(error) = w.initialization.failure() {
-                emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
-                return FfiResult::err(error.to_owned());
-            }
-            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Starting, "");
-            let log_ctx = build_dyn_source_log_ctx(w);
-            let handle = (w.runtime_handle)().handle().clone();
-            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-            let result = dispatch_to_runtime(&handle, async move {
-                set_instance_log_ctx(log_ctx);
-                let inner = unsafe { inner_ptr.as_ref() };
-                let r = inner.inner.start().await;
-                clear_instance_log_ctx();
-                r
-            });
-            match result {
-                Ok(()) => {
-                    emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Started, "");
-                    FfiResult::ok()
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, &msg);
-                    FfiResult::err(msg)
-                }
-            }
-        })
-    }
-
-    extern "C" fn stop_fn(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const DynSourceWrapper) };
-            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Stopping, "");
-            let log_ctx = build_dyn_source_log_ctx(w);
-            let handle = (w.runtime_handle)().handle().clone();
-            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-            let result = dispatch_to_runtime(&handle, async move {
-                set_instance_log_ctx(log_ctx);
-                let inner = unsafe { inner_ptr.as_ref() };
-                let r = inner.inner.stop().await;
-                clear_instance_log_ctx();
-                r
-            });
-            match result {
-                Ok(()) => {
-                    emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Stopped, "");
-                    FfiResult::ok()
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, &msg);
-                    FfiResult::err(msg)
-                }
-            }
-        })
-    }
+    component_lifecycle_functions!(
+        [],
+        [],
+        DynSourceWrapper,
+        emit_dyn_source_lifecycle,
+        build_dyn_source_log_ctx
+    );
 
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
@@ -1338,22 +1309,6 @@ pub fn build_source_vtable_from_boxed(
             inner.inner.status().await
         });
         component_status_to_ffi(status)
-    }
-
-    extern "C" fn deprovision_fn(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const DynSourceWrapper) };
-            let handle = (w.runtime_handle)().handle().clone();
-            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-            let result = dispatch_to_runtime(&handle, async move {
-                let inner = unsafe { inner_ptr.as_ref() };
-                inner.inner.deprovision().await
-            });
-            match result {
-                Ok(()) => FfiResult::ok(),
-                Err(e) => FfiResult::err(e.to_string()),
-            }
-        })
     }
 
     extern "C" fn subscribe_fn(
@@ -1374,8 +1329,20 @@ pub fn build_source_vtable_from_boxed(
             emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
             return std::ptr::null_mut();
         }
-        let source_id_str = unsafe { source_id.to_string() };
-        let qid = unsafe { query_id.to_string() };
+        let source_id_str = match decode_component_id(&source_id) {
+            Ok(id) => id,
+            Err(error) => {
+                log::error!("Invalid plugin component identity: {error}");
+                return std::ptr::null_mut();
+            }
+        };
+        let qid = match decode_component_id(&query_id) {
+            Ok(id) => id,
+            Err(error) => {
+                log::error!("Invalid plugin component identity: {error}");
+                return std::ptr::null_mut();
+            }
+        };
         let nodes_str = unsafe { nodes_json.to_string() };
         let rels_str = unsafe { relations_json.to_string() };
 
@@ -1428,50 +1395,66 @@ pub fn build_source_vtable_from_boxed(
         }
     }
 
-    extern "C" fn initialize_fn(state: *mut c_void, ctx: *const FfiRuntimeContext) {
-        let w = unsafe { &*(state as *const DynSourceWrapper) };
-        let ffi_ctx = unsafe { &*ctx };
+    extern "C" fn bind_runtime_context_fn(
+        state: *mut c_void,
+        ctx: *const FfiRuntimeContext,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const DynSourceWrapper) };
+            let Some(ffi_ctx) = (unsafe { ctx.as_ref() }) else {
+                return FfiResult::err("null source runtime context".into());
+            };
 
-        if let Some(log_cb) = ffi_ctx.log_callback {
-            w.instance_log_cb
-                .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
-            w.instance_log_ctx
-                .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
-        }
-        if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
-            w.instance_lifecycle_cb.store(
-                lifecycle_cb as *mut (),
-                std::sync::atomic::Ordering::Release,
+            let result = w.initialization.bind(
+                || build_source_runtime_context(ffi_ctx),
+                |prepared| {
+                    let (runtime_ctx, status_rx) = match prepared {
+                        Ok(context) => context,
+                        Err(error) => return FfiResult::err(error),
+                    };
+                    if let Some(log_cb) = ffi_ctx.log_callback {
+                        w.instance_log_cb
+                            .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
+                        w.instance_log_ctx
+                            .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
+                    }
+                    if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
+                        w.instance_lifecycle_cb.store(
+                            lifecycle_cb as *mut (),
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        w.instance_lifecycle_ctx
+                            .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
+                    }
+                    if let Ok(mut iid) = w.instance_id.write() {
+                        *iid = unsafe { ffi_ctx.instance_id.to_string() };
+                    }
+
+                    let handle = (w.runtime_handle)().handle().clone();
+                    forward_status(
+                        &w.status_forwarder,
+                        status_rx,
+                        ffi_ctx,
+                        "source",
+                        w.lifecycle_emitter,
+                        &handle,
+                    );
+                    let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+                    dispatch_lifecycle(&handle, async move {
+                        let inner = unsafe { inner_ptr.as_ref() };
+                        inner.inner.bind_runtime_context(runtime_ctx).await;
+                        Ok(())
+                    })
+                },
             );
-            w.instance_lifecycle_ctx
-                .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
-        }
-        if let Ok(mut iid) = w.instance_id.write() {
-            *iid = unsafe { ffi_ctx.instance_id.to_string() };
-        }
-
-        let result = w.initialization.run(
-            || build_source_runtime_context(ffi_ctx),
-            |(runtime_ctx, status_rx)| {
-                let handle = (w.runtime_handle)().handle().clone();
-                forward_status(
-                    &w.status_forwarder,
-                    status_rx,
-                    ffi_ctx,
-                    "source",
-                    w.lifecycle_emitter,
-                    &handle,
-                );
-                let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-                dispatch_initialization(&handle, async move {
-                    let inner = unsafe { inner_ptr.as_ref() };
-                    inner.inner.initialize(runtime_ctx).await
-                })
-            },
-        );
-        if let Err(error) = result {
-            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
-        }
+            match result {
+                Ok(()) => FfiResult::ok(),
+                Err(error) => {
+                    emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, &error);
+                    FfiResult::err(error)
+                }
+            }
+        })
     }
 
     extern "C" fn set_bootstrap_provider_fn(
@@ -1514,7 +1497,10 @@ pub fn build_source_vtable_from_boxed(
     extern "C" fn remove_position_handle_fn(state: *mut c_void, query_id: FfiStr) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const DynSourceWrapper) };
-            let qid = unsafe { query_id.as_str() }.to_string();
+            let qid = match decode_component_id(&query_id) {
+                Ok(id) => id,
+                Err(error) => return FfiResult::err(error),
+            };
             let handle = (w.runtime_handle)().handle().clone();
             let inner_ptr = SendPtr(state as *const DynSourceWrapper);
             dispatch_to_runtime(&handle, async move {
@@ -1525,7 +1511,7 @@ pub fn build_source_vtable_from_boxed(
         })
     }
 
-    let cached_id = source.id().to_string();
+    let cached_id = source.id().clone();
     let cached_type_name = source.type_name().to_string();
 
     let wrapper = Box::new(DynSourceWrapper {
@@ -1555,8 +1541,12 @@ pub fn build_source_vtable_from_boxed(
         describe_schema_fn,
         start_fn,
         stop_fn,
+        dispose_fn,
+        pause_processing_fn,
+        resume_processing_fn,
         status_fn,
-        deprovision_fn,
+        delete_owned_resources_fn,
+        bind_runtime_context_fn,
         initialize_fn,
         subscribe_fn,
         set_bootstrap_provider_fn,
@@ -1573,7 +1563,7 @@ pub fn build_source_vtable_from_boxed(
 /// Internal wrapper holding a Reaction impl + runtime handle + lifecycle emitter.
 pub(crate) struct ReactionWrapper<T: Reaction + 'static> {
     pub inner: T,
-    pub cached_id: String,
+    pub cached_id: ComponentId,
     pub cached_type_name: String,
     pub lifecycle_emitter: LifecycleEmitterFn,
     pub runtime_handle: fn() -> &'static tokio::runtime::Runtime,
@@ -1595,7 +1585,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
 ) -> ReactionVtable {
     extern "C" fn id_fn<T: Reaction + 'static>(state: *const c_void) -> FfiStr {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
-        FfiStr::from_str(&w.cached_id)
+        FfiStr::from_str(w.cached_id.as_str())
     }
 
     extern "C" fn type_name_fn<T: Reaction + 'static>(state: *const c_void) -> FfiStr {
@@ -1608,9 +1598,12 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         w.inner.auto_start()
     }
 
-    extern "C" fn query_ids_fn<T: Reaction + 'static>(state: *const c_void) -> FfiStringArray {
+    extern "C" fn query_inputs_fn<T: Reaction + 'static>(state: *const c_void) -> FfiGetResult {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
-        FfiStringArray::from_vec(w.inner.query_ids())
+        match rmp_serde::to_vec_named(&w.inner.query_inputs()) {
+            Ok(bytes) => FfiGetResult::found(bytes),
+            Err(error) => FfiGetResult::err(format!("could not encode query inputs: {error}")),
+        }
     }
 
     extern "C" fn properties_fn<T: Reaction + 'static>(state: *const c_void) -> FfiOwnedStr {
@@ -1634,7 +1627,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
                 .instance_lifecycle_ctx
                 .load(std::sync::atomic::Ordering::Acquire);
             let event = FfiLifecycleEvent {
-                component_id: FfiStr::from_str(&w.cached_id),
+                component_id: FfiStr::from_str(w.cached_id.as_str()),
                 component_type: FfiStr::from_str("reaction"),
                 event_type,
                 message: FfiStr::from_str(message),
@@ -1667,65 +1660,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         })
     }
 
-    extern "C" fn start_fn<T: Reaction + 'static>(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const ReactionWrapper<T>) };
-            if let Some(error) = w.initialization.failure() {
-                emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
-                return FfiResult::err(error.to_owned());
-            }
-            emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Starting, "");
-            let log_ctx = build_reaction_log_ctx(w);
-            let handle = (w.runtime_handle)().handle().clone();
-            let ptr = SendPtr(state as *const ReactionWrapper<T>);
-            let result = dispatch_to_runtime(&handle, async move {
-                set_instance_log_ctx(log_ctx);
-                let inner = unsafe { ptr.as_ref() };
-                let r = inner.inner.start().await;
-                clear_instance_log_ctx();
-                r
-            });
-            match result {
-                Ok(()) => {
-                    emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Started, "");
-                    FfiResult::ok()
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, &msg);
-                    FfiResult::err(msg)
-                }
-            }
-        })
-    }
-
-    extern "C" fn stop_fn<T: Reaction + 'static>(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const ReactionWrapper<T>) };
-            emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Stopping, "");
-            let log_ctx = build_reaction_log_ctx(w);
-            let handle = (w.runtime_handle)().handle().clone();
-            let ptr = SendPtr(state as *const ReactionWrapper<T>);
-            let result = dispatch_to_runtime(&handle, async move {
-                set_instance_log_ctx(log_ctx);
-                let inner = unsafe { ptr.as_ref() };
-                let r = inner.inner.stop().await;
-                clear_instance_log_ctx();
-                r
-            });
-            match result {
-                Ok(()) => {
-                    emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Stopped, "");
-                    FfiResult::ok()
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, &msg);
-                    FfiResult::err(msg)
-                }
-            }
-        })
-    }
+    component_lifecycle_functions!(
+        [<T: Reaction + 'static>], [::<T>], ReactionWrapper<T>,
+        emit_reaction_lifecycle_for, build_reaction_log_ctx
+    );
 
     extern "C" fn status_fn<T: Reaction + 'static>(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
@@ -1741,70 +1679,67 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         component_status_to_ffi(status)
     }
 
-    extern "C" fn deprovision_fn<T: Reaction + 'static>(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const ReactionWrapper<T>) };
-            let handle = (w.runtime_handle)().handle().clone();
-            let ptr = SendPtr(state as *const ReactionWrapper<T>);
-            let result = dispatch_to_runtime(&handle, async move {
-                let inner = unsafe { ptr.as_ref() };
-                inner.inner.deprovision().await
-            });
-            match result {
-                Ok(()) => FfiResult::ok(),
-                Err(e) => FfiResult::err(e.to_string()),
-            }
-        })
-    }
-
-    extern "C" fn initialize_fn<T: Reaction + 'static>(
+    extern "C" fn bind_runtime_context_fn<T: Reaction + 'static>(
         state: *mut c_void,
         ctx: *const FfiRuntimeContext,
-    ) {
-        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
-        let ffi_ctx = unsafe { &*ctx };
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+            let Some(ffi_ctx) = (unsafe { ctx.as_ref() }) else {
+                return FfiResult::err("null reaction runtime context".into());
+            };
 
-        // Capture per-instance callbacks
-        if let Some(log_cb) = ffi_ctx.log_callback {
-            w.instance_log_cb
-                .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
-            w.instance_log_ctx
-                .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
-        }
-        if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
-            w.instance_lifecycle_cb.store(
-                lifecycle_cb as *mut (),
-                std::sync::atomic::Ordering::Release,
+            let result = w.initialization.bind(
+                || build_reaction_runtime_context(ffi_ctx),
+                |prepared| {
+                    let (runtime_ctx, status_rx) = match prepared {
+                        Ok(context) => context,
+                        Err(error) => return FfiResult::err(error),
+                    };
+                    // Capture per-instance callbacks
+                    if let Some(log_cb) = ffi_ctx.log_callback {
+                        w.instance_log_cb
+                            .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
+                        w.instance_log_ctx
+                            .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
+                    }
+                    if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
+                        w.instance_lifecycle_cb.store(
+                            lifecycle_cb as *mut (),
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        w.instance_lifecycle_ctx
+                            .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
+                    }
+                    if let Ok(mut iid) = w.instance_id.write() {
+                        *iid = unsafe { ffi_ctx.instance_id.to_string() };
+                    }
+
+                    let handle = (w.runtime_handle)().handle().clone();
+                    forward_status(
+                        &w.status_forwarder,
+                        status_rx,
+                        ffi_ctx,
+                        "reaction",
+                        w.lifecycle_emitter,
+                        &handle,
+                    );
+                    let ptr = SendPtr(state as *const ReactionWrapper<T>);
+                    dispatch_lifecycle(&handle, async move {
+                        let inner = unsafe { ptr.as_ref() };
+                        inner.inner.bind_runtime_context(runtime_ctx).await;
+                        Ok(())
+                    })
+                },
             );
-            w.instance_lifecycle_ctx
-                .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
-        }
-        if let Ok(mut iid) = w.instance_id.write() {
-            *iid = unsafe { ffi_ctx.instance_id.to_string() };
-        }
-
-        let result = w.initialization.run(
-            || build_reaction_runtime_context(ffi_ctx),
-            |(runtime_ctx, status_rx)| {
-                let handle = (w.runtime_handle)().handle().clone();
-                forward_status(
-                    &w.status_forwarder,
-                    status_rx,
-                    ffi_ctx,
-                    "reaction",
-                    w.lifecycle_emitter,
-                    &handle,
-                );
-                let ptr = SendPtr(state as *const ReactionWrapper<T>);
-                dispatch_initialization(&handle, async move {
-                    let inner = unsafe { ptr.as_ref() };
-                    inner.inner.initialize(runtime_ctx).await
-                })
-            },
-        );
-        if let Err(error) = result {
-            emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
-        }
+            match result {
+                Ok(()) => FfiResult::ok(),
+                Err(error) => {
+                    emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, &error);
+                    FfiResult::err(error)
+                }
+            }
+        })
     }
 
     extern "C" fn start_result_push_fn<T: Reaction + 'static>(
@@ -1900,7 +1835,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             }
             let ffi_ctx = unsafe { &*ctx };
 
-            let query_id = unsafe { ffi_ctx.query_id.to_string() };
+            let query_id = match decode_component_id(&ffi_ctx.query_id) {
+                Ok(id) => id,
+                Err(error) => return FfiResult::err(error),
+            };
             let is_reset = ffi_ctx.is_reset;
 
             let backend = FfiBootstrapBackend {
@@ -1934,7 +1872,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         })
     }
 
-    let cached_id = reaction.id().to_string();
+    let cached_id = reaction.id().clone();
     let cached_type_name = reaction.type_name().to_string();
 
     let wrapper = Box::new(ReactionWrapper {
@@ -1958,12 +1896,16 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         id_fn: id_fn::<T>,
         type_name_fn: type_name_fn::<T>,
         auto_start_fn: auto_start_fn::<T>,
-        query_ids_fn: query_ids_fn::<T>,
+        query_inputs_fn: query_inputs_fn::<T>,
         properties_fn: properties_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
+        dispose_fn: dispose_fn::<T>,
+        pause_processing_fn: pause_processing_fn::<T>,
+        resume_processing_fn: resume_processing_fn::<T>,
         status_fn: status_fn::<T>,
-        deprovision_fn: deprovision_fn::<T>,
+        delete_owned_resources_fn: delete_owned_resources_fn::<T>,
+        bind_runtime_context_fn: bind_runtime_context_fn::<T>,
         initialize_fn: initialize_fn::<T>,
         start_result_push_fn: start_result_push_fn::<T>,
         is_durable_fn: is_durable_fn::<T>,
@@ -1983,7 +1925,7 @@ pub fn build_reaction_vtable_from_boxed(
 ) -> ReactionVtable {
     struct DynReactionWrapper {
         inner: Box<dyn Reaction>,
-        cached_id: String,
+        cached_id: ComponentId,
         cached_type_name: String,
         lifecycle_emitter: LifecycleEmitterFn,
         runtime_handle: fn() -> &'static tokio::runtime::Runtime,
@@ -2020,7 +1962,7 @@ pub fn build_reaction_vtable_from_boxed(
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
         let w = wrapper_ref(state);
-        FfiStr::from_str(&w.cached_id)
+        FfiStr::from_str(w.cached_id.as_str())
     }
 
     extern "C" fn type_name_fn(state: *const c_void) -> FfiStr {
@@ -2033,9 +1975,12 @@ pub fn build_reaction_vtable_from_boxed(
         w.inner.auto_start()
     }
 
-    extern "C" fn query_ids_fn(state: *const c_void) -> FfiStringArray {
+    extern "C" fn query_inputs_fn(state: *const c_void) -> FfiGetResult {
         let w = wrapper_ref(state);
-        FfiStringArray::from_vec(w.inner.query_ids())
+        match rmp_serde::to_vec_named(&w.inner.query_inputs()) {
+            Ok(bytes) => FfiGetResult::found(bytes),
+            Err(error) => FfiGetResult::err(format!("could not encode query inputs: {error}")),
+        }
     }
 
     extern "C" fn properties_fn(state: *const c_void) -> FfiOwnedStr {
@@ -2059,7 +2004,7 @@ pub fn build_reaction_vtable_from_boxed(
                 .instance_lifecycle_ctx
                 .load(std::sync::atomic::Ordering::Acquire);
             let event = FfiLifecycleEvent {
-                component_id: FfiStr::from_str(&w.cached_id),
+                component_id: FfiStr::from_str(w.cached_id.as_str()),
                 component_type: FfiStr::from_str("reaction"),
                 event_type,
                 message: FfiStr::from_str(message),
@@ -2090,63 +2035,13 @@ pub fn build_reaction_vtable_from_boxed(
         })
     }
 
-    extern "C" fn start_fn(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = wrapper_ref(state);
-            if let Some(error) = w.initialization.failure() {
-                emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
-                return FfiResult::err(error.to_owned());
-            }
-            emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Starting, "");
-            let log_ctx = build_dyn_reaction_log_ctx(w);
-            let handle = (w.runtime_handle)().handle().clone();
-            let arc = wrapper_arc(state);
-            let result = dispatch_to_runtime(&handle, async move {
-                set_instance_log_ctx(log_ctx);
-                let r = arc.inner.start().await;
-                clear_instance_log_ctx();
-                r
-            });
-            match result {
-                Ok(()) => {
-                    emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Started, "");
-                    FfiResult::ok()
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, &msg);
-                    FfiResult::err(msg)
-                }
-            }
-        })
-    }
-
-    extern "C" fn stop_fn(state: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = wrapper_ref(state);
-            emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Stopping, "");
-            let log_ctx = build_dyn_reaction_log_ctx(w);
-            let handle = (w.runtime_handle)().handle().clone();
-            let arc = wrapper_arc(state);
-            let result = dispatch_to_runtime(&handle, async move {
-                set_instance_log_ctx(log_ctx);
-                let r = arc.inner.stop().await;
-                clear_instance_log_ctx();
-                r
-            });
-            match result {
-                Ok(()) => {
-                    emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Stopped, "");
-                    FfiResult::ok()
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, &msg);
-                    FfiResult::err(msg)
-                }
-            }
-        })
-    }
+    component_lifecycle_functions!(
+        [],
+        [],
+        Arc<DynReactionWrapper>,
+        emit_dyn_reaction_lifecycle,
+        build_dyn_reaction_log_ctx
+    );
 
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
         let w = wrapper_ref(state);
@@ -2159,63 +2054,65 @@ pub fn build_reaction_vtable_from_boxed(
         component_status_to_ffi(status)
     }
 
-    extern "C" fn deprovision_fn(state: *mut c_void) -> FfiResult {
+    extern "C" fn bind_runtime_context_fn(
+        state: *mut c_void,
+        ctx: *const FfiRuntimeContext,
+    ) -> FfiResult {
         catch_panic_ffi(|| {
             let w = wrapper_ref(state);
-            let handle = (w.runtime_handle)().handle().clone();
-            let arc = wrapper_arc(state);
-            let result = dispatch_to_runtime(&handle, async move { arc.inner.deprovision().await });
+            let Some(ffi_ctx) = (unsafe { ctx.as_ref() }) else {
+                return FfiResult::err("null reaction runtime context".into());
+            };
+
+            let result = w.initialization.bind(
+                || build_reaction_runtime_context(ffi_ctx),
+                |prepared| {
+                    let (runtime_ctx, status_rx) = match prepared {
+                        Ok(context) => context,
+                        Err(error) => return FfiResult::err(error),
+                    };
+                    if let Some(log_cb) = ffi_ctx.log_callback {
+                        w.instance_log_cb
+                            .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
+                        w.instance_log_ctx
+                            .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
+                    }
+                    if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
+                        w.instance_lifecycle_cb.store(
+                            lifecycle_cb as *mut (),
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        w.instance_lifecycle_ctx
+                            .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
+                    }
+                    if let Ok(mut iid) = w.instance_id.write() {
+                        *iid = unsafe { ffi_ctx.instance_id.to_string() };
+                    }
+
+                    let handle = (w.runtime_handle)().handle().clone();
+                    forward_status(
+                        &w.status_forwarder,
+                        status_rx,
+                        ffi_ctx,
+                        "reaction",
+                        w.lifecycle_emitter,
+                        &handle,
+                    );
+                    let arc = wrapper_arc(state);
+                    dispatch_lifecycle(&handle, async move {
+                        arc.inner.bind_runtime_context(runtime_ctx).await;
+                        Ok(())
+                    })
+                },
+            );
             match result {
                 Ok(()) => FfiResult::ok(),
-                Err(e) => FfiResult::err(e.to_string()),
+                Err(error) => {
+                    emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, &error);
+                    FfiResult::err(error)
+                }
             }
         })
-    }
-
-    extern "C" fn initialize_fn(state: *mut c_void, ctx: *const FfiRuntimeContext) {
-        let w = wrapper_ref(state);
-        let ffi_ctx = unsafe { &*ctx };
-
-        if let Some(log_cb) = ffi_ctx.log_callback {
-            w.instance_log_cb
-                .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
-            w.instance_log_ctx
-                .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
-        }
-        if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
-            w.instance_lifecycle_cb.store(
-                lifecycle_cb as *mut (),
-                std::sync::atomic::Ordering::Release,
-            );
-            w.instance_lifecycle_ctx
-                .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
-        }
-        if let Ok(mut iid) = w.instance_id.write() {
-            *iid = unsafe { ffi_ctx.instance_id.to_string() };
-        }
-
-        let result = w.initialization.run(
-            || build_reaction_runtime_context(ffi_ctx),
-            |(runtime_ctx, status_rx)| {
-                let handle = (w.runtime_handle)().handle().clone();
-                forward_status(
-                    &w.status_forwarder,
-                    status_rx,
-                    ffi_ctx,
-                    "reaction",
-                    w.lifecycle_emitter,
-                    &handle,
-                );
-                let arc = wrapper_arc(state);
-                dispatch_initialization(
-                    &handle,
-                    async move { arc.inner.initialize(runtime_ctx).await },
-                )
-            },
-        );
-        if let Err(error) = result {
-            emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
-        }
     }
 
     extern "C" fn start_result_push_fn(
@@ -2325,7 +2222,10 @@ pub fn build_reaction_vtable_from_boxed(
             }
             let ffi_ctx = unsafe { &*ctx };
 
-            let query_id = unsafe { ffi_ctx.query_id.to_string() };
+            let query_id = match decode_component_id(&ffi_ctx.query_id) {
+                Ok(id) => id,
+                Err(error) => return FfiResult::err(error),
+            };
             let is_reset = ffi_ctx.is_reset;
 
             let backend = FfiBootstrapBackend {
@@ -2358,7 +2258,7 @@ pub fn build_reaction_vtable_from_boxed(
         })
     }
 
-    let cached_id = reaction.id().to_string();
+    let cached_id = reaction.id().clone();
     let cached_type_name = reaction.type_name().to_string();
 
     let wrapper = Arc::new(DynReactionWrapper {
@@ -2387,12 +2287,16 @@ pub fn build_reaction_vtable_from_boxed(
         id_fn,
         type_name_fn,
         auto_start_fn,
-        query_ids_fn,
+        query_inputs_fn,
         properties_fn,
         start_fn,
         stop_fn,
+        dispose_fn,
+        pause_processing_fn,
+        resume_processing_fn,
         status_fn,
-        deprovision_fn,
+        delete_owned_resources_fn,
+        bind_runtime_context_fn,
         initialize_fn,
         start_result_push_fn,
         is_durable_fn,
@@ -2683,13 +2587,25 @@ pub fn build_bootstrap_provider_vtable(
                     .collect()
             };
             let request = BootstrapRequest {
-                query_id: unsafe { query_id.to_string() },
+                query_id: match decode_component_id(&query_id) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        log::error!("Invalid plugin component identity: {error}");
+                        return std::ptr::null_mut();
+                    }
+                },
                 node_labels,
                 relation_labels,
                 request_id: unsafe { request_id.to_string() },
             };
             let server_id_str = unsafe { server_id.to_string() };
-            let source_id_str = unsafe { source_id.to_string() };
+            let source_id_str = match decode_component_id(&source_id) {
+                Ok(id) => id,
+                Err(error) => {
+                    log::error!("Invalid plugin component identity: {error}");
+                    return std::ptr::null_mut();
+                }
+            };
             if settings_json.len > super::payload::MAX_FFI_PAYLOAD_BYTES
                 || properties_json.len > super::payload::MAX_FFI_PAYLOAD_BYTES
                 || settings_json.ptr.is_null()
@@ -2854,7 +2770,10 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         auto_start: bool,
     ) -> FfiCreateResult {
         let w = unsafe { &*(state as *const SourcePluginWrapper<T>) };
-        let id_str = unsafe { id.to_string() };
+        let id_str = match decode_component_id(&id) {
+            Ok(id) => id,
+            Err(error) => return FfiCreateResult::err(error),
+        };
         let config_str = unsafe { config_json.to_string() };
 
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
@@ -2979,23 +2898,28 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
     extern "C" fn create_reaction_fn<T: ReactionPluginDescriptor + 'static>(
         state: *mut c_void,
         id: FfiStr,
-        query_ids_json: FfiStr,
+        query_inputs_json: FfiStr,
         config_json: FfiStr,
         auto_start: bool,
     ) -> FfiCreateResult {
         let w = unsafe { &*(state as *const ReactionPluginWrapper<T>) };
-        let id_str = unsafe { id.to_string() };
-        let query_ids_str = unsafe { query_ids_json.to_string() };
+        let id_str = match decode_component_id(&id) {
+            Ok(id) => id,
+            Err(error) => return FfiCreateResult::err(error),
+        };
+        let query_inputs_str = unsafe { query_inputs_json.to_string() };
         let config_str = unsafe { config_json.to_string() };
 
-        let query_ids: Vec<String> = match serde_json::from_str(&query_ids_str) {
-            Ok(v) => v,
-            Err(e) => {
-                let msg = format!("Failed to parse query_ids JSON for reaction '{id_str}': {e}");
-                log::error!("{msg}");
-                return FfiCreateResult::err(msg);
-            }
-        };
+        let query_inputs: Vec<drasi_lib::config::ComponentReference> =
+            match serde_json::from_str(&query_inputs_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg =
+                        format!("Failed to parse query_inputs JSON for reaction '{id_str}': {e}");
+                    log::error!("{msg}");
+                    return FfiCreateResult::err(msg);
+                }
+            };
 
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
@@ -3013,7 +2937,7 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
             let inner = unsafe { ptr.as_ref() };
             inner
                 .inner
-                .create_reaction(&id_owned, query_ids, &config_value, auto_start)
+                .create_reaction(&id_owned, query_inputs, &config_value, auto_start)
                 .await
         });
 
@@ -3205,12 +3129,21 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
 // Helper functions
 // ============================================================================
 
+fn decode_component_id(value: &FfiStr) -> Result<ComponentId, String> {
+    if value.ptr.is_null() || value.len == 0 || value.len > 128 {
+        return Err("invalid component UUID buffer".into());
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(value.ptr.cast::<u8>(), value.len) };
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| format!("invalid component UUID UTF-8: {error}"))?;
+    ComponentId::try_new(text).map_err(|error| error.to_string())
+}
+
 /// Build a SourceRuntimeContext from FFI runtime context.
 fn build_source_runtime_context(
     ffi_ctx: &FfiRuntimeContext,
-) -> (SourceRuntimeContext, ComponentUpdateReceiver) {
+) -> Result<(SourceRuntimeContext, ComponentUpdateReceiver), String> {
     let instance_id = unsafe { ffi_ctx.instance_id.to_string() };
-    let component_id = unsafe { ffi_ctx.component_id.to_string() };
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
         None
     } else {
@@ -3241,21 +3174,20 @@ fn build_source_runtime_context(
 
     let ctx = SourceRuntimeContext {
         instance_id,
-        source_id: component_id,
+        source_id: decode_component_id(&ffi_ctx.component_id)?,
         update_tx: update_tx.into(),
         state_store,
         identity_provider,
         wal_provider,
         resource_observer: None,
     };
-    (ctx, status_rx)
+    Ok((ctx, status_rx))
 }
 
 fn build_reaction_runtime_context(
     ffi_ctx: &FfiRuntimeContext,
-) -> (drasi_lib::ReactionRuntimeContext, ComponentUpdateReceiver) {
+) -> Result<(drasi_lib::ReactionRuntimeContext, ComponentUpdateReceiver), String> {
     let instance_id = unsafe { ffi_ctx.instance_id.to_string() };
-    let component_id = unsafe { ffi_ctx.component_id.to_string() };
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
         None
     } else {
@@ -3285,14 +3217,16 @@ fn build_reaction_runtime_context(
 
     let ctx = drasi_lib::ReactionRuntimeContext {
         instance_id,
-        reaction_id: component_id,
+        reaction_id: decode_component_id(&ffi_ctx.component_id)?,
+        query_ids: serde_json::from_str(&unsafe { ffi_ctx.resolved_query_ids_json.to_string() })
+            .map_err(|error| format!("invalid resolved query IDs: {error}"))?,
         update_tx: update_tx.into(),
         state_store,
         identity_provider,
         snapshot_fetcher,
         resource_observer: None,
     };
-    (ctx, status_rx)
+    Ok((ctx, status_rx))
 }
 
 /// Wrap a DrasiLib SubscriptionResponse into an FfiSubscriptionResponse.
@@ -3769,8 +3703,8 @@ fn wrap_subscription_response(
     };
 
     Box::into_raw(Box::new(FfiSubscriptionResponse {
-        query_id: FfiOwnedStr::from_string(sub.query_id),
-        source_id: FfiOwnedStr::from_string(sub.source_id),
+        query_id: FfiOwnedStr::from_string(sub.query_id.to_string()),
+        source_id: FfiOwnedStr::from_string(sub.source_id.to_string()),
         receiver: Box::into_raw(ffi_rx),
         bootstrap_receiver,
         position_handle_ptr,
@@ -4192,7 +4126,7 @@ mod status_forwarder_tests {
         capture.changed.notify_one();
     }
 
-    fn unexpected_fallback(_: &str, _: FfiLifecycleEventType, _: &str) {
+    fn unexpected_fallback(_: &drasi_lib::ComponentId, _: FfiLifecycleEventType, _: &str) {
         panic!("the instance callback must be selected");
     }
 
@@ -4201,7 +4135,8 @@ mod status_forwarder_tests {
             let capture_state = Box::<Capture>::default();
             let context = FfiRuntimeContext {
                 instance_id: FfiStr::from_str("status-instance"),
-                component_id: FfiStr::from_str("status-component"),
+                component_id: FfiStr::from_str("00000000-0000-0000-0000-00000000002f"),
+                resolved_query_ids_json: FfiStr::from_str("[]"),
                 state_store: std::ptr::null(),
                 log_callback: None,
                 log_ctx: std::ptr::null_mut(),
@@ -4212,10 +4147,12 @@ mod status_forwarder_tests {
                 wal_provider: std::ptr::null(),
             };
             let (sender, receiver) = if kind == "source" {
-                let (context, receiver) = build_source_runtime_context(&context);
+                let (context, receiver) =
+                    build_source_runtime_context(&context).expect("valid source runtime context");
                 (context.update_tx, receiver)
             } else {
-                let (context, receiver) = build_reaction_runtime_context(&context);
+                let (context, receiver) = build_reaction_runtime_context(&context)
+                    .expect("valid reaction runtime context");
                 (context.update_tx, receiver)
             };
             let forwarder = StatusForwarder::new(
@@ -4225,7 +4162,11 @@ mod status_forwarder_tests {
                 unexpected_fallback,
                 &tokio::runtime::Handle::current(),
             );
-            let handle = ComponentStatusHandle::new_wired("status-component", sender.clone());
+            let handle = ComponentStatusHandle::new_wired(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002f")
+                    .expect("fixture UUID"),
+                sender.clone(),
+            );
             tokio::time::timeout(Duration::from_secs(2), async {
                 for _ in 0..128 {
                     handle.set_status(ComponentStatus::Running, None).await;
@@ -4240,7 +4181,7 @@ mod status_forwarder_tests {
             assert_eq!(
                 *capture_state.errors.lock().unwrap(),
                 vec![(
-                    "status-component".into(),
+                    "00000000-0000-0000-0000-00000000002f".into(),
                     kind.into(),
                     "background failure".into()
                 )]
@@ -4252,7 +4193,10 @@ mod status_forwarder_tests {
                 .expect("forwarder releases receiver");
             assert!(sender
                 .send(drasi_lib::channels::ComponentUpdate::Status {
-                    component_id: "late".into(),
+                    component_id: drasi_core_types::ComponentId::try_new(
+                        "00000000-0000-0000-0000-0000000001c2"
+                    )
+                    .expect("fixture UUID"),
                     status: ComponentStatus::Error,
                     message: None,
                 })
@@ -4273,15 +4217,19 @@ mod status_forwarder_tests {
 }
 
 #[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
+
+#[cfg(test)]
 mod initialization_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn setup_panic_poisoning_preserves_the_first_failure_and_releases_rejected_resources() {
+    fn binding_panic_preserves_the_first_failure_and_releases_rejected_resources() {
         let state = InitializationState::default();
         let first = state
-            .run(
+            .bind(
                 || panic!("runtime setup failed"),
                 |()| panic!("initializer must not run after setup failure"),
             )
@@ -4291,7 +4239,7 @@ mod initialization_tests {
         let resource = Arc::new(());
         let weak = Arc::downgrade(&resource);
         let error = state
-            .run(
+            .bind(
                 || resource,
                 |_| panic!("a failed instance cannot be initialized again"),
             )
@@ -4301,12 +4249,12 @@ mod initialization_tests {
     }
 
     #[test]
-    fn successful_initialization_preserves_existing_reinitialization_behavior() {
+    fn successful_binding_runs_once_per_object() {
         let state = InitializationState::default();
         let calls = AtomicUsize::new(0);
         for _ in 0..2 {
             state
-                .run(
+                .bind(
                     || (),
                     |()| {
                         calls.fetch_add(1, Ordering::SeqCst);
@@ -4316,7 +4264,7 @@ mod initialization_tests {
                 .unwrap();
         }
         assert!(state.failure().is_none());
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
 

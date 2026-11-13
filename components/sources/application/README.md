@@ -64,7 +64,9 @@ After the graph activates the source, producers submit native graph-change
 envelopes through the retained service:
 
 ```rust,ignore
-let session = admission.register_producer(ComponentId::try_new("client")?).await?;
+let application = ComponentId::try_new("35b53f3e-8373-49ab-b7dc-cd2072429890")?;
+let producer = ComponentId::derive_owned(&application, "client")?;
+let session = admission.register_producer(producer).await?;
 let receipt = admission.admit(&session, 1, &envelope).await?;
 ```
 

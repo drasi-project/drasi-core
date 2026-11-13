@@ -35,17 +35,31 @@ async fn shared_redis() -> &'static RedisGuard {
         .await
 }
 
-async fn build_index(query_id: &str, archive_enabled: bool) -> GarnetElementIndex {
+async fn build_index(
+    query_id: &drasi_core::ComponentId,
+    archive_enabled: bool,
+) -> GarnetElementIndex {
     let redis = shared_redis().await;
     let client = redis::Client::open(redis.url()).unwrap();
     let connection = client.get_multiplexed_async_connection().await.unwrap();
     let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
-    GarnetElementIndex::new(query_id, connection, archive_enabled, session_state)
+    GarnetElementIndex::new(
+        &drasi_core::interface::StorageScope::default(),
+        query_id,
+        connection,
+        archive_enabled,
+        session_state,
+    )
 }
 
 #[tokio::test]
 async fn get_element_as_at_archive_disabled() {
-    let index = build_index("archive-disabled-as-at", false).await;
+    let index = build_index(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ca")
+            .expect("fixture UUID"),
+        false,
+    )
+    .await;
     let result = index
         .get_element_as_at(&ElementReference::new("source1", "node1"), 1000)
         .await;
@@ -54,7 +68,12 @@ async fn get_element_as_at_archive_disabled() {
 
 #[tokio::test]
 async fn get_element_versions_archive_disabled() {
-    let index = build_index("archive-disabled-versions", false).await;
+    let index = build_index(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003cb")
+            .expect("fixture UUID"),
+        false,
+    )
+    .await;
     for from in [
         TimestampBound::Included(0),
         TimestampBound::StartFromPrevious(0),
@@ -76,7 +95,14 @@ async fn archive_reads_with_archive_enabled() {
     let connection = client.get_multiplexed_async_connection().await.unwrap();
     let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
     let session_control = GarnetSessionControl::new(session_state.clone());
-    let index = GarnetElementIndex::new("archive-enabled", connection, true, session_state);
+    let index = GarnetElementIndex::new(
+        &drasi_core::interface::StorageScope::default(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e9")
+            .expect("fixture UUID"),
+        connection,
+        true,
+        session_state,
+    );
 
     // Reads require an active session.
     session_control.begin().await.unwrap();

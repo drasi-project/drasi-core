@@ -8,6 +8,8 @@ use serde_json::json;
 use std::{future::Future, path::Path};
 use tokio::time::timeout;
 
+const SOURCE_ID: &str = "2a10f8f4-f49e-5f26-8be7-2cdfee604e40";
+
 fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("positive test bound")
 }
@@ -31,7 +33,7 @@ fn settings(path: &Path) -> SqliteBootstrapConfig {
 
 fn provider(config: SqliteBootstrapConfig) -> Result<SqliteBootstrapProvider> {
     SqliteBootstrapProvider::new(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new(SOURCE_ID)?,
         StreamId::try_new("source/out")?,
         config,
     )
@@ -125,7 +127,7 @@ async fn file_snapshots_filter_tables_preserve_types_and_native_typed_keys() -> 
     );
     for change in &changes {
         let metadata = node(change).get_metadata();
-        assert_eq!(metadata.reference.source_id.as_ref(), "source");
+        assert_eq!(metadata.reference.namespace.as_ref(), SOURCE_ID);
         assert!(metadata.reference.element_id.starts_with("sqlite:v1:"));
         assert_eq!(&*metadata.labels, [Arc::<str>::from("items")]);
     }

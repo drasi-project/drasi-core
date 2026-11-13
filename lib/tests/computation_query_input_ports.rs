@@ -21,6 +21,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -34,6 +38,7 @@ use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
+use drasi_core_types::ComponentName;
 use drasi_lib::{computation::v1::*, DrasiLib, Query};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -41,7 +46,12 @@ use tokio::sync::mpsc;
 const SCOPE: &str = "query-input-ports";
 
 fn component(id: &str) -> ComponentId {
-    ComponentId::try_new(id).expect("component id")
+    fixture_support::component_id(match id {
+        "native" => 1,
+        "audit-sink" => 2,
+        "data-sink" => 3,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 fn port(id: &str) -> PortId {
@@ -435,18 +445,26 @@ async fn install(primaries: PortPrimaries) -> Installed {
     let audit_received = Received::default();
     let data_received = Received::default();
     let factory = SourceFactory::new(fixture.clone(), primaries);
-    let mut batch = ComponentBatch::builder().component(factory.specification(), factory);
+    let specification = factory.specification();
+    let mut batch = ComponentBatch::builder().component(
+        ComponentName::try_new("native").expect("fixture name"),
+        specification,
+        factory,
+    );
     for (name, received) in [("audit", &audit_received), ("data", &data_received)] {
         let sink = format!("{name}-sink");
         batch = batch
-            .sink(Box::new(FixtureSink {
-                descriptor: ComponentDescriptor::try_new(
-                    component(&sink),
-                    vec![graph_port("in", PortDirection::Input)],
-                )
-                .expect("sink descriptor"),
-                received: received.clone(),
-            }))
+            .sink(
+                ComponentName::try_new(sink.as_str()).expect("fixture name"),
+                Box::new(FixtureSink {
+                    descriptor: ComponentDescriptor::try_new(
+                        component(&sink),
+                        vec![graph_port("in", PortDirection::Input)],
+                    )
+                    .expect("sink descriptor"),
+                    received: received.clone(),
+                }),
+            )
             .bind_stream(endpoint("native", name), stream("native", name))
             .connect(
                 EdgeDefinition::new(endpoint("native", name), endpoint(&sink, "in")),
@@ -455,6 +473,7 @@ async fn install(primaries: PortPrimaries) -> Installed {
     }
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -472,16 +491,21 @@ async fn install(primaries: PortPrimaries) -> Installed {
             .await
             .expect("instance"),
     );
-    let report = core
-        .add_components(batch.build().expect("batch").auto_start(false))
+    core.add_components(batch.build().expect("batch").auto_start(false))
         .await
         .expect("add components");
-    assert!(report.committed, "{report:?}");
-    core.computation_component("native")
-        .expect("native source")
-        .wait_created()
+    let status = core
+        .reconcile_desired_state()
         .await
-        .expect("source construction");
+        .expect("declared topology");
+    assert!(status.applied && status.error.is_none(), "{status:?}");
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+    )
+    .expect("native source")
+    .wait_created()
+    .await
+    .expect("source construction");
     Installed {
         core,
         fixture,
@@ -493,22 +517,24 @@ async fn install(primaries: PortPrimaries) -> Installed {
 impl Installed {
     async fn start_components(&self) {
         for id in ["audit-sink", "data-sink", "native"] {
+            let name =
+                drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
             self.core
-                .computation_component(id)
+                .component_by_name(&name)
                 .expect("component")
                 .start()
                 .await
-                .unwrap_or_else(|error| panic!("start {id}: {error:#}"));
+                .unwrap_or_else(|error| panic!("start {id}: {error:#?}"));
         }
     }
 
-    async fn start_query(&self, id: &str) {
+    async fn start_query(&self, id: &drasi_core_types::ComponentName) {
         self.core
-            .start_query(id)
+            .start_query_by_name(id)
             .await
             .unwrap_or_else(|error| panic!("start query {id}: {error:#}"));
         self.core
-            .computation_component(id)
+            .component_by_name(id)
             .expect("query component")
             .wait_started()
             .await
@@ -516,25 +542,28 @@ impl Installed {
     }
 
     /// The data endpoints this query's input edges actually bind. The query's
-    /// own scheduled-work helper (`scheduled/...`) is infrastructure, not input.
-    fn upstream(&self, query: &str) -> Vec<(String, String)> {
+    /// own scheduled-work helper is infrastructure, not input.
+    fn upstream(&self, query: &drasi_core_types::ComponentName) -> Vec<(ComponentId, PortId)> {
+        let query_id = self
+            .core
+            .component_by_name(query)
+            .expect("query component")
+            .id()
+            .clone();
         let snapshot = self.core.computation_control().unwrap().desired_snapshot();
+        let scheduled = QueryScheduledSourceFactory::default();
         let mut upstream: Vec<_> = snapshot
             .edges
             .iter()
-            .filter(|edge| edge.definition.to.component.as_str() == query)
+            .filter(|edge| edge.definition.to.component == query_id)
             .filter(|edge| {
-                !edge
-                    .definition
-                    .from
-                    .component
-                    .as_str()
-                    .starts_with("scheduled/")
+                snapshot.specifications[&edge.definition.from.component].implementation
+                    != scheduled.descriptor().implementation
             })
             .map(|edge| {
                 (
-                    edge.definition.from.component.to_string(),
-                    edge.definition.from.port.to_string(),
+                    edge.definition.from.component.clone(),
+                    edge.definition.from.port.clone(),
                 )
             })
             .collect();
@@ -547,20 +576,26 @@ impl Installed {
         let observed = self.core.computation_control().unwrap().observed();
         ids.iter()
             .map(|id| {
+                let component = self
+                    .core
+                    .component_by_name(&ComponentName::try_new(*id).expect("fixture name"))
+                    .expect("admitted component");
                 let failure = observed
                     .components
-                    .get(&component(id))
-                    .and_then(|node| node.failure.as_ref())
+                    .get(component.id())
+                    .expect("observed component")
+                    .failure
+                    .as_ref()
                     .map(|failure| format!("{failure:?}"));
                 (id.to_string(), failure)
             })
             .collect()
     }
 
-    async fn values(&self, query: &str) -> Vec<i64> {
+    async fn values(&self, query: &drasi_core_types::ComponentName) -> Vec<i64> {
         let mut values: Vec<_> = self
             .core
-            .get_query_results(query)
+            .get_query_results_by_name(query)
             .await
             .unwrap_or_else(|error| panic!("results of {query}: {error:#}"))
             .iter()
@@ -570,7 +605,13 @@ impl Installed {
         values
     }
 
-    async fn wait_for(&self, query: &str, expected: &[i64]) {
+    async fn wait_for(&self, query: &drasi_core_types::ComponentName, expected: &[i64]) {
+        let query_id = self
+            .core
+            .component_by_name(query)
+            .expect("query component")
+            .id()
+            .to_string();
         let outcome = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if self.values(query).await == expected {
@@ -584,14 +625,14 @@ impl Installed {
             outcome.is_ok(),
             "query {query} never reached {expected:?}; it has {:?}; status {:?}; observed {:?}",
             self.values(query).await,
-            self.core.get_query_status(query).await,
+            self.core.get_query_status_by_name(query).await,
             self.core
                 .computation_control()
                 .unwrap()
                 .observed()
                 .relationships
                 .iter()
-                .filter(|(edge, _)| edge.to.component.as_str() == query)
+                .filter(|(edge, _)| edge.to.component.as_str() == query_id)
                 .collect::<Vec<_>>()
         );
     }
@@ -599,38 +640,38 @@ impl Installed {
     /// Return the failure of declaring or starting `config`. Admission may keep
     /// a failed declaration, so the failure may surface on start instead of add.
     async fn failure(&self, config: drasi_lib::config::QueryConfig) -> String {
-        let id = config.id.clone();
+        let name = config.name.clone();
         if let Err(error) = self.core.add_query(config).await {
             return format!("{error:#}");
         }
-        let started = self.core.start_query(&id).await;
+        let started = self.core.start_query_by_name(&name).await;
         let failure = match started {
             Err(error) => format!("{error:#}"),
             Ok(()) => {
                 let waited = self
                     .core
-                    .computation_component(&id)
+                    .component_by_name(&name)
                     .expect("query component")
                     .wait_started()
                     .await;
                 match waited {
                     Err(error) => format!("{error:#}"),
-                    Ok(_) => panic!("query {id} started with an unresolvable input"),
+                    Ok(_) => panic!("query {name} started with an unresolvable input"),
                 }
             }
         };
         assert!(
             self.core
-                .get_query_results(&id)
+                .get_query_results_by_name(&name)
                 .await
                 .map_or(true, |rows| rows.is_empty()),
-            "query {id} must not process data"
+            "query {name} must not process data"
         );
         failure
     }
 }
 
-fn query(id: &str, label: &str) -> Query {
+fn query(id: drasi_core_types::ComponentName, label: &str) -> Query {
     Query::cypher(id)
         .query(format!("MATCH (n:{label}) RETURN n.value AS value"))
         .auto_start(false)
@@ -643,27 +684,76 @@ async fn primary_and_explicit_outputs_bind_and_read_their_own_data() {
         let core = &installed.core;
         for config in [
             // No port: the designated primary (`data`), not the first declared output.
-            query("implicit-items", "Item").from_input("native").build(),
-            query("implicit-audits", "Audit")
-                .from_input("native")
-                .build(),
-            query("audit-audits", "Audit")
-                .from_input_port("native", "audit")
-                .build(),
-            query("audit-items", "Item")
-                .from_input_port("native", "audit")
-                .build(),
-            query("data-items", "Item")
-                .from_input_port("native", "data")
-                .with_result_label("DataItem")
-                .build(),
+            query(
+                drasi_core_types::ComponentName::try_new("implicit-items")
+                    .expect("fixture component name"),
+                "Item",
+            )
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+            )
+            .build()
+            .expect("valid query"),
+            query(
+                drasi_core_types::ComponentName::try_new("implicit-audits")
+                    .expect("fixture component name"),
+                "Audit",
+            )
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+            )
+            .build()
+            .expect("valid query"),
+            query(
+                drasi_core_types::ComponentName::try_new("audit-audits")
+                    .expect("fixture component name"),
+                "Audit",
+            )
+            .from_input_port_by_name(
+                drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+                drasi_computation_contracts::PortId::try_new("audit").expect("fixture PortId"),
+            )
+            .build()
+            .expect("valid query"),
+            query(
+                drasi_core_types::ComponentName::try_new("audit-items")
+                    .expect("fixture component name"),
+                "Item",
+            )
+            .from_input_port_by_name(
+                drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+                drasi_computation_contracts::PortId::try_new("audit").expect("fixture PortId"),
+            )
+            .build()
+            .expect("valid query"),
+            query(
+                drasi_core_types::ComponentName::try_new("data-items")
+                    .expect("fixture component name"),
+                "Item",
+            )
+            .from_input_port_by_name(
+                drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+                drasi_computation_contracts::PortId::try_new("data").expect("fixture PortId"),
+            )
+            .with_result_label("DataItem")
+            .build()
+            .expect("valid query"),
         ] {
-            core.add_query(config).await.expect("add query");
+            core.add_query_with_handle(config)
+                .await
+                .expect("add query")
+                .wait_created()
+                .await
+                .expect("query construction");
         }
         installed.start_components().await;
         for id in ["implicit-items", "implicit-audits", "audit-audits", "audit-items", "data-items"]
         {
-            installed.start_query(id).await;
+            installed
+                .start_query(
+                    &drasi_core_types::ComponentName::try_new(id).expect("fixture component name"),
+                )
+                .await;
         }
 
         // Each query reads exactly one output of the source.
@@ -675,28 +765,99 @@ async fn primary_and_explicit_outputs_bind_and_read_their_own_data() {
             ("data-items", "data"),
         ] {
             assert_eq!(
-                installed.upstream(name),
-                [("native".to_string(), selected.to_string())],
+                installed.upstream(
+                    &drasi_core_types::ComponentName::try_new(name)
+                        .expect("fixture component name"),
+                ),
+                [(component("native"), port(selected))],
                 "{name}"
             );
         }
 
         // Bootstrap comes from the selected output's own snapshot.
-        installed.wait_for("implicit-items", &[1, 2]).await;
-        installed.wait_for("data-items", &[1, 2]).await;
-        installed.wait_for("audit-audits", &[10]).await;
-        assert_eq!(installed.values("implicit-audits").await, Vec::<i64>::new());
-        assert_eq!(installed.values("audit-items").await, Vec::<i64>::new());
+        installed
+            .wait_for(
+                &drasi_core_types::ComponentName::try_new("implicit-items")
+                    .expect("fixture component name"),
+                &[1, 2],
+            )
+            .await;
+        installed
+            .wait_for(
+                &drasi_core_types::ComponentName::try_new("data-items")
+                    .expect("fixture component name"),
+                &[1, 2],
+            )
+            .await;
+        installed
+            .wait_for(
+                &drasi_core_types::ComponentName::try_new("audit-audits")
+                    .expect("fixture component name"),
+                &[10],
+            )
+            .await;
+        assert_eq!(
+            installed
+                .values(
+                    &drasi_core_types::ComponentName::try_new("implicit-audits")
+                        .expect("fixture component name")
+                )
+                .await,
+            Vec::<i64>::new()
+        );
+        assert_eq!(
+            installed
+                .values(
+                    &drasi_core_types::ComponentName::try_new("audit-items")
+                        .expect("fixture component name")
+                )
+                .await,
+            Vec::<i64>::new()
+        );
 
         // Live data follows the same selected output.
         installed.fixture.send("audit", "a2", 20).await;
         installed.fixture.send("data", "i3", 3).await;
-        installed.wait_for("implicit-items", &[1, 2, 3]).await;
-        installed.wait_for("data-items", &[1, 2, 3]).await;
-        installed.wait_for("audit-audits", &[10, 20]).await;
+        installed
+            .wait_for(
+                &drasi_core_types::ComponentName::try_new("implicit-items")
+                    .expect("fixture component name"),
+                &[1, 2, 3],
+            )
+            .await;
+        installed
+            .wait_for(
+                &drasi_core_types::ComponentName::try_new("data-items")
+                    .expect("fixture component name"),
+                &[1, 2, 3],
+            )
+            .await;
+        installed
+            .wait_for(
+                &drasi_core_types::ComponentName::try_new("audit-audits")
+                    .expect("fixture component name"),
+                &[10, 20],
+            )
+            .await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(installed.values("implicit-audits").await, Vec::<i64>::new());
-        assert_eq!(installed.values("audit-items").await, Vec::<i64>::new());
+        assert_eq!(
+            installed
+                .values(
+                    &drasi_core_types::ComponentName::try_new("implicit-audits")
+                        .expect("fixture component name")
+                )
+                .await,
+            Vec::<i64>::new()
+        );
+        assert_eq!(
+            installed
+                .values(
+                    &drasi_core_types::ComponentName::try_new("audit-items")
+                        .expect("fixture component name")
+                )
+                .await,
+            Vec::<i64>::new()
+        );
 
         // The fixed output schemas and the other subscribers are unaffected.
         for (received, name) in
@@ -729,7 +890,19 @@ async fn two_outputs_without_a_primary_require_an_explicit_port() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let installed = install(PortPrimaries::default()).await;
         let failure = installed
-            .failure(query("ambiguous", "Item").from_input("native").build())
+            .failure(
+                query(
+                    drasi_core_types::ComponentName::try_new("ambiguous")
+                        .expect("fixture component name"),
+                    "Item",
+                )
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("native")
+                        .expect("fixture component name"),
+                )
+                .build()
+                .expect("valid query"),
+            )
             .await;
         assert!(failure.contains("ambiguous Output port"), "{failure}");
         assert!(
@@ -741,21 +914,49 @@ async fn two_outputs_without_a_primary_require_an_explicit_port() {
         // never consumed or disturbed it.
         installed
             .core
-            .add_query(
-                query("named", "Item")
-                    .from_input_port("native", "data")
-                    .build(),
+            .add_query_with_handle(
+                query(
+                    drasi_core_types::ComponentName::try_new("named")
+                        .expect("fixture component name"),
+                    "Item",
+                )
+                .from_input_port_by_name(
+                    drasi_core_types::ComponentName::try_new("native")
+                        .expect("fixture component name"),
+                    drasi_computation_contracts::PortId::try_new("data").expect("fixture PortId"),
+                )
+                .build()
+                .expect("valid query"),
             )
             .await
-            .expect("add named query");
+            .expect("add named query")
+            .wait_created()
+            .await
+            .expect("query construction");
         installed.start_components().await;
-        installed.start_query("named").await;
+        installed
+            .start_query(
+                &drasi_core_types::ComponentName::try_new("named").expect("fixture component name"),
+            )
+            .await;
         assert_eq!(
-            installed.upstream("named"),
-            [("native".to_string(), "data".to_string())]
+            installed.upstream(
+                &drasi_core_types::ComponentName::try_new("named").expect("fixture component name")
+            ),
+            [(component("native"), port("data"))]
         );
-        installed.wait_for("named", &[1, 2]).await;
-        assert!(installed.upstream("ambiguous").is_empty());
+        installed
+            .wait_for(
+                &drasi_core_types::ComponentName::try_new("named").expect("fixture component name"),
+                &[1, 2],
+            )
+            .await;
+        assert!(installed
+            .upstream(
+                &drasi_core_types::ComponentName::try_new("ambiguous")
+                    .expect("fixture component name")
+            )
+            .is_empty());
         installed.core.shutdown().await.expect("shutdown");
     })
     .await
@@ -768,43 +969,44 @@ async fn unknown_and_wrong_direction_ports_fail_before_processing() {
         let installed = install(primary("data")).await;
         installed
             .core
-            .add_query(query("upstream", "Item").from_input("native").build())
+            .add_query_with_handle(query(drasi_core_types::ComponentName::try_new("upstream").expect("fixture component name"), "Item").from_input_by_name(drasi_core_types::ComponentName::try_new("native").expect("fixture component name")).build().expect("valid query"))
             .await
-            .expect("add upstream query");
+            .expect("add upstream query")
+            .wait_created().await.expect("query construction");
         installed.start_components().await;
-        installed.start_query("upstream").await;
-        installed.wait_for("upstream", &[1, 2]).await;
+        installed.start_query(&drasi_core_types::ComponentName::try_new("upstream").expect("fixture component name")).await;
+        installed.wait_for(&drasi_core_types::ComponentName::try_new("upstream").expect("fixture component name"), &[1, 2]).await;
 
         // A source has no input port, and a query's `in` is not an output.
         for (config, needle) in [
             (
-                query("unknown", "Item")
-                    .from_input_port("native", "missing")
-                    .build(),
+                query(drasi_core_types::ComponentName::try_new("unknown").expect("fixture component name"), "Item")
+                    .from_input_port_by_name(drasi_core_types::ComponentName::try_new("native").expect("fixture component name"), drasi_computation_contracts::PortId::try_new("missing").expect("fixture PortId"))
+                    .build().expect("valid query"),
                 r#"no Output port PortId("missing") is declared (declared Output ports: [PortId("audit"), PortId("data")])"#,
             ),
             (
-                query("source-input", "Item")
-                    .from_input_port("native", "in")
-                    .build(),
+                query(drasi_core_types::ComponentName::try_new("source-input").expect("fixture component name"), "Item")
+                    .from_input_port_by_name(drasi_core_types::ComponentName::try_new("native").expect("fixture component name"), drasi_computation_contracts::PortId::try_new("in").expect("fixture PortId"))
+                    .build().expect("valid query"),
                 r#"no Output port PortId("in") is declared (declared Output ports: [PortId("audit"), PortId("data")])"#,
             ),
             (
-                query("wrong-direction", "Item")
-                    .from_input_port("upstream", "in")
-                    .build(),
+                query(drasi_core_types::ComponentName::try_new("wrong-direction").expect("fixture component name"), "Item")
+                    .from_input_port_by_name(drasi_core_types::ComponentName::try_new("upstream").expect("fixture component name"), drasi_computation_contracts::PortId::try_new("in").expect("fixture PortId"))
+                    .build().expect("valid query"),
                 r#"no Output port PortId("in") is declared (declared Output ports: [PortId("out")])"#,
             ),
         ] {
-            let id = config.id.clone();
+            let name = config.name.clone();
             let failure = installed.failure(config).await;
-            assert!(failure.contains(needle), "{id}: {failure}");
-            assert!(installed.upstream(&id).is_empty(), "{id}");
+            assert!(failure.contains(needle), "{name}: {failure}");
+            assert!(installed.upstream(&name).is_empty(), "{name}");
         }
 
         // The healthy query and its source are unaffected by the failures.
         installed.fixture.send("data", "i3", 3).await;
-        installed.wait_for("upstream", &[1, 2, 3]).await;
+        installed.wait_for(&drasi_core_types::ComponentName::try_new("upstream").expect("fixture component name"), &[1, 2, 3]).await;
         installed.core.shutdown().await.expect("shutdown");
     })
     .await
@@ -821,12 +1023,13 @@ async fn untimed_native_input_is_processed_after_the_snapshot() {
         let installed = install(primary("data")).await;
         installed
             .core
-            .add_query(query("untimed", "Item").from_input("native").build())
+            .add_query_with_handle(query(drasi_core_types::ComponentName::try_new("untimed").expect("fixture component name"), "Item").from_input_by_name(drasi_core_types::ComponentName::try_new("native").expect("fixture component name")).build().expect("valid query"))
             .await
-            .expect("add query");
+            .expect("add query")
+            .wait_created().await.expect("query construction");
         installed.start_components().await;
-        installed.start_query("untimed").await;
-        installed.wait_for("untimed", &[1, 2]).await;
+        installed.start_query(&drasi_core_types::ComponentName::try_new("untimed").expect("fixture component name")).await;
+        installed.wait_for(&drasi_core_types::ComponentName::try_new("untimed").expect("fixture component name"), &[1, 2]).await;
 
         installed.fixture.send_untimed("data", "i3", 3).await;
 
@@ -854,7 +1057,7 @@ async fn untimed_native_input_is_processed_after_the_snapshot() {
         );
 
         let processed = tokio::time::timeout(Duration::from_secs(5), async {
-            while installed.values("untimed").await != [1, 2, 3] {
+            while installed.values(&drasi_core_types::ComponentName::try_new("untimed").expect("fixture component name")).await != [1, 2, 3] {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -862,8 +1065,8 @@ async fn untimed_native_input_is_processed_after_the_snapshot() {
         assert!(
             processed.is_ok(),
             "the query did not process untimed native input: it has {:?}, status {:?}, failures {:?}",
-            installed.values("untimed").await,
-            installed.core.get_query_status("untimed").await,
+            installed.values(&drasi_core_types::ComponentName::try_new("untimed").expect("fixture component name")).await,
+            installed.core.get_query_status_by_name(&drasi_core_types::ComponentName::try_new("untimed").expect("fixture component name")).await,
             installed.failures(&["native", "untimed"])
         );
         installed.core.shutdown().await.expect("shutdown");

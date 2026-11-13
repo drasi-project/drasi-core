@@ -62,10 +62,10 @@ pub struct SuiDeepBookSource {
 }
 
 impl SuiDeepBookSource {
-    pub fn new(id: impl Into<String>, config: SuiDeepBookSourceConfig) -> Result<Self> {
+    pub fn new(id: drasi_lib::ComponentId, config: SuiDeepBookSourceConfig) -> Result<Self> {
         config.validate()?;
-        let id = id.into();
-        let params = SourceBaseParams::new(&id);
+        let id = id.clone();
+        let params = SourceBaseParams::new(id.clone());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         Ok(Self {
@@ -78,14 +78,14 @@ impl SuiDeepBookSource {
         })
     }
 
-    pub fn builder(id: impl Into<String>) -> SuiDeepBookSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> SuiDeepBookSourceBuilder {
         SuiDeepBookSourceBuilder::new(id)
     }
 }
 
 #[async_trait]
 impl Source for SuiDeepBookSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -219,8 +219,8 @@ impl Source for SuiDeepBookSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
         if let Some(state_store) = context.state_store {
             *self.state_store.write().await = Some(state_store);
             debug!(
@@ -241,7 +241,7 @@ impl Source for SuiDeepBookSource {
 // ── gRPC Checkpoint Streaming ──
 
 async fn run_grpc_stream(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: SuiDeepBookSourceConfig,
     base: &SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
@@ -434,14 +434,20 @@ fn backoff_delay_ms(failures: u32) -> u64 {
 }
 
 async fn load_grpc_cursor(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<Option<u64>> {
     let Some(store) = state_store else {
         return Ok(None);
     };
 
-    let Some(bytes) = store.get(source_id, GRPC_CURSOR_STATE_KEY).await? else {
+    let Some(bytes) = store
+        .get(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            GRPC_CURSOR_STATE_KEY,
+        )
+        .await?
+    else {
         return Ok(None);
     };
 
@@ -449,14 +455,19 @@ async fn load_grpc_cursor(
         Ok(seq) => Ok(Some(seq)),
         Err(err) => {
             warn!("Failed to parse gRPC cursor for source '{source_id}': {err}. Clearing state.");
-            let _ = store.delete(source_id, GRPC_CURSOR_STATE_KEY).await;
+            let _ = store
+                .delete(
+                    &drasi_lib::StorePartition::component(source_id.clone()),
+                    GRPC_CURSOR_STATE_KEY,
+                )
+                .await;
             Ok(None)
         }
     }
 }
 
 async fn save_grpc_cursor(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     seq: u64,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<()> {
@@ -465,14 +476,20 @@ async fn save_grpc_cursor(
     };
 
     let bytes = serde_json::to_vec(&seq)?;
-    store.set(source_id, GRPC_CURSOR_STATE_KEY, bytes).await?;
+    store
+        .set(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            GRPC_CURSOR_STATE_KEY,
+            bytes,
+        )
+        .await?;
     Ok(())
 }
 
 // ── JSON-RPC Polling (Legacy) ──
 
 async fn run_poll_loop(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: SuiDeepBookSourceConfig,
     base: &SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
@@ -660,7 +677,7 @@ struct EnrichmentState {
 
 /// Emit Pool, Trader, and Order nodes if not already seen.
 async fn emit_enrichment_nodes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     event: &crate::rpc::SuiEvent,
     enrichment: &EnrichmentConfig,
     rpc_client: &SuiRpcClient,
@@ -715,7 +732,7 @@ async fn emit_enrichment_nodes(
 
 /// Emit IN_POOL, SENT_BY, FOR_ORDER relationships after both nodes exist.
 async fn emit_enrichment_relationships(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     event: &crate::rpc::SuiEvent,
     enrichment: &EnrichmentConfig,
     event_entity_id: &str,
@@ -787,7 +804,7 @@ async fn initialize_cursor_for_now(
 /// reverse them into chronological order, and process them as inserts.
 /// This lets the dashboard display data immediately on startup.
 async fn fetch_lookback_events(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &SuiDeepBookSourceConfig,
     rpc_client: &SuiRpcClient,
     query_filter: &serde_json::Value,
@@ -871,14 +888,20 @@ async fn fetch_lookback_events(
 }
 
 async fn load_cursor(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<Option<EventCursor>> {
     let Some(store) = state_store else {
         return Ok(None);
     };
 
-    let Some(bytes) = store.get(source_id, CURSOR_STATE_KEY).await? else {
+    let Some(bytes) = store
+        .get(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            CURSOR_STATE_KEY,
+        )
+        .await?
+    else {
         return Ok(None);
     };
 
@@ -888,14 +911,19 @@ async fn load_cursor(
             warn!(
                 "Failed to parse persisted DeepBook cursor for source '{source_id}': {err}. Clearing state."
             );
-            let _ = store.delete(source_id, CURSOR_STATE_KEY).await;
+            let _ = store
+                .delete(
+                    &drasi_lib::StorePartition::component(source_id.clone()),
+                    CURSOR_STATE_KEY,
+                )
+                .await;
             Ok(None)
         }
     }
 }
 
 async fn save_cursor(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     cursor: &EventCursor,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<()> {
@@ -904,7 +932,13 @@ async fn save_cursor(
     };
 
     let bytes = serde_json::to_vec(cursor)?;
-    store.set(source_id, CURSOR_STATE_KEY, bytes).await?;
+    store
+        .set(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            CURSOR_STATE_KEY,
+            bytes,
+        )
+        .await?;
     Ok(())
 }
 
@@ -921,7 +955,7 @@ async fn wait_for_poll_or_shutdown(
 }
 
 pub struct SuiDeepBookSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: SuiDeepBookSourceConfig,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -931,9 +965,9 @@ pub struct SuiDeepBookSourceBuilder {
 }
 
 impl SuiDeepBookSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: SuiDeepBookSourceConfig::default(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -1062,7 +1096,7 @@ impl SuiDeepBookSourceBuilder {
     pub fn build(self) -> Result<SuiDeepBookSource> {
         self.config.validate()?;
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -1092,22 +1126,34 @@ mod tests {
 
     #[test]
     fn test_builder_defaults() {
-        let source = SuiDeepBookSource::builder("source-1").build().unwrap();
-        assert_eq!(source.id(), "source-1");
+        let source = SuiDeepBookSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000096")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000096")
+                .expect("fixture UUID")
+        );
         assert_eq!(source.type_name(), "sui-deepbook");
         assert_eq!(source.config.poll_interval_ms, 2_000);
     }
 
     #[test]
     fn test_builder_with_custom_values() {
-        let source = SuiDeepBookSource::builder("source-1")
-            .with_rpc_endpoint("https://fullnode.testnet.sui.io:443")
-            .with_deepbook_package_id("0xabc")
-            .with_poll_interval_ms(500)
-            .with_request_limit(25)
-            .with_start_from_beginning()
-            .build()
-            .unwrap();
+        let source = SuiDeepBookSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000096")
+                .expect("fixture UUID"),
+        )
+        .with_rpc_endpoint("https://fullnode.testnet.sui.io:443")
+        .with_deepbook_package_id("0xabc")
+        .with_poll_interval_ms(500)
+        .with_request_limit(25)
+        .with_start_from_beginning()
+        .build()
+        .unwrap();
 
         assert_eq!(
             source.config.rpc_endpoint,
@@ -1124,9 +1170,12 @@ mod tests {
 
     #[test]
     fn test_builder_rejects_invalid_config() {
-        let result = SuiDeepBookSource::builder("source-1")
-            .with_rpc_endpoint("")
-            .build();
+        let result = SuiDeepBookSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000096")
+                .expect("fixture UUID"),
+        )
+        .with_rpc_endpoint("")
+        .build();
         assert!(result.is_err());
     }
 }

@@ -530,7 +530,10 @@ mod ownership_tests {
     #[test]
     fn decode_source_event_rebuilds_and_frees_buffer_once() {
         let payload = SourceEventPayload {
-            source_id: "src-1".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000031",
+            )
+            .expect("fixture UUID"),
             event: SourceEvent::Change(SourceChange::Insert { element: node() }),
             timestamp_us: 1_771_000_000_000_000,
             sequence: 99,
@@ -540,7 +543,11 @@ mod ownership_tests {
         let ffi = unsafe { &*raw };
 
         let wrapper = decode_source_event(ffi).expect("host-owned wrapper");
-        assert_eq!(wrapper.source_id, "src-1");
+        assert_eq!(
+            wrapper.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID")
+        );
         assert_eq!(wrapper.sequence, 99);
         assert_eq!(wrapper.source_position.as_deref(), Some(&b"binlog:1"[..]));
         assert_eq!(wrapper.event, payload.event);
@@ -582,7 +589,10 @@ mod ownership_tests {
     #[test]
     fn decode_bootstrap_event_rebuilds_and_frees_buffer_once() {
         let payload = BootstrapEventPayload {
-            source_id: "src-1".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000031",
+            )
+            .expect("fixture UUID"),
             change: SourceChange::Insert { element: node() },
             timestamp_us: 1_771_000_000_000_000,
             sequence: 5,
@@ -600,7 +610,11 @@ mod ownership_tests {
         let ffi = unsafe { &*raw };
 
         let event = decode_bootstrap_event(ffi).expect("host-owned bootstrap event");
-        assert_eq!(event.source_id, "src-1");
+        assert_eq!(
+            event.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID")
+        );
         assert_eq!(event.sequence, 5);
         assert_eq!(event.change, payload.change);
         assert_eq!(BOOT_DROPS.load(Ordering::SeqCst), 1);
@@ -668,7 +682,10 @@ mod ownership_tests {
     fn change(sequence: u64) -> *mut FfiSourceEvent {
         make_source_event(
             &SourceEventPayload {
-                source_id: "s".to_string(),
+                source_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000007e",
+                )
+                .expect("fixture UUID"),
                 event: SourceEvent::Change(SourceChange::Insert { element: node() }),
                 timestamp_us: 0,
                 sequence,
@@ -754,7 +771,10 @@ mod ownership_tests {
         drop(rx);
 
         let payload = SourceEventPayload {
-            source_id: "s".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000007e",
+            )
+            .expect("fixture UUID"),
             event: SourceEvent::Change(SourceChange::Insert { element: node() }),
             timestamp_us: 0,
             sequence: 0,
@@ -792,7 +812,10 @@ mod ownership_tests {
         drop(rx);
 
         let payload = BootstrapEventPayload {
-            source_id: "s".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000007e",
+            )
+            .expect("fixture UUID"),
             change: SourceChange::Insert { element: node() },
             timestamp_us: 0,
             sequence: 1,

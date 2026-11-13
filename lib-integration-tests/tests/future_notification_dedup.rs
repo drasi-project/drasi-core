@@ -4,6 +4,7 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
+use drasi_lib::computation::v1::GraphEntityId;
 use drasi_lib::{test_support::QueryTestControl, DrasiLib, Query};
 use drasi_reaction_application::ApplicationReactionBuilder;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig};
@@ -30,7 +31,7 @@ fn insert(source: &str, id: &str, name: &str, deadline: u64) -> SourceChange {
     }
 }
 
-async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+async fn wait_for_running(drasi: &DrasiLib, component_id: drasi_core::ComponentId) {
     let mut events = drasi.subscribe_all_component_events();
     if drasi
         .get_graph()
@@ -38,7 +39,10 @@ async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
         .expect("component graph snapshot unavailable")
         .nodes
         .iter()
-        .any(|node| node.id == component_id && node.status == ComponentStatus::Running)
+        .any(|node| {
+            node.id == GraphEntityId::Component(component_id.clone())
+                && node.status == ComponentStatus::Running
+        })
     {
         return;
     }
@@ -69,43 +73,74 @@ async fn future_notifications_ignore_data_checkpoints_with_colliding_source_id_m
 
 async fn run_future_notification_dedup(runtime: &str) {
     for source_id in ["ordinary-source", "__future_queue__"] {
+        let source_name =
+            drasi_core::ComponentName::try_new(source_id).expect("fixture component name");
+        let source_component_id =
+            drasi_core::ComponentId::try_new(if source_id == "ordinary-source" {
+                "00000000-0000-0000-0000-000000000140"
+            } else {
+                "00000000-0000-0000-0000-000000000142"
+            })
+            .expect("fixture UUID");
         let clock = QueryTestControl::new(INITIAL_TIME);
         let (source, source_handle) = ApplicationSource::new(
-            source_id,
+            source_component_id,
             ApplicationSourceConfig {
                 properties: Default::default(),
                 durability: None,
             },
         )
         .expect("create application source");
-        let (reaction, reaction_handle) = ApplicationReactionBuilder::new("results")
-            .with_query("deadlines")
-            .with_auto_start(true)
-            .build();
-        let query = Query::cypher("deadlines")
-            .query(
-                "MATCH (item:Item)
+        let (reaction, reaction_handle) = ApplicationReactionBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000141")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("deadlines").expect("fixture component name"),
+        )
+        .with_auto_start(true)
+        .build();
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("deadlines").expect("fixture component name"),
+        )
+        .query(
+            "MATCH (item:Item)
                  RETURN item.name AS name,
                  CASE WHEN drasi.trueLater(
                      datetime.realtime() >= datetime({epochMillis: item.deadline}),
                      datetime({epochMillis: item.deadline})
                  ) THEN true ELSE false END AS due",
-            )
-            .from_input(source_id)
-            .auto_start(true)
-            .enable_bootstrap(false)
-            .build();
+        )
+        .from_input_by_name(source_name.clone())
+        .auto_start(true)
+        .enable_bootstrap(false)
+        .build()
+        .expect("valid query configuration");
         let drasi = lib_integration_tests::query_builder()
             .with_id(format!("future-dedup-{runtime}-{source_id}"))
-            .with_source(source)
+            .with_source(source_name.clone(), source)
             .with_query(query)
-            .with_query_test_control("deadlines", clock.clone())
-            .with_reaction(reaction)
+            .with_query_test_control_by_name(
+                drasi_core::ComponentName::try_new("deadlines").expect("fixture component name"),
+                clock.clone(),
+            )
+            .with_reaction(
+                drasi_core::ComponentName::try_new("results").expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .expect("build timer fixture");
         drasi.start().await.expect("start timer fixture");
-        for component_id in [source_id, "deadlines", "results"] {
+        for component_name in [source_id, "deadlines", "results"] {
+            let component_id = drasi
+                .component_by_name(
+                    &drasi_core::ComponentName::try_new(component_name)
+                        .expect("fixture component name"),
+                )
+                .expect("fixture component")
+                .id()
+                .clone();
             wait_for_running(&drasi, component_id).await;
         }
         let mut subscription = reaction_handle

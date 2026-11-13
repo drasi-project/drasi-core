@@ -47,10 +47,13 @@ async fn receiver(request_count: usize) -> Receiver {
 }
 
 fn reaction(url: &str, adaptive: bool) -> HttpReaction {
-    let mut builder = HttpReaction::builder("http-lifecycle")
-        .with_query("q1")
-        .with_base_url(url)
-        .with_timeout_ms(30_000);
+    let mut builder = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000db")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_base_url(url)
+    .with_timeout_ms(30_000);
     if adaptive {
         builder = builder
             .with_adaptive(AdaptiveBatchConfig {
@@ -75,7 +78,11 @@ async fn arrived(server: &mut Receiver, adaptive: bool, sequence: u64) {
     } else {
         &payload
     };
-    assert_eq!(notification["queryId"], "q1");
+    assert_eq!(
+        notification["queryId"],
+        "00000000-0000-0000-0000-00000000002b"
+    );
+    assert_eq!(notification["queryName"], "q1");
     assert_eq!(notification["sequenceId"], sequence);
     assert_eq!(notification["after"]["generation"], sequence);
 }
@@ -100,7 +107,15 @@ async fn requests_survive_stop_and_three_restarts_in_both_modes() {
             arrived(&mut server, adaptive, sequence).await;
             if sequence == 1 {
                 support::assert_incomplete_stop(&reaction, &reaction.base).await;
-                assert!(reaction.base.read_checkpoint("q1").await.unwrap().is_none());
+                assert!(reaction
+                    .base
+                    .read_checkpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                            .expect("fixture UUID")
+                    )
+                    .await
+                    .unwrap()
+                    .is_none());
             }
             server.release.add_permits(1);
             reaction.stop().await.unwrap();
@@ -109,7 +124,10 @@ async fn requests_survive_stop_and_three_restarts_in_both_modes() {
             assert_eq!(
                 reaction
                     .base
-                    .read_checkpoint("q1")
+                    .read_checkpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                            .expect("fixture UUID")
+                    )
                     .await
                     .unwrap()
                     .unwrap()
@@ -139,13 +157,24 @@ async fn checkpoint_writes_survive_stop_in_both_modes() {
             .await
             .unwrap();
         support::assert_incomplete_stop(&reaction, &reaction.base).await;
-        assert!(reaction.base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(reaction
+            .base
+            .read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
         store.release.add_permits(1);
         reaction.stop().await.unwrap();
         assert_eq!(
             reaction
                 .base
-                .read_checkpoint("q1")
+                .read_checkpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -176,7 +205,15 @@ async fn cancelled_start_and_checkpoint_panic_require_cleanup_in_both_modes() {
             .unwrap();
         store.release.add_permits(1);
         support::assert_panic_cleanup(&reaction, &reaction.base).await;
-        assert!(reaction.base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(reaction
+            .base
+            .read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
         server.worker.await.unwrap();
     }
 }

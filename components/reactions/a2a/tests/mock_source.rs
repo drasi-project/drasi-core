@@ -18,9 +18,9 @@ use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use serde_json::Value;
 
-pub fn add_result(query_id: &str, sequence: u64, after: Value) -> QueryResult {
+pub fn add_result(query_id: drasi_lib::ComponentId, sequence: u64, after: Value) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         Utc::now(),
         vec![ResultDiff::Add {
@@ -31,9 +31,14 @@ pub fn add_result(query_id: &str, sequence: u64, after: Value) -> QueryResult {
     )
 }
 
-pub fn update_result(query_id: &str, sequence: u64, before: Value, after: Value) -> QueryResult {
+pub fn update_result(
+    query_id: drasi_lib::ComponentId,
+    sequence: u64,
+    before: Value,
+    after: Value,
+) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         Utc::now(),
         vec![ResultDiff::Update {
@@ -47,9 +52,13 @@ pub fn update_result(query_id: &str, sequence: u64, before: Value, after: Value)
     )
 }
 
-pub fn delete_result(query_id: &str, sequence: u64, before: Value) -> QueryResult {
+pub fn delete_result(
+    query_id: drasi_lib::ComponentId,
+    sequence: u64,
+    before: Value,
+) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         Utc::now(),
         vec![ResultDiff::Delete {
@@ -61,13 +70,13 @@ pub fn delete_result(query_id: &str, sequence: u64, before: Value) -> QueryResul
 }
 
 pub fn aggregation_result(
-    query_id: &str,
+    query_id: drasi_lib::ComponentId,
     sequence: u64,
     before: Option<Value>,
     after: Value,
 ) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         Utc::now(),
         vec![ResultDiff::Aggregation {
@@ -80,13 +89,13 @@ pub fn aggregation_result(
 }
 
 pub fn two_updates(
-    query_id: &str,
+    query_id: drasi_lib::ComponentId,
     sequence: u64,
     first: (Value, Value),
     second: (Value, Value),
 ) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         Utc::now(),
         vec![
@@ -109,9 +118,9 @@ pub fn two_updates(
     )
 }
 
-pub fn noop_then_add(query_id: &str, sequence: u64, after: Value) -> QueryResult {
+pub fn noop_then_add(query_id: drasi_lib::ComponentId, sequence: u64, after: Value) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         Utc::now(),
         vec![

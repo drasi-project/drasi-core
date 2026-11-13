@@ -12,11 +12,14 @@ impl DurableQuery {
         middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
         force_reset: bool,
     ) -> Result<()> {
-        let reset = force_reset || self.initialized && !self.bootstrap_complete;
+        let updating =
+            self.update_operation.is_some() && (!self.initialized || !self.bootstrap_complete);
+        let reset = force_reset || self.initialized && !self.bootstrap_complete || updating;
         if reset {
             anyhow::ensure!(
-                self.bootstrap_configured && self.recovery == QueryRecoveryPolicy::AutoReset,
-                "incomplete volatile initialization requires AutoReset and a bootstrap provider"
+                updating
+                    || self.bootstrap_configured && self.recovery == QueryRecoveryPolicy::AutoReset,
+                "volatile reset requires an accepted update or AutoReset with bootstrap"
             );
             anyhow::ensure!(
                 self.pending.is_none(),

@@ -14,6 +14,8 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
 #[path = "fixtures/query_semantics.rs"]
 mod query_semantics;
 
@@ -31,6 +33,7 @@ use drasi_core::{
     },
 };
 use drasi_lib::{
+    channels::{SourceEvent, SourceEventWrapper},
     computation::v1::*,
     config::{QueryJoinConfig, QueryJoinKeyConfig},
 };
@@ -99,48 +102,56 @@ impl SourceMiddleware for Prefix {
         }])
     }
 }
-fn config() -> drasi_lib::config::QueryConfig {
-    drasi_lib::Query::cypher("joined")
-        .query(
-            "MATCH (o:Order)-[:PLACED_BY]->(c:Customer) RETURN o.name AS item, c.name AS customer",
-        )
-        .from_input_with_pipeline("orders", vec!["normalize".into()])
-        .from_input("customers")
-        .with_middleware(SourceMiddlewareConfig::new(
-            "prefix",
-            "normalize",
-            serde_json::json!({"value":"normalized:"})
-                .as_object()
-                .expect("object")
-                .clone(),
-        ))
-        .with_joins(vec![QueryJoinConfig {
-            id: "PLACED_BY".into(),
-            keys: vec![
-                QueryJoinKeyConfig {
-                    label: "Order".into(),
-                    property: "customerId".into(),
-                },
-                QueryJoinKeyConfig {
-                    label: "Customer".into(),
-                    property: "id".into(),
-                },
-            ],
-        }])
-        .build()
+fn config() -> drasi_lib::config::AssignedQueryConfig {
+    drasi_lib::Query::cypher(
+        drasi_core_types::ComponentName::try_new("joined").expect("fixture component name"),
+    )
+    .query("MATCH (o:Order)-[:PLACED_BY]->(c:Customer) RETURN o.name AS item, c.name AS customer")
+    .from_input_with_pipeline_by_id(fixture_support::component_id(1), vec!["normalize".into()])
+    .from_input_by_id(fixture_support::component_id(2))
+    .with_middleware(SourceMiddlewareConfig::new(
+        "prefix",
+        "normalize",
+        serde_json::json!({"value":"normalized:"})
+            .as_object()
+            .expect("object")
+            .clone(),
+    ))
+    .with_joins(vec![QueryJoinConfig {
+        id: "PLACED_BY".into(),
+        keys: vec![
+            QueryJoinKeyConfig {
+                label: "Order".into(),
+                property: "customerId".into(),
+            },
+            QueryJoinKeyConfig {
+                label: "Customer".into(),
+                property: "id".into(),
+            },
+        ],
+    }])
+    .build()
+    .expect("valid query configuration")
+    .with_assigned_id(fixture_support::component_id(752))
 }
-fn definition(config: &drasi_lib::config::QueryConfig) -> ContinuousQueryDefinition {
+fn definition(config: &drasi_lib::config::AssignedQueryConfig) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: "configured".into(),
-        id: ComponentId::try_new(config.id.as_str()).expect("id"),
+        id: config.id.clone(),
         query: config.query.clone(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("joined/out").expect("stream"),
         outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
     }
 }
-fn input(source: &str, label: &str, properties: serde_json::Value) -> InputEnvelope {
+fn input(
+    id: ComponentId,
+    source: &str,
+    label: &str,
+    properties: serde_json::Value,
+) -> InputEnvelope {
     change_input(
+        id,
         source,
         SourceChange::Insert {
             element: Element::Node {
@@ -156,11 +167,24 @@ fn input(source: &str, label: &str, properties: serde_json::Value) -> InputEnvel
     )
 }
 
-fn change_input(source: &str, change: SourceChange, sequence: u64) -> InputEnvelope {
+fn change_input(
+    id: ComponentId,
+    source: &str,
+    change: SourceChange,
+    sequence: u64,
+) -> InputEnvelope {
     InputEnvelope {
         port: PortId::try_new("in").expect("port"),
-        envelope: GraphChangeCodec::encode_change(
-            change,
+        envelope: GraphChangeCodec::encode_source_event(
+            Arc::new(SourceEventWrapper {
+                source_id: id.clone(),
+                event: SourceEvent::Change(change),
+                timestamp: chrono::DateTime::from_timestamp_millis(1000).expect("fixture time"),
+                sequence,
+                source_position: None,
+                profiling: None,
+            }),
+            &id,
             StreamId::try_new(format!("{source}/out")).expect("stream"),
             sequence,
             None,
@@ -221,9 +245,10 @@ async fn native_query_executes_synthetic_joins_and_the_configured_source_middlew
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = MiddlewareTypeRegistry::new();
     registry.register(Arc::new(PrefixFactory(calls.clone())));
-    let settings = QueryExecutionSettings::from_legacy_config(&config);
+    let settings =
+        QueryExecutionSettings::from_configuration(&config).expect("fixture execution settings");
     let subscriptions =
-        QueryExecutionSettings::legacy_subscriptions(&config).expect("same subscription planning");
+        QueryExecutionSettings::subscriptions(&config).expect("same subscription planning");
     assert!(
         subscriptions
             .iter()
@@ -239,9 +264,31 @@ async fn native_query_executes_synthetic_joins_and_the_configured_source_middlew
     )
     .await
     .expect("construct");
+    query
+        .bind_inputs(&[
+            InputBinding {
+                input_port: PortId::try_new("in").expect("port"),
+                output: OutputEndpoint::new(
+                    fixture_support::component_id(1),
+                    PortId::try_new("out").expect("port"),
+                ),
+                stream: StreamId::try_new("orders/out").expect("stream"),
+            },
+            InputBinding {
+                input_port: PortId::try_new("in").expect("port"),
+                output: OutputEndpoint::new(
+                    fixture_support::component_id(2),
+                    PortId::try_new("out").expect("port"),
+                ),
+                stream: StreamId::try_new("customers/out").expect("stream"),
+            },
+        ])
+        .await
+        .expect("host-owned input bindings");
     query.start().await.expect("start");
     assert!(query
         .transform(input(
+            fixture_support::component_id(2),
             "customers",
             "Customer",
             serde_json::json!({"id":"C1","name":"Ada"})
@@ -251,6 +298,7 @@ async fn native_query_executes_synthetic_joins_and_the_configured_source_middlew
         .is_empty());
     let output = query
         .transform(input(
+            fixture_support::component_id(1),
             "orders",
             "Order",
             serde_json::json!({"customerId":"C1","name":"order"}),
@@ -275,7 +323,7 @@ impl ComputationIndexProvider for CountingProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        query: &str,
+        query: &drasi_core_types::ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         InMemoryComputationProvider
@@ -295,7 +343,7 @@ async fn invalid_middleware_is_rejected_before_constructing_query_resources() {
         definition(&config),
         Arc::new(CountingProvider(count.clone())),
         QueryOptions::default(),
-        QueryExecutionSettings::from_legacy_config(&config),
+        QueryExecutionSettings::from_configuration(&config).expect("fixture execution settings"),
         Some(Arc::new(MiddlewareTypeRegistry::new())),
     )
     .await;
@@ -327,7 +375,8 @@ async fn recovery_detects_changed_join_or_middleware_configuration() {
             definition(&config),
             provider.clone(),
             QueryOptions::default(),
-            QueryExecutionSettings::from_legacy_config(&config),
+            QueryExecutionSettings::from_configuration(&config)
+                .expect("fixture execution settings"),
             Some(registry.clone()),
         )
         .await
@@ -335,7 +384,8 @@ async fn recovery_detects_changed_join_or_middleware_configuration() {
         query.start().await.expect("start");
         query.stop().await.expect("stop");
     }
-    let mut changed = QueryExecutionSettings::from_legacy_config(&config);
+    let mut changed =
+        QueryExecutionSettings::from_configuration(&config).expect("fixture execution settings");
     changed.middleware[0]
         .config
         .insert("value".into(), "changed:".into());

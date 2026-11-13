@@ -191,7 +191,11 @@ async fn independent_checkpoint_preserves_progress_without_claiming_atomicity() 
         StorageDurability::LOCAL_PROCESS_RESTART
     );
     let resources = InMemoryComputationProvider
-        .create_indexes("graph", "query")
+        .create_indexes(
+            "graph",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
+        )
         .await
         .unwrap();
     assert_eq!(resources.durability(), StorageDurability::VOLATILE);
@@ -203,7 +207,14 @@ async fn independent_checkpoint_preserves_progress_without_claiming_atomicity() 
 
     let configured: Arc<dyn CheckpointStore> = Arc::new(InMemoryCheckpointStore::new());
     configured
-        .stage_checkpoint("source", 7, None)
+        .stage_checkpoint(
+            &drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
+            7,
+            None,
+        )
         .await
         .unwrap();
     let resources = ComputationIndexes::try_new(
@@ -226,7 +237,10 @@ async fn independent_checkpoint_preserves_progress_without_claiming_atomicity() 
         resources
             .checkpoint_store()
             .unwrap()
-            .read_checkpoint("source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            ))
             .await
             .unwrap()
             .unwrap()
@@ -854,7 +868,11 @@ async fn transaction_group_atomic_rejection_does_not_fence_healthy_members() {
 #[tokio::test]
 async fn transaction_group_registration_is_bounded_and_cannot_wrap_an_existing_group() {
     let resources = InMemoryComputationProvider
-        .create_indexes("graph", "query")
+        .create_indexes(
+            "graph",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
+        )
         .await
         .unwrap();
     assert!(matches!(

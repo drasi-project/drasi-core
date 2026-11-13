@@ -4,7 +4,7 @@
 use super::persistent_faults::process::{write_boundary, OwnedChild, WATCHDOG};
 use super::*;
 use drasi_core::{computation::ComputationIndexProvider, interface::FailureMode};
-use drasi_lib::DrasiLib;
+use drasi_lib::{ComponentName, DrasiLib};
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 
@@ -28,7 +28,7 @@ fn codec() -> EnvelopeCodec {
 
 async fn output_channel(path: &Path, fault: Arc<Fault>) -> Arc<QosChannel> {
     let provider = FaultProvider {
-        inner: provider(path),
+        inner: provider(&path.join("storage")),
         fault,
     };
     QosChannel::persistent_with_recovery(
@@ -43,7 +43,7 @@ async fn output_channel(path: &Path, fault: Arc<Fault>) -> Arc<QosChannel> {
             )]),
         },
         provider
-            .create_indexes(GRAPH, "output")
+            .create_indexes(GRAPH, &component(461))
             .await
             .expect("open persistent output indexes"),
         codec(),
@@ -130,6 +130,10 @@ struct Fixture {
 
 impl Fixture {
     async fn open(path: &Path, merge_fault: Arc<Fault>, journal_fault: Arc<Fault>) -> Self {
+        let storage = path.join("storage");
+        let source = source_id("a");
+        let merge = config().id;
+        let sink = component(101);
         let input = QosChannel::persistent_with_recovery(
             QosChannelDefinition {
                 stream: stream("a"),
@@ -141,8 +145,8 @@ impl Fixture {
                     SubscriptionStart::Earliest,
                 )]),
             },
-            provider(path)
-                .create_indexes(GRAPH, "input")
+            provider(&storage)
+                .create_indexes(GRAPH, &component(460))
                 .await
                 .expect("open persistent input indexes"),
             codec(),
@@ -150,7 +154,7 @@ impl Fixture {
             QosRecoveryOptions::Admission(AdmissionOptions {
                 construction_scope: INSTANCE.into(),
                 graph_id: GRAPH.into(),
-                component_id: component("a"),
+                component_id: source.clone(),
                 failure_scope: FailureMode::ProcessRestart,
                 max_producers: size(1),
                 receipts_per_producer: size(8),
@@ -166,7 +170,7 @@ impl Fixture {
             config(),
             schema(),
             Arc::new(FaultProvider {
-                inner: provider(path),
+                inner: provider(&storage),
                 fault: merge_fault,
             }),
         )
@@ -176,16 +180,25 @@ impl Fixture {
         let received = Received::default();
         let hold = Arc::new(AtomicBool::new(false));
         let mut batch = ComponentBatch::builder()
-            .source(Box::new(Ingress(
-                admission.clone(),
-                descriptor("a", &[], &["out"]),
-            )))
-            .transformer(Box::new(merger))
-            .sink(Box::new(Sink {
-                descriptor: descriptor("sink", &["in"], &[]),
-                received: received.clone(),
-                hold: hold.clone(),
-            }));
+            .source(
+                ComponentName::try_new("a").expect("source name"),
+                Box::new(Ingress(
+                    admission.clone(),
+                    descriptor(&source, &[], &["out"]),
+                )),
+            )
+            .transformer(
+                ComponentName::try_new("merge").expect("merger name"),
+                Box::new(merger),
+            )
+            .sink(
+                ComponentName::try_new("sink").expect("sink name"),
+                Box::new(Sink {
+                    descriptor: descriptor(&sink, &["in"], &[]),
+                    received: received.clone(),
+                    hold: hold.clone(),
+                }),
+            );
         for (name, channel) in [("input", &input), ("output", &output)] {
             let id = ResourceId::try_new(name).expect("channel resource id");
             batch = batch
@@ -200,17 +213,17 @@ impl Fixture {
                 .expect("provide actual channel resource");
         }
         let batch = batch
-            .bind_stream(endpoint("a", "out"), stream("a"))
-            .bind_stream(endpoint("merge", "out"), stream("merge"))
+            .bind_stream(endpoint(&source, "out"), stream("a"))
+            .bind_stream(endpoint(&merge, "out"), stream("merge"))
             .connect(
-                edge("a", "merge"),
+                edge(&source, &merge),
                 Box::new(input.definition().pipe(
                     ResourceId::try_new("input").expect("input resource id"),
                     "merge",
                 )),
             )
             .connect(
-                edge("merge", "sink"),
+                edge(&merge, &sink),
                 Box::new(output.definition().pipe(
                     ResourceId::try_new("output").expect("output resource id"),
                     "sink",
@@ -219,6 +232,7 @@ impl Fixture {
             .build()
             .expect("build actual merger pipeline");
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -259,7 +273,7 @@ impl Fixture {
     async fn admit(&self, sequence: u64, time: i64) {
         let session = self
             .admission
-            .register_producer(component("caller"))
+            .register_producer(component(462))
             .await
             .expect("register actual merger producer");
         let input = event("a", sequence, time);
@@ -439,7 +453,7 @@ fn normal_drasi_merger_recovers_after_child_death_at_persistence_and_handoff() {
             let mut merger = SourceTimeMergeTransformer::new_durable(
                 config(),
                 schema(),
-                provider(directory.path()),
+                provider(&directory.path().join("storage")),
             )
             .await
             .unwrap();

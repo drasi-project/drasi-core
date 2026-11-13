@@ -8,7 +8,7 @@ use prost::Message;
 #[test]
 fn source_messages_preserve_field_numbers_and_event_encoding() {
     let reference = crate::source::ElementReference {
-        source_id: "s".into(),
+        namespace: "s".into(),
         element_id: "n".into(),
     };
     assert_eq!(reference.encode_to_vec(), [10, 1, b's', 18, 1, b'n']);

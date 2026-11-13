@@ -204,6 +204,7 @@ impl OutputFollow for NativeFollow {
         )
         .map_err(invalid)?;
         let operation = self.lease.next(&request).map_err(failure_error)?;
+        context.fence.track(&operation);
         let bytes = tokio::select! {
             biased;
             _ = changed.changed() => return Err(OutputReadError::Retired),
@@ -315,10 +316,16 @@ mod tests {
     }
 
     fn producer(component: &str) -> GraphProducerIdentity {
+        let owner = ComponentId::try_new("2b3ece9c-f37f-5c0d-a27c-3188619c6edc").unwrap();
+        let component_id = if component == "component" {
+            ComponentId::try_new("0b42dc44-5ffd-5636-8c14-64a9594fd816").unwrap()
+        } else {
+            ComponentId::derive_owned(&owner, component).unwrap()
+        };
         GraphProducerIdentity::new(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new(component).unwrap(),
+            component_id,
             StreamId::try_new(format!("{component}/out")).unwrap(),
             true,
         )
@@ -369,7 +376,7 @@ mod tests {
         let codec = Arc::new(wire::codec(std::slice::from_ref(&schema)).unwrap());
         let context = Arc::new(Context {
             endpoint: OutputEndpoint::new(
-                ComponentId::try_new("component").unwrap(),
+                ComponentId::try_new("0b42dc44-5ffd-5636-8c14-64a9594fd816").unwrap(),
                 PortId::try_new("out").unwrap(),
             ),
             capability: OutputCapability::SnapshotFollow,
@@ -550,7 +557,7 @@ mod tests {
         let other_stream = GraphProducerIdentity::for_epoch(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("component").unwrap(),
+            ComponentId::try_new("0b42dc44-5ffd-5636-8c14-64a9594fd816").unwrap(),
             StreamId::try_new("component/other").unwrap(),
             fixture.owner.incarnation(),
             true,

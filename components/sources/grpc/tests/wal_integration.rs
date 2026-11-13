@@ -47,7 +47,7 @@ fn insert_node_request(source_id: &str, element_id: &str) -> SubmitEventRequest 
                 element: Some(ProtoElementType::Node(Node {
                     metadata: Some(ElementMetadata {
                         reference: Some(ElementReference {
-                            source_id: source_id.to_string(),
+                            namespace: source_id.to_string(),
                             element_id: element_id.to_string(),
                         }),
                         labels: vec!["Person".to_string()],
@@ -104,12 +104,16 @@ fn durability_config(
 }
 
 /// Helper: initialize a source with WAL provider
-async fn init_source_with_wal(source: &dyn Source, wal: Arc<dyn WalProvider>, source_id: &str) {
+async fn init_source_with_wal(
+    source: &dyn Source,
+    wal: Arc<dyn WalProvider>,
+    source_id: drasi_core::ComponentId,
+) {
     let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
     source
-        .initialize(SourceRuntimeContext {
+        .bind_runtime_context(SourceRuntimeContext {
             instance_id: "test-instance".to_string(),
-            source_id: source_id.to_string(),
+            source_id,
             update_tx: update_tx.into(),
             state_store: None,
             identity_provider: None,
@@ -133,18 +137,35 @@ async fn test_grpc_wal_disabled_no_persistence() {
         timeout_ms: 5000,
         durability: None,
     };
-    let source = GrpcSource::new("grpc-disabled", config).unwrap();
+    let source = GrpcSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000147")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "grpc-disabled").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000147")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     assert!(!source.supports_replay());
 
-    let count = wal.event_count("grpc-disabled").await;
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000147")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert!(count.is_err(), "WAL should not be registered when disabled");
 
     source.stop().await.unwrap();
@@ -164,18 +185,36 @@ async fn test_grpc_wal_enabled_source_starts() {
             CapacityPolicy::RejectIncoming,
         )),
     };
-    let source = GrpcSource::new("grpc-enabled", config).unwrap();
+    let source = GrpcSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000148")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "grpc-enabled").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000148")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     assert!(source.supports_replay());
 
-    let count = wal.event_count("grpc-enabled").await.unwrap();
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000148")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(count, 0);
 
     source.stop().await.unwrap();
@@ -192,7 +231,14 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
         max_events: 10_000,
         capacity_policy: CapacityPolicy::RejectIncoming,
     };
-    wal.register("grpc-crash", wal_config).await.unwrap();
+    wal.register(
+        &drasi_core::interface::StorageScope::default(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000149")
+            .expect("fixture UUID"),
+        wal_config,
+    )
+    .await
+    .unwrap();
 
     // Simulate 5 prior events by appending directly
     use drasi_core::models::{
@@ -203,7 +249,7 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
             element: Element::Node {
                 metadata: ElementMetadata {
                     reference: ElementReference {
-                        source_id: Arc::from("grpc-crash"),
+                        namespace: Arc::from("grpc-crash"),
                         element_id: Arc::from(format!("n{i}").as_str()),
                     },
                     labels: Arc::from(vec![Arc::from("T")]),
@@ -212,7 +258,15 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
                 properties: ElementPropertyMap::new(),
             },
         };
-        let seq = wal.append("grpc-crash", &change).await.unwrap();
+        let seq = wal
+            .append(
+                &drasi_core::interface::StorageScope::default(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000149")
+                    .expect("fixture UUID"),
+                &change,
+            )
+            .await
+            .unwrap();
         assert_eq!(seq, i);
     }
 
@@ -228,15 +282,28 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
             CapacityPolicy::RejectIncoming,
         )),
     };
-    let source = GrpcSource::new("grpc-crash", config).unwrap();
-    init_source_with_wal(&source, wal.clone(), "grpc-crash").await;
+    let source = GrpcSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000149")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000149")
+            .expect("fixture UUID"),
+    )
+    .await;
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Subscribe with resume to verify replay works
     let settings = SourceSubscriptionSettings {
-        source_id: "grpc-crash".to_string(),
-        query_id: "q1".to_string(),
+        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000149")
+            .expect("fixture UUID"),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
@@ -277,22 +344,46 @@ async fn test_grpc_deprovision_removes_wal() {
             CapacityPolicy::RejectIncoming,
         )),
     };
-    let source = GrpcSource::new("grpc-deprov", config).unwrap();
+    let source = GrpcSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014a")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "grpc-deprov").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014a")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let count = wal.event_count("grpc-deprov").await.unwrap();
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014a")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(count, 0);
 
     source.stop().await.unwrap();
-    source.deprovision().await.unwrap();
+    source.delete_owned_resources().await.unwrap();
 
-    let count = wal.event_count("grpc-deprov").await;
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014a")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");
 }
 
@@ -302,7 +393,8 @@ async fn concurrent_grpc_requests_preserve_sequence_order() {
         let port = reserve_port();
         let source_id = "grpc-concurrent";
         let source = GrpcSource::new(
-            source_id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003eb")
+                .expect("fixture UUID"),
             GrpcSourceConfig {
                 host: "127.0.0.1".to_string(),
                 port,
@@ -315,12 +407,20 @@ async fn concurrent_grpc_requests_preserve_sequence_order() {
         .unwrap();
         let directory = TempDir::new().unwrap();
         let wal = Arc::new(RedbWalProvider::new(directory.path()));
-        init_source_with_wal(&source, wal.clone(), source_id).await;
+        init_source_with_wal(
+            &source,
+            wal.clone(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003eb")
+                .expect("fixture UUID"),
+        )
+        .await;
         source.start().await.unwrap();
         let mut receiver = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: source_id.to_string(),
-                query_id: "q1".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003eb")
+                    .expect("fixture UUID"),
+                query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
                 enable_bootstrap: false,
                 nodes: HashSet::new(),
                 relations: HashSet::new(),
@@ -380,7 +480,16 @@ async fn concurrent_grpc_requests_preserve_sequence_order() {
             result.unwrap();
         }
         if durable {
-            assert_eq!(wal.event_count(source_id).await.unwrap(), 64);
+            assert_eq!(
+                wal.event_count(
+                    &drasi_core::interface::StorageScope::default(),
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003eb",)
+                        .expect("fixture UUID"),
+                )
+                .await
+                .unwrap(),
+                64
+            );
         }
         source.stop().await.unwrap();
     }
@@ -402,11 +511,22 @@ async fn test_grpc_sequence_stamped_without_durability() {
         timeout_ms: 5000,
         durability: None,
     };
-    let source = GrpcSource::new("grpc-noseq", config).unwrap();
+    let source = GrpcSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014b")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "grpc-noseq").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014b")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -416,8 +536,10 @@ async fn test_grpc_sequence_stamped_without_durability() {
 
     // Subscribe before submitting so the events are dispatched to us.
     let settings = SourceSubscriptionSettings {
-        source_id: "grpc-noseq".to_string(),
-        query_id: "q1".to_string(),
+        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014b")
+            .expect("fixture UUID"),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),

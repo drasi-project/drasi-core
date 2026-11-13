@@ -6,7 +6,7 @@ use drasi_lib::{
     channels::{QueryResult, ResultDiff},
     computation::v1::GraphError,
     config::QueryConfig,
-    error::ComponentNotFoundError,
+    error::{DrasiError, OperationSubject},
     queries::FetchError,
     DispatchMode, DrasiLib, Query,
 };
@@ -17,17 +17,24 @@ use futures::{stream::BoxStream, StreamExt};
 use std::{future::Future, sync::Arc, time::Duration};
 
 const DEADLINE: Duration = Duration::from_secs(10);
+// Reuse the UUID across instances to exercise reader-scope isolation.
+const QUERY_UUID: &str = "00000000-0000-0000-0000-00000000002e";
 type Results = BoxStream<'static, drasi_lib::Result<Arc<QueryResult>>>;
 
 fn configuration(mode: DispatchMode, retention: usize) -> QueryConfig {
-    let mut config = Query::cypher("query")
-        .query("MATCH (n:Item) RETURN n.value AS value")
-        .from_input("input")
-        .enable_bootstrap(false)
-        .auto_start(true)
-        .with_dispatch_buffer_capacity(1)
-        .with_outbox_capacity(retention)
-        .build();
+    let mut config =
+        Query::cypher(drasi_core::ComponentName::try_new("query").expect("fixture component name"))
+            .with_id(drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"))
+            .query("MATCH (n:Item) RETURN n.value AS value")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("input").expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .auto_start(true)
+            .with_dispatch_buffer_capacity(1)
+            .with_outbox_capacity(retention)
+            .build()
+            .expect("valid subscription query");
     config.dispatch_mode = Some(mode);
     config
 }
@@ -38,7 +45,8 @@ async fn fixture(
     retention: usize,
 ) -> Result<(DrasiLib, ApplicationSourceHandle)> {
     let (source, input) = ApplicationSource::new(
-        "input",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+            .expect("fixture UUID"),
         ApplicationSourceConfig {
             properties: Default::default(),
             durability: None,
@@ -48,14 +56,20 @@ async fn fixture(
         .with_id(id)
         .with_priority_queue_capacity(1)
         .with_dispatch_buffer_capacity(1)
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("input").expect("fixture component name"),
+            source,
+        )
         .with_query(configuration(mode, retention))
         .build()
         .await?;
     core.start().await?;
     tokio::time::timeout(
         DEADLINE,
-        core.computation_component("query")?.wait_started(),
+        core.component_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )?
+        .wait_started(),
     )
     .await??;
     Ok((core, input))
@@ -76,7 +90,14 @@ async fn insert(input: &ApplicationSourceHandle, value: i64) -> Result<()> {
 async fn rows(core: &DrasiLib, count: usize) -> Result<()> {
     tokio::time::timeout(DEADLINE, async {
         loop {
-            if core.get_query_results("query").await?.len() == count {
+            if core
+                .get_query_results_by_name(
+                    &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+                )
+                .await?
+                .len()
+                == count
+            {
                 return Ok::<_, anyhow::Error>(());
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -90,7 +111,10 @@ async fn value(stream: &mut Results, expected: i64) -> Result<u64> {
     let result = tokio::time::timeout(DEADLINE, stream.next())
         .await?
         .context("result stream closed")??;
-    assert_eq!(result.query_id, "query");
+    assert_eq!(
+        result.query_id,
+        drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID")
+    );
     assert!(
         matches!(&result.results[..], [ResultDiff::Add { data, .. }] if data["value"] == expected),
         "{result:?}"
@@ -110,15 +134,29 @@ async fn scoped_readers() -> Result<()> {
         .keys()
         .cloned()
         .collect::<Vec<_>>();
-    let subscription = first.subscribe_query_results("query").await?;
+    let subscription = first
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
     assert_eq!(subscription.snapshot.as_of_sequence, 1);
     assert_eq!(
         subscription.snapshot.to_vec(),
         [serde_json::json!({"value": 0})]
     );
     let mut a = subscription.stream;
-    let mut b = first.subscribe_query_results("query").await?.stream;
-    let mut other = second.subscribe_query_results("query").await?.stream;
+    let mut b = first
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?
+        .stream;
+    let mut other = second
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?
+        .stream;
     assert_eq!(
         control
             .observed()
@@ -138,9 +176,22 @@ async fn scoped_readers() -> Result<()> {
     drop(a);
     insert(&input, 2).await?;
     assert_eq!(value(&mut b, 2).await?, 3);
-    first.stop_query("query").await?;
-    first.start_query("query").await?;
-    first.computation_component("query")?.wait_started().await?;
+    first
+        .stop_query_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
+    first
+        .start_query_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
+    first
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )?
+        .wait_started()
+        .await?;
     insert(&input, 3).await?;
     assert_eq!(value(&mut b, 3).await?, 4);
     drop(b);
@@ -161,7 +212,11 @@ async fn scoped_readers() -> Result<()> {
 
 async fn bounded_reader_drop() -> Result<()> {
     let (core, input) = fixture("bounded", DispatchMode::Channel, 64).await?;
-    let unread = core.subscribe_query_results("query").await?;
+    let unread = core
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
     let produce = async {
         for next in 1..=32 {
             insert(&input, next).await?;
@@ -175,7 +230,12 @@ async fn bounded_reader_drop() -> Result<()> {
             .is_err(),
         "an unread bounded subscription must backpressure publication"
     );
-    let count = core.get_query_results("query").await?.len();
+    let count = core
+        .get_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?
+        .len();
     assert!(
         (1..=4).contains(&count),
         "unexpected bounded progress: {count}"
@@ -190,7 +250,12 @@ async fn bounded_reader_drop() -> Result<()> {
 
 async fn broadcast_recovery_and_replacement() -> Result<()> {
     let (core, input) = fixture("replay", DispatchMode::Broadcast, 64).await?;
-    let mut stream = core.subscribe_query_results("query").await?.stream;
+    let mut stream = core
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?
+        .stream;
     insert(&input, 1).await?;
     assert_eq!(value(&mut stream, 1).await?, 1);
     for next in 2..=8 {
@@ -210,7 +275,12 @@ async fn broadcast_recovery_and_replacement() -> Result<()> {
     assert_eq!(value(&mut stream, 10).await?, 10);
     let mut replacement = configuration(DispatchMode::Broadcast, 64);
     replacement.query = "MATCH (n:Item) RETURN n.value * 2 AS value".into();
-    core.update_query("query", replacement).await?;
+    core.remove_query_by_name(
+        &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await?;
+    let replacement = core.add_query_with_handle(replacement).await?;
+    tokio::time::timeout(DEADLINE, replacement.wait_started()).await??;
     let error = tokio::time::timeout(DEADLINE, stream.next())
         .await?
         .context("replacement must explicitly invalidate the reader")?
@@ -229,7 +299,12 @@ async fn broadcast_recovery_and_replacement() -> Result<()> {
 
 async fn unavailable_history() -> Result<()> {
     let (core, input) = fixture("history-gap", DispatchMode::Broadcast, 2).await?;
-    let mut stream = core.subscribe_query_results("query").await?.stream;
+    let mut stream = core
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?
+        .stream;
     for next in 1..=8 {
         insert(&input, next).await?;
     }
@@ -258,7 +333,9 @@ async fn snapshot_handoff() -> Result<()> {
         }
         rows(&core, 32).await
     };
-    let (subscription, produced) = tokio::join!(core.subscribe_query_results("query"), producing,);
+    let query_name = drasi_core::ComponentName::try_new("query").expect("fixture component name");
+    let (subscription, produced) =
+        tokio::join!(core.subscribe_query_results_by_name(&query_name), producing,);
     produced?;
     let subscription = subscription?;
     let cutoff = subscription.snapshot.as_of_sequence;
@@ -283,13 +360,35 @@ async fn snapshot_handoff() -> Result<()> {
 
 async fn unavailable_queries_and_shutdown() -> Result<()> {
     let (core, _) = fixture("lifecycle", DispatchMode::Channel, 64).await?;
-    let error = match core.subscribe_query_results("missing").await {
+    let error = match core
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("missing").expect("fixture component name"),
+        )
+        .await
+    {
         Err(error) => error,
         Ok(_) => anyhow::bail!("missing query unexpectedly exposed a reader"),
     };
-    assert!(error.downcast_ref::<ComponentNotFoundError>().is_some());
-    core.stop_query("query").await?;
-    let error = match core.subscribe_query_results("query").await {
+    assert!(
+        matches!(
+            error.classification(),
+            DrasiError::ComponentNotFound {
+                component_type,
+                subject: OperationSubject::Name(name),
+            } if component_type == "query" && name.as_str() == "missing"
+        ),
+        "{error:#}"
+    );
+    core.stop_query_by_name(
+        &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await?;
+    let error = match core
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await
+    {
         Err(error) => error,
         Ok(_) => anyhow::bail!("stopped query unexpectedly exposed a reader"),
     };
@@ -297,10 +396,25 @@ async fn unavailable_queries_and_shutdown() -> Result<()> {
         error.downcast_ref::<FetchError>(),
         Some(FetchError::NotRunning { .. })
     ));
-    core.start_query("query").await?;
-    core.computation_component("query")?.wait_started().await?;
-    let mut stream = core.subscribe_query_results("query").await?.stream;
-    core.remove_query("query").await?;
+    core.start_query_by_name(
+        &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await?;
+    core.component_by_name(
+        &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+    )?
+    .wait_started()
+    .await?;
+    let mut stream = core
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?
+        .stream;
+    core.remove_query_by_name(
+        &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await?;
     assert!(tokio::time::timeout(DEADLINE, stream.next())
         .await?
         .context("removal must explicitly invalidate the reader")?
@@ -311,7 +425,12 @@ async fn unavailable_queries_and_shutdown() -> Result<()> {
         .add_query_with_handle(configuration(DispatchMode::Channel, 64))
         .await?;
     query.wait_started().await?;
-    let mut stream = core.subscribe_query_results("query").await?.stream;
+    let mut stream = core
+        .subscribe_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?
+        .stream;
     core.shutdown().await?;
     assert!(tokio::time::timeout(DEADLINE, stream.next())
         .await?

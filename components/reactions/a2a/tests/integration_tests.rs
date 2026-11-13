@@ -61,9 +61,18 @@ impl Respond for OrderedResponses {
 
 async fn initialize_with_store(reaction: &A2AReaction, store: Arc<MemoryStateStoreProvider>) {
     let (update_tx, _rx) = tokio::sync::mpsc::channel(16);
-    let context =
-        ReactionRuntimeContext::new("a2a-it", reaction.id(), Some(store), update_tx, None);
-    reaction.initialize(context).await;
+    let context = ReactionRuntimeContext::new(
+        "a2a-it",
+        reaction.id().clone(),
+        vec![
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        ],
+        Some(store),
+        update_tx,
+        None,
+    );
+    reaction.bind_runtime_context(context).await;
 }
 
 fn memory_store() -> Arc<MemoryStateStoreProvider> {
@@ -71,13 +80,16 @@ fn memory_store() -> Arc<MemoryStateStoreProvider> {
 }
 
 fn make_reaction(server: &MockServer, policy: TerminalUpdatePolicy) -> A2AReaction {
-    A2AReaction::builder("a2a-it")
-        .with_query("q1")
-        .with_endpoint(server.uri())
-        .with_result_key_fields(["invoiceId"])
-        .with_terminal_update_policy(policy)
-        .build()
-        .expect("build reaction")
+    A2AReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000086")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_endpoint(server.uri())
+    .with_result_key_fields(["invoiceId"])
+    .with_terminal_update_policy(policy)
+    .build()
+    .expect("build reaction")
 }
 
 async fn wait_for_requests(server: &MockServer, expected: usize, timeout: Duration) {
@@ -123,12 +135,20 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
     mount_send_message_task(&server, "WORKING").await;
 
     let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    let reaction_id = reaction.id().clone();
+    let query_id = drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+        .expect("fixture UUID");
+    let activation_id = format!("{}:{query_id}:5:INV-1", query_id.as_str().len());
+    let message_id = format!(
+        "{}:{reaction_id}:{activation_id}:1:0",
+        reaction_id.as_str().len()
+    );
     initialize_with_store(&reaction, memory_store()).await;
     reaction.start().await.expect("start reaction");
 
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            query_id.clone(),
             1,
             json!({"invoiceId":"INV-1","amount":100}),
         ))
@@ -138,7 +158,7 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
 
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            query_id.clone(),
             2,
             json!({"invoiceId":"INV-1","amount":100}),
             json!({"invoiceId":"INV-1","amount":200}),
@@ -149,7 +169,7 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
 
     reaction
         .enqueue_query_result(mock_source::delete_result(
-            "q1",
+            query_id.clone(),
             3,
             json!({"invoiceId":"INV-1","amount":200}),
         ))
@@ -176,15 +196,15 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
     assert_eq!(add_body["params"]["message"]["role"], json!("ROLE_USER"));
     assert_eq!(
         add_body["params"]["message"]["messageId"],
-        json!("6:a2a-it:2:q1:5:INV-1:1:0")
+        json!(message_id)
     );
     assert_eq!(
         add_body["params"]["message"]["metadata"]["activationId"],
-        json!("2:q1:5:INV-1")
+        json!(activation_id)
     );
     assert_eq!(
         update_body["params"]["message"]["metadata"]["activationId"],
-        json!("2:q1:5:INV-1")
+        json!(activation_id)
     );
     assert_eq!(get_before_update["method"], json!("GetTask"));
     assert_eq!(get_before_update["params"]["id"], json!("task-1"));
@@ -200,7 +220,7 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
     );
     assert_eq!(
         add_body["params"]["message"]["parts"][0]["data"]["queryId"],
-        json!("q1")
+        json!(query_id)
     );
     assert_eq!(update_body["method"], json!("SendMessage"));
     assert_eq!(update_body["params"]["message"]["taskId"], json!("task-1"));
@@ -232,7 +252,8 @@ async fn one_shot_message_has_no_follow_up_or_cancel() {
 
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-2"}),
         ))
@@ -242,7 +263,8 @@ async fn one_shot_message_has_no_follow_up_or_cancel() {
 
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-2"}),
             json!({"invoiceId":"INV-2","amount":2}),
@@ -251,7 +273,8 @@ async fn one_shot_message_has_no_follow_up_or_cancel() {
         .expect("enqueue update");
     reaction
         .enqueue_query_result(mock_source::delete_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             3,
             json!({"invoiceId":"INV-2"}),
         ))
@@ -329,7 +352,8 @@ async fn follow_up_message_keeps_task_so_delete_still_cancels() {
 
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-7"}),
         ))
@@ -339,7 +363,8 @@ async fn follow_up_message_keeps_task_so_delete_still_cancels() {
 
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-7"}),
             json!({"invoiceId":"INV-7","amount":7}),
@@ -350,7 +375,8 @@ async fn follow_up_message_keeps_task_so_delete_still_cancels() {
 
     reaction
         .enqueue_query_result(mock_source::delete_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             3,
             json!({"invoiceId":"INV-7"}),
         ))
@@ -418,7 +444,8 @@ async fn submitted_then_completed_update_creates_new_task() {
 
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-11"}),
         ))
@@ -428,7 +455,8 @@ async fn submitted_then_completed_update_creates_new_task() {
 
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-11","amount":1}),
             json!({"invoiceId":"INV-11","amount":2}),
@@ -461,7 +489,8 @@ async fn terminal_replace_creates_new_task_without_task_id() {
 
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-3"}),
         ))
@@ -471,7 +500,8 @@ async fn terminal_replace_creates_new_task_without_task_id() {
 
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-3"}),
             json!({"invoiceId":"INV-3","amount":300}),
@@ -498,7 +528,8 @@ async fn terminal_ignore_sends_no_additional_rpc() {
 
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-4"}),
         ))
@@ -508,7 +539,8 @@ async fn terminal_ignore_sends_no_additional_rpc() {
 
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-4"}),
             json!({"invoiceId":"INV-4","amount":400}),
@@ -533,7 +565,8 @@ async fn replay_does_not_issue_extra_create() {
 
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             7,
             json!({"invoiceId":"INV-5"}),
         ))
@@ -543,7 +576,8 @@ async fn replay_does_not_issue_extra_create() {
 
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             7,
             json!({"invoiceId":"INV-5"}),
         ))
@@ -567,7 +601,8 @@ async fn activation_survives_process_restart() {
     first.start().await.expect("start first reaction");
     first
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-6"}),
         ))
@@ -581,7 +616,8 @@ async fn activation_survives_process_restart() {
     second.start().await.expect("start second reaction");
     second
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-6"}),
             json!({"invoiceId":"INV-6","amount":6}),
@@ -631,7 +667,8 @@ async fn json_rpc_error_on_http_400_fails_delivery() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-9"}),
         ))
@@ -655,7 +692,8 @@ async fn http_401_fail_stops_without_retry() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-16"}),
         ))
@@ -682,7 +720,8 @@ async fn oversized_content_length_fails_delivery() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-17"}),
         ))
@@ -709,7 +748,8 @@ async fn success_without_result_fails_delivery() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-10"}),
         ))
@@ -725,11 +765,14 @@ async fn deprovision_clears_activation_state() {
     mount_send_message_task(&server, "WORKING").await;
     let store = memory_store();
     let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    let partition = drasi_lib::state_store::StorePartition::component(reaction.id().clone());
+    let query_id = drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+        .expect("fixture UUID");
     initialize_with_store(&reaction, store.clone()).await;
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            query_id.clone(),
             1,
             json!({"invoiceId":"INV-8"}),
         ))
@@ -738,10 +781,17 @@ async fn deprovision_clears_activation_state() {
     wait_for_requests(&server, 1, Duration::from_secs(3)).await;
     reaction.stop().await.expect("stop reaction");
 
-    let key = "activation:2:q1:5:INV-8";
-    assert!(store.get("a2a-it", key).await.expect("get").is_some());
-    reaction.deprovision().await.expect("deprovision");
-    assert!(store.get("a2a-it", key).await.expect("get after").is_none());
+    let key = format!("activation:{}:{query_id}:5:INV-8", query_id.as_str().len());
+    assert!(store.get(&partition, &key).await.expect("get").is_some());
+    reaction
+        .delete_owned_resources()
+        .await
+        .expect("deprovision");
+    assert!(store
+        .get(&partition, &key)
+        .await
+        .expect("get after")
+        .is_none());
 }
 
 #[tokio::test]
@@ -793,7 +843,8 @@ async fn add_after_gettask_completed_creates_new_task() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-12"}),
         ))
@@ -802,7 +853,8 @@ async fn add_after_gettask_completed_creates_new_task() {
     wait_for_requests(&server, 1, Duration::from_secs(3)).await;
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-12"}),
         ))
@@ -866,7 +918,8 @@ async fn gettask_not_found_then_update_creates() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-13"}),
         ))
@@ -875,7 +928,8 @@ async fn gettask_not_found_then_update_creates() {
     wait_for_requests(&server, 1, Duration::from_secs(3)).await;
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-13"}),
             json!({"invoiceId":"INV-13","amount":2}),
@@ -937,7 +991,8 @@ async fn cancel_task_not_found_clears_without_error() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-14"}),
         ))
@@ -946,7 +1001,8 @@ async fn cancel_task_not_found_clears_without_error() {
     wait_for_requests(&server, 1, Duration::from_secs(3)).await;
     reaction
         .enqueue_query_result(mock_source::delete_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-14"}),
         ))
@@ -964,6 +1020,8 @@ async fn cancel_task_not_found_clears_without_error() {
 
 #[tokio::test]
 async fn cancel_http_drop_keeps_activation_for_follow_up() {
+    let query_id = drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+        .expect("fixture UUID");
     let working = json!({
         "jsonrpc": "2.0",
         "id": "1",
@@ -1006,7 +1064,7 @@ async fn cancel_http_drop_keeps_activation_for_follow_up() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            query_id.clone(),
             1,
             json!({"invoiceId":"INV-15"}),
         ))
@@ -1015,7 +1073,7 @@ async fn cancel_http_drop_keeps_activation_for_follow_up() {
     wait_for_requests(&server, 1, Duration::from_secs(3)).await;
     reaction
         .enqueue_query_result(mock_source::delete_result(
-            "q1",
+            query_id.clone(),
             2,
             json!({"invoiceId":"INV-15"}),
         ))
@@ -1024,13 +1082,20 @@ async fn cancel_http_drop_keeps_activation_for_follow_up() {
     wait_for_requests(&server, 3, Duration::from_secs(3)).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let key = "activation:2:q1:6:INV-15";
-    assert!(store.get("a2a-it", key).await.expect("get").is_some());
+    let key = format!("activation:{}:{query_id}:6:INV-15", query_id.as_str().len());
+    assert!(store
+        .get(
+            &drasi_lib::state_store::StorePartition::component(reaction.id().clone()),
+            &key
+        )
+        .await
+        .expect("get")
+        .is_some());
     assert_ne!(reaction.status().await, ComponentStatus::Error);
 
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            query_id,
             3,
             json!({"invoiceId":"INV-15"}),
             json!({"invoiceId":"INV-15","amount":2}),
@@ -1057,7 +1122,8 @@ async fn aggregation_diff_creates_task() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::aggregation_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             None,
             json!({"invoiceId":"INV-18","amount":1}),
@@ -1085,7 +1151,8 @@ async fn noop_diff_does_not_emit_extra_rpc() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::noop_then_add(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-19"}),
         ))
@@ -1134,7 +1201,8 @@ async fn http_503_retries_then_succeeds() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-20"}),
         ))
@@ -1159,7 +1227,8 @@ async fn http_503_exhausted_retries_fail_stops() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-21"}),
         ))
@@ -1237,7 +1306,8 @@ async fn same_batch_same_key_updates_are_distinct() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-22"}),
         ))
@@ -1246,7 +1316,8 @@ async fn same_batch_same_key_updates_are_distinct() {
     wait_for_requests(&server, 1, Duration::from_secs(3)).await;
     reaction
         .enqueue_query_result(mock_source::two_updates(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             (
                 json!({"invoiceId":"INV-22","amount":1}),
@@ -1341,7 +1412,8 @@ async fn task_not_cancelable_follow_up_refreshes_then_replaces() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             1,
             json!({"invoiceId":"INV-23"}),
         ))
@@ -1350,7 +1422,8 @@ async fn task_not_cancelable_follow_up_refreshes_then_replaces() {
     wait_for_requests(&server, 1, Duration::from_secs(3)).await;
     reaction
         .enqueue_query_result(mock_source::update_result(
-            "q1",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             2,
             json!({"invoiceId":"INV-23"}),
             json!({"invoiceId":"INV-23","amount":2}),
@@ -1375,6 +1448,8 @@ async fn task_not_cancelable_follow_up_refreshes_then_replaces() {
 
 #[tokio::test]
 async fn task_not_cancelable_cancel_clears_when_gettask_is_terminal() {
+    let query_id = drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+        .expect("fixture UUID");
     let server = mock_server::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
@@ -1426,7 +1501,7 @@ async fn task_not_cancelable_cancel_clears_when_gettask_is_terminal() {
     reaction.start().await.expect("start reaction");
     reaction
         .enqueue_query_result(mock_source::add_result(
-            "q1",
+            query_id.clone(),
             1,
             json!({"invoiceId":"INV-24"}),
         ))
@@ -1435,7 +1510,7 @@ async fn task_not_cancelable_cancel_clears_when_gettask_is_terminal() {
     wait_for_requests(&server, 1, Duration::from_secs(3)).await;
     reaction
         .enqueue_query_result(mock_source::delete_result(
-            "q1",
+            query_id.clone(),
             2,
             json!({"invoiceId":"INV-24"}),
         ))
@@ -1449,7 +1524,14 @@ async fn task_not_cancelable_cancel_clears_when_gettask_is_terminal() {
     let refresh: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
     assert_eq!(cancel["method"], json!("CancelTask"));
     assert_eq!(refresh["method"], json!("GetTask"));
-    let key = "activation:2:q1:6:INV-24";
-    assert!(store.get("a2a-it", key).await.expect("get").is_none());
+    let key = format!("activation:{}:{query_id}:6:INV-24", query_id.as_str().len());
+    assert!(store
+        .get(
+            &drasi_lib::state_store::StorePartition::component(reaction.id().clone()),
+            &key
+        )
+        .await
+        .expect("get")
+        .is_none());
     assert_ne!(reaction.status().await, ComponentStatus::Error);
 }

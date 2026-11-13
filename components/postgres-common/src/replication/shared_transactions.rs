@@ -94,7 +94,7 @@ pub fn read_position(
 ) -> Result<Option<SharedTransactionPosition>> {
     let Some(checkpoint) = snapshot
         .checkpoints
-        .get(&SourceProgressKey::Source(source.to_string()))
+        .get(&SourceProgressKey::Source(source.clone()))
     else {
         return Ok(None);
     };
@@ -177,8 +177,11 @@ mod tests {
     use drasi_core_types::interface::SourceCheckpoint;
     use std::sync::Arc;
 
+    const COMPONENT_NAMESPACE: &str = "d02c756d-aa75-5d47-811f-edc9b57a01c7";
+
     fn id(value: &str) -> ComponentId {
-        ComponentId::try_new(value).unwrap()
+        ComponentId::derive_owned(&ComponentId::try_new(COMPONENT_NAMESPACE).unwrap(), value)
+            .unwrap()
     }
     fn state(position: SharedTransactionPosition) -> Arc<SourceProgressSnapshot> {
         Arc::new(SourceProgressSnapshot {
@@ -187,7 +190,7 @@ mod tests {
             admitting: true,
             persistent: true,
             checkpoints: BTreeMap::from([(
-                SourceProgressKey::Source("source".into()),
+                SourceProgressKey::Source(id("source").clone()),
                 SourceCheckpoint::new(
                     position.sequence,
                     Some(serde_json::to_vec(&position).unwrap().into()),
@@ -247,7 +250,7 @@ mod tests {
             }),
         );
         assert!(minimum_checkpoint(&snapshot, &expected, &id("source"), binding)?.is_none());
-        let key = SourceProgressKey::Source("source".into());
+        let key = SourceProgressKey::Source(id("source").clone());
         let mut invalid = state(position.clone());
         Arc::make_mut(&mut invalid).checkpoints.insert(
             key.clone(),

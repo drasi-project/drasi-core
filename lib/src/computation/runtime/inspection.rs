@@ -33,8 +33,86 @@ fn error_message(record: &Record, observed: &ObservedComponent) -> Option<String
         .map(|failure| format!("{:#}", failure.cause))
 }
 
+#[cfg(test)]
+pub(super) struct SourceSchemaCaptureTest {
+    pub component: ComponentId,
+    pub release: Arc<tokio::sync::Notify>,
+    pub observations: Arc<std::sync::Mutex<Vec<SourceSchemaCaptureObservation>>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(super) struct SourceSchemaCaptureObservation {
+    pub stage: &'static str,
+    pub captured: Option<ObservedComponent>,
+    pub current: Option<ObservedComponent>,
+    pub captured_reader: std::result::Result<bool, String>,
+    pub current_reader: std::result::Result<bool, String>,
+}
+
 impl Runtime {
-    pub(crate) async fn query_inspector(&self, id: &str) -> anyhow::Result<ComputationInspector> {
+    #[cfg(test)]
+    fn record_source_schema_capture_test(
+        &self,
+        stage: &'static str,
+        publication: &GraphRegistrySnapshot,
+        id: &ComponentId,
+    ) {
+        let test = self
+            .source_schema_capture_test
+            .lock()
+            .expect("source schema test hook lock")
+            .clone();
+        let Some(test) = test.filter(|test| &test.component == id) else {
+            return;
+        };
+        let current = self.control().map(|control| control.registry_snapshot());
+        let (current, current_reader) = match current {
+            Ok(current) => (
+                current.observed.components.get(id).cloned(),
+                current
+                    .source_schema_reader(id)
+                    .map(|reader| reader.is_some())
+                    .map_err(|error| format!("{error:?}")),
+            ),
+            Err(error) => (None, Err(format!("{error:#}"))),
+        };
+        test.observations
+            .lock()
+            .expect("source schema test observation lock")
+            .push(SourceSchemaCaptureObservation {
+                stage,
+                captured: publication.observed.components.get(id).cloned(),
+                current,
+                captured_reader: publication
+                    .source_schema_reader(id)
+                    .map(|reader| reader.is_some())
+                    .map_err(|error| format!("{error:?}")),
+                current_reader,
+            });
+    }
+
+    #[cfg(test)]
+    async fn pause_source_schema_capture_test(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        id: &ComponentId,
+    ) {
+        let test = self
+            .source_schema_capture_test
+            .lock()
+            .expect("source schema test hook lock")
+            .clone();
+        if let Some(test) = test.filter(|test| &test.component == id) {
+            self.record_source_schema_capture_test("fresh-capture", publication, id);
+            test.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn query_inspector(
+        &self,
+        id: &ComponentId,
+    ) -> anyhow::Result<ComputationInspector> {
         let publication = self.control()?.registry_snapshot();
         self.query_observation_at(&publication, id)?;
         self.inspector()
@@ -47,7 +125,7 @@ impl Runtime {
             == ComponentSemanticKind::Query
     }
 
-    pub(super) fn public_component_kind(
+    pub(crate) fn public_component_kind(
         snapshot: &GraphSnapshot,
         node: &NodeSnapshot,
     ) -> Option<&'static str> {
@@ -77,7 +155,7 @@ impl Runtime {
     pub(super) fn component_observation_at<'a>(
         &self,
         publication: &'a GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
         kind: &'static str,
     ) -> anyhow::Result<&'a ObservedComponent> {
         let node = publication
@@ -85,10 +163,10 @@ impl Runtime {
             .nodes
             .iter()
             .find(|node| {
-                node.descriptor.id().as_str() == id
+                node.descriptor.id() == id
                     && Self::public_component_kind(&publication.desired, node) == Some(kind)
             })
-            .ok_or_else(|| crate::error::ComponentNotFoundError::new(kind, id))?;
+            .ok_or_else(|| crate::error::ComponentNotFoundError::new(kind, id.clone()))?;
         publication
             .observed
             .components
@@ -99,11 +177,11 @@ impl Runtime {
     fn native_component_properties(
         &self,
         publication: &GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
         kind: &'static str,
     ) -> anyhow::Result<(String, HashMap<String, serde_json::Value>)> {
         self.component_observation_at(publication, id, kind)?;
-        let component = ComponentId::try_new(id)?;
+        let component = id.clone();
         let configuration = publication
             .component_configuration(&component)
             .ok_or_else(|| anyhow::anyhow!("{kind} '{id}' has no published configuration"))?;
@@ -152,18 +230,16 @@ impl Runtime {
     pub(super) fn native_query_configuration_at(
         &self,
         publication: &GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<QueryConfig> {
         let node = publication
             .desired
             .nodes
             .iter()
-            .find(|node| node.descriptor.id().as_str() == id && Self::is_query_node(node))
-            .ok_or_else(|| crate::error::ComponentNotFoundError::new("query", id))?;
+            .find(|node| node.descriptor.id() == id && Self::is_query_node(node))
+            .ok_or_else(|| crate::error::ComponentNotFoundError::new("query", id.clone()))?;
         let component = node.descriptor.id();
-        let mut config = if let Some(api) = publication.query_api(component) {
-            api.config.clone()
-        } else if let Some(ConfigurationValue::Literal(value)) = publication
+        let mut config = if let Some(ConfigurationValue::Literal(value)) = publication
             .desired
             .specifications
             .get(component)
@@ -176,27 +252,36 @@ impl Runtime {
             .get(component)
             .and_then(|spec| publication.authored_query_configuration(spec))
         {
-            config?
+            config?.into_assigned(
+                node.name.clone(),
+                publication.desired.lifecycle_policies[component].auto_start,
+            )
+        } else if let Some(api) = publication.query_api(component) {
+            api.config.clone().into_assigned(
+                node.name.clone(),
+                publication.desired.lifecycle_policies[component].auto_start,
+            )
         } else {
             anyhow::bail!("Query '{id}' exists but does not expose ordinary query configuration in its current construction state");
         };
         anyhow::ensure!(
-            config.id == id,
+            &config.id == id,
             "query configuration identity does not match its graph node"
         );
         config.auto_start = publication.desired.lifecycle_policies[component].auto_start;
+        config.name = node.name.clone();
         Ok(config)
     }
 
     pub(super) fn query_observation_at<'a>(
         &self,
         publication: &'a GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<&'a ObservedComponent> {
         self.component_observation_at(publication, id, "query")
     }
 
-    pub(crate) async fn component_events(&self, id: &str) -> Vec<ComponentEvent> {
+    pub(crate) async fn component_events(&self, id: &ComponentId) -> Vec<ComponentEvent> {
         self.events.component(id)
     }
 
@@ -268,7 +353,7 @@ impl Runtime {
                 for provider in providers {
                     inventory.links.insert(ScopedGraphEntityLink {
                         from: root.entity(GraphEntityId::Resource(
-                            ComputationPipelineBuilder::index_resource_id(id.as_str())?,
+                            ComputationPipelineBuilder::index_resource_id(&id)?,
                         )),
                         to: root.entity(GraphEntityId::Resource(provider.clone())),
                         kind: GraphEntityLinkKind::UsesResource,
@@ -281,7 +366,7 @@ impl Runtime {
 
     async fn inspect_record(
         &self,
-        id: &str,
+        id: &ComponentId,
         kind: &'static str,
     ) -> anyhow::Result<(Record, ObservedComponent)> {
         let publication = self.control()?.registry_snapshot();
@@ -290,7 +375,7 @@ impl Runtime {
             .await?
             .remove(id)
             .filter(|record| record.value.instance().kind() == kind)
-            .ok_or_else(|| crate::error::ComponentNotFoundError::new(kind, id))?;
+            .ok_or_else(|| crate::error::ComponentNotFoundError::new(kind, id.clone()))?;
         let observed = publication
             .observed
             .components
@@ -303,7 +388,7 @@ impl Runtime {
     pub(crate) async fn list_components(
         &self,
         kind: &str,
-    ) -> anyhow::Result<Vec<(String, ComponentStatus)>> {
+    ) -> anyhow::Result<Vec<crate::config::ComponentListEntry>> {
         let publication = self.control()?.registry_snapshot();
         let records = self.records_at(&publication).await?;
         let mut components: Vec<_> = publication
@@ -312,28 +397,29 @@ impl Runtime {
             .iter()
             .filter(|node| Self::public_component_kind(&publication.desired, node) == Some(kind))
             .map(|node| {
-                let id = node.descriptor.id().as_str();
+                let id = node.descriptor.id();
                 let state = publication
                     .observed
                     .components
                     .get(node.descriptor.id())
                     .ok_or_else(|| anyhow::anyhow!("{kind} '{id}' has no graph observation"))?;
-                Ok((
-                    id.to_owned(),
-                    records.get(id).filter(|_| kind != "query").map_or_else(
+                Ok(crate::config::ComponentListEntry {
+                    id: id.clone(),
+                    name: node.name.clone(),
+                    status: records.get(id).filter(|_| kind != "query").map_or_else(
                         || events::observed_status(state, ComponentStatus::Added),
                         |record| status(record, state),
                     ),
-                ))
+                })
             })
             .collect::<anyhow::Result<_>>()?;
-        components.sort_by(|left, right| left.0.cmp(&right.0));
+        components.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(components)
     }
 
     pub(crate) async fn component_status(
         &self,
-        id: &str,
+        id: &ComponentId,
         kind: &'static str,
     ) -> anyhow::Result<ComponentStatus> {
         let publication = self.control()?.registry_snapshot();
@@ -354,7 +440,7 @@ impl Runtime {
         ))
     }
 
-    pub(crate) async fn source_info(&self, id: &str) -> anyhow::Result<SourceRuntime> {
+    pub(crate) async fn source_info(&self, id: &ComponentId) -> anyhow::Result<SourceRuntime> {
         let publication = self.control()?.registry_snapshot();
         if !self.records_at(&publication).await?.contains_key(id) {
             return self.native_source_info_at(&publication, id);
@@ -365,6 +451,12 @@ impl Runtime {
         };
         Ok(SourceRuntime {
             id: id.to_owned(),
+            name: publication
+                .desired
+                .component_by_id(&record.node)
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .clone(),
             source_type: source.source.type_name().to_owned(),
             status: status(&record, &observed),
             error_message: error_message(&record, &observed),
@@ -372,12 +464,13 @@ impl Runtime {
         })
     }
 
-    pub(crate) async fn query_info(&self, id: &str) -> anyhow::Result<QueryRuntime> {
+    pub(crate) async fn query_info(&self, id: &ComponentId) -> anyhow::Result<QueryRuntime> {
         let publication = self.control()?.registry_snapshot();
         let config = self.native_query_configuration_at(&publication, id)?;
         let observed = self.query_observation_at(&publication, id)?;
         Ok(QueryRuntime {
             id: id.to_owned(),
+            name: config.name,
             query: config.query,
             status: events::observed_status(observed, ComponentStatus::Added),
             error_message: observed
@@ -390,7 +483,7 @@ impl Runtime {
         })
     }
 
-    pub(crate) async fn reaction_info(&self, id: &str) -> anyhow::Result<ReactionRuntime> {
+    pub(crate) async fn reaction_info(&self, id: &ComponentId) -> anyhow::Result<ReactionRuntime> {
         let publication = self.control()?.registry_snapshot();
         if !self.records_at(&publication).await?.contains_key(id) {
             return self.native_reaction_info_at(&publication, id);
@@ -401,10 +494,16 @@ impl Runtime {
         };
         Ok(ReactionRuntime {
             id: id.to_owned(),
+            name: publication
+                .desired
+                .component_by_id(&record.node)
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .clone(),
             reaction_type: reaction.reaction.type_name().to_owned(),
             status: status(&record, &observed),
             error_message: error_message(&record, &observed),
-            queries: reaction.query_ids.clone(),
+            queries: reaction.references()?,
             properties: reaction.reaction.properties(),
         })
     }
@@ -412,13 +511,19 @@ impl Runtime {
     fn native_source_info_at(
         &self,
         publication: &GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<SourceRuntime> {
         let state = self.component_observation_at(publication, id, "source")?;
         let (source_type, properties) =
             self.native_component_properties(publication, id, "source")?;
         Ok(SourceRuntime {
-            id: id.into(),
+            id: id.clone(),
+            name: publication
+                .desired
+                .component_by_id(&id.clone())
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .clone(),
             source_type,
             properties,
             status: events::observed_status(state, ComponentStatus::Added),
@@ -433,14 +538,14 @@ impl Runtime {
     fn native_reaction_info_at(
         &self,
         publication: &GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<ReactionRuntime> {
         let state = self.component_observation_at(publication, id, "reaction")?;
         let (reaction_type, properties) =
             self.native_component_properties(publication, id, "reaction")?;
         let queries = publication
             .desired
-            .data_dependencies(&ComponentId::try_new(id)?)
+            .data_dependencies(&id.clone())
             .into_iter()
             .filter(|id| {
                 publication
@@ -449,10 +554,16 @@ impl Runtime {
                     .iter()
                     .any(|node| node.descriptor.id() == id && Self::is_query_node(node))
             })
-            .map(|id| id.to_string())
+            .map(crate::config::ComponentReference::by_id)
             .collect();
         Ok(ReactionRuntime {
-            id: id.into(),
+            id: id.clone(),
+            name: publication
+                .desired
+                .component_by_id(&id.clone())
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .clone(),
             reaction_type,
             properties,
             queries,
@@ -467,16 +578,159 @@ impl Runtime {
 
     pub(crate) async fn source_schema(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<Option<crate::schema::SourceSchema>> {
-        let publication = self.control()?.registry_snapshot();
+        let publication = self.source_schema_publication(Some(id)).await?;
+        #[cfg(test)]
+        self.pause_source_schema_capture_test(&publication, id)
+            .await;
         self.source_schema_at(&publication, id).await
+    }
+
+    pub(super) async fn source_schema_publication(
+        &self,
+        selected: Option<&ComponentId>,
+    ) -> anyhow::Result<Arc<GraphRegistrySnapshot>> {
+        let control = self.control()?;
+        let mut publications = control.subscribe_registry();
+        let mut states = control.subscribe();
+        let mut generations = BTreeMap::new();
+        let mut settled_operations = BTreeMap::new();
+        let mut construction_operations = BTreeMap::new();
+        loop {
+            let state = *states.borrow_and_update();
+            anyhow::ensure!(
+                !matches!(
+                    state,
+                    GraphState::Stopping
+                        | GraphState::Completed
+                        | GraphState::Cancelled
+                        | GraphState::Failed
+                        | GraphState::CleanupRequired
+                ),
+                GraphError::StaleGeneration
+            );
+            let publication = publications.borrow_and_update().clone();
+            for (id, generation) in &generations {
+                let current = self
+                    .component_observation_at(&publication, id, "source")
+                    .map_err(|_| GraphError::StaleGeneration)?;
+                anyhow::ensure!(
+                    current.generation == *generation,
+                    GraphError::StaleGeneration
+                );
+            }
+            let sources: Vec<_> = match selected {
+                Some(id) => vec![id.clone()],
+                None => publication
+                    .desired
+                    .nodes
+                    .iter()
+                    .filter(|node| {
+                        Self::public_component_kind(&publication.desired, node) == Some("source")
+                    })
+                    .map(|node| node.descriptor.id().clone())
+                    .collect(),
+            };
+            let mut pending = false;
+            for id in sources {
+                let observed = self.component_observation_at(&publication, &id, "source")?;
+                generations.entry(id.clone()).or_insert(observed.generation);
+                if let Some(failure) = &observed.failure {
+                    anyhow::bail!(GraphError::Reported {
+                        cause: failure.cause.clone(),
+                    });
+                }
+                anyhow::ensure!(
+                    observed.lifecycle != ComponentLifecycle::Stopping,
+                    GraphError::StaleGeneration
+                );
+                if let Some(operation) = settled_operations.get(&id) {
+                    anyhow::ensure!(
+                        observed.operation == *operation,
+                        GraphError::StaleGeneration
+                    );
+                }
+                let admission = publication.source_schema_admission(&id);
+                if let Some(operation) = construction_operations.get(&id) {
+                    anyhow::ensure!(
+                        observed.operation == *operation
+                            && admission.is_some_and(|(reservation, _)| {
+                                reservation == Some(*operation)
+                            }),
+                        GraphError::StaleGeneration
+                    );
+                }
+                if observed.realization == RealizationState::CreationFailed {
+                    anyhow::bail!(GraphError::CreationStopped { component: id });
+                }
+                if observed.realization == RealizationState::Pending {
+                    anyhow::ensure!(
+                        !observed.lifecycle_requested
+                            || observed.lifecycle != ComponentLifecycle::Stopped,
+                        GraphError::CreationStopped { component: id }
+                    );
+                    pending = true;
+                    continue;
+                }
+                let Some((reservation, captured)) = admission else {
+                    anyhow::bail!(GraphError::Creation {
+                        component: id,
+                        disposition: FailureDisposition::Retryable,
+                        source: anyhow::anyhow!(
+                            "source construction admission has not been published"
+                        ),
+                    });
+                };
+                if captured && reservation.is_some() {
+                    settled_operations
+                        .entry(id.clone())
+                        .or_insert(observed.operation);
+                    continue;
+                }
+                if observed.realization == RealizationState::Blocked {
+                    anyhow::bail!(GraphError::Creation {
+                        component: id,
+                        disposition: FailureDisposition::Retryable,
+                        source: anyhow::anyhow!(
+                            "source schema capture is blocked by construction prerequisites: {:?}",
+                            observed.waiting_for
+                        ),
+                    });
+                }
+                if observed.lifecycle_requested && observed.lifecycle == ComponentLifecycle::Stopped
+                {
+                    anyhow::bail!(GraphError::CreationStopped { component: id });
+                }
+                let Some(reservation) = reservation else {
+                    anyhow::bail!(GraphError::CreationStopped { component: id });
+                };
+                anyhow::ensure!(
+                    observed.realization == RealizationState::Creating
+                        && observed.operation == reservation,
+                    GraphError::StaleGeneration
+                );
+                construction_operations.entry(id).or_insert(reservation);
+                pending = true;
+            }
+            if !pending {
+                return Ok(publication);
+            }
+            tokio::select! {
+                changed = publications.changed() => {
+                    changed.map_err(|_| GraphError::ControllerClosed)?;
+                }
+                changed = states.changed() => {
+                    changed.map_err(|_| GraphError::ControllerClosed)?;
+                }
+            }
+        }
     }
 
     pub(super) fn ensure_source_schema_current(
         &self,
         publication: &GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<()> {
         let expected = self.component_observation_at(publication, id, "source")?;
         let control = self.control()?;
@@ -484,11 +738,15 @@ impl Runtime {
         let observed = self
             .component_observation_at(&current, id, "source")
             .map_err(|_| GraphError::StaleGeneration)?;
+        #[cfg(test)]
+        if observed.generation != expected.generation || observed.operation != expected.operation {
+            self.record_source_schema_capture_test("currency-rejected", publication, id);
+        }
         anyhow::ensure!(
             observed.generation == expected.generation && observed.operation == expected.operation,
             GraphError::StaleGeneration
         );
-        let component = ComponentId::try_new(id)?;
+        let component = id.clone();
         let reader = publication.source_schema_reader(&component)?;
         let current_reader = current.source_schema_reader(&component)?;
         anyhow::ensure!(
@@ -519,12 +777,12 @@ impl Runtime {
     pub(super) async fn source_schema_at(
         &self,
         publication: &GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<Option<crate::schema::SourceSchema>> {
         self.component_observation_at(publication, id, "source")?;
         let control = self.control()?;
         let mut publications = control.subscribe_registry();
-        if let Some(reader) = publication.source_schema_reader(&ComponentId::try_new(id)?)? {
+        if let Some(reader) = publication.source_schema_reader(&id.clone())? {
             let read = reader.describe_schema();
             tokio::pin!(read);
             loop {
@@ -540,6 +798,8 @@ impl Runtime {
                 }
             }
         }
+        #[cfg(test)]
+        self.record_source_schema_capture_test("ordinary-fallback-entered", publication, id);
         let schema = self
             .records_at(publication)
             .await?
@@ -551,12 +811,21 @@ impl Runtime {
                     None
                 }
             });
+        #[cfg(test)]
+        self.record_source_schema_capture_test("ordinary-fallback-completed", publication, id);
         self.ensure_source_schema_current(publication, id)?;
         Ok(schema)
     }
 
     pub(crate) async fn query_configurations(&self) -> anyhow::Result<Vec<QueryConfig>> {
         let publication = self.control()?.registry_snapshot();
+        self.query_configurations_at(&publication)
+    }
+
+    pub(super) fn query_configurations_at(
+        &self,
+        publication: &GraphRegistrySnapshot,
+    ) -> anyhow::Result<Vec<QueryConfig>> {
         let mut configs: Vec<QueryConfig> = Vec::new();
         for node in publication
             .desired
@@ -566,21 +835,20 @@ impl Runtime {
         {
             if !configs
                 .iter()
-                .any(|config| config.id == node.descriptor.id().as_str())
+                .any(|config| &config.id == node.descriptor.id())
             {
-                configs.push(
-                    self.native_query_configuration_at(
-                        &publication,
-                        node.descriptor.id().as_str(),
-                    )?,
-                );
+                configs
+                    .push(self.native_query_configuration_at(publication, node.descriptor.id())?);
             }
         }
         configs.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(configs)
     }
 
-    pub(crate) async fn query_configuration(&self, id: &str) -> anyhow::Result<QueryConfig> {
+    pub(crate) async fn query_configuration(
+        &self,
+        id: &ComponentId,
+    ) -> anyhow::Result<QueryConfig> {
         let publication = self.control()?.registry_snapshot();
         self.native_query_configuration_at(&publication, id)
     }
@@ -588,24 +856,24 @@ impl Runtime {
     pub(crate) fn component_log_key(
         &self,
         publication: &GraphRegistrySnapshot,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<ComponentLogKey> {
         let node = publication
             .desired
             .nodes
             .iter()
-            .find(|node| node.descriptor.id().as_str() == id)
-            .ok_or_else(|| crate::error::ComponentNotFoundError::new("component", id))?;
+            .find(|node| node.descriptor.id() == id)
+            .ok_or_else(|| crate::error::ComponentNotFoundError::new("component", id.clone()))?;
         Ok(ComponentLogKey::new(
             &self.config.id,
             ComponentLogType::for_component(node.role, node.descriptor.semantic_kind()),
-            id,
+            id.clone(),
         ))
     }
 
     pub(crate) async fn subscribe_logs(
         &self,
-        id: &str,
+        id: &ComponentId,
         kind: &str,
     ) -> anyhow::Result<(
         Vec<LogMessage>,
@@ -628,7 +896,7 @@ impl Runtime {
 
     pub(crate) async fn subscribe_events(
         &self,
-        id: &str,
+        id: &ComponentId,
         kind: &str,
     ) -> anyhow::Result<(
         Vec<ComponentEvent>,
@@ -653,12 +921,13 @@ impl Runtime {
         let publication = self.control()?.registry_snapshot();
         let mut snapshot = self.configuration_snapshot_at(&publication).await?;
         for node in publication.desired.nodes.iter() {
-            let id = node.descriptor.id().as_str();
+            let id = node.descriptor.id();
             match Self::public_component_kind(&publication.desired, node) {
-                Some("source") if !snapshot.sources.iter().any(|source| source.id == id) => {
+                Some("source") if !snapshot.sources.iter().any(|source| &source.id == id) => {
                     let info = self.native_source_info_at(&publication, id)?;
                     snapshot.sources.push(crate::config::SourceSnapshot {
-                        id: id.into(),
+                        id: id.clone(),
+                        name: node.name.clone(),
                         source_type: info.source_type,
                         status: info.status,
                         auto_start: publication.desired.lifecycle_policies[node.descriptor.id()]
@@ -666,16 +935,18 @@ impl Runtime {
                         properties: info.properties,
                         bootstrap_provider: None,
                     });
-                    snapshot
-                        .edges
-                        .extend(super::snapshot::ownership_edges(&self.config.id, id));
+                    snapshot.edges.extend(super::snapshot::ownership_edges(
+                        &self.config.id,
+                        &GraphEntityId::Component(id.clone()),
+                    ));
                 }
                 Some("reaction")
-                    if !snapshot.reactions.iter().any(|reaction| reaction.id == id) =>
+                    if !snapshot.reactions.iter().any(|reaction| &reaction.id == id) =>
                 {
                     let info = self.native_reaction_info_at(&publication, id)?;
                     snapshot.reactions.push(crate::config::ReactionSnapshot {
-                        id: id.into(),
+                        id: id.clone(),
+                        name: node.name.clone(),
                         reaction_type: info.reaction_type,
                         status: info.status,
                         auto_start: publication.desired.lifecycle_policies[node.descriptor.id()]
@@ -683,9 +954,10 @@ impl Runtime {
                         properties: info.properties,
                         queries: info.queries,
                     });
-                    snapshot
-                        .edges
-                        .extend(super::snapshot::ownership_edges(&self.config.id, id));
+                    snapshot.edges.extend(super::snapshot::ownership_edges(
+                        &self.config.id,
+                        &GraphEntityId::Component(id.clone()),
+                    ));
                 }
                 _ => {}
             }
@@ -696,21 +968,23 @@ impl Runtime {
             .iter()
             .filter(|node| Self::is_query_node(node))
         {
-            let id = node.descriptor.id().as_str();
-            if !snapshot.queries.iter().any(|query| query.id == id) {
+            let id = node.descriptor.id();
+            if !snapshot.queries.iter().any(|query| &query.id == id) {
                 snapshot
                     .queries
                     .push(crate::config::QueryConfigurationSnapshot {
                         id: id.to_owned(),
+                        name: node.name.clone(),
                         config: self.native_query_configuration_at(&publication, id)?,
                         status: events::observed_status(
                             self.query_observation_at(&publication, id)?,
                             ComponentStatus::Added,
                         ),
                     });
-                snapshot
-                    .edges
-                    .extend(super::snapshot::ownership_edges(&self.config.id, id));
+                snapshot.edges.extend(super::snapshot::ownership_edges(
+                    &self.config.id,
+                    &GraphEntityId::Component(id.clone()),
+                ));
             }
         }
         Ok(snapshot)
@@ -736,6 +1010,12 @@ impl Runtime {
             edges: Vec::new(),
         };
         for (id, record) in &records {
+            if !record.value.instance().configuration_available() {
+                return Err(crate::config::ComponentConfigurationUnavailable {
+                    component: record.node.clone(),
+                }
+                .into());
+            }
             let observed = publication
                 .observed
                 .components
@@ -747,6 +1027,12 @@ impl Runtime {
                 Value::Source(source) => {
                     snapshot.sources.push(SourceSnapshot {
                         id: id.clone(),
+                        name: publication
+                            .desired
+                            .component_by_id(&record.node)
+                            .ok_or(GraphError::StaleGeneration)?
+                            .name
+                            .clone(),
                         source_type: source.source.type_name().to_owned(),
                         status,
                         auto_start,
@@ -756,62 +1042,61 @@ impl Runtime {
                 }
                 Value::Reaction(reaction) => snapshot.reactions.push(ReactionSnapshot {
                     id: id.clone(),
+                    name: publication
+                        .desired
+                        .component_by_id(&record.node)
+                        .ok_or(GraphError::StaleGeneration)?
+                        .name
+                        .clone(),
                     reaction_type: reaction.reaction.type_name().to_owned(),
                     status,
                     auto_start,
-                    queries: reaction.query_ids.clone(),
+                    queries: reaction.references()?,
                     properties: reaction.reaction.properties(),
                 }),
             }
-            snapshot.edges.extend([
-                GraphEdge {
-                    from: self.config.id.clone(),
-                    to: id.clone(),
-                    relationship: RelationshipKind::Owns,
-                },
-                GraphEdge {
-                    from: id.clone(),
-                    to: self.config.id.clone(),
-                    relationship: RelationshipKind::OwnedBy,
-                },
-            ]);
+            snapshot.edges.extend(super::snapshot::ownership_edges(
+                &self.config.id,
+                &GraphEntityId::Component(id.clone()),
+            ));
         }
         let ordinary_queries = self.ordinary_queries_at(publication)?;
         for id in ordinary_queries.keys() {
-            let mut config = self.native_query_configuration_at(publication, id.as_str())?;
+            let mut config = self.native_query_configuration_at(publication, id)?;
             config.auto_start = publication.desired.lifecycle_policies[id].auto_start;
             snapshot.queries.push(QueryConfigurationSnapshot {
-                id: id.to_string(),
+                id: id.clone(),
+                name: config.name.clone(),
                 config,
                 status: events::observed_status(
-                    self.query_observation_at(publication, id.as_str())?,
+                    self.query_observation_at(publication, id)?,
                     ComponentStatus::Added,
                 ),
             });
             snapshot.edges.extend(super::snapshot::ownership_edges(
                 &self.config.id,
-                id.as_str(),
+                &GraphEntityId::Component(id.clone()),
             ));
         }
         for (from, to) in publication.desired.subscriptions.iter() {
             snapshot.edges.push(GraphEdge {
-                from: from.to_string(),
-                to: to.to_string(),
+                from: GraphEntityId::Component(from.clone()),
+                to: GraphEntityId::Component(to.clone()),
                 relationship: RelationshipKind::Feeds,
             });
             if (matches!(
-                records.get(from.as_str()).map(|record| &record.value),
+                records.get(from).map(|record| &record.value),
                 Some(Value::Source(_))
             ) && ordinary_queries.contains_key(to))
                 || (ordinary_queries.contains_key(from)
                     && matches!(
-                        records.get(to.as_str()).map(|record| &record.value),
+                        records.get(to).map(|record| &record.value),
                         Some(Value::Reaction(_))
                     ))
             {
                 snapshot.edges.push(GraphEdge {
-                    from: to.to_string(),
-                    to: from.to_string(),
+                    from: GraphEntityId::Component(to.clone()),
+                    to: GraphEntityId::Component(from.clone()),
                     relationship: RelationshipKind::SubscribesTo,
                 });
             }

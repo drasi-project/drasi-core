@@ -67,7 +67,7 @@ impl Transactions {
                 anyhow::ensure!(self.pending.is_none(), "incomplete PostgreSQL transaction");
                 self.pending = Some((
                     info,
-                    SourceTransactionBuilder::new(self.source.as_str(), self.limits)?,
+                    SourceTransactionBuilder::new(&self.source, self.limits)?,
                 ));
             }
             WalMessage::Commit(info) => {

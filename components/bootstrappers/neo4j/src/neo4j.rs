@@ -171,7 +171,7 @@ impl BootstrapProvider for Neo4jBootstrapProvider {
 
 async fn bootstrap_nodes(
     graph: &Graph,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     labels: &[String],
     context: &BootstrapContext,
     event_tx: &BootstrapEventSender,
@@ -212,7 +212,7 @@ async fn bootstrap_nodes(
 async fn stream_nodes_query(
     graph: &Graph,
     cypher: &str,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     context: &BootstrapContext,
     event_tx: &BootstrapEventSender,
 ) -> Result<usize> {
@@ -231,7 +231,7 @@ async fn stream_nodes_query(
                 };
 
                 let metadata = ElementMetadata {
-                    reference: ElementReference::new(source_id, &element_id),
+                    reference: ElementReference::new(source_id.as_str(), &element_id),
                     labels: labels
                         .iter()
                         .map(|label| Arc::from(label.as_str()))
@@ -248,7 +248,7 @@ async fn stream_nodes_query(
 
                 event_tx
                     .send(BootstrapEvent {
-                        source_id: source_id.to_string(),
+                        source_id: source_id.clone(),
                         change,
                         timestamp: Utc::now(),
                         sequence: context.next_sequence(),
@@ -265,7 +265,7 @@ async fn stream_nodes_query(
 
 async fn bootstrap_relationships(
     graph: &Graph,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     rel_types: &[String],
     context: &BootstrapContext,
     event_tx: &BootstrapEventSender,
@@ -315,7 +315,7 @@ async fn bootstrap_relationships(
 async fn stream_relationship_query(
     graph: &Graph,
     cypher: &str,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     context: &BootstrapContext,
     event_tx: &BootstrapEventSender,
 ) -> Result<usize> {
@@ -336,7 +336,7 @@ async fn stream_relationship_query(
                 };
 
                 let metadata = ElementMetadata {
-                    reference: ElementReference::new(source_id, &element_id),
+                    reference: ElementReference::new(source_id.as_str(), &element_id),
                     labels: vec![Arc::from(rel_type.as_str())].into(),
                     effective_from: now_ms(),
                 };
@@ -344,14 +344,14 @@ async fn stream_relationship_query(
                     element: Element::Relation {
                         metadata,
                         properties,
-                        in_node: ElementReference::new(source_id, &start_element_id),
-                        out_node: ElementReference::new(source_id, &end_element_id),
+                        in_node: ElementReference::new(source_id.as_str(), &start_element_id),
+                        out_node: ElementReference::new(source_id.as_str(), &end_element_id),
                     },
                 };
 
                 event_tx
                     .send(BootstrapEvent {
-                        source_id: source_id.to_string(),
+                        source_id: source_id.clone(),
                         change,
                         timestamp: Utc::now(),
                         sequence: context.next_sequence(),

@@ -1,13 +1,16 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{config::ComponentId, DrasiLib, Query};
 
 fn query() -> drasi_lib::config::QueryConfig {
-    Query::cypher("query")
-        .query("MATCH (n:Item) RETURN n.value AS value")
-        .enable_bootstrap(false)
-        .build()
+    Query::cypher(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .query("MATCH (n:Item) RETURN n.value AS value")
+    .enable_bootstrap(false)
+    .build()
+    .expect("valid query")
 }
 
 #[tokio::test]
@@ -41,7 +44,10 @@ async fn empty_instance_and_source_only_pipeline_do_not_require_a_query_factory(
             core.list_queries().await?.is_empty(),
             "missing registration installed a partial query"
         );
-        let result = core.computation_pipeline()?.query(query()).build();
+        let result = core
+            .computation_pipeline()?
+            .query(query().with_assigned_id(ComponentId::generate()))
+            .build();
         anyhow::ensure!(
             result.err().is_some_and(|error| error
                 .to_string()

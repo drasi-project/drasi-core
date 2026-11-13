@@ -26,14 +26,15 @@ use super::{ElementPropertyMap, ElementValue};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ElementReference {
-    pub source_id: Arc<str>,
+    /// Data-set namespace, not necessarily a source component's identity.
+    pub namespace: Arc<str>,
     pub element_id: Arc<str>,
 }
 
 impl ElementReference {
-    pub fn new(source_id: &str, element_id: &str) -> Self {
+    pub fn new(namespace: &str, element_id: &str) -> Self {
         ElementReference {
-            source_id: Arc::from(source_id),
+            namespace: Arc::from(namespace),
             element_id: Arc::from(element_id),
         }
     }
@@ -41,7 +42,7 @@ impl ElementReference {
 
 impl Display for ElementReference {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.source_id, self.element_id)
+        write!(f, "{}:{}", self.namespace, self.element_id)
     }
 }
 

@@ -1,13 +1,5 @@
 # The drasi-lib developer guide
 
-**Development API guide.** This guide describes the current checkout, including
-native database components, the loadable query plugin, stateful views, scheduled
-non-query work, reconstructible recipes and the unified graph-change data
-contract (queries publish ordinary result nodes). Use
-matching Core/Server sources and rebuilt plugin libraries; an older published
-commit or registry binary does not contain all of these interfaces, and earlier
-native wire or query-row formats are not read.
-
 **drasi-lib is an embedded data-processing runtime for Rust applications.**
 You connect **components** into a **computation graph** to ingest data, transform it,
 maintain **state**, and perform actions. A graph can use custom processing logic,
@@ -27,8 +19,8 @@ working application to advanced processing and operational concerns.
 You will apply these concepts by building **Stockroom**, a running example
 application that keeps a live view of products that need replenishment.
 Stockroom evolves throughout the guide: it starts as a complete in-memory
-program, gains processing and operational controls, and develops the storage
-and delivery contracts needed to recover unfinished work. The same techniques
+program, gains processing and operational controls, and learns to save its state
+and finish work after a restart. The same techniques
 apply to monitoring, data integration, event-driven automation, and other
 embedded applications.
 
@@ -44,9 +36,16 @@ Follow the main Stockroom path first; sections marked **Alternative** or
 | `--features persistence -- --state ...` in Part III | SQLite capture, query storage, retained alerts and saved reorders | Processing and consumer completion in the same state directory |
 | `--features management -- managed ...` in Part IV | Saved definitions, factories and revisioned configuration | Configuration; this variant rebuilds its memory query from the file |
 
-Saving configuration does not implicitly enable processing recovery, and choosing
-a persistent query provider does not implicitly retain input or complete effects.
-The later lessons make those boundaries explicit.
+Read Parts I and II in order to build and operate an application. Continue with
+Part III when it must survive a restart, and Part IV when it needs saved
+configuration, reusable plugins, or process isolation. Each chapter explains
+what its example adds, gives you something to run or change, and ends with a
+summary. The appendices and linked API documentation are references, not
+prerequisites.
+
+Saving an application's configuration and saving the data it has processed are
+different tasks. You can learn them separately; the recovery chapters explain
+how to combine them.
 
 ## Contents
 
@@ -113,14 +112,17 @@ the alert disappear. You control the input by editing and saving that file.
 
 #### Copy and run the starter
 
-Install Rust through rustup. This book targets the native APIs on the
-`agentofreality-parallel-computation-graph` branch; the examples use that source
-checkout, not an arbitrary crates.io release. If you do not already have it:
+Install Rust through rustup. Start in the root of the `drasi-core` checkout
+containing this book. The examples use that checkout's APIs, rather than an
+arbitrary crates.io release. If obtaining the source from
+[the repository](https://github.com/drasi-project/drasi-core), select the
+revision that contains this edition and its `stockroom` folder; a different
+branch or a registry package is not a substitute.
 
-```sh
-git clone --branch agentofreality-parallel-computation-graph https://github.com/drasi-project/drasi-core.git drasi-core
-cd drasi-core
-```
+The book does not install a different library version for you. Build native libraries
+from the same revision as the host application; shared-library interfaces and
+record encodings must agree. These development APIs are not a promise of
+compatibility with earlier binaries or saved formats.
 
 The final directory name **`drasi-core`** is significant: the supplied Cargo
 paths expect it beside your application. The [starter project](stockroom)
@@ -197,9 +199,10 @@ The starter and its selected normalization middleware do not require libjq.
 libjq is needed only when you explicitly choose the jq middleware build.
 The selected lessons do not require CMake.
 
-The starter commits its own lockfile, so its commands use `--locked`.
-The repository-root lockfile is not distributed; workspace build/reference
-commands in this book allow Cargo to create it.
+Both the starter and repository root track `Cargo.lock`. Commands use `--locked`
+so dependency resolution cannot silently change underneath a lesson. Use the
+lockfile and source from the same revision. A lockfile mismatch is a setup
+problem to resolve, rather than a reason to remove `--locked`.
 
 The first build can take a little time. Once the application is ready, it prints:
 
@@ -305,23 +308,11 @@ A **stream** identifies one output's ordered emissions.
 The sink is where the application reacts to changes. In the native API its
 role is Sink; "reacting" describes what it does, not a separate plugin interface.
 
-#### Choose an application surface
+#### Build components and give them names
 
-The same runtime can be configured through different interfaces. “Native” names
-the component processing contract; it does not mean “must be a dynamic library.”
-
-| Surface | What the application supplies | Where it is used here |
-|---|---|---|
-| Explicit native Rust composition | Sources, transformers, queries and sinks plus their ports, pipes and resources in a `ComponentBatch` | The main Stockroom path |
-| Ordinary Source/Query/Reaction APIs | Convenience declarations such as `DrasiLib::add_query`; the host assembles graph components and adapters | The optional query-input example in Chapter 5; existing connector APIs |
-| Native dynamic plugins | Trusted libraries exporting native factories; the Host SDK loads them into the same graph | HTTP/SSE/webhook lessons |
-| Drasi Server | An existing application that hosts `DrasiLib` instances and exposes configuration/HTTP APIs | Optional **Server host** configuration examples |
-| Instance host and bridges | Independently owned instances, optionally in child processes, with explicit data links | Process isolation in Chapter 18 |
-
-There is one ComputationGraph per `DrasiLib`, not a second query engine for the
-ordinary API. Native sinks consume envelopes; an ordinary Reaction adapter
-consumes query results. Code below uses explicit native Rust composition unless
-its surrounding lesson identifies another surface.
+Stockroom implements a small native source and sink directly in Rust.
+"Native" means that they implement the computation graph's processing traits;
+they need not be separately loaded libraries. Each `DrasiLib` owns one graph.
 
 Stockroom deliberately selects the supported Rust-linked query reference in
 its source examples; it is not an implicit runtime fallback. Ordinary
@@ -344,6 +335,20 @@ memory-backed processing state and small file source are starting points:
 storage providers and source/sink plugins support persistent state and other
 external systems.
 
+Each component has two separate values: a **name** for people and an **ID** for
+the runtime. A `ComponentName`, such as `inventory`, is unique within the
+instance and can be changed. A `ComponentId` is an immutable UUID. Connections
+and stored state refer to IDs, so renaming a component does not disconnect it.
+
+Normally you let Drasi assign IDs when accepting factory declarations; Chapter 15
+shows that path. The first Stockroom intentionally constructs its objects
+directly so you can follow their code without first learning factories. Its
+small `component_id` helper supplies fixed example UUIDs, and its builder
+explicitly permits external IDs. Those numeric values are arbitrary example
+identities, not a way to turn names into UUIDs. Keep them unchanged when reopening
+the persistent lesson's state. The saved-configuration lesson instead uses
+library-assigned IDs and preserves them in its configuration store.
+
 The first lesson explicitly constructs one linked `ContinuousQueryTransformer` for the low-stock
 query. The companion's `low_stock_query` function creates it and obtains its
 result handle:
@@ -353,7 +358,7 @@ result handle:
 let query = ContinuousQueryTransformer::new(
     ContinuousQueryDefinition {
         graph_id: GRAPH.into(),
-        id: ComponentId::try_new("low-stock")?,
+        id: component_id(757),
         query: LOW_STOCK.into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("low-stock/out")?,
@@ -382,9 +387,9 @@ the source and sink, the program adds them with the query:
 <!-- illustration: component-members -->
 ```rust
 let mut batch = ComponentBatch::builder()
-    .source(Box::new(inventory))
-    .transformer(Box::new(query))
-    .sink(Box::new(alerts));
+    .source(ComponentName::try_new("inventory")?, Box::new(inventory))
+    .transformer(ComponentName::try_new("low-stock")?, Box::new(query))
+    .sink(ComponentName::try_new("alerts")?, Box::new(alerts));
 ```
 
 An output has a named port and a stream identity. The companion's `endpoint`
@@ -394,19 +399,20 @@ helper builds a component/port pair. For example:
 ```rust
 batch = batch
     .bind_stream(
-        endpoint("inventory", "out")?,
+        endpoint(component_id(758), "out")?,
         StreamId::try_new("inventory/out")?,
     )
     .connect(
         EdgeDefinition::new(
-            endpoint("inventory", "out")?,
-            endpoint("low-stock", "in")?,
+            endpoint(component_id(758), "out")?,
+            endpoint(component_id(757), "in")?,
         ),
         Box::new(BoundedPipeConfig { capacity: 8 }),
     );
 ```
 
-The query output is bound and connected to `alerts/in` in the same way.
+The query output is bound and connected to the `in` port of the component named
+`alerts` in the same way.
 Declaring a port and connecting it are separate operations. Ports on known
 components must have the declared names and compatible schemas; missing
 dependencies can remain waiting for later connections.
@@ -425,6 +431,7 @@ Finally, the application gives the batch to its runtime owner:
 <!-- excerpt: stockroom/src/main.rs#instance-build -->
 ```rust
 let core = DrasiLib::builder()
+    .with_allow_external_component_ids(true)
     .with_id("stockroom")
     .with_components(batch.build()?)
     .build()
@@ -528,10 +535,15 @@ fn metadata(sku: &str, time: u64) -> ElementMetadata {
 }
 ```
 
-The element's identity is the pair **source ID, element ID**.
+The element's identity is the pair **dataset namespace, element ID**.
+The field is called `ElementReference.source_id`, but it is a data namespace,
+not the UUID or editable name of a running component.
 `inventory/bolts` and `catalog/bolts` are different elements. The `"Product"`
 label describes the element's type; it does not identify an individual
 product. A mutable property such as a display name is usually a poor element ID.
+Renaming the `inventory` component leaves the `"inventory"` dataset namespace
+unchanged. Conversely, changing that namespace makes the data describe different
+elements even if the same component publishes it.
 
 Use source-qualified references for relationship endpoints too.
 `Element::Relation` contains `in_node` and `out_node` references as well as its
@@ -664,50 +676,75 @@ introduces that separate promise.
 
 #### Keep identity scopes separate
 
-Use the identity belonging to the question you are answering:
+Start with three everyday distinctions:
 
-| Coordinate | Identifies | Use |
+| Value | Example | Meaning |
 |---|---|---|
-| `ElementReference` | Source/dataset namespace and element ID | Update the same node or relationship |
-| `RecordId` | Schema-defined namespace and opaque identity bytes | Key a record view; never key it by JSON values |
-| `ChangeSetId` and operation ordinal | A group of changes and an operation within it | Distinguish operations, including equal-valued records |
-| Output stream and logical sequence | A producer's emissions from one output | Order new output; one emission can contain several operations |
-| Transport sequence | A particular delivery/re-emission stream position | Track transport, not deduplicate business effects |
-| Source position | Optional opaque upstream resume location | Resume source history under that source's comparison policy |
-| Output epoch / query output generation | The output provider's recovery identity | Decide whether a cursor can continue in the same output history |
-| Component generation | One constructed incarnation in the graph | Reject handles belonging to a replaced component |
-| Graph/configuration revision | Accepted topology or desired-definition version | Reject stale management changes |
+| Component name | `inventory` | Editable name used by application code and operators |
+| Component ID | A `ComponentId` UUID | Stable identity used by graph connections and processing state |
+| Element reference | `inventory/bolts` | A particular product in a dataset |
 
-These are **not one interchangeable hierarchy of counters**. In particular,
-component generation is not query output generation, and neither is a source
-position. Later recovery APIs return their own identity/cursor; preserve it
-rather than manufacturing it from a component ID or a transport counter.
-One output owns one stream; new emissions increase its sequence, with gaps
-permitted by the contract. Framework metadata belongs in `SystemMetadata`,
-business attributes in records. Derive new envelopes rather than mutating shared
-input, preserving the attribution/lineage required by the transformation.
+`ComponentName::try_new` validates a nonempty, case-sensitive name without
+whitespace or control characters. It does not register a component.
+`ComponentId::try_new` parses a UUID; it never hashes a name or looks one up.
+A UUID-looking name is still a name. The typed APIs make the choice explicit:
 
-| Event | What the consumer should do |
-|---|---|
-| Ordinary processing | Apply the next logical output in the current output identity |
-| Replay of committed output | Recognize the original logical output even if transport sequence changes |
-| Stop/start of the same query object | Its volatile publication incarnation is retained; a bootstrap reset can still change its query reset generation |
-| Persistent query reopen | The same validated scope, configuration, stores and reset generation preserve the producer epoch |
-| New volatile query object | It receives a new publication incarnation; old output cursors cannot identify its new history |
-| Component replacement | Acquire fresh component handles; a new component generation does not itself change a durable output epoch |
-| Explicit query reset | Reset generation participates in output epoch; use an authorized rebuild/snapshot policy, not the old cursor |
+<!-- illustration: component-selection -->
+```rust
+let name = ComponentName::try_new("low-stock")?;
+let handle = core.component_by_name(&name)?;
+let id = handle.id().clone();
+let before = core.get_query_results_by_name(&name).await?;
 
-A query's producer epoch is derived from its recovery identity and reset
-generation. A volatile query additionally has a per-object publication
-incarnation; a fully persistent query does not. “Fully persistent” here requires
-persistent checkpoints, outbox and live results as well as a nonvolatile provider.
-Neither this table nor equal projected values promises equal row IDs across
-every reset.
+core.rename_component_by_id(&id, ComponentName::try_new("needs-reorder")?)
+    .await?;
+let after = core.get_query_results_by_id(&id).await?;
+```
 
-For example, query output 7 can contain operations 0 and 1 for distinct records.
-A retry may arrive with transport sequence 12 while still representing output 7.
-Neither operation is new business work solely because the transport number changed.
-Chapter 11 gives that distinction durable receipts.
+The two reads can see different data if input changes between them, but they
+address the same query. Names are unique across component kinds in an instance.
+Renaming does not change connections, saved state, or an already obtained handle.
+If another component later takes the old name, a new name lookup finds that
+new component; an ID lookup still identifies the original.
+
+Name-based operations resolve once to an ID when the operation is admitted.
+A later rename or name reuse does not redirect an operation already in flight.
+Use `*_by_name(&ComponentName)` for a current human-facing selection and
+`*_by_id(&ComponentId)` when retaining a specific component's identity.
+Handles additionally identify a construction generation, so replacing an
+object can invalidate an old handle without changing the component's UUID.
+
+Configuration uses the same explicit distinction:
+
+<!-- illustration: component-references -->
+```rust
+use drasi_lib::config::ComponentReference;
+
+fn references(id: ComponentId) -> anyhow::Result<()> {
+    let by_name = ComponentReference::by_name(ComponentName::try_new("inventory")?);
+    let by_id = ComponentReference::by_id(id);
+    assert_eq!(serde_json::to_value(by_name)?, serde_json::json!("inventory"));
+    assert!(serde_json::to_value(by_id)?.get("id").is_some());
+    Ok(())
+}
+```
+
+A JSON string selects a name; `{"id":"<uuid>"}` selects an ID. A port name such
+as `out`, an output alias such as `low-stock`, and a `StreamId` are separate
+values. Renaming a component does not rewrite those strings. This is why
+Stockroom's data namespace and notification label can remain unchanged after
+a component rename.
+
+**Try it.** Run
+`cargo test --locked component_identity_and_lifecycle -- --nocapture`.
+The test renames a component, reuses its former name for a second component,
+and proves that the original ID and handle still select the original object.
+Chapter 7 explains the lifecycle trace printed by the same test.
+
+Use those identities for everyday application code. The additional counters
+used to resume delivery belong in
+[Chapter 11](#distinguish-input-output-and-replay-positions), where you will have
+a persistent application to apply them to.
 
 #### Supply meaningful time
 
@@ -720,8 +757,8 @@ upstream change timestamp should preserve that timestamp instead.
 
 The evaluator reports and skips mutations that are strictly older than the
 element's accepted source time. Equal-time changes follow admitted order.
-Deleting an absent element still records a source-time frontier, so an older
-insertion cannot resurrect it after recovery. Those frontiers are not
+Deleting an absent element still records the deletion's effective time, so an older
+insertion cannot resurrect it after recovery. Those recorded times are not
 automatically expired without an appropriate retention contract.
 
 Do not use a receive timestamp to disguise unavailable source time. If an
@@ -764,8 +801,8 @@ surface an error or an explicit recovery operation, not masquerade as normal
 end of input.
 
 `Inventory` also implements `ComputationComponent`. Its descriptor declares
-one output, `out`, with the `GraphChangeCodec` schema. Its first start validates
-and loads the file. A later stop/start preserves any changes still awaiting
+one output, `out`, with the `GraphChangeCodec` schema. Its `initialize` hook validates
+and loads the file once for that object. A later stop/start preserves any changes still awaiting
 emission. The graph owns the polling work, so the source has no independently
 spawned watcher to stop or join.
 
@@ -1070,7 +1107,7 @@ updates the view, and completes directly in the graph's owned task.
 fn application_callback(view: watch::Sender<ResultView>) -> anyhow::Result<Box<dyn EnvelopeSink>> {
     use drasi_reaction_application::NativeApplicationReaction;
     let sink = NativeApplicationReaction::callback(
-        "alerts",
+        component_id(759),
         QueryChangeCodec::schema().descriptor().clone(),
         move |input: InputEnvelope| {
             let view = view.clone();
@@ -1105,7 +1142,7 @@ The channel alternative uses the same declared schema:
 use drasi_reaction_application::NativeApplicationReaction;
 
 let (sink, mut receiver) = NativeApplicationReaction::channel(
-    "alerts",
+    component_id(759),
     QueryChangeCodec::schema().descriptor().clone(),
     NonZeroUsize::new(64).expect("positive capacity"),
 )?;
@@ -1273,7 +1310,7 @@ for record in snapshot.rows.values() {
 
 `QueryResultSnapshot` contains the output's `projector`, keyed records, a
 logical output position, and a generation. The projector names the output scope
-even when the snapshot is empty. `core.get_query_results("low-stock").await?` is a convenient JSON
+even when the snapshot is empty. `core.get_query_results_by_name(&ComponentName::try_new("low-stock")?).await?` is a convenient JSON
 read for an inspection endpoint. Neither call executes the query again, and
 neither establishes a live subscription.
 
@@ -1298,7 +1335,7 @@ let catalog = QueryResultsCatalog::new(GRAPH)?;
 let mut events = catalog.subscribe();
 let query = query.with_result_catalog(&catalog)?;
 let outlet = QueryResultsOutlet::new(
-    ComponentId::try_new("live-results")?,
+    component_id(761),
     catalog,
 );
 ```
@@ -1330,7 +1367,7 @@ async fn open_live_view(
     drasi: &drasi_lib::DrasiLib,
 ) -> anyhow::Result<OutputSnapshotFollow> {
     let output = drasi.output_catalogue()?.resolve(&OutputEndpoint::new(
-        ComponentId::try_new("low-stock")?,
+        component_id(757),
         PortId::try_new("out")?,
     ))?;
     Ok(output.snapshot_and_follow(OutputFollowLimits {
@@ -1349,6 +1386,9 @@ covered output twice. The cursor uses the output's logical sequence and epoch,
 not its transport sequence.
 
 This is a bounded **volatile lease**, not persisted consumer acknowledgement.
+A lease is a temporary reservation for this reader's retained output.
+A cursor includes an **epoch**, which identifies one output history, as well as
+a position within it. A new history cannot be continued using an old cursor.
 A query allows at most 64 leases, each bounded by its configured outbox capacity,
 16 MiB and five minutes. Choose limits within those ceilings. Buffer overflow
 returns `Gap`; the non-renewing deadline returns `LeaseExpired`. Neither silently
@@ -1379,6 +1419,17 @@ and both current-thread and multi-threaded executors.
 The sustained-condition test waits for a real scheduled result without another
 input edit. A fixed sleep followed by an unchecked read is not an equivalent test.
 
+For applications using builder-declared queries, the optional `test-support`
+feature provides `QueryTestControl`. Attach it before building with
+`with_query_test_control_by_name`, passing a `ComponentName` and a cloned
+control. After the query has applied your input, `advance_to` moves its test
+clock forward and waits for due work and immediate output delivery;
+`wake` checks due work without advancing time. This avoids wall-clock sleeps
+in timer tests. It does not wait for downstream business effects or change
+logical event timestamps. Stockroom's direct-constructor lesson uses the real
+clock; the [query-control tests](../../tests/query_test_control.rs) show the
+builder-based alternative.
+
 **Try it.** Add a regression test for two low-stock products, then restock one.
 Assert both the remaining view and the cancellation identity.
 
@@ -1405,7 +1456,7 @@ and connections, not an HTTP server implementation.
 From your `drasi-core` checkout, build just those two native libraries:
 
 ```sh
-cargo build -p drasi-computation-source-http -p drasi-computation-sink-sse --features dynamic-plugin
+cargo build --locked -p drasi-computation-source-http -p drasi-computation-sink-sse --features dynamic-plugin
 ```
 
 Return to your copied Stockroom project and run:
@@ -1436,9 +1487,11 @@ curl -N http://127.0.0.1:9081/events
 In a third terminal, from your copied Stockroom directory:
 
 ```sh
-curl --fail-with-body -H "Content-Type: application/json" --data-binary @http-insert.json http://127.0.0.1:9080/sources/inventory/events
-curl --fail-with-body -H "Content-Type: application/json" --data-binary @http-restock.json http://127.0.0.1:9080/sources/inventory/events
+curl --fail-with-body -H "Content-Type: application/json" --data-binary @http-insert.json http://127.0.0.1:9080/sources/00000000-0000-0000-0000-0000000002f6/events
+curl --fail-with-body -H "Content-Type: application/json" --data-binary @http-restock.json http://127.0.0.1:9080/sources/00000000-0000-0000-0000-0000000002f6/events
 ```
+
+The source path uses the starter's `inventory` component UUID, not its name.
 
 Use `curl.exe` in Windows PowerShell. The supplied JSON requests insert the
 product at quantity 3 and update it to 8. Each SSE data message contains
@@ -1482,7 +1535,7 @@ that product's result.
 The native HTTP sink supplies the outgoing integration. Build it from `drasi-core`:
 
 ```sh
-cargo build -p drasi-computation-sink-http --features dynamic-plugin
+cargo build --locked -p drasi-computation-sink-http --features dynamic-plugin
 ```
 
 For a local observation endpoint, run the included receiver from your copied
@@ -1609,10 +1662,12 @@ The graph supports several kinds of work:
 |---|---|
 | Source | `EnvelopeSource` produces envelopes |
 | Transformer | `Transformer` consumes an envelope and produces zero or more outputs |
-| Query | A query component maintains results using the transformer data boundary |
+| Transformer used as a query | Maintains results; its descriptor identifies its semantic kind as Query |
 | Sink | `EnvelopeSink` accepts or handles input without data outputs |
 | Service | `ComputationService` runs an activity with no data ports |
 
+There are four execution roles (`ComponentRole`): Source, Transformer, Sink,
+and Service. Query is a semantic kind of transformer, not a fifth role.
 All implement `ComputationComponent` for description and lifecycle.
 Several complete pipelines can coexist in one instance. A pipeline can also
 contain no query at all: normalization, routing, and custom calculations do
@@ -1670,25 +1725,25 @@ not repeated full snapshots. Select the starting-state contract deliberately:
 
 Explicit native `ComponentBatch` connections only establish transport. Bind the
 appropriate query-scoped bootstrap provider when the starting boundary requires
-one; Chapter 10 explains that lifecycle. The ordinary query API can assemble
+one; Chapter 10 explains that lifecycle. The query convenience API can assemble
 the input and its bootstrap/replay services for a selected output:
 
 <!-- illustration: chained-query-input -->
 ```rust
 async fn add_low_stock_count(drasi: &drasi_lib::DrasiLib) -> anyhow::Result<()> {
     drasi.add_query(
-        drasi_lib::Query::cypher("low-stock-count")
+        drasi_lib::Query::cypher(ComponentName::try_new("low-stock-count")?)
             .query("MATCH (r:Result) RETURN count(r) AS Items")
-            .from_input("low-stock")
+            .from_input_by_name(ComponentName::try_new("low-stock")?)
             .with_result_label("LowStockCount")
-            .build(),
+            .build()?,
     ).await?;
     Ok(())
 }
 ```
 
-This is an **ordinary API alternative**, not a second query executor.
-`from_input_port(component, port)` selects an explicit output. Without a port,
+This is a **query-builder alternative**, not a second query executor.
+`from_input_port_by_name(component, port)` selects an explicit output. Without a port,
 resolution uses the factory's declared primary output or its only output;
 several outputs without a primary are an error. YAML/JSON uses `inputs: [low-stock]`
 or `inputs: [{component: low-stock, port: out}]`; old `sources`/`sourceId`
@@ -1734,7 +1789,7 @@ The `normalize` feature enables `middleware-parse-json` and
 fn normalization() -> anyhow::Result<MiddlewareTransformer> {
     MiddlewareTransformer::new(
         MiddlewareTransformerDefinition {
-            id: ComponentId::try_new("normalize")?,
+            id: component_id(760),
             output_stream: StreamId::try_new("normalize/out")?,
             middleware: serde_json::from_value(serde_json::json!([
                 {"kind":"parse_json","name":"read-payload","config":{
@@ -1770,7 +1825,7 @@ the registry to `new_configured`. For example, an input entry is:
 <!-- illustration: source-pipeline -->
 ```rust
 drasi_lib::config::QueryInputConfig {
-    component: "inventory".into(),
+    component: drasi_lib::config::ComponentReference::Name(ComponentName::try_new("inventory")?),
     port: None,
     nodes: vec!["Product".into()],
     relations: vec![],
@@ -1899,7 +1954,7 @@ show the complete service contract. Query temporal functions already use the
 shared committed wakeup policy; they do not require this optional capability.
 
 A `ComputationService` can run a periodic health activity without data ports.
-Its `run` future must yield, and its quiesce/stop hooks must account for any
+Its `run` future must yield, and its pause/stop hooks must account for any
 workers it owns. Use a data source when the activity produces records that
 belong in the pipeline instead.
 
@@ -2050,7 +2105,7 @@ For example:
 let merger = SourceTimeMergeTransformer::new(
     SourceTimeMergeDefinition {
         graph_id: GRAPH.into(),
-        id: ComponentId::try_new("merge")?,
+        id: component_id(771),
         sources: vec![
             StreamId::try_new("inventory/out")?,
             StreamId::try_new("catalog/out")?,
@@ -2156,6 +2211,77 @@ An embedded runtime is part of the application's lifetime. Stockroom needs to
 know when it is usable, stop without abandoning ownership, and distinguish an
 idle source from a damaged component.
 
+#### Follow an object from creation to disposal
+
+A component definition is a recipe; a constructed Rust object is one instance
+of that recipe. Drasi accepts the definition and its ID before running the
+factory. The graph then binds the required resources, calls `initialize` once,
+and calls `start` when activation is requested and prerequisites are ready.
+Only successfully started components process input.
+
+```text
+accept definition -> construct -> bind resources -> initialize
+                                                   |
+                                                   v
+                                              start -> process
+                                                ^         |
+                                                |         v
+                                                +------- stop
+
+final retirement: stop -> dispose
+explicit data removal: stop -> delete_owned_resources -> dispose
+```
+
+These are awaited methods, not Rust's synchronous `Drop`:
+
+| Hook | Put this work here | How often |
+|---|---|---|
+| Factory `create` | Construct the object using its assigned ID and configuration | Once per constructed object |
+| `initialize` | Prepare resources that belong to the object's lifetime | Once, after required bindings |
+| `start` | Open or resume resources used during active processing | Every activation |
+| `stop` | Stop processing and join workers, while preserving restartable state | Every completed active run |
+| `dispose` | Release the object's remaining resources | Final retirement, also after partial initialization failure |
+| `delete_owned_resources` | Explicitly erase state owned by this component | Only an authorized permanent removal |
+
+Initialization failure is not retried on the same partially initialized object.
+Drasi retires that object and retains unfinished cleanup before constructing a
+replacement. A normal stop/start reuses the initialized object; it does not call
+`initialize` again or allocate another UUID. `shutdown()` is terminal for the
+`DrasiLib` instance, but does not mean "delete the database."
+
+Keeping the object alive does not by itself promise to keep all its data.
+Each component documents which state survives stop/start. Stockroom's file
+comparison state and persistent consumer remain usable; a plugin explicitly
+designed to discard volatile state on stop must be rebuilt from input.
+
+Stockroom's file source loads its initial snapshot in `initialize`:
+
+<!-- excerpt: stockroom/src/main.rs#file-initialization -->
+```rust
+async fn initialize(&mut self) -> anyhow::Result<()> {
+    self.reload().await
+}
+```
+
+The graph owns file polling, so the source needs no separate task to cancel.
+Its default `start` and `stop` hooks do nothing; the pending changes and
+comparison state remain in the object between runs. In Part III, the alert
+consumer likewise keeps its transaction owner across stop/start and closes it
+in `dispose`.
+
+**Try it.** Run
+`cargo test --locked component_identity_and_lifecycle -- --nocapture`.
+It creates a component through the library's ID allocator, starts it, renames
+it, stops and starts it, then shuts down. Its lifecycle log is:
+
+```text
+["initialize", "start", "stop", "start", "stop", "dispose"]
+```
+
+One UUID identifies the logical component. A **generation** identifies a
+particular constructed object with that UUID. Replacement creates a new
+generation; renaming and normal stop/start do not.
+
 #### Exercise startup and shutdown
 
 Run the file lesson, save an invalid JSON fragment, and observe the warning.
@@ -2164,22 +2290,22 @@ and restart Stockroom. The file provides a new initial snapshot; the in-memory
 query is rebuilt.
 
 Now temporarily give two products the same SKU and start the application.
-Startup fails with `duplicate record key` instead of reporting readiness.
+Initialization fails with `duplicate record key` instead of reporting readiness.
 This distinguishes an invalid initial definition/data set from a recoverable
 bad save while a previously valid source is running.
 
-An object's **generation** identifies one constructed incarnation. The graph's
-**revision** identifies an accepted topology version. These are ownership
-coordinates, not query row numbers. You will use them for replacement in
-Part IV; routine application code can begin with `start`, readiness waits,
-and awaited `shutdown`.
+The graph's **revision** identifies an accepted topology version. A separate
+configuration revision identifies the saved definition. Neither is a query
+row count. Part IV uses these values to reject changes based on outdated state.
 
 #### Separate acceptance, construction, and readiness
 
 A successful addition accepts a component definition. It does not prove that
 a database connection opened or that processing is ready.
-`ComponentHandle::wait_created` waits for construction; `wait_started` waits
-for the running boundary. Bound waits with an application deadline.
+`ComponentHandle::wait_created` waits for the created generation to be published;
+`wait_started` observes successful activation. These methods observe progress;
+they do not request a start. Bound waits with an application deadline and use
+current observations or the failure monitor for continuing health checks.
 
 A valid declaration can be accepted before all of its dependencies are usable.
 Inspect the component's observed state and the actual topology when readiness
@@ -2196,12 +2322,12 @@ need. The instance host remains available for management while dependencies are
 missing after library startup returns.
 
 **Try it.** In your copied `main.rs`, find the default edge list in
-`build_application` and temporarily remove `("inventory", query_id)`, leaving
-`(query_id, "alerts")`. Run `cargo run --locked`. The graph declaration and
+`build_application` and temporarily remove `(inventory_id, query_component_id.clone())`,
+leaving `(query_component_id.clone(), alerts_component_id)`. Run `cargo run --locked`. The graph declaration and
 instance start are accepted, but the inventory source waits for its output
 connection. After the five-second readiness deadline, Stockroom reports
 `wait for component 'inventory' readiness` and
-`connection for 'inventory:out'`, then exits unsuccessfully. Restore the edge,
+`connection for '00000000-0000-0000-0000-0000000002f6:out'`, then exits unsuccessfully. Restore the edge,
 rerun, and confirm that `Ready. Watching inventory.json` returns.
 
 A failed definition remains inspectable. Retryable acquisition failures can be
@@ -2221,7 +2347,7 @@ Follow the missing-edge exercise through its distinct boundaries:
 | Observation / wait | What is established | What is not established |
 |---|---|---|
 | `wait_created` | The requested generation is present as Created in a coherent registry publication | A connection, running worker or loaded query |
-| `wait_started` | That generation reached its requested running/activation boundary | Queue drain or current business completion |
+| `wait_started` | That generation completed activation | Continuing health, queue drain, or business completion |
 | `QueryResults::wait_ready` | Query recovery/bootstrap initialization and output-delivery preparation completed | All pending input replay, output handoffs or consumer work completed |
 | Business-state predicate with a deadline | The particular answer/state the application awaited | Completion of unrelated inputs, other branches or timers |
 
@@ -2233,7 +2359,7 @@ but idle because there is no edit to emit. During startup, inspect:
 | Dimension | Question to ask in the observed component snapshot |
 |---|---|
 | Realization | Was this definition constructed, or is construction deferred/failed? |
-| Lifecycle | Is this incarnation stopped, activating, running or stopping? |
+| Lifecycle | Is this constructed object stopped, activating, running or stopping? |
 | Health | Has an actual failure been reported? |
 | Binding | Are required resources, streams and connections present? |
 | Availability | Can this component currently offer its service? |
@@ -2270,10 +2396,10 @@ that cannot undo an external action already performed.
 | Operation | Purpose |
 |---|---|
 | Quiesce selected components | Park processing at supported safe boundaries while retaining ownership |
-| Stop components or `DrasiLib::stop` | Stop processing with awaited lifecycle work; the instance supports a later start |
-| `DrasiLib::shutdown` | Perform terminal instance cleanup |
+| `ComponentHandle::stop` or `DrasiLib::stop` | Stop processing and retain the initialized objects for later start |
+| `DrasiLib::shutdown` | Stop and dispose the instance's owned objects; this instance cannot restart |
 | Standalone graph `dispose` | Release graph-owned resources after its run/cleanup boundary |
-| Deprovision | Permanently remove component-owned processing state |
+| Explicit permanent removal | Stop, delete permitted component-owned state, and dispose; distinct from removing a definition while preserving data |
 
 Quiescence is not a universal drain. Work from selected producers drains to
 the supported boundary, while other queued input can remain owned.
@@ -2292,7 +2418,12 @@ does not abandon the accepted stop operation or authorize a replacement owner.
 Unrelated cleanup remains independent; a failed producer is not permission to
 retire the owners it still needs.
 
-Deprovision is not a pause button. Similarly, a configuration change that
+Temporary graph-coordinated pauses use `pause_processing` and
+`resume_processing`, not another initialization. These hooks matter for a
+component that owns background work: merely pausing calls to `next` or `transform`
+would leave that worker running.
+
+Permanent state deletion is not a pause button. Similarly, a configuration change that
 removes a component is not an ordinary stop; its recovery obligations need
 separate consideration in Chapter 17.
 
@@ -2347,6 +2478,14 @@ cause even though the standard error source chain follows only the primary
 one. Lifecycle reports likewise contain per-member failures.
 `OperationSummary::CompletedWithFailures` requires inspecting the unsuccessful
 members. Preserve the typed aggregate so callers can inspect every retained cause.
+
+Instance-wide `start` can fail after independent components have already started.
+Inspect the typed `PartialStartError`, retain the instance, and await `stop` or
+`shutdown` as appropriate. A failed start is not a rollback of every component.
+The lifecycle budget includes time spent waiting for admission and prerequisites,
+not just the component hook. Cancelling or timing out the caller does not prove
+that an already accepted operation stopped; the runtime retains that work and
+its cleanup responsibility.
 
 `ComputationCleanupError` can itself retain a failed construction or
 registration owner. Keep it and await its `cleanup` operation. Rejected supplied
@@ -2419,7 +2558,7 @@ Diagnostic logging supplies additional lifecycle detail.
 Use `inspect_computation_inventory`, `inspect_computation_graph`, and
 `computation_info` for native inventory and topology. `ComputationInspector`
 and the control handle expose coherent observed snapshots and bounded change
-history. `list_queries` and `get_query_results` provide application-oriented
+history. `list_queries` and `get_query_results_by_name` provide application-oriented
 query inspection.
 
 Stockroom's `cli::Health` subscribes before startup and observes failures
@@ -2432,7 +2571,7 @@ durable audit log. Ordinary dependency waits and intentionally held alerts
 are not component failures.
 
 Include component generation and graph revision in observations. A health probe
-belongs to the incarnation it inspected; `report_health` checks that revision,
+belongs to the particular object it inspected; `report_health` checks that revision,
 generation, and ownership before accepting the observation.
 
 Distinguish three kinds of snapshot:
@@ -2463,7 +2602,6 @@ Install the host subscriber before constructing `DrasiLib`; otherwise Drasi may
 install its default, and a later infallible subscriber `.init()` can panic.
 Stockroom defaults diagnostic logs to warnings on stderr and includes
 `ComponentLogLayer`. Result lines on stdout are application output, not INFO logs.
-At INFO level, `__component_graph__` is the runtime's internal inspection source.
 
 Stockroom already includes `tracing-subscriber` with its `env-filter` feature.
 Its setup is:
@@ -2498,7 +2636,8 @@ Preserve that span when spawning auxiliary work, for example by instrumenting
 the future. Merely placing a component ID in an arbitrary message field does
 not establish component log routing.
 
-`subscribe_computation_logs` supplies recent history plus a live receiver
+`subscribe_computation_logs_by_name` and `subscribe_computation_logs_by_id`
+supply recent history plus a live receiver
 for the actual Source, Transformer, Query, Sink, or Service category.
 Use `ComponentRole` or `ComponentLogType` when selecting it.
 Handle receiver lag explicitly. Log channels are bounded and diagnostic;
@@ -2579,7 +2718,8 @@ execution role. Resource observations must identify actual provider handles,
 not infer sharing from names or paths. A newer complete resource observation
 replaces the previous inventory, including when the new inventory is empty.
 
-For data discovery, await `DrasiLib::get_source_schema` or `get_graph_schema`.
+For data discovery, await `DrasiLib::get_source_schema_by_name` (or its `_by_id`
+counterpart) or `get_graph_schema`.
 Supported native database sources report actual captured tables/fields/types,
 not their factory's configuration schema. Reads remain available while `next()`
 waits for data. A source without a schema capability can report no schema;
@@ -2802,7 +2942,7 @@ Chapter 10.
 let query = ContinuousQueryTransformer::new_configured(
     ContinuousQueryDefinition {
         graph_id: GRAPH.into(),
-        id: ComponentId::try_new("low-stock")?,
+        id: component_id(757),
         query: LOW_STOCK.into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("low-stock/out")?,
@@ -2832,6 +2972,25 @@ An index provider supplies `ComputationIndexes`: the index set, transaction
 owner, supported checkpoint/live-result/outbox writers, durability evidence,
 and asynchronous cleanup. Two writers using the same filename or a matching
 transaction label are not necessarily participants in one transaction.
+
+Component identity and storage location are separate. A `StorageScope` chooses
+an application's storage namespace; a component's immutable ID selects its
+state within that scope. `StorePartition::named` is available for application
+data that does not belong to a component. Use typed partitions rather than
+encoding names and UUIDs into interchangeable strings:
+
+<!-- illustration: state-partition -->
+```rust
+fn component_preferences(id: ComponentId) -> drasi_lib::StorePartition {
+    drasi_lib::StorePartition::component(id)
+        .in_scope(&drasi_lib::StorageScope::new("stockroom"))
+}
+```
+
+Changing the component's display name leaves this partition unchanged.
+Reusing its former name for a new component does not give the new UUID access
+to the original component's state. Backends encode the partition into physical
+keys; application code should preserve the typed value and chosen scope.
 
 #### Know what an atomic query commit includes
 
@@ -2914,7 +3073,7 @@ the missing services.
 <!-- illustration: recovery-requirement -->
 ```rust
 let requirement = RecoveryRequirement {
-    consumer: ComponentId::try_new("low-stock")?,
+    consumer: component_id(757),
     scope: RecoveryScope::Failure(
         drasi_core::interface::FailureMode::ProcessRestart,
     ),
@@ -2942,7 +3101,9 @@ helpers are not a general multi-key transaction: some writes can succeed
 before a later one fails. Use idempotent retry or a real transaction owner when
 all-or-nothing state matters.
 
-`WalProvider` stores partitioned input history. Register a partition before
+`WalProvider` stores input history under a `StorageScope` and source
+`ComponentId`. This UUID is not the element's string dataset namespace.
+Register the source before
 appending, honor its capacity policy, and preserve the meaning of its allocated
 sequence. The redb provider's `head_sequence()` reads the committed storage
 counter, not an allocated-but-uncommitted sequence. It can remain positive after
@@ -2950,17 +3111,6 @@ old events have been pruned; that does not mean those events are still replayabl
 Missing requested history fails explicitly, including a fully pruned log.
 `WalSourceResource` and `WalReplaySource` can expose an actual WAL and processing
 progress owner as a native replay source.
-
-**Alternative ordinary source adapters.** Unlike native source admission,
-ordinary HTTP/gRPC sources can use the source-WAL interface. They protect retained
-WAL input while their initial query
-subscriptions are restored. The first fast subscriber cannot authorize deletion
-of data still needed by a slower one. Replay registration is protected against
-pruning, and stop awaits submitted pruning work. If you host these plugins
-directly rather than through DrasiLib, call `on_subscriptions_complete()` only
-after establishing every required initial subscription; a timer is not a
-replacement for that signal. See the
-[source-authoring contract](../../../components/sources/README.md#pattern-b--transient-source-with-drasi-wal-durability).
 
 A WAL, query outbox, consumer progress store, and configuration store are not
 interchangeable. Each proves completion only at its own boundary.
@@ -2987,10 +3137,10 @@ the native source and its paired bootstrap provider:
 ```rust
 let progress = Arc::new(QuerySourceProgress::new(
     GRAPH,
-    ComponentId::try_new("low-stock")?,
+    component_id(757),
 )?);
 let (source, bootstrap) = SqliteSource::coordinated(
-    ComponentId::try_new("inventory")?,
+    component_id(758),
     StreamId::try_new("inventory/out")?,
     sqlite_config,
     progress.clone(),
@@ -3263,6 +3413,49 @@ and output in a QoS journal. This chapter explains its outgoing connection,
 then shows two alternatives: admission for externally submitted input and
 snapshot/outbox recovery for a materialized view.
 
+#### Distinguish input, output, and replay positions
+
+Suppose query output 7 contains operations 0 and 1 for two different products.
+A retry may arrive at transport position 12 while still representing output 7.
+It is the same business work arriving again, not a new order. Store the identity
+returned by the relevant API instead of deducing it from an unrelated counter.
+
+| Value | Identifies | Use |
+|---|---|---|
+| `ElementReference` / `RecordId` | A particular node, relationship or result row | Update the same data item |
+| `ChangeSetId` and operation ordinal | A batch and an operation within it | Distinguish operations, including equal-valued records |
+| Output stream and logical sequence | Emissions from one output | Order new output; one emission can contain several operations |
+| Transport sequence | A particular delivery/re-emission stream position | Track transport, not deduplicate business effects |
+| Source position | An upstream resume location, such as a database log position | Resume source history using that source's comparison rules |
+| Output epoch / query output generation | The output provider's recovery identity | Decide whether a cursor belongs to the same output history |
+| Component generation | One constructed object in the graph | Reject handles belonging to a replaced object |
+| Graph/configuration revision | Accepted topology or saved-definition version | Reject stale configuration changes |
+
+These are not interchangeable counters. A component's UUID is its stable
+identity, not its processed-input position. Its editable name is neither.
+Framework metadata belongs in `SystemMetadata`, business attributes in records.
+Derive new envelopes rather than mutating shared input, preserving the attribution
+and lineage required by the transformation.
+
+| Event | What the consumer should do |
+|---|---|
+| Normal processing | Apply the next logical output in the current output history |
+| Replay of committed output | Recognize the original logical output even if its transport sequence changes |
+| Stop/start of the same query object | Retain its output identity; an actual bootstrap reset can still change its reset generation |
+| Persistent query reopen | Validate the same scope, configuration, stores and reset generation before continuing |
+| New volatile query object | Treat its output as a new history; old cursors cannot identify it |
+| Component replacement | Acquire fresh component handles; a new object does not itself change a durable output epoch |
+| Explicit query reset | Use an authorized rebuild/snapshot policy, not the old cursor |
+
+A query's producer epoch is derived from its recovery identity and reset
+generation. A volatile query also has a per-object publication identity, because
+its data disappears with that object. A fully persistent query instead recovers
+its checkpoints, outbox and live results from storage. Equal projected values
+do not promise equal row IDs across every reset.
+These query examples use the linked or indexed query implementation. A plugin
+profile that explicitly discards its evaluator on stop has a different restart
+contract; consult that profile before reusing a cursor.
+
 #### Register a bounded codec
 
 Persistent transport needs executable validators, not only schema names.
@@ -3298,7 +3491,7 @@ let journal = QosChannel::persistent_with_recovery(
         retention: RetentionPolicy::Backpressure,
         subscribers: [("alerts".into(), SubscriptionStart::Earliest)].into(),
     },
-    provider.create_indexes(GRAPH, "output-journal").await?,
+    provider.create_indexes(GRAPH, &component_id(767)).await?,
     codec()?,
     "low-stock",
     QosRecoveryOptions::Replay(ReplayOptions {
@@ -3327,8 +3520,8 @@ batch = batch
     .provide_resource(output_journal.clone(), handle)?
     .connect(
         EdgeDefinition::new(
-            endpoint("low-stock", "out")?,
-            endpoint("alerts", "in")?,
+            endpoint(component_id(757), "out")?,
+            endpoint(component_id(759), "in")?,
         ),
         Box::new(journal.definition().pipe(output_journal, "alerts")),
     );
@@ -3430,13 +3623,13 @@ use drasi_core::interface::FailureMode;
 
 let incoming = QosChannel::persistent_with_recovery(
     channel_definition("inventory/out", "low-stock")?,
-    provider.create_indexes(GRAPH, "input-journal").await?,
+    provider.create_indexes(GRAPH, &component_id(768)).await?,
     codec()?,
     "inventory",
     QosRecoveryOptions::Admission(AdmissionOptions {
         construction_scope: INSTANCE.into(),
         graph_id: GRAPH.into(),
-        component_id: ComponentId::try_new("inventory")?,
+        component_id: component_id(758),
         failure_scope: FailureMode::ProcessRestart,
         max_producers: NonZeroUsize::new(1).expect("positive capacity"),
         receipts_per_producer: NonZeroUsize::new(32).expect("positive capacity"),
@@ -3484,8 +3677,9 @@ Register a producer, then submit consecutive client sequences:
 
 <!-- illustration: admission-retry -->
 ```rust
+admission.wait_active().await?;
 let producer = admission
-    .register_producer(ComponentId::try_new("stockroom-app")?)
+    .register_producer(component_id(769))
     .await?;
 let first = admission.admit(&producer, 1, &input).await?;
 let retry = admission.admit(&producer, 1, &input).await?;
@@ -3495,6 +3689,10 @@ ensure!(first == retry, "identical retry must return the original receipt");
 Here `input` is the same encoded inventory envelope in both calls. The receipt
 proves storage-backed acceptance at the configured failure scope, not query
 completion or a business effect.
+Wait for the admission service's own `wait_active` boundary after activating
+the graph. Component startup alone does not establish that its admission mailbox
+is ready. Before activation and while stopped, durable admission rejects sends;
+it does not behave like a volatile application channel that buffers while stopped.
 
 Retain the producer session, client sequence, and original content when a
 response is lost. Resolve uncertainty with `producer_status`,
@@ -3562,15 +3760,15 @@ fn recoverable_consumer(
     store: Arc<dyn drasi_lib::StateStoreProvider>,
 ) -> anyhow::Result<(QueryReplayTransformer, CheckpointedSink)> {
     ensure!(
-        inner.descriptor().id().as_str() == "alerts",
+        inner.descriptor().id() == &component_id(759),
         "consumer identity must match its progress scope"
     );
     let progress: Arc<dyn ConsumerProgressStore> = Arc::new(
-        StateStoreConsumerProgress::new(INSTANCE, "alerts", store)?,
+        StateStoreConsumerProgress::new(INSTANCE, &component_id(759), store)?,
     );
     let replay = QueryReplayTransformer::new(
-        ComponentId::try_new("alert-replay")?,
-        "low-stock".into(),
+        component_id(770),
+        component_id(757),
         StreamId::try_new("alert-replay/out")?,
         results,
         progress.clone(),
@@ -3639,14 +3837,10 @@ runner construction is:
 
 <!-- excerpt: stockroom/src/persistence.rs#delivery-runner -->
 ```rust
-let indexes = provider.create_indexes(GRAPH, "reorder-completion").await?;
+let indexes = provider.create_indexes(GRAPH, &component_id(759)).await?;
 let contract = ComponentRecovery::transactional_consumer(&indexes)?;
 let runner = Arc::new(Mutex::new(DeliveryRunner::new_transactional(
-    DeliveryScope::new(
-        INSTANCE.into(),
-        GRAPH.into(),
-        ComponentId::try_new("alerts")?,
-    )?,
+    DeliveryScope::new(INSTANCE.into(), GRAPH.into(), component_id(759))?,
     indexes,
     codec()?,
     DeliveryOptions {
@@ -3665,7 +3859,11 @@ positive `NonZeroUsize` bounds. `DeliveryRetryPolicy::default` makes
 one attempt; a retry policy is not implied by persistence.
 
 The sink owns this runner, returns `contract` from `recovery_contract`, awaits
-`deliver_transactional`, and shuts the runner down in its stop hook.
+`deliver_transactional`, and shuts the runner down in its final `dispose` hook.
+A healthy stop/start retains that transaction owner. Closing it during ordinary
+stop would make the same initialized sink unusable on restart. Run
+`cargo test --locked --features persistence durable_consumer_stop_start`
+to exercise this distinction.
 `SaveReorder` updates a versioned, keyed reorder view and advances a handled
 counter through the borrowed `TransactionContext`. The view and the operation's
 completion share the same actual storage transaction.
@@ -3957,7 +4155,7 @@ fn committed_group(
         max_bytes: NonZeroUsize::new(1024 * 1024).expect("positive limit"),
         max_duration_ms: NonZeroU64::new(5_000).expect("positive limit"),
     };
-    let mut group = SourceTransactionBuilder::new("inventory", limits)?;
+    let mut group = SourceTransactionBuilder::new(&component_id(758), limits)?;
     for change in changes {
         group.push(change)?;
     }
@@ -4187,7 +4385,7 @@ The application has several independently meaningful successes:
 | Outgoing journal acceptance | Query output is retained for its required subscriber |
 | Transactional handler completion | Business state and that operation's completion committed together |
 | Consumer batch completion | Every operation in that delivered batch completed |
-| Configuration receipt, when management is enabled | A desired definition was accepted, not necessarily started |
+| Configuration receipt | A definition and its identities were accepted, not necessarily constructed or started; durability depends on the store |
 | Awaited shutdown | The reported owners completed cleanup; it is not retroactive proof of every business effect |
 
 This table is also the basis of the application's external API. An endpoint
@@ -4224,15 +4422,6 @@ identity-only deletes, equal-valued rows with different identities, stale
 source times, grouped totals, and temporal retractions.
 Exercise both current-thread and multi-threaded Tokio runtimes when supporting
 both hosts.
-
-The [completed Building Comfort reference and recovery](https://github.com/drasi-project/test-infra/tree/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/e2e-test-framework/examples/recovery_comparison/goldens/building-comfort-small-v2)
-is optional qualification evidence from a **different Server/ordinary-adapter
-profile**, not another Stockroom exercise. It uses rebuilt ordinary
-gRPC adapters. Both queries processed 100,000 inputs; after SIGKILL, the aggregate
-restored input 88,748 and replayed 11,252 remaining events. Exact delivery and
-independently checked final snapshots matched the completed reference. This is
-the standard-gRPC/source-WAL profile, not proof for every native pipe, transport,
-effect or crash window. The wider application matrix still needs its own runs.
 
 Measure boundedness under the intended workload. Include full envelope sizes,
 retained membership, outbox growth, component-local expansion, backend memory,
@@ -4302,8 +4491,45 @@ substitute one implementation identity for the other.
 
 Run `cargo test --locked --features management configuration_reopens` to build
 and exercise this path before changing it. The test saves a definition, closes
-its owner, opens it without resubmitting the seed, and applies a revisioned
-query change. Chapter 16 runs it interactively.
+its owner, opens it without resubmitting the seed, and verifies that an
+unsupported query change leaves the accepted definition unchanged. It also
+renames a source and verifies that the name and its assigned UUID survive reopen.
+Construction support alone does not authorize updates. Chapter 16 runs the
+saved-configuration path interactively.
+
+#### Let the library assign component identities
+
+An application should normally supply names and let Drasi allocate UUIDs.
+The instance's `allow_external_component_ids` option is false by default and
+cannot be changed by a component or a creation request. The direct-object
+lessons opted in only because those objects already had IDs.
+
+For a batch, `with_component_batch_factory` accepts a metadata-building closure
+on the memory-backed builder; `create_components` accepts one on an existing
+instance. The closure receives a `ComponentIds` allocator. Allocate each new
+ID once, then use it consistently in the descriptor and edges. Prepare factory
+specifications there, not initialized objects or database connections.
+
+The managed lesson uses the same allocation pattern in
+`create_managed_components`, which accepts complete saved recipes:
+
+<!-- excerpt: stockroom/src/managed.rs#allocated-identities -->
+```rust
+let inventory_id = ids.allocate()?;
+let query_id = ids.allocate()?;
+let alerts_id = ids.allocate()?;
+```
+
+The configuration owner accepts those assignments, names, references and a
+receipt before invoking component constructors. A matching request retry returns
+the original assignments, even if a component has since been deleted; it does
+not create the component again. A new component using an old name receives a
+new identity. Factory code uses `ConstructionContext.component_id` rather than
+deriving an ID from a name or hard-coding the first lesson's example UUID.
+
+Names, IDs, stream names and data namespaces remain separate. The managed file
+factory accepts the assigned ID but continues emitting Product elements in the
+`inventory` dataset, including after a component rename.
 
 This lesson persists **configuration**, while rebuilding its query state from
 the file. The `--state` lesson persists **processing and completion**. They
@@ -4321,7 +4547,7 @@ let factory = factories
     .clone();
 let indexes = ResourceId::try_new("query-indexes")?;
 let mut specification = factory.specification_from_config(
-    ComponentId::try_new("low-stock")?,
+    component_id(757),
     serde_json::json!({
         "query": LOW_STOCK,
         "language": "cypher",
@@ -4353,7 +4579,11 @@ batch = batch
         binding: "query-indexes".into(),
     })?
     .provide_resource(indexes, handle)?
-    .component(specification, factory);
+    .component(
+        ComponentName::try_new("low-stock")?,
+        specification,
+        factory,
+    );
 ```
 
 This replaces the directly constructed query, rather than adding another
@@ -4379,8 +4609,9 @@ A custom `ComponentFactory` follows the same separation:
 |---|---|
 | Descriptor and schema discovery | Describe role, ports, implementation, configuration fields, and dependencies without I/O |
 | Validation | Reject invalid configuration, scope, resource roles/types, and cardinality before acquisition |
-| Construction | Use the supplied configuration and actual resources to create a component, without starting processing |
-| Activation | Perform the component's start/readiness work under graph lifecycle ownership |
+| Construction | Use the assigned UUID, supplied configuration and actual resources to create a component, without starting processing |
+| Initialization | Prepare the object's lifetime resources once, after required binding |
+| Activation | Perform repeatable start/readiness work under graph lifecycle ownership |
 
 `ConstructionContext` contains the component specification, enclosing identity,
 resolved configuration, and declared resources. A factory asks for resources
@@ -4396,10 +4627,18 @@ The graph captures it at construction and reconfiguration boundaries.
 Keep configuration stable during processing. Report a missing getter as
 unavailable so the host retains the external binding.
 
-In-place reconfiguration requires the factory to opt into
-`supports_reconfiguration` and the component to implement `reconfigure`.
-The descriptor must remain unchanged. Replacing the component is a different
-operation and creates a new generation.
+A registered factory's pure `plan_update(current, proposed)` chooses an explicit
+`ComponentUpdatePlan`, or rejects the change. `InPlace` pauses processing;
+`Restart` stops and later restarts the same initialized object. Both execute
+`apply_update` and retain the descriptor and construction generation. `Recreate`
+disposes the old object and constructs and initializes a new generation under the
+same UUID. Creation support does not imply any update support.
+
+Native lifecycle hooks are zero-argument async fallible methods: `initialize`,
+`start`, `stop`, `dispose`, `pause_processing`, and `resume_processing`.
+Explicit permanent removal alone calls `delete_owned_resources`; disposal and
+updates do not imply deletion. See the
+[accepted update and recovery contract](../computation-graph-configuration.md#object-lifecycle-and-assessed-updates).
 
 The managed lesson's `FileFactory` reads a saved path setting and constructs
 the file source; `AlertFactory` constructs the in-memory view sink.
@@ -4556,12 +4795,17 @@ Processing state lets Stockroom recover its data. Saved desired configuration
 lets the host reconstruct the application that owns that data, including
 definitions that were accepted but failed to start.
 
-Native source/reaction integrations can also use `add_source_from_factory` and
-`add_reaction_from_factory` with `ComponentAddition` instead of supplying an
-already constructed object. They return declaration handles: missing factories
-remain waits, and failed construction remains inspectable and retryable.
-`ComponentAddition::declaration` can be submitted before registration. These new
-recipes are native-only; existing legacy object-based APIs remain supported.
+Every initialized `DrasiLib` owns its accepted configuration, including the first
+in-memory Stockroom. The default private memory store forgets that configuration
+when the instance is destroyed. Supplying a durable store makes the accepted
+definitions and UUID assignments survive reopening; it does not change who
+owns configuration.
+
+Use `create_computation_component` for one native factory declaration,
+`create_components` for a process-local batch, or `create_managed_components`
+for a batch of reconstructible recipes with an explicit revision and request ID.
+A missing factory can leave an accepted declaration waiting, and a constructor
+can fail after acceptance. Acceptance is not readiness.
 
 `GraphConfigurationSnapshot::reconstructible_topology()` exports explicit
 component, resource and pipe recipes with their original secret references.
@@ -4604,9 +4848,13 @@ cargo run --locked --features management -- managed ./state/managed stockroom.ke
 
 The threshold is still 10: the accepted definition, not a newly generated
 startup default, was restored. The printed configuration revision is unchanged.
-To submit a different definition, stop and run with an explicit threshold 5.
-That accepts a new revision; omitting the argument on subsequent starts
-preserves it.
+This lesson's linked-reference query factory supports construction, not managed
+query changes. Supplying the accepted threshold again is harmless; a different threshold is
+rejected with an explanation instead of being mistaken for a new component.
+Do not use a different threshold to update an existing deployment.
+To try a different initial threshold, stop and use a separate configuration
+directory, such as `./state/managed-five`, with threshold 5. Keep the original
+directory to reopen its accepted threshold 10 definition.
 
 The running process continues to watch `inventory.json`. The saved definition
 contains its absolute path; keep that file available at the same path when
@@ -4618,17 +4866,18 @@ recovery path in Part III.
 
 #### Build a complete desired definition
 
-`DesiredInstance` contains a native `DesiredTopology`. The topology describes
+`DesiredInstance` contains the assigned native `DesiredTopology` and any
+ordinary component recipes. The topology describes
 component factory specifications, streams, relationships, lifecycle policies,
 resource declarations and recipes, and required recovery contracts.
 
-After assembling a factory-backed batch builder, build it before reading the
-resulting definition:
+For new components, prepare the factory-backed topology inside the allocation
+callback. Build the batch before reading its definition:
 
 <!-- excerpt: stockroom/src/managed.rs#desired-from-batch -->
 ```rust
 let batch = batch.build()?;
-DesiredInstance::from(batch.definition).normalized()
+Ok(batch.definition)
 ```
 
 This requires a **reconstructible** batch. The first chapter's file source and
@@ -4637,7 +4886,8 @@ batch does not turn them into recipes. Convert all managed components and
 their resources, preserve every connection, and register the implementations
 needed to rebuild them.
 
-Normalization validates the representation without opening external services.
+The configuration owner validates and normalizes the representation without
+opening external services.
 A serialized object name cannot recreate an `Arc`, a worker, or a live database
 transaction. Keep actual bindings outside the persisted document.
 
@@ -4646,11 +4896,22 @@ actual handles. It owns application-specific policy such as allowed paths,
 provider selection, credentials, and recovery-domain validation. Wrapping
 another resolver must preserve those checks.
 
-#### Enable management at the host boundary
+#### Choose memory or durable configuration
 
 `ManagementOptions` groups factories, the resource resolver, and an optional
-configuration store. Without a store, desired configuration exists only in
-memory.
+configuration store. Omitting the store selects the private memory store; it
+does not disable management or allow a separate caller to mutate the graph's
+configuration behind its owner.
+
+| Choice | Can it survive a process restart? | What it may contain |
+|---|---|---|
+| Default memory configuration | No | Accepted definitions plus process-local factory and object bindings |
+| Durable configuration store | Yes, under the store's guarantee | Reconstructible factory, resource and pipe recipes |
+
+A persistent builder restores the store and rejects initial component additions
+on the builder. Build it first, inspect the restored revision, and submit new
+definitions through the configuration APIs. The memory builder can accept its
+initial declarations together before constructors run.
 
 The builder also exposes the services separately:
 
@@ -4690,10 +4951,36 @@ on the configuration-store contract.
 #### Accept a revision, then reconcile it
 
 Configuration acceptance and runtime convergence are two separate outcomes.
-The store commits the definition and an idempotency receipt **before**
-construction and lifecycle effects.
+Here **convergence** means that the running objects and their bindings match the
+accepted definition. The owner performs that work through **reconciliation**.
+Neither word means "all business data has been processed."
+The store accepts the definition and an idempotency receipt **before**
+construction and lifecycle effects. That acceptance is durable only when the
+selected store says so.
 
-This helper waits for a reconciliation pass:
+On the first managed startup, Stockroom submits new recipes and lets the owner
+assign their IDs:
+
+<!-- excerpt: stockroom/src/managed.rs#accept-created-components -->
+```rust
+core.create_managed_components(
+    current.revision,
+    request,
+    move |ids| desired(ids, &path, threshold, &factories),
+)
+.await?;
+```
+
+`receipt.creation` records the resulting IDs and creation-time names.
+For a single JSON-friendly declaration, `ComponentDefinition.id = None`
+requests assignment. An explicit ID is allowed only if the instance creator
+enabled external IDs. For mixed changes, `apply_configuration` accepts a
+`ConfigurationRequest` containing new additions and optionally a replacement
+definition for existing members.
+
+Use `apply_desired_state` to update the existing assigned definition, not to
+invent new IDs. Omitted existing components are removals. A same-name addition
+is a conflict, not an update. This helper waits for a reconciliation pass:
 
 <!-- illustration: apply-configuration -->
 ```rust
@@ -4751,10 +5038,13 @@ Failed definitions remain available for inspection and repair. Unsupported
 configuration versions, unavailable secrets, and damaged encrypted records
 fail explicitly; none should be interpreted as "no saved application."
 
-Managed configuration mutations go through `apply_desired_state`.
-Imperative configuration changes to managed members are rejected.
-Unmanaged components and instance-provided services are preserved by managed
-reconciliation, but they are not thereby serialized for reconstruction.
+All `DrasiLib` members use the configuration owner. Create definitions through
+the creation APIs, rename through `rename_component_by_id` or `_by_name`,
+and update assigned definitions through the configuration APIs.
+The exposed graph control handle supports inspection and authorized lifecycle
+operations, not bypassing configuration ownership with raw topology mutation.
+Externally supplied resources remain under their declared lifetime; sharing
+an `Arc` does not make it serializable.
 
 Await instance shutdown before releasing the store or opening a replacement
 owner. A cancelled storage waiter does not release an exclusive configuration
@@ -4772,14 +5062,20 @@ A `consumerProgress` recipe groups downstream owners of **one producer**.
 A `compositeBootstrap` recipe groups initializers of **one query**. These JSON
 objects are recipe configurations, not complete graph definitions: declare the
 resources, dependencies, factories and connections around them.
+They contain already assigned component UUIDs, not name selectors. In this
+illustration, `inventory`, `low-stock`, and `stock-audit` have the IDs ending in
+`2f6`, `2f5`, and `300` respectively. Use the actual assignments returned by your
+configuration owner. Resource IDs such as `low-stock-progress` remain separate
+named resource keys.
 
+<!-- json-example: consumer-progress -->
 ```json
 {
   "kind": "consumerProgress",
-  "producer": "inventory",
+  "producer": "00000000-0000-0000-0000-0000000002f6",
   "consumers": {
-    "low-stock": "low-stock-progress",
-    "stock-audit": "stock-audit-progress"
+    "00000000-0000-0000-0000-0000000002f5": "low-stock-progress",
+    "00000000-0000-0000-0000-000000000300": "stock-audit-progress"
   }
 }
 ```
@@ -4792,10 +5088,11 @@ use their own `input_progress` slot.
 
 For one query to initialize from inventory and an HTTP catalog:
 
+<!-- json-example: composite-bootstrap -->
 ```json
 {
   "kind": "compositeBootstrap",
-  "component": "low-stock",
+  "component": "00000000-0000-0000-0000-0000000002f5",
   "providers": ["inventory-bootstrap", "catalog-bootstrap"]
 }
 ```
@@ -4940,24 +5237,40 @@ pub(super) async fn add_webhook(
         "drasi_computation_sink_http",
         "drasi.network/http-sink",
     )?;
-    let specification = factory.specification(
-        ComponentId::try_new("webhook")?,
-        serde_json::json!({
-            "outputs":{"low-stock":{"component":"low-stock","port":"out"}},
-            "url":url,
-            "timeoutMs":5000, "maxRetries":0, "failurePolicy":"strict"
-        }),
-    )?;
-    let addition = ComponentBatch::builder()
-        .component(specification, factory)
-        .connect(
-            EdgeDefinition::new(endpoint("low-stock", "out")?, endpoint("webhook", "in")?),
-            Box::new(BoundedPipeConfig { capacity: 8 }),
-        )
-        .build()?
-        .auto_start(false);
-    core.add_components(addition).await?.ensure_committed()?;
-    let component = core.computation_component("webhook")?;
+    let query_id = core
+        .component_by_name(&ComponentName::try_new("low-stock")?)?
+        .id()
+        .clone();
+    let url = url.to_owned();
+    let destination = url.clone();
+    let receipt = core
+        .create_components(move |ids| {
+            let webhook_id = ids.allocate()?;
+            let specification = factory
+                .specification(
+                    webhook_id.clone(),
+                    serde_json::json!({
+                        "outputs":{"low-stock":{"component":query_id,"port":"out"}},
+                        "url":destination,
+                        "timeoutMs":5000, "maxRetries":0, "failurePolicy":"strict"
+                    }),
+                )
+                .map_err(|source| GraphError::Validation {
+                    component: webhook_id.clone(),
+                    source,
+                })?;
+            Ok(ComponentBatch::builder()
+                .component(ComponentName::try_new("webhook")?, specification, factory)
+                .connect(
+                    EdgeDefinition::new(endpoint(query_id, "out")?, endpoint(webhook_id, "in")?),
+                    Box::new(BoundedPipeConfig { capacity: 8 }),
+                )
+                .build()?
+                .auto_start(false))
+        })
+        .await?;
+    let component =
+        cli::accepted_component(core, &receipt, &ComponentName::try_new("webhook")?).await?;
     tokio::time::timeout(Duration::from_secs(10), component.start())
         .await
         .context("wait for webhook readiness")??;
@@ -4974,16 +5287,36 @@ already-connected URL reports an error and exits with a nonzero status.
 A malformed JSON save instead reports `Destination unchanged` and keeps the
 current destination while you repair the file. A delivery failure also stops
 the application, using the same supervision as Chapter 5.
-Managed members use desired-state updates instead.
+This batch is accepted through the same configuration owner as the original
+components. `ids.allocate()` assigns the new destination its own UUID; the
+existing query is selected by name once and connected by its resolved ID.
+The receipt can arrive before the graph publishes the new component.
+`cli::accepted_component` checks reconciliation errors and waits for that
+assigned ID in the public inspection stream before obtaining its handle.
+Then `start` waits for activation. A successful receipt alone would be too early
+to announce the new webhook as ready.
 
 #### Exercise revisioned changes
 
 Run `cargo test --locked --features management configuration_reopens`.
-The test first verifies that an imperative graph mutation is rejected for
-managed members. It then changes the saved query specification through
-`apply_desired_state`, waits for convergence, and checks that the revision
-advanced. Read this test in [managed.rs](stockroom/src/managed.rs) as the
-working counterpart to the unmanaged control example below.
+The test renames the source, closes and reopens the configuration store, and
+verifies that both the new name and original UUID are restored. It then verifies
+that a raw graph mutation is rejected and an unsupported query-text update
+leaves the accepted definition and revision unchanged. Read this test in
+[managed.rs](stockroom/src/managed.rs).
+
+Renaming is a metadata change, not a component reconstruction. In contrast,
+changing a factory's configuration requires that factory's `plan_update`.
+Inspect the returned strategy: `InPlace` updates a paused object; `Restart`
+updates it between stop and start; `Recreate` constructs a new generation
+under the same UUID. The accompanying data strategy says whether state is
+preserved, rebuilt from bootstrap, or reset. Only combinations supported by
+the factory and its actual dependencies can be accepted.
+
+An accepted update may still be unfinished. Its pending intent and operation ID
+are recorded before lifecycle effects. On reopen the owner resumes that intent;
+it does not infer completion from an object existing or replay a historical
+authorization as a new update.
 
 For a persistent query, a changed query definition can require a migration
 instead of ordinary replacement. Choose one of three explicit strategies:
@@ -5012,55 +5345,35 @@ The native shared-source qualification covers drained reconstruction and explici
 drain-barrier replacement, not cold reconstruction with undrained persistent
 input-pipe frames. Do not infer the missing queued counters from handled
 progress or erase the queue to make a replacement start.
-The ordinary gRPC source-WAL recovery case described in Chapter 14 is a separate
-supported path; it does not close this native input-pipe limitation.
+The source-specific guide describes the supported recovery modes; a different
+adapter or transport cannot establish this missing input-pipe guarantee.
 
-#### Preview changes to unmanaged topology
+#### Restart a component without replacing its definition
 
-For unmanaged native components, obtain graph control and preview against the
-current desired revision:
+Use a handle for a stop/start of an existing component. Resolve the name once
+so both operations address the same component even if its name changes:
 
 <!-- illustration: restart-preview -->
 ```rust
-let control = core.computation_control()?;
-let preview = control.preview(
-    control.desired_snapshot().revision,
-    vec![DesiredMutation::Restart(GraphSelection::Exact(vec![
-        ComponentId::try_new("alerts")?,
-    ]))],
-)
-.await?;
-let report = control
-    .reconcile(preview, TopologyBindings::default())
-    .await?;
-ensure!(
-    report.committed && report.summary == OperationSummary::Completed,
-    "graph change failed (committed={}): {:?}",
-    report.committed,
-    report.failures
-);
+let alerts = core.component_by_name(&ComponentName::try_new("alerts")?)?;
+alerts.stop().await?;
+alerts.start().await?;
 ```
 
-This requests a restart, not replacement or deprovision. Another accepted
-change can invalidate the preview's revision. Observed lifecycle/resource changes
-can also alter its impact without advancing that revision; `StalePreview` requires
-a new preview and inspection of its affected sets before execution. New implementations and resources
-belong in `TopologyBindings` as actual factories, instances, constructors,
-and pipe providers, not just serialized names.
+This retains the initialized object and its ID; it does not update configuration
+or delete owned state. A failure during stop must be resolved before restarting.
+If another operation replaces the component, an old handle reports that it is
+stale rather than controlling the replacement.
 
-For managed members, submit the corresponding desired definition through the
-configuration API from Chapter 16. That API preserves accepted managed ownership.
-
-Selections can name exact members, dependencies, dependents, or the whole graph.
-Updates require supported in-place reconfiguration. Replacement reconstructs
-an owner even when its visible description is unchanged. Retry concerns a
-retained failed operation, not permission to start a second owner of resources
-whose cleanup is unfinished.
-
-`ComponentAddition` supports incremental construction with resources, stream
-bindings, readiness, and auto-start policy. Deferred activation lets a host
-finish valid wiring before starting. A returned handle is generation-bound;
-an old handle cannot silently control its replacement.
+For `DrasiLib` topology changes, submit definitions through Chapter 16's
+configuration APIs. `GraphControl::preview` / `reconcile` and
+`ComponentAddition` are lower-level tools for a separately owned
+`ComputationGraph`; they do not bypass the `DrasiLib` configuration owner.
+A standalone preview is revision-bound and can also become stale when
+observed lifecycle/resource state changes. Recompute it after `StalePreview`.
+Selections can include exact members, dependencies, dependents, or the whole
+graph. Keep new factories and resources as actual `TopologyBindings`, not
+just names.
 
 #### State dependency policy
 
@@ -5076,8 +5389,8 @@ let policy = RelationshipPolicy {
     ..RelationshipPolicy::default()
 };
 let edge = EdgeDefinition::new(
-    endpoint("inventory", "out")?,
-    endpoint("low-stock", "in")?,
+    endpoint(component_id(758), "out")?,
+    endpoint(component_id(757), "in")?,
 );
 batch = batch.relationship_policy(edge, policy);
 ```
@@ -5303,7 +5616,7 @@ wait is cancelled, the owner can finish cleanup later. Serialize
 restart with cleanup, including after a timeout or cancellation.
 
 For services, quiescence can drop the `run` future. Pause any independently
-owned workers in `quiesce` and resume them when processing resumes.
+owned workers in `pause_processing` and resume them in `resume_processing`.
 A clean no-worker service can use the default hook; a listener cannot treat
 dropping its controller future as proof that its connections stopped.
 
@@ -5409,8 +5722,11 @@ storage ownership:
 | Activation credentials | Host resolves the actual identity provider for each start and supplies ephemeral credentials; no provider trait or acquired secret enters saved configuration |
 
 Consumer progress and its optional position policy use the separate
-`drasi_computation_plugin_consumer_progress_v1` extension. Base ABI `1.0.0`,
-wire `1` and the existing recovery interface are unchanged. Opt-in producer
+`drasi_computation_plugin_consumer_progress_v1` extension. The base ABI and wire
+versions are defined by `ABI_VERSION` and `WIRE_VERSION` in
+[`drasi-computation-plugin-abi`](../../../components/computation-plugin-abi/src/lib.rs);
+build the host and plugins from compatible sources. The separate recovery-v1
+interface has its own version. Opt-in producer
 factories require the actual `consumer_progress` resource and cannot mix it
 with single-owner progress or source admission. Constructors retain the
 capability without reading/subscribing until start. Stop fences new work but
@@ -5467,10 +5783,33 @@ trait objects, `Arc` values, and runtime internals do not cross the C boundary.
 Use the SDK rather than designing ad hoc cross-library ownership.
 
 Libraries are pinned for process lifetime. There is no general hot-unload
-contract, arbitrary dynamic query-role hosting, unrestricted resource injection,
-or in-place dynamic reconfiguration. A native plugin is trusted in-process code,
+contract or unrestricted resource injection. Live updates require the declared
+factory planner and instance capabilities; unsupported changes are rejected.
+A native plugin is trusted in-process code,
 not a sandbox. A contained panic still requires a fresh component generation;
 native aborts and memory faults can terminate the process.
+
+To select the loaded native query implementation for the convenience query APIs,
+register its authoring factory explicitly:
+
+<!-- illustration: native-query-host -->
+```rust
+async fn query_host(path: &std::path::Path) -> anyhow::Result<DrasiLib> {
+    let plugin = drasi_host_sdk::computation::load(path)?;
+    let mut factories = FactoryRegistry::standard();
+    plugin.register_factories(&mut factories)?;
+    Ok(DrasiLib::builder()
+        .with_component_factories(factories)
+        .with_query_factory(plugin.query_factory()?)
+        .build()
+        .await?)
+}
+```
+
+Registration makes the implementation available for saved recipes; selection
+chooses the factory for new `Query` declarations. Empty/source-only
+instances need neither. An omitted or ambiguous query implementation is an
+error, not a request to choose a hidden fallback.
 
 #### Available native integrations
 
@@ -5510,7 +5849,7 @@ for executable schemas and configurations.
 | [SQL Server](../../../components/computation-plugins/sources/mssql/README.md) | Independent libraries, not database-qualified | CDC/permissions; coordinated snapshots need a pre-provisioned marker and locking contract |
 
 Selected MySQL and SQLite roles have static, rebuilt-dynamic and Server
-qualification on both Tokio runtimes. SQLite has no legacy reaction to migrate.
+qualification on both Tokio runtimes.
 Its original Rust handle remains the Stockroom interface; separately hosted
 sources may expose source-owned REST, not a general SQL API on `DrasiLib`.
 Data schemas are available through ordinary DrasiLib/Server inspection via the
@@ -5645,6 +5984,29 @@ The [instance-host guide](../../../components/instance-host/README.md) and
 [bridge guide](../../../components/computation-plugins/common/bridge/README.md)
 provide manifest fields, resource recipes, and exact cut protocols.
 
+#### Exercise the process boundary
+
+The repository includes a real two-process fixture using the same host and
+bridge components. From the `drasi-core` root on Linux or macOS:
+
+```sh
+cargo build --locked --lib -p drasi-computation-source-counter -p drasi-computation-transformer-arithmetic -p drasi-computation-sink-capture --features dynamic-plugin
+DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug" cargo test --locked -p drasi-instance-host --test processes real_bidirectional_native_data_drains_through_native_cuts_before_process_exit -- --exact --test-threads=1
+```
+
+If you set `CARGO_TARGET_DIR`, point `DRASI_NATIVE_PLUGIN_DIR` at its `debug`
+directory instead. The fixture starts a parent and an owned child, sends
+counter records to the child, adds 10 there, and returns the records to the
+parent's capture sink. It requests shutdown while traffic is flowing and
+checks the exact returned values through the agreed stopping position before
+checking that both processes have exited.
+
+Read the parent/child definitions in
+[the process test](../../../components/instance-host/tests/processes.rs).
+Trace the outgoing bridge, child transformer, and return bridge separately from
+the child supervisor. This fixture is an executable isolation example;
+Stockroom's CLI does not have a hidden multi-process mode.
+
 **Summary.** Native SDKs preserve contracts across a library boundary; normal
 DrasiLib instances and bridges preserve them across a process boundary.
 Neither packaging nor isolation creates stronger delivery guarantees on its
@@ -5657,8 +6019,11 @@ own. The final application must still identify who owns every unfinished action.
 | Instance | One `DrasiLib` owner with its own application identity and runtime |
 | ComputationGraph | The authoritative owner of components, connections, resources, and lifecycle |
 | Component | A source, transformer, query, sink, or service in that graph |
-| Generation | One incarnation of a component; replacement invalidates old handles |
-| Output epoch / query reset generation | Output recovery coordinates, separate from component generation; use the [identity lifecycle table](#keep-identity-scopes-separate) |
+| Component ID / name | Immutable UUID / exact editable name unique within an instance |
+| Storage scope / partition | Where application state is stored / which component or named application store owns it |
+| Output alias | A label for a selected output in a consumer's configuration; not its producing component's identity |
+| Generation | One constructed object for a component; replacement invalidates old handles |
+| Output epoch / query reset generation | Output recovery identities, separate from component generation; see [replay positions](#distinguish-input-output-and-replay-positions) |
 | Element | A source-qualified graph node or relationship |
 | Record | Immutable schema-defined identity and image bytes |
 | Envelope | One identified change set with system metadata, context, and lineage |
@@ -5666,7 +6031,7 @@ own. The final application must still identify who owns every unfinished action.
 | Port / edge / pipe | A component boundary / a declared connection / its transport implementation |
 | Row signature | The evaluator's identity for a result row; it becomes the node's opaque identity within its output's dataset namespace, not its JSON value |
 | Result node | The ordinary graph node a query publishes for one result row, with one property per `RETURN` alias |
-| Dataset namespace | The bounded, scoped `source_id` of a derived output's nodes, so two outputs never share identities |
+| Dataset namespace | The data namespace stored in `ElementReference.source_id`; independent of component UUIDs and names |
 | Bootstrap | Coordinated initial loading and handover to live/replayed input |
 | Composite bootstrap | Ordered query-scoped providers with namespaced initialization state and one existing query completion boundary |
 | Checkpoint | A saved position proving only the owning processor's completion boundary |
@@ -5677,13 +6042,14 @@ own. The final application must still identify who owns every unfinished action.
 | Handling | Completion of the work the consumer actually promises |
 | Recovery domain | Actual owners whose state and progress must remain consistent |
 | Desired / observed | Accepted intent / the realized and running state |
-| Factory / resource | A reconstructible constructor / an actual supplied service |
-| Quiesce / deprovision | Park processing with ownership retained / permanently remove owned state |
+| Factory / resource | Code that constructs a component from a specification / a shared service it uses |
+| Initialize / start / stop / dispose | Prepare an object once / activate it / stop it for possible reuse / release it permanently |
+| Quiesce / delete owned resources | Park processing with ownership retained / explicitly remove owned state; disposal alone is not persistent deletion |
 | Fence | Prevent further use of an owner whose state or operation outcome cannot yet be trusted |
 | Frontier | An accepted progress boundary, such as an element's latest effective time or a merger's emitted time |
 | Watermark | A source boundary known to be covered by a coordinated snapshot |
 | Receipt | A record of a particular accepted or completed operation at a named boundary |
-| Lease | Held ownership/exclusion that prevents competing users until the operation is resolved |
+| Lease | A retained right or reservation with an explicit lifetime, such as a bounded output reader or a storage-operation reservation |
 | QoS channel | One retained channel with named subscribers, independent cursors, and explicit delivery/retention policy |
 | Native plugin | A packaged component using the native processing contracts, statically linked or hosted through the native SDK |
 | Reconciliation | Work that brings actual components/resources toward an accepted desired definition |
@@ -5693,7 +6059,7 @@ own. The final application must still identify who owns every unfinished action.
 Use the generated API reference for signatures and exhaustive options:
 
 ```sh
-cargo doc -p drasi-lib --no-deps --open
+cargo doc --locked -p drasi-lib --no-deps --open
 ```
 
 The book supplies the application path; the reference supplies the catalog.
@@ -5702,8 +6068,11 @@ The book supplies the application path; the reference supplies the catalog.
 |---|---|
 | Embed and own an application | `DrasiLib`, `DrasiLibBuilder`; [Stockroom starter](stockroom) and [source](stockroom/src/main.rs) |
 | Compose components and connections | `drasi_lib::computation::v1`; [schemas, ports, and pipes](../computation-graph-schemas-ports-pipes.md) |
+| Create, find and rename components | `ComponentId`, `ComponentName`, `ComponentIds`, `component_by_name`, `component_by_id`, `rename_component_by_id`; [identity](#keep-identity-scopes-separate) |
+| Manage an object's lifetime | `ComputationComponent`, `ComponentHandle`; [initialize, start, stop and dispose](#follow-an-object-from-creation-to-disposal) |
 | Configure and read a native query | `ContinuousQueryDefinition`, `QueryExecutionSettings`, `QueryOptions`, `QueryResults` |
-| Select inputs through the ordinary query API | `Query::from_input`, `from_input_port`; [chaining and initialization](#chain-maintained-outputs) |
+| Test time-dependent queries | `test-support`, `QueryTestControl`, `with_query_test_control_by_name`; [tests](../../tests/query_test_control.rs) |
+| Select inputs through the ordinary query API | `Query::from_input_by_name`, `from_input_port_by_name`; [chaining and initialization](#chain-maintained-outputs) |
 | Display current contents and follow changes | `DrasiLib::output_catalogue`, `snapshot_and_follow`; [volatile viewer](#open-a-current-plus-live-viewer) |
 | Normalize data | `MiddlewareTransformer`; [middleware guide](../computation-graph-middleware.md) |
 | Reorder source time | `SourceTimeMergeTransformer`; [time-merge guide](../computation-graph-time-merge.md) |
@@ -5718,7 +6087,7 @@ The book supplies the application path; the reference supplies the catalog.
 | Preserve transactions | `SourceTransactionBuilder`, `TransactionTransformer`, `SharedStorageGroup`; [transaction guide](../computation-graph-transactions.md) |
 | Supply state and credentials | `state_store`, `identity`, `secret_store`, `wal`; `ComputationIndexProvider` in `drasi-core` |
 | Save desired configuration | `management`; [managed configuration](../managed-configuration.md) |
-| Inspect and observe | `ComputationInspector`, `ComponentGraphView`, `DrasiLib::get_source_schema`, `get_graph_schema`, `observability`, `metrics`, `profiling` |
+| Inspect and observe | `ComputationInspector`, `ComponentGraphView`, `DrasiLib::get_source_schema_by_name`, `get_graph_schema`, `observability`, `metrics`, `profiling` |
 | Observe committed query progress | `DrasiLib::get_query_progress_metrics`; [progress measurements](#follow-pressure-and-progress) and Server's optional OTLP exporter |
 | Understand internal data representation and flow | [Internal data design](../computation-graph-data-design.md): records, standard schemas, transport, query transformations, persistence and replay |
 | Handle public failures | `DrasiError`, `error::OperationFailures`, `GraphError`, lifecycle reports |
@@ -5735,6 +6104,8 @@ and live destination changes through the real application with logging disabled.
 These bounded smoke tests use local endpoints and temporary files, and run on
 Linux/macOS; Windows remains unqualified. Omit `--network` to run only the
 book and starter checks. The combined command is part of the repository test workflow.
+JSON fences are syntax-checked, and the named Host resource recipes are also
+deserialized into their actual public Rust configuration types.
 The marked excerpts are compared with their compiled source; contextual
 fragments receive the values named by their surrounding lesson. Compile-only
 fragments are not executed as additional applications.

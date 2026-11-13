@@ -3,15 +3,20 @@
 
 use super::*;
 use chrono::{TimeZone, Utc};
+use drasi_computation_contracts::{ComponentId, ComponentName};
+
+const QUERY_ID: &str = "00000000-0000-0000-0000-000000000071";
 
 fn result(query: &str, changes: Vec<ResultDiff>) -> QueryResult {
-    QueryResult::new(
-        query.into(),
+    let mut result = QueryResult::new(
+        ComponentId::try_new(QUERY_ID).expect("fixture UUID"),
         9,
         Utc.timestamp_millis_opt(123).unwrap(),
         changes,
         HashMap::from([("origin".into(), json!("test"))]),
-    )
+    );
+    result.query_name = Some(ComponentName::try_new(query).expect("fixture query name"));
+    result
 }
 
 fn added() -> ResultDiff {
@@ -98,7 +103,7 @@ fn empty_templates_use_the_legacy_singular_result_shape() {
     let payload: Value = serde_json::from_str(&events[0].payload).unwrap();
     assert_eq!(
         payload,
-        json!({"queryId": "q", "result": added(), "timestamp": 456})
+        json!({"queryId": QUERY_ID, "result": added(), "timestamp": 456})
     );
     assert!(payload.get("results").is_none());
 }
@@ -125,7 +130,7 @@ fn dynamic_paths_and_json_helpers_share_the_real_result_context() {
         json!({"id":1,"group":"north","enabled":true})
     );
     assert_eq!(payload["metadata"], json!({"origin":"test"}));
-    assert_eq!(payload["query"], "q");
+    assert_eq!(payload["query"], QUERY_ID);
     assert_eq!(payload["name"], "q");
     assert_eq!(payload["operation"], "ADD");
     assert_eq!(payload["time"], 456);
@@ -248,7 +253,13 @@ fn runtime_render_failures_report_the_default_payload_fallback() {
     let mut errors = Vec::new();
     let events = renderer.render(&result("q", vec![added()]), 456, |error| errors.push(error));
     assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains(QUERY_ID));
     assert!(errors[0].contains("using default result payload"));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].path, "/events");
     let payload: Value = serde_json::from_str(&events[0].payload).unwrap();
-    assert_eq!(payload["result"], json!(added()));
+    assert_eq!(
+        payload,
+        json!({"queryId": QUERY_ID, "result": added(), "timestamp": 456})
+    );
 }

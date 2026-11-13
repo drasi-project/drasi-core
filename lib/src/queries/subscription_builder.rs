@@ -14,7 +14,9 @@
 
 use anyhow::{bail, Result};
 
-use crate::config::{QueryConfig, QueryInputConfig, SourceSubscriptionSettings};
+use crate::config::{
+    AssignedQueryConfig as QueryConfig, QueryInputConfig, SourceSubscriptionSettings,
+};
 use crate::queries::QueryLabels;
 
 /// Builder for creating SourceSubscriptionSettings from QueryConfig
@@ -30,17 +32,19 @@ impl SubscriptionSettingsBuilder {
         let mut settings_vec: Vec<SourceSubscriptionSettings> = query_config
             .inputs
             .iter()
-            .map(|source_config| SourceSubscriptionSettings {
-                source_id: source_config.component.clone(),
-                enable_bootstrap: query_config.enable_bootstrap,
-                query_id: query_config.id.clone(),
-                nodes: source_config.nodes.iter().cloned().collect(),
-                relations: source_config.relations.iter().cloned().collect(),
-                resume_from: None,
-                resume_sequence: None,
-                request_position_handle: false,
+            .map(|source_config| {
+                Ok(SourceSubscriptionSettings {
+                    source_id: source_config.id()?.to_owned(),
+                    enable_bootstrap: query_config.enable_bootstrap,
+                    query_id: query_config.id.clone(),
+                    nodes: source_config.nodes.iter().cloned().collect(),
+                    relations: source_config.relations.iter().cloned().collect(),
+                    resume_from: None,
+                    resume_sequence: None,
+                    request_position_handle: false,
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
 
         // Allocate node labels
         Self::allocate_node_labels(&mut settings_vec, &query_config.inputs, query_labels)?;
@@ -163,12 +167,18 @@ impl SubscriptionSettingsBuilder {
 mod tests {
     use super::*;
     use crate::config::{
-        QueryConfig, QueryInputConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage,
+        AssignedQueryConfig as QueryConfig, ComponentId, ComponentReference, QueryInputConfig,
+        QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage,
     };
+
+    const SOURCE_1: &str = "00000000-0000-4000-8000-000000000001";
+    const SOURCE_2: &str = "00000000-0000-4000-8000-000000000002";
 
     fn create_test_query_config(sources: Vec<QueryInputConfig>) -> QueryConfig {
         QueryConfig {
-            id: "test-query".to_string(),
+            id: ComponentId::generate().clone(),
+            name: drasi_core_types::ComponentName::try_new("test-query")
+                .expect("fixture component name"),
             query: "MATCH (n:Person) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -190,7 +200,7 @@ mod tests {
     #[test]
     fn test_node_label_in_one_source() {
         let sources = vec![QueryInputConfig {
-            component: "source1".to_string(),
+            component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec!["Person".to_string()],
             relations: vec![],
             pipeline: vec![],
@@ -216,14 +226,14 @@ mod tests {
     fn test_node_label_not_in_any_source_goes_to_all() {
         let sources = vec![
             QueryInputConfig {
-                component: "source1".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
                 port: None,
             },
             QueryInputConfig {
-                component: "source2".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
@@ -251,14 +261,14 @@ mod tests {
     fn test_node_label_in_multiple_sources_error() {
         let sources = vec![
             QueryInputConfig {
-                component: "source1".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["Person".to_string()],
                 relations: vec![],
                 pipeline: vec![],
                 port: None,
             },
             QueryInputConfig {
-                component: "source2".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec!["Person".to_string()],
                 relations: vec![],
                 pipeline: vec![],
@@ -281,7 +291,7 @@ mod tests {
     #[test]
     fn test_relation_label_in_one_source() {
         let sources = vec![QueryInputConfig {
-            component: "source1".to_string(),
+            component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec![],
             relations: vec!["KNOWS".to_string()],
             pipeline: vec![],
@@ -307,14 +317,14 @@ mod tests {
     fn test_relation_label_not_in_any_source_goes_to_all() {
         let sources = vec![
             QueryInputConfig {
-                component: "source1".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
                 port: None,
             },
             QueryInputConfig {
-                component: "source2".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
@@ -342,14 +352,14 @@ mod tests {
     fn test_relation_label_in_multiple_sources_error() {
         let sources = vec![
             QueryInputConfig {
-                component: "source1".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec![],
                 relations: vec!["KNOWS".to_string()],
                 pipeline: vec![],
                 port: None,
             },
             QueryInputConfig {
-                component: "source2".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec![],
                 relations: vec!["KNOWS".to_string()],
                 pipeline: vec![],
@@ -372,7 +382,7 @@ mod tests {
     #[test]
     fn test_join_relation_not_added_to_source() {
         let sources = vec![QueryInputConfig {
-            component: "source1".to_string(),
+            component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
@@ -415,7 +425,7 @@ mod tests {
     #[test]
     fn test_configured_join_relation_error() {
         let sources = vec![QueryInputConfig {
-            component: "source1".to_string(),
+            component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec![],
             relations: vec!["CUSTOMER".to_string()],
             pipeline: vec![],
@@ -457,7 +467,7 @@ mod tests {
             let sources = source_ids
                 .iter()
                 .map(|source_id| QueryInputConfig {
-                    component: (*source_id).to_string(),
+                    component: ComponentReference::by_id(ComponentId::try_new(*source_id).unwrap()),
                     nodes: vec![],
                     relations: vec![],
                     pipeline: vec![],
@@ -488,10 +498,11 @@ mod tests {
                 .unwrap()
         }
 
-        let forward = build(&["physical-ops", "retail-ops"]);
-        let reverse = build(&["retail-ops", "physical-ops"]);
+        let forward = build(&[SOURCE_1, SOURCE_2]);
+        let reverse = build(&[SOURCE_2, SOURCE_1]);
 
-        for source_id in ["physical-ops", "retail-ops"] {
+        for source_id in [SOURCE_1, SOURCE_2] {
+            let source_id = ComponentId::try_new(source_id).unwrap();
             let forward_settings = forward
                 .iter()
                 .find(|settings| settings.source_id == source_id)
@@ -513,7 +524,7 @@ mod tests {
     #[test]
     fn test_join_relation_with_missing_node_label_error() {
         let sources = vec![QueryInputConfig {
-            component: "source1".to_string(),
+            component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
@@ -553,14 +564,14 @@ mod tests {
     fn test_complex_multi_source_scenario() {
         let sources = vec![
             QueryInputConfig {
-                component: "orders_db".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["Order".to_string()],
                 relations: vec![],
                 pipeline: vec![],
                 port: None,
             },
             QueryInputConfig {
-                component: "customers_db".to_string(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec!["Customer".to_string()],
                 relations: vec![],
                 pipeline: vec![],

@@ -2,7 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use drasi_core::interface::{
+    CheckpointKey, CheckpointStore, IndexError, OutputPartition, SourceCheckpoint,
+};
 use serde::{Deserialize, Serialize};
 
 pub const PENDING_QUERY_OUTPUT: &str = "\0computation:pending-output:v1";
@@ -36,7 +38,7 @@ impl QueryPublicationCheckpoint {
         let marker = self.checkpoint();
         store
             .stage_checkpoint(
-                PENDING_QUERY_OUTPUT,
+                &CheckpointKey::Metadata(PENDING_QUERY_OUTPUT.to_owned()),
                 marker.sequence,
                 marker.source_position.as_ref(),
             )
@@ -67,8 +69,8 @@ impl QueryResetMarker {
     }
 }
 
-pub fn query_reset_key(query: &str) -> String {
-    format!("computation-reset-v1:{query}")
+pub fn query_reset_key(query: &drasi_core::ComponentId) -> OutputPartition {
+    OutputPartition::Component(query.clone()).metadata("computation-reset-v1")
 }
 
 #[cfg(test)]
@@ -120,6 +122,22 @@ mod tests {
             12
         );
         assert!(QueryResetMarker::next_generation(0, u64::MAX, None).is_err());
-        assert_eq!(query_reset_key("example"), "computation-reset-v1:example");
+        assert_eq!(
+            query_reset_key(
+                &drasi_computation_contracts::ComponentId::try_new(
+                    "00000000-0000-0000-0000-0000000002cd"
+                )
+                .expect("fixture UUID")
+            ),
+            drasi_core::interface::OutputPartition::Metadata {
+                output: Box::new(drasi_core::interface::OutputPartition::Component(
+                    drasi_computation_contracts::ComponentId::try_new(
+                        "00000000-0000-0000-0000-0000000002cd"
+                    )
+                    .expect("fixture UUID")
+                )),
+                key: "computation-reset-v1".to_owned(),
+            }
+        );
     }
 }

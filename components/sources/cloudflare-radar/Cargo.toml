@@ -46,6 +46,7 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 
 [dev-dependencies]
+shared-tests = { path = "../../../shared-tests" }
 tokio-test = "0.4"
 testcontainers = "0.27"
 drasi-bootstrap-cloudflare-radar.workspace = true

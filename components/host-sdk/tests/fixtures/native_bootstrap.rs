@@ -47,6 +47,7 @@ impl sdk::BootstrapFactory for Factory {
                     (
                         "testSecret".into(),
                         sdk::ConfigField {
+                            constraint: None,
                             value_type: sdk::ConfigType::String,
                             required: false,
                             secret: true,
@@ -55,6 +56,7 @@ impl sdk::BootstrapFactory for Factory {
                     (
                         "durability".into(),
                         sdk::ConfigField {
+                            constraint: None,
                             value_type: sdk::ConfigType::Object,
                             required: false,
                             secret: false,
@@ -63,6 +65,7 @@ impl sdk::BootstrapFactory for Factory {
                     (
                         "mode".into(),
                         sdk::ConfigField {
+                            constraint: None,
                             value_type: sdk::ConfigType::String,
                             required: false,
                             secret: false,
@@ -71,6 +74,7 @@ impl sdk::BootstrapFactory for Factory {
                     (
                         "count".into(),
                         sdk::ConfigField {
+                            constraint: None,
                             value_type: sdk::ConfigType::Integer,
                             required: false,
                             secret: false,
@@ -79,6 +83,7 @@ impl sdk::BootstrapFactory for Factory {
                     (
                         "cleanupDelayMs".into(),
                         sdk::ConfigField {
+                            constraint: None,
                             value_type: sdk::ConfigType::Integer,
                             required: false,
                             secret: false,
@@ -286,7 +291,10 @@ impl sdk::NativeBootstrapProvider for Provider {
         Ok(vec![BootstrapWatermark {
             producer: None,
             stream: StreamId::try_new("fixture/other")?,
-            source_id: Some("source".into()),
+            source_id: Some(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             sequence: u64::MAX,
             position: Some(Bytes::from_static(&[255, 0])),
         }])

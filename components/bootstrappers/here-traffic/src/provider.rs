@@ -36,20 +36,15 @@ use drasi_source_here_traffic::{
 
 /// Bootstrap provider for HERE Traffic source.
 pub struct HereTrafficBootstrapProvider {
-    source_id: String,
     config: HereTrafficConfig,
     client: HereTrafficClient,
 }
 
 impl HereTrafficBootstrapProvider {
-    pub fn new(source_id: impl Into<String>, config: HereTrafficConfig) -> Result<Self> {
+    pub fn new(config: HereTrafficConfig) -> Result<Self> {
         config.validate()?;
         let client = HereTrafficClient::new(config.auth.clone(), config.base_url.clone())?;
-        Ok(Self {
-            source_id: source_id.into(),
-            config,
-            client,
-        })
+        Ok(Self { config, client })
     }
 
     pub fn builder() -> HereTrafficBootstrapProviderBuilder {
@@ -68,7 +63,7 @@ impl BootstrapProvider for HereTrafficBootstrapProvider {
     ) -> Result<BootstrapResult> {
         info!(
             "HERE Traffic bootstrap starting for query '{}' (source '{}')",
-            request.query_id, self.source_id
+            request.query_id, context.source_id
         );
 
         let (node_labels, relation_labels) = extract_labels(&request, settings);
@@ -84,13 +79,13 @@ impl BootstrapProvider for HereTrafficBootstrapProvider {
             let flow = self.client.get_flow(&self.config.bounding_box).await?;
             segments = drasi_source_here_traffic::mapping::extract_segments(flow);
             total_sent += send_changes(
-                &self.source_id,
+                &context.source_id,
                 context,
                 &event_tx,
                 segments
                     .iter()
                     .map(|segment| {
-                        build_segment_change(&self.source_id, segment, ChangeKind::Insert)
+                        build_segment_change(&context.source_id, segment, ChangeKind::Insert)
                     })
                     .collect(),
             )
@@ -101,13 +96,13 @@ impl BootstrapProvider for HereTrafficBootstrapProvider {
             let response = self.client.get_incidents(&self.config.bounding_box).await?;
             incidents = drasi_source_here_traffic::mapping::extract_incidents(response);
             total_sent += send_changes(
-                &self.source_id,
+                &context.source_id,
                 context,
                 &event_tx,
                 incidents
                     .iter()
                     .map(|incident| {
-                        build_incident_change(&self.source_id, incident, ChangeKind::Insert)
+                        build_incident_change(&context.source_id, incident, ChangeKind::Insert)
                     })
                     .collect(),
             )
@@ -132,11 +127,11 @@ impl BootstrapProvider for HereTrafficBootstrapProvider {
             let relation_changes = relations
                 .values()
                 .map(|relation| {
-                    build_relation_change(&self.source_id, relation, ChangeKind::Insert)
+                    build_relation_change(&context.source_id, relation, ChangeKind::Insert)
                 })
                 .collect();
             total_sent +=
-                send_changes(&self.source_id, context, &event_tx, relation_changes).await?;
+                send_changes(&context.source_id, context, &event_tx, relation_changes).await?;
         }
 
         info!(
@@ -153,21 +148,14 @@ impl BootstrapProvider for HereTrafficBootstrapProvider {
 
 /// Builder for HERE Traffic bootstrap provider.
 pub struct HereTrafficBootstrapProviderBuilder {
-    source_id: String,
     config: HereTrafficConfig,
 }
 
 impl HereTrafficBootstrapProviderBuilder {
     pub fn new() -> Self {
         Self {
-            source_id: "here-traffic-bootstrap".to_string(),
             config: HereTrafficConfig::new("", ""),
         }
-    }
-
-    pub fn with_source_id(mut self, source_id: impl Into<String>) -> Self {
-        self.source_id = source_id.into();
-        self
     }
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
@@ -234,7 +222,7 @@ impl HereTrafficBootstrapProviderBuilder {
         if self.config.bounding_box.trim().is_empty() {
             return Err(anyhow::anyhow!("bounding_box is required"));
         }
-        HereTrafficBootstrapProvider::new(self.source_id, self.config)
+        HereTrafficBootstrapProvider::new(self.config)
     }
 }
 
@@ -245,7 +233,7 @@ impl Default for HereTrafficBootstrapProviderBuilder {
 }
 
 async fn send_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     context: &BootstrapContext,
     event_tx: &drasi_lib::channels::BootstrapEventSender,
     changes: Vec<SourceChange>,
@@ -254,7 +242,7 @@ async fn send_changes(
     for change in changes {
         let sequence = context.next_sequence();
         let event = BootstrapEvent {
-            source_id: source_id.to_string(),
+            source_id: source_id.clone(),
             change,
             timestamp: Utc::now(),
             sequence,
@@ -307,6 +295,9 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(provider.source_id, "here-traffic-bootstrap");
+        assert!(serde_json::to_value(&provider.config)
+            .unwrap()
+            .get("sourceId")
+            .is_none());
     }
 }

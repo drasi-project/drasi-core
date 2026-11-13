@@ -31,9 +31,14 @@ use std::time::Instant;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
-const SOURCE_ID: &str = "here-traffic-source";
+const SOURCE_NAME: &str = "here-traffic-source";
+const SOURCE_COMPONENT_ID: &str = "64ae0536-16da-5306-9137-453be5793209";
 const SEGMENTS_QUERY: &str = "segments-query";
 const INCIDENTS_QUERY: &str = "incidents-query";
+const SEGMENTS_REACTION_NAME: &str = "segments-reaction";
+const SEGMENTS_REACTION_ID: &str = "0ba93649-a2ad-5f34-8ee9-4b8050945416";
+const INCIDENTS_REACTION_NAME: &str = "incidents-reaction";
+const INCIDENTS_REACTION_ID: &str = "37641756-f153-59eb-9b39-88b3f90fe5f9";
 
 fn value_as_string(value: &Value) -> Option<String> {
     match value {
@@ -249,52 +254,77 @@ async fn test_here_traffic_change_detection_end_to_end() -> Result<()> {
     mount_incident_mock(&mock_server, bbox, api_key, false).await;
 
     let bootstrap_provider = HereTrafficBootstrapProvider::builder()
-        .with_source_id(SOURCE_ID)
         .with_api_key(api_key)
         .with_bounding_box(bbox)
         .with_endpoints(vec![Endpoint::Flow, Endpoint::Incidents])
         .with_base_url(mock_server.uri())
         .build()?;
 
-    let source = HereTrafficSource::builder(SOURCE_ID, api_key, bbox)
-        .with_polling_interval(Duration::from_secs(1))
-        .with_base_url(mock_server.uri())
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = HereTrafficSource::builder(
+        drasi_core::ComponentId::try_new("64ae0536-16da-5306-9137-453be5793209")
+            .expect("fixture UUID"),
+        api_key,
+        bbox,
+    )
+    .with_polling_interval(Duration::from_secs(1))
+    .with_base_url(mock_server.uri())
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
-    let segments_query = Query::cypher(SEGMENTS_QUERY)
-        .query(
-            r#"
+    let segments_query = Query::cypher(
+        drasi_core::ComponentName::try_new("segments-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (s:TrafficSegment)
             RETURN s.id AS id, s.jam_factor AS jam_factor
             "#,
-        )
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("here-traffic-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .build()
+    .expect("valid query configuration");
 
-    let incidents_query = Query::cypher(INCIDENTS_QUERY)
-        .query(
-            r#"
+    let incidents_query = Query::cypher(
+        drasi_core::ComponentName::try_new("incidents-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (i:TrafficIncident)
             RETURN i.id AS id, i.status AS status
             "#,
-        )
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("here-traffic-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (segments_reaction, segments_handle) = ApplicationReaction::builder("segments-reaction")
-        .with_query(SEGMENTS_QUERY)
-        .build();
+    let (segments_reaction, segments_handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("0ba93649-a2ad-5f34-8ee9-4b8050945416")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("segments-query").expect("fixture component name"),
+    )
+    .build();
 
-    let (incidents_reaction, incidents_handle) = ApplicationReaction::builder("incidents-reaction")
-        .with_query(INCIDENTS_QUERY)
-        .build();
+    let (incidents_reaction, incidents_handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("37641756-f153-59eb-9b39-88b3f90fe5f9")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("incidents-query").expect("fixture component name"),
+    )
+    .build();
 
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -308,11 +338,23 @@ async fn test_here_traffic_change_detection_end_to_end() -> Result<()> {
                 .clone(),
         )
         .with_id("here-traffic-integration-test")
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("here-traffic-source")
+                .expect("fixture component name"),
+            source,
+        )
         .with_query(segments_query)
         .with_query(incidents_query)
-        .with_reaction(segments_reaction)
-        .with_reaction(incidents_reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("segments-reaction")
+                .expect("fixture component name"),
+            segments_reaction,
+        )
+        .with_reaction(
+            drasi_core::ComponentName::try_new("incidents-reaction")
+                .expect("fixture component name"),
+            incidents_reaction,
+        )
         .build()
         .await?;
 

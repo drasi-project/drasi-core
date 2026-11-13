@@ -29,8 +29,8 @@ pub use storage::{DashboardConfig, DashboardWidget, GridOptions, WidgetGrid};
 
 /// Builder for dashboard reactions.
 pub struct DashboardReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     host: String,
     port: u16,
     heartbeat_interval_ms: u64,
@@ -41,10 +41,10 @@ pub struct DashboardReactionBuilder {
 
 impl DashboardReactionBuilder {
     /// Create a new dashboard builder with defaults.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         let config = DashboardReactionConfig::default();
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             host: config.host,
             port: config.port,
@@ -55,15 +55,42 @@ impl DashboardReactionBuilder {
         }
     }
 
-    /// Replace subscribed query IDs.
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
         self
     }
 
-    /// Add one subscribed query ID.
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
+    }
+
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
+        self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
     }
 

@@ -34,7 +34,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::channels::ComponentStatus;
 use crate::component_graph::GraphEdge;
-use crate::config::schema::QueryConfig;
+use crate::config::schema::AssignedQueryConfig as QueryConfig;
+
+/// An opaque ordinary constructor has not supplied real configuration yet.
+/// Hosts must retain their supplied definition or wait; never persist placeholder
+/// plugin kinds and empty properties as if construction had succeeded.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "configuration for component {component} is unavailable: its constructor has not succeeded"
+)]
+pub struct ComponentConfigurationUnavailable {
+    /// UUID of the declaration whose configuration is unavailable.
+    pub component: crate::config::ComponentId,
+}
 
 /// A point-in-time snapshot of the full drasi-lib instance configuration.
 ///
@@ -77,7 +89,9 @@ pub struct ConfigurationSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceSnapshot {
     /// Source component identifier
-    pub id: String,
+    pub id: crate::ComponentId,
+    /// Current graph-owned name, independent of the UUID.
+    pub name: crate::ComponentName,
     /// Plugin type identifier (e.g., "postgres", "http", "grpc")
     pub source_type: String,
     /// Lifecycle status at the time of snapshot
@@ -112,7 +126,9 @@ pub struct BootstrapSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfigurationSnapshot {
     /// Query component identifier
-    pub id: String,
+    pub id: crate::ComponentId,
+    /// Current graph-owned name.
+    pub name: crate::ComponentName,
     /// Full query configuration (query string, source subscriptions, joins, etc.)
     pub config: QueryConfig,
     /// Lifecycle status at the time of snapshot
@@ -123,7 +139,9 @@ pub struct QueryConfigurationSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionSnapshot {
     /// Reaction component identifier
-    pub id: String,
+    pub id: crate::ComponentId,
+    /// Current graph-owned name.
+    pub name: crate::ComponentName,
     /// Plugin type identifier (e.g., "log", "http", "grpc")
     pub reaction_type: String,
     /// Lifecycle status at the time of snapshot
@@ -131,7 +149,7 @@ pub struct ReactionSnapshot {
     /// Whether the reaction was configured to auto-start
     pub auto_start: bool,
     /// Query IDs this reaction subscribes to
-    pub queries: Vec<String>,
+    pub queries: Vec<super::ComponentReference>,
     /// Configuration properties from [`crate::Reaction::properties()`], including secrets.
     ///
     /// For an ordinary plugin with a known construction contract, this is its
@@ -147,12 +165,19 @@ mod tests {
     use super::*;
     #[test]
     fn query_configuration_snapshot_round_trips_settings_and_status() {
-        let config = crate::Query::cypher("query")
-            .query("MATCH (n:Item) RETURN n.name AS name")
-            .from_input("source")
-            .build();
+        let config = crate::Query::cypher(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .query("MATCH (n:Item) RETURN n.name AS name")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
+        .build()
+        .unwrap()
+        .with_assigned_id(crate::test_helpers::component_id(1));
         let expected = serde_json::json!({
-            "id": "query",
+            "id": config.id,
+            "name": config.name,
             "config": config,
             "status": "Stopped"
         });

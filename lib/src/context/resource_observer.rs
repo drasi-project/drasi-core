@@ -114,31 +114,36 @@ mod tests {
         impl WalProvider for Wal {
             async fn register(
                 &self,
-                source_id: &str,
+                scope: &crate::StorageScope,
+                source_id: &crate::ComponentId,
                 config: WriteAheadLogConfig,
             ) -> std::result::Result<(), WalError>;
             async fn append(
                 &self,
-                source_id: &str,
+                scope: &crate::StorageScope,
+                source_id: &crate::ComponentId,
                 event: &SourceChange,
             ) -> std::result::Result<u64, WalError>;
             async fn read_from(
                 &self,
-                source_id: &str,
+                scope: &crate::StorageScope,
+                source_id: &crate::ComponentId,
                 sequence: u64,
             ) -> std::result::Result<Vec<(u64, SourceChange)>, WalError>;
             async fn prune_up_to(
                 &self,
-                source_id: &str,
+                scope: &crate::StorageScope,
+                source_id: &crate::ComponentId,
                 sequence: u64,
             ) -> std::result::Result<u64, WalError>;
-            async fn head_sequence(&self, source_id: &str) -> std::result::Result<u64, WalError>;
+            async fn head_sequence(&self, scope: &crate::StorageScope, source_id: &crate::ComponentId) -> std::result::Result<u64, WalError>;
             async fn oldest_sequence(
                 &self,
-                source_id: &str,
+                scope: &crate::StorageScope,
+                source_id: &crate::ComponentId,
             ) -> std::result::Result<Option<u64>, WalError>;
-            async fn event_count(&self, source_id: &str) -> std::result::Result<u64, WalError>;
-            async fn delete_wal(&self, source_id: &str) -> std::result::Result<(), WalError>;
+            async fn event_count(&self, scope: &crate::StorageScope, source_id: &crate::ComponentId) -> std::result::Result<u64, WalError>;
+            async fn delete_wal(&self, scope: &crate::StorageScope, source_id: &crate::ComponentId) -> std::result::Result<(), WalError>;
         }
     }
 
@@ -208,10 +213,23 @@ mod tests {
     #[tokio::test]
     async fn contexts_default_to_none_and_clone_the_same_observer() {
         let (update_tx, _rx) = mpsc::channel(8);
-        let mut source =
-            SourceRuntimeContext::new("instance", "source", None, update_tx.clone(), None);
-        let mut reaction =
-            ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
+        let mut source = SourceRuntimeContext::new(
+            "instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            None,
+            update_tx.clone(),
+            None,
+        );
+        let mut reaction = ReactionRuntimeContext::new(
+            "instance",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                .expect("fixture UUID"),
+            vec![],
+            None,
+            update_tx,
+            None,
+        );
         assert!(source.resource_observer.is_none());
         assert!(reaction.resource_observer.is_none());
 
@@ -236,9 +254,12 @@ mod tests {
         let default_store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
         let selected_identity = identity("selected");
         let base = SourceBase::new(
-            SourceBaseParams::new("source")
-                .with_state_store(selected_store.clone())
-                .with_bootstrap_provider(TestBootstrap(1)),
+            SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            )
+            .with_state_store(selected_store.clone())
+            .with_bootstrap_provider(TestBootstrap(1)),
         )
         .unwrap();
         base.set_identity_provider(selected_identity.clone()).await;
@@ -248,14 +269,15 @@ mod tests {
         let (update_tx, mut rx) = mpsc::channel(8);
         let mut context = SourceRuntimeContext::new(
             "instance",
-            "source",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             Some(default_store),
             update_tx,
             Some(identity("default")),
         );
         context.wal_provider = Some(wal.clone());
         context.resource_observer = Some(observer.clone());
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let replacement_identity = identity("replacement");
         base.clone_shared()
@@ -296,12 +318,21 @@ mod tests {
             let result = provider
                 .bootstrap(
                     BootstrapRequest {
-                        query_id: "query".into(),
+                        query_id: drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002e",
+                        )
+                        .expect("fixture UUID"),
                         node_labels: vec![],
                         relation_labels: vec![],
                         request_id: "request".into(),
                     },
-                    &BootstrapContext::new_minimal("instance".into(), "source".into()),
+                    &BootstrapContext::new_minimal(
+                        "instance".into(),
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                    ),
                     tx,
                     None,
                 )
@@ -317,19 +348,25 @@ mod tests {
     async fn reaction_reports_selected_identity_and_shared_state_store() {
         let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
         let selected_identity = identity("selected");
-        let base = ReactionBase::new(ReactionBaseParams::new("reaction", vec![]));
+        let base = ReactionBase::new(ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                .expect("fixture UUID"),
+            vec![],
+        ));
         base.set_identity_provider(selected_identity.clone()).await;
         let observer = Arc::new(RecordingObserver::default());
         let (update_tx, _rx) = mpsc::channel(8);
         let mut context = ReactionRuntimeContext::new(
             "instance",
-            "reaction",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                .expect("fixture UUID"),
+            vec![],
             Some(store.clone()),
             update_tx,
             Some(identity("default")),
         );
         context.resource_observer = Some(observer.clone());
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
         let replacement_identity = identity("replacement");
         base.clone_shared()
             .set_identity_provider(replacement_identity.clone())
@@ -350,18 +387,39 @@ mod tests {
         for observed in [false, true] {
             let observer = Arc::new(RecordingObserver::default());
             let (update_tx, mut rx) = mpsc::channel(8);
-            let mut source_context =
-                SourceRuntimeContext::new("instance", "source", None, update_tx.clone(), None);
-            let mut reaction_context =
-                ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
+            let mut source_context = SourceRuntimeContext::new(
+                "instance",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                None,
+                update_tx.clone(),
+                None,
+            );
+            let mut reaction_context = ReactionRuntimeContext::new(
+                "instance",
+                crate::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                    .expect("fixture UUID"),
+                vec![],
+                None,
+                update_tx,
+                None,
+            );
             if observed {
                 source_context.resource_observer = Some(observer.clone());
                 reaction_context.resource_observer = Some(observer.clone());
             }
-            let source = SourceBase::new(SourceBaseParams::new("source")).unwrap();
-            let reaction = ReactionBase::new(ReactionBaseParams::new("reaction", vec![]));
-            source.initialize(source_context).await;
-            reaction.initialize(reaction_context).await;
+            let source = SourceBase::new(SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ))
+            .unwrap();
+            let reaction = ReactionBase::new(ReactionBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                    .expect("fixture UUID"),
+                vec![],
+            ));
+            source.bind_runtime_context(source_context).await;
+            reaction.bind_runtime_context(reaction_context).await;
             let reports = observer.reports.lock().await;
             assert_eq!(reports.len(), if observed { 2 } else { 0 });
             assert!(reports.iter().all(Vec::is_empty));
@@ -377,16 +435,37 @@ mod tests {
             let observer = Arc::new(RecordingObserver::default());
             observer.fail.store(fail_initialize, Ordering::Release);
             let (update_tx, mut rx) = mpsc::channel(8);
-            let mut source_context =
-                SourceRuntimeContext::new("instance", "source", None, update_tx.clone(), None);
-            let mut reaction_context =
-                ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
+            let mut source_context = SourceRuntimeContext::new(
+                "instance",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                None,
+                update_tx.clone(),
+                None,
+            );
+            let mut reaction_context = ReactionRuntimeContext::new(
+                "instance",
+                crate::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                    .expect("fixture UUID"),
+                vec![],
+                None,
+                update_tx,
+                None,
+            );
             source_context.resource_observer = Some(observer.clone());
             reaction_context.resource_observer = Some(observer.clone());
-            let source = SourceBase::new(SourceBaseParams::new("source")).unwrap();
-            let reaction = ReactionBase::new(ReactionBaseParams::new("reaction", vec![]));
-            source.initialize(source_context).await;
-            reaction.initialize(reaction_context).await;
+            let source = SourceBase::new(SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ))
+            .unwrap();
+            let reaction = ReactionBase::new(ReactionBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                    .expect("fixture UUID"),
+                vec![],
+            ));
+            source.bind_runtime_context(source_context).await;
+            reaction.bind_runtime_context(reaction_context).await;
             if !fail_initialize {
                 observer.fail.store(true, Ordering::Release);
                 source.set_bootstrap_provider(TestBootstrap(1)).await;
@@ -396,7 +475,12 @@ mod tests {
             }
             assert_eq!(source.get_status().await, ComponentStatus::Error);
             assert_eq!(reaction.get_status().await, ComponentStatus::Error);
-            for expected_id in ["source", "reaction"] {
+            for expected_id in [
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                    .expect("fixture UUID"),
+            ] {
                 let ComponentUpdate::Status {
                     component_id,
                     status,

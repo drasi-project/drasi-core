@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -65,23 +69,23 @@ impl SourceMiddleware for Pass {
 
 fn definition() -> MiddlewareTransformerDefinition {
     MiddlewareTransformerDefinition {
-        id: ComponentId::try_new("normalize").expect("id"),
+        id: fixture_support::component_id(760),
         output_stream: StreamId::try_new("normalize/out").expect("stream"),
         middleware: vec![SourceMiddlewareConfig::new("pass", "step", serde_json::Map::new())],
         pipeline: vec!["step".into()],
     }
 }
 
-fn endpoint(id: &str, port: &str) -> Endpoint {
+fn endpoint(id: u128, port: &str) -> Endpoint {
     Endpoint::new(
-        ComponentId::try_new(id).expect("id"),
+        fixture_support::component_id(id),
         PortId::try_new(port).expect("port"),
     )
 }
 
-fn port_descriptor(id: &str, port: &str, direction: PortDirection) -> ComponentDescriptor {
+fn port_descriptor(id: u128, port: &str, direction: PortDirection) -> ComponentDescriptor {
     ComponentDescriptor::try_new(
-        ComponentId::try_new(id).expect("id"),
+        fixture_support::component_id(id),
         vec![PortDescriptor::new(
             PortId::try_new(port).expect("port"),
             direction,
@@ -186,32 +190,33 @@ async fn declared_factory_uses_the_supplied_shared_registry_in_a_complete_graph(
             ),
         )
         .expect("resource")
-        .source(Box::new(Source {
-            descriptor: port_descriptor("source", "out", PortDirection::Output),
+        .fixture_source(Box::new(Source {
+            descriptor: port_descriptor(77, "out", PortDirection::Output),
             output: Some(OutputEnvelope {
                 port: PortId::try_new("out").expect("port"),
                 envelope: input,
             }),
         }))
         .component(
+            ComponentName::try_new("normalize").expect("fixture name"),
             definition.specification(resource).expect("specification"),
             Arc::new(MiddlewareTransformerFactory::default()),
         )
-        .sink(Box::new(Sink {
-            descriptor: port_descriptor("sink", "in", PortDirection::Input),
+        .fixture_sink(Box::new(Sink {
+            descriptor: port_descriptor(101, "in", PortDirection::Input),
             received: received.clone(),
         }))
         .bind_stream(
-            endpoint("source", "out"),
+            endpoint(77, "out"),
             StreamId::try_new("source/out").expect("stream"),
         )
-        .bind_stream(endpoint("normalize", "out"), definition.output_stream)
+        .bind_stream(endpoint(760, "out"), definition.output_stream)
         .connect(
-            EdgeDefinition::new(endpoint("source", "out"), endpoint("normalize", "in")),
+            EdgeDefinition::new(endpoint(77, "out"), endpoint(760, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            EdgeDefinition::new(endpoint("normalize", "out"), endpoint("sink", "in")),
+            EdgeDefinition::new(endpoint(760, "out"), endpoint(101, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -331,7 +336,7 @@ impl SourceMiddleware for ExpandOrFilter {
                     element: Element::Node {
                         metadata: ElementMetadata {
                             reference: ElementReference::new(
-                                &metadata.reference.source_id,
+                                &metadata.reference.namespace,
                                 &format!("{}-{suffix}", metadata.reference.element_id),
                             ),
                             ..metadata.clone()
@@ -348,7 +353,8 @@ impl SourceMiddleware for ExpandOrFilter {
 
 fn raw_source_input(sequence: u64, skip: bool) -> InputEnvelope {
     let event = drasi_lib::channels::SourceEventWrapper::with_sequence(
-        "source".into(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
         drasi_lib::channels::SourceEvent::Change(SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -369,7 +375,7 @@ fn raw_source_input(sequence: u64, skip: bool) -> InputEnvelope {
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(event),
-            &ComponentId::try_new("adapter").expect("id"),
+            &fixture_support::component_id(721),
             StreamId::try_new("source/out").expect("stream"),
             sequence + 1_000,
             None,
@@ -393,7 +399,7 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "middleware-progress".into(),
-            id: ComponentId::try_new("query").expect("query"),
+            id: fixture_support::component_id(46),
             query: "MATCH (n:Item) RETURN n.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out").expect("stream"),

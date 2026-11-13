@@ -53,7 +53,7 @@ impl ComputationIndexProvider for FaultProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> std::result::Result<ComputationIndexes, IndexError> {
         let original = self.inner.create_indexes(graph, component).await?;
         let control: Arc<dyn SessionControl> = Arc::new(FaultControl {
@@ -110,18 +110,19 @@ async fn native_consumer_completion_crash_worker() -> anyhow::Result<()> {
         cancel: true,
         entered: tokio::sync::Notify::new(),
     });
-    let mut consumer = factory(&plugin, mode)
-        .create_consumer(
-            id("consumer"),
-            json!({"path":directory.join("effects.db")}),
-            scope(),
-            Arc::new(FaultProvider {
-                inner: provider(&directory.join("progress"))?,
-                boundary: boundary.clone(),
-            }),
-            options(),
-        )
-        .await?;
+    let factory = factory(&plugin, mode);
+    let mut consumer = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({"path":directory.join("effects.db")}),
+        scope(),
+        Arc::new(FaultProvider {
+            inner: provider(&directory.join("progress"))?,
+            boundary: boundary.clone(),
+        }),
+        options(),
+    )
+    .await?;
     consumer.start().await?;
     boundary.remaining.store(2, Ordering::Release);
     let operation = consumer.handle(batch()?);
@@ -181,18 +182,19 @@ async fn native_consumer_completion_recovers_after_process_exit() -> anyhow::Res
             } else {
                 assert_eq!(effects(&directory.path().join("effects.db"))?, (1, 1, 1));
             }
-            let mut consumer = factory(&plugin, mode)
-                .create_consumer(
-                    id("consumer"),
-                    json!({"path":directory.path().join("effects.db")}),
-                    sdk::Scope {
-                        generation: 2,
-                        ..scope()
-                    },
-                    provider.clone(),
-                    options(),
-                )
-                .await?;
+            let factory = factory(&plugin, mode);
+            let mut consumer = initialized_consumer(
+                factory.as_ref(),
+                id(423),
+                json!({"path":directory.path().join("effects.db")}),
+                sdk::Scope {
+                    generation: 2,
+                    ..scope()
+                },
+                provider.clone(),
+                options(),
+            )
+            .await?;
             consumer.start().await?;
             assert_eq!(
                 consumer.progress().await?[0].completed_operations,
@@ -242,15 +244,15 @@ async fn native_consumer_real_library_recovers_uncertain_completion_without_losi
                     boundary: boundary.clone(),
                 });
                 let factory = factory(&plugin, mode);
-                let mut consumer = factory
-                    .create_consumer(
-                        id("consumer"),
-                        json!({"path":path}),
-                        scope(),
-                        provider,
-                        options(),
-                    )
-                    .await?;
+                let mut consumer = initialized_consumer(
+                    factory.as_ref(),
+                    id(423),
+                    json!({"path":path}),
+                    scope(),
+                    provider,
+                    options(),
+                )
+                .await?;
                 consumer.start().await?;
                 // After startup, admission commits first, then operation completion.
                 boundary.remaining.store(2, Ordering::Release);
@@ -279,15 +281,15 @@ async fn native_consumer_real_library_recovers_uncertain_completion_without_losi
                 } else {
                     assert_eq!(effects(&path)?, (1, 1, 1));
                 }
-                let mut consumer = factory
-                    .create_consumer(
-                        id("consumer"),
-                        json!({"path":path}),
-                        scope(),
-                        inner.clone(),
-                        options(),
-                    )
-                    .await?;
+                let mut consumer = initialized_consumer(
+                    factory.as_ref(),
+                    id(423),
+                    json!({"path":path}),
+                    scope(),
+                    inner.clone(),
+                    options(),
+                )
+                .await?;
                 consumer.start().await?;
                 assert_eq!(
                     consumer.progress().await?[0].completed_operations,

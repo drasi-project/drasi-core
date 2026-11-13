@@ -208,7 +208,7 @@ impl QueryResultsCatalog {
         self.0.events.subscribe()
     }
     pub(super) async fn publish(&self, envelope: ChangeEnvelope) -> anyhow::Result<()> {
-        let id = ComponentId::try_new(QueryChangeCodec::metadata(&envelope)?.query_id)?;
+        let id = QueryChangeCodec::metadata(&envelope)?.query_id;
         if self.get(&id)?.is_none() {
             anyhow::bail!("query publication is not registered in this catalogue");
         }
@@ -253,7 +253,7 @@ impl QueryResultsCatalog {
     }
     pub(super) fn configure_delivery(
         &self,
-        config: &crate::config::QueryConfig,
+        config: &crate::config::ResolvedQueryConfig,
         metrics: Arc<crate::metrics::QueryOutputMetrics>,
         default_capacity: usize,
     ) -> anyhow::Result<()> {
@@ -264,7 +264,7 @@ impl QueryResultsCatalog {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
-        let id = ComponentId::try_new(config.id.as_str())?;
+        let id = config.id.clone();
         state.delivery.insert(
             id,
             DeliveryConfiguration {
@@ -289,16 +289,19 @@ impl QueryResultsCatalog {
             .or_default()
             .clone())
     }
-    pub(crate) async fn subscribe_query(&self, id: &str) -> anyhow::Result<CatalogSubscription> {
+    pub(crate) async fn subscribe_query(
+        &self,
+        id: &ComponentId,
+    ) -> anyhow::Result<CatalogSubscription> {
         self.subscribe_query_at_head(id)
             .await
             .map(|(subscription, _)| subscription)
     }
     pub(crate) async fn subscribe_query_at_head(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<(CatalogSubscription, u64)> {
-        let id = ComponentId::try_new(id)?;
+        let id = id.clone();
         let (query, mut receiver) = {
             let mut state = self
                 .0
@@ -325,9 +328,12 @@ impl QueryResultsCatalog {
         Ok((receiver, sequence))
     }
 
-    pub(super) async fn query_head(&self, id: &str) -> anyhow::Result<QuerySubscriptionHead> {
+    pub(super) async fn query_head(
+        &self,
+        id: &ComponentId,
+    ) -> anyhow::Result<QuerySubscriptionHead> {
         let query = self
-            .get(&ComponentId::try_new(id)?)?
+            .get(&id.clone())?
             .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
         Self::read_head(&query).await
     }
@@ -343,9 +349,9 @@ impl QueryResultsCatalog {
         })
     }
 
-    pub(crate) fn output_is_persistent(&self, id: &str) -> anyhow::Result<bool> {
+    pub(crate) fn output_is_persistent(&self, id: &ComponentId) -> anyhow::Result<bool> {
         let query = self
-            .get(&ComponentId::try_new(id)?)?
+            .get(&id.clone())?
             .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
         query.output.is_persistent()
     }
@@ -355,9 +361,9 @@ impl QueryResultsCatalog {
     #[cfg(test)]
     pub(crate) fn output_generation_reader(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<QueryOutputGenerationReader> {
-        let id = ComponentId::try_new(id)?;
+        let id = id.clone();
         let query = self
             .get(&id)?
             .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
@@ -423,9 +429,9 @@ impl QueryResultsCatalog {
     #[cfg(test)]
     pub(crate) fn checkpoint_store(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> anyhow::Result<Option<Arc<dyn drasi_core::interface::CheckpointStore>>> {
-        let Some(entry) = self.get(&ComponentId::try_new(id)?)? else {
+        let Some(entry) = self.get(&id.clone())? else {
             return Ok(None);
         };
         let super::query_api::QueryApiOutput::Local(output) = entry.output.as_ref() else {
@@ -438,9 +444,9 @@ impl QueryResultsCatalog {
             .clone();
         Ok(checkpoint)
     }
-    pub(crate) async fn current_sequence(&self, id: &str) -> anyhow::Result<u64> {
+    pub(crate) async fn current_sequence(&self, id: &ComponentId) -> anyhow::Result<u64> {
         let query = self
-            .get(&ComponentId::try_new(id)?)?
+            .get(&id.clone())?
             .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
         Ok(query.output.head().await?.0)
     }
@@ -634,8 +640,12 @@ impl QueryResultsCatalog {
             generation,
         })
     }
-    pub(crate) fn link_query(&self, id: &str, source: &Self) -> anyhow::Result<CatalogLink> {
-        let id = ComponentId::try_new(id)?;
+    pub(crate) fn link_query(
+        &self,
+        id: &ComponentId,
+        source: &Self,
+    ) -> anyhow::Result<CatalogLink> {
+        let id = id.clone();
         let mut entry = source
             .get(&id)?
             .ok_or_else(|| anyhow::anyhow!("native query reader has not been created"))?;
@@ -662,11 +672,11 @@ impl QueryResultsCatalog {
     #[cfg(test)]
     pub(crate) async fn legacy_snapshot(
         &self,
-        id: &str,
+        id: &ComponentId,
         timeout: Duration,
     ) -> anyhow::Result<crate::queries::SnapshotResponse> {
         let (snapshot, hash) = self.query_snapshot(id, timeout).await?;
-        if let Some(metrics) = self.configured_metrics(&ComponentId::try_new(id)?)? {
+        if let Some(metrics) = self.configured_metrics(&id.clone())? {
             metrics.record_snapshot_fetch();
         }
         super::plugin_reaction::snapshot_response_parts(id, &snapshot, hash)
@@ -674,7 +684,7 @@ impl QueryResultsCatalog {
     #[cfg(test)]
     pub(crate) async fn legacy_outbox(
         &self,
-        id: &str,
+        id: &ComponentId,
         after: u64,
         timeout: Duration,
     ) -> std::result::Result<crate::queries::OutboxResponse, crate::queries::FetchError> {
@@ -703,8 +713,12 @@ impl QueryResultsCatalog {
             .get(id)
             .cloned())
     }
-    pub(super) async fn ready(&self, id: &str, timeout: Duration) -> anyhow::Result<CatalogQuery> {
-        let id = ComponentId::try_new(id)?;
+    pub(super) async fn ready(
+        &self,
+        id: &ComponentId,
+        timeout: Duration,
+    ) -> anyhow::Result<CatalogQuery> {
+        let id = id.clone();
         let mut changed = self.0.changed.subscribe();
         tokio::time::timeout(timeout, async {
             loop {
@@ -725,9 +739,9 @@ impl QueryResultsCatalog {
         }).await?
     }
 
-    fn require_registration(&self, id: &str, entry: &CatalogQuery) -> anyhow::Result<()> {
+    fn require_registration(&self, id: &ComponentId, entry: &CatalogQuery) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.get(&ComponentId::try_new(id)?)?
+            self.get(&id.clone())?
                 .is_some_and(|current| current.generation == entry.generation),
             GraphError::StaleGeneration
         );
@@ -737,7 +751,7 @@ impl QueryResultsCatalog {
     #[cfg(test)]
     pub(super) async fn query_view(
         &self,
-        id: &str,
+        id: &ComponentId,
         timeout: Duration,
     ) -> anyhow::Result<super::plugin_reaction::OutputView> {
         tokio::time::timeout(timeout, async {
@@ -751,7 +765,7 @@ impl QueryResultsCatalog {
 
     pub(super) async fn query_snapshot(
         &self,
-        id: &str,
+        id: &ComponentId,
         timeout: Duration,
     ) -> anyhow::Result<(QueryResultSnapshot, u64)> {
         tokio::time::timeout(timeout, async {
@@ -765,14 +779,14 @@ impl QueryResultsCatalog {
 
     pub async fn snapshot(
         &self,
-        id: &str,
+        id: &ComponentId,
         timeout: Duration,
     ) -> anyhow::Result<QueryResultSnapshot> {
         Ok(self.query_snapshot(id, timeout).await?.0)
     }
     pub async fn replay(
         &self,
-        id: &str,
+        id: &ComponentId,
         after: u64,
         timeout: Duration,
     ) -> anyhow::Result<Vec<ChangeEnvelope>> {
@@ -854,7 +868,7 @@ mod tests {
     )> {
         let definition = ContinuousQueryDefinition {
             graph_id: "asynchronous-reader".into(),
-            id: ComponentId::try_new("query")?,
+            id: crate::test_helpers::component_id(46),
             query: "MATCH (n:Item) RETURN n.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -891,9 +905,12 @@ mod tests {
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         });
-        let api =
-            QueryApi::from_native_reader(ComponentId::try_new("query")?, provider.clone(), None)?
-                .with_native_result_catalog(catalog.clone(), crate::DispatchMode::Channel, 1)?;
+        let api = QueryApi::from_native_reader(
+            crate::test_helpers::component_id(46),
+            provider.clone(),
+            None,
+        )?
+        .with_native_result_catalog(catalog.clone(), crate::DispatchMode::Channel, 1)?;
         Ok((query, catalog, api, provider))
     }
 
@@ -930,7 +947,10 @@ mod tests {
     #[tokio::test]
     async fn asynchronous_subscription_attaches_before_sampling_its_head() -> anyhow::Result<()> {
         let (mut query, catalog, _api, provider) = asynchronous_catalog().await?;
-        let mut attaching = Box::pin(catalog.subscribe_query_at_head("query"));
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID");
+        let mut attaching = Box::pin(catalog.subscribe_query_at_head(&query_id));
         tokio::select! {
             result = &mut attaching => anyhow::bail!("head did not pause: {}", result.is_ok()),
             _ = provider.entered.notified() => {}
@@ -951,7 +971,10 @@ mod tests {
     #[tokio::test]
     async fn cancelled_subscription_head_releases_its_channel() -> anyhow::Result<()> {
         let (mut query, catalog, _api, provider) = asynchronous_catalog().await?;
-        let mut attaching = Box::pin(catalog.subscribe_query_at_head("query"));
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID");
+        let mut attaching = Box::pin(catalog.subscribe_query_at_head(&query_id));
         tokio::select! {
             result = &mut attaching => anyhow::bail!("head did not pause: {}", result.is_ok()),
             _ = provider.entered.notified() => {}
@@ -972,7 +995,12 @@ mod tests {
     ) -> anyhow::Result<()> {
         let (mut query, catalog, api, provider) = asynchronous_catalog().await?;
         provider.pause_head.store(false, Ordering::Release);
-        let (subscription, _) = catalog.subscribe_query_at_head("query").await?;
+        let (subscription, _) = catalog
+            .subscribe_query_at_head(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            )
+            .await?;
         let head = subscription.head()?;
         api.validate_subscription(&head).await?;
         let (cursor, generation) = provider.reader.query_head()?;
@@ -996,19 +1024,39 @@ mod tests {
         provider.pause_head.store(false, Ordering::Release);
         provider.pause_reads.store(true, Ordering::Release);
         let deadline = Duration::from_millis(10);
-        let error =
-            tokio::time::timeout(Duration::from_secs(1), catalog.snapshot("query", deadline))
-                .await?
-                .err()
-                .expect("snapshot ignored its deadline");
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            catalog.snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                deadline,
+            ),
+        )
+        .await?
+        .err()
+        .expect("snapshot ignored its deadline");
         assert!(error.is::<tokio::time::error::Elapsed>());
-        let error =
-            tokio::time::timeout(Duration::from_secs(1), catalog.replay("query", 0, deadline))
-                .await?
-                .expect_err("replay ignored its deadline");
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            catalog.replay(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                0,
+                deadline,
+            ),
+        )
+        .await?
+        .expect_err("replay ignored its deadline");
         assert!(error.is::<tokio::time::error::Elapsed>());
         assert!(matches!(
-            catalog.legacy_outbox("query", 0, deadline).await,
+            catalog
+                .legacy_outbox(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    0,
+                    deadline
+                )
+                .await,
             Err(crate::queries::FetchError::TimedOut)
         ));
         query.stop().await?;
@@ -1024,17 +1072,21 @@ mod tests {
         for mode in [crate::DispatchMode::Channel, crate::DispatchMode::Broadcast] {
             let catalog = QueryResultsCatalog::new("subscription-head")?;
             let stream = StreamId::try_new("query/out")?;
-            let config = crate::Query::cypher("query")
-                .query("MATCH (n:Person) RETURN n.name AS name")
-                .with_outbox_capacity(8)
-                .enable_bootstrap(false)
-                .build();
+            let query_id = ComponentId::generate();
+            let config = crate::Query::cypher(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .query("MATCH (n:Person) RETURN n.name AS name")
+            .with_outbox_capacity(8)
+            .enable_bootstrap(false)
+            .build()?
+            .with_assigned_id(query_id.clone());
             let mut config = config;
             config.dispatch_mode = Some(mode);
             let mut query = ContinuousQueryTransformer::new(
                 ContinuousQueryDefinition {
                     graph_id: "subscription-head".into(),
-                    id: ComponentId::try_new("query")?,
+                    id: query_id.clone(),
                     query: config.query.clone(),
                     language: ComputationQueryLanguage::Cypher,
                     output_stream: stream.clone(),
@@ -1073,7 +1125,7 @@ mod tests {
                 .await?
                 .remove(0)
                 .envelope;
-            let (mut subscription, head) = catalog.subscribe_query_at_head("query").await?;
+            let (mut subscription, head) = catalog.subscribe_query_at_head(&query_id).await?;
             assert_eq!(head, 1);
             let second = query.transform(input(2, "Bob")?).await?.remove(0).envelope;
             for (envelope, transport) in [(&first, 99), (&second, 100)] {
@@ -1098,17 +1150,22 @@ mod tests {
     #[tokio::test]
     async fn query_replacement_refreshes_identity_and_delivery_without_resetting_transport() {
         let catalog = QueryResultsCatalog::new("delivery").unwrap();
-        let id = ComponentId::try_new("query").unwrap();
+        let id = ComponentId::generate();
         let stream = StreamId::try_new("query/out").unwrap();
         let open = |text: &'static str, capacity| {
             let catalog = catalog.clone();
             let id = id.clone();
             let stream = stream.clone();
             async move {
-                let mut config = crate::Query::cypher(id.as_str())
-                    .query(text)
-                    .with_outbox_capacity(8)
-                    .build();
+                let mut config = crate::Query::cypher(
+                    drasi_core_types::ComponentName::try_new("query")
+                        .expect("fixture component name"),
+                )
+                .query(text)
+                .with_outbox_capacity(8)
+                .build()
+                .unwrap()
+                .with_assigned_id(id.clone());
                 config.dispatch_buffer_capacity = Some(capacity);
                 ContinuousQueryTransformer::new(
                     ContinuousQueryDefinition {
@@ -1163,7 +1220,7 @@ mod tests {
     #[tokio::test]
     async fn output_persistence_requires_an_explicit_observation_and_is_shared_by_links() {
         let catalog = QueryResultsCatalog::new("durability").unwrap();
-        let id = ComponentId::try_new("query").unwrap();
+        let id = crate::test_helpers::component_id(46);
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: "durability".into(),
@@ -1180,29 +1237,80 @@ mod tests {
         .with_result_catalog(&catalog)
         .unwrap();
         let linked = QueryResultsCatalog::new("ordinary").unwrap();
-        let link = linked.link_query("query", &catalog).unwrap();
+        let link = linked
+            .link_query(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                &catalog,
+            )
+            .unwrap();
         let entry = catalog.get(&id).unwrap().unwrap();
         let super::super::query_api::QueryApiOutput::Local(output) = entry.output.as_ref() else {
             panic!("expected a linked query");
         };
         let observation = output.output_persistence.clone();
 
-        assert!(!catalog.output_is_persistent("query").unwrap());
-        assert!(!linked.output_is_persistent("query").unwrap());
+        assert!(!catalog
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .unwrap());
+        assert!(!linked
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .unwrap());
         *observation.write().unwrap() = None;
-        assert!(catalog.output_is_persistent("query").is_err());
-        assert!(linked.output_is_persistent("query").is_err());
+        assert!(catalog
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .is_err());
+        assert!(linked
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .is_err());
         *observation.write().unwrap() = Some(true);
-        assert!(catalog.output_is_persistent("query").unwrap());
-        assert!(linked.output_is_persistent("query").unwrap());
+        assert!(catalog
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .unwrap());
+        assert!(linked
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .unwrap());
         *observation.write().unwrap() = Some(false);
-        assert!(!linked.output_is_persistent("query").unwrap());
+        assert!(!linked
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .unwrap());
 
         drop(link);
-        assert!(linked.output_is_persistent("query").is_err());
+        assert!(linked
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .is_err());
         query.stop().await.unwrap();
         drop(query);
-        assert!(catalog.output_is_persistent("query").is_err());
+        assert!(catalog
+            .output_is_persistent(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .is_err());
     }
 
     #[tokio::test]
@@ -1215,7 +1323,7 @@ mod tests {
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: "outbox-head".into(),
-                id: ComponentId::try_new("query").unwrap(),
+                id: crate::test_helpers::component_id(46),
                 query: "MATCH (n:Item) RETURN n.value AS value".into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new("query/out").unwrap(),
@@ -1258,11 +1366,20 @@ mod tests {
                 .unwrap();
         }
         let snapshot = catalog
-            .legacy_snapshot("query", Duration::from_secs(1))
+            .legacy_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         let head = catalog
-            .legacy_outbox("query", u64::MAX, Duration::from_secs(1))
+            .legacy_outbox(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                u64::MAX,
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         assert!(head.results.is_empty());
@@ -1272,13 +1389,23 @@ mod tests {
         assert_eq!(head.config_hash, snapshot.config_hash);
         assert!(matches!(
             catalog
-                .legacy_outbox("query", 0, Duration::from_secs(1))
+                .legacy_outbox(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    0,
+                    Duration::from_secs(1)
+                )
                 .await,
             Err(crate::queries::FetchError::OutboxGap(_))
         ));
         assert_eq!(
             catalog
-                .legacy_outbox("query", 1, Duration::from_secs(1))
+                .legacy_outbox(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    1,
+                    Duration::from_secs(1)
+                )
                 .await
                 .unwrap()
                 .results
@@ -1291,7 +1418,7 @@ mod tests {
     #[tokio::test]
     async fn output_generation_reader_survives_retirement_without_defaulting_to_zero() {
         let catalog = QueryResultsCatalog::new("generation-reader").unwrap();
-        let id = ComponentId::try_new("query").unwrap();
+        let id = crate::test_helpers::component_id(46);
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: "generation-reader".into(),
@@ -1307,14 +1434,24 @@ mod tests {
         .unwrap()
         .with_result_catalog(&catalog)
         .unwrap();
-        let reader = catalog.output_generation_reader("query").unwrap();
+        let reader = catalog
+            .output_generation_reader(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            )
+            .unwrap();
         assert_eq!(reader.generation(), 0);
         let owner = query.output_owner();
         owner.state.write().unwrap().generation = 7;
         assert_eq!(reader.generation(), 7);
         query.stop().await.unwrap();
         drop(query);
-        assert!(catalog.output_generation_reader("query").is_err());
+        assert!(catalog
+            .output_generation_reader(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .is_err());
         assert_eq!(reader.generation(), 7);
 
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

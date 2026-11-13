@@ -2,10 +2,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::Value;
+use shared_tests::fixture_attribution::{Attribution, Fixture};
 use testcontainers::core::ContainerPort;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::ImageExt;
-use testcontainers::{ContainerAsync, GenericImage};
+use testcontainers::{ContainerAsync, GenericImage, Image};
 
 pub struct LokiGuard {
     container: ContainerAsync<GenericImage>,
@@ -13,11 +14,26 @@ pub struct LokiGuard {
 }
 
 pub async fn setup_loki() -> Result<LokiGuard> {
-    let image = GenericImage::new("grafana/loki", "3.4.3")
-        .with_exposed_port(ContainerPort::Tcp(3100))
-        .with_cmd(["-config.file=/etc/loki/local-config.yaml"]);
+    let image =
+        GenericImage::new("grafana/loki", "3.4.3").with_exposed_port(ContainerPort::Tcp(3100));
+    let attribution = Attribution::from_env(Fixture::new(
+        "loki",
+        format!("{}:{}", image.name(), image.tag()),
+        "components/reactions/loki/tests/loki_helpers.rs",
+        1,
+    ))?;
+    let mut request = image.with_cmd(["-config.file=/etc/loki/local-config.yaml"]);
+    if let Some(owner) = &attribution {
+        request = request
+            .with_container_name(owner.container_name(1))
+            .with_labels(owner.labels(1));
+        owner.record_intent(1)?;
+    }
 
-    let container = image.start().await?;
+    let container = request.start().await?;
+    if let Some(owner) = &attribution {
+        owner.record_started(1, container.id())?;
+    }
     let port = container.get_host_port_ipv4(3100).await?;
     let endpoint = format!("http://localhost:{port}"); // DevSkim: ignore DS137138
 

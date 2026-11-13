@@ -1,17 +1,28 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Optional desired-state management. Factories, resource resolution and durable
-//! storage are supplied by the embedding host; plugin loading remains external.
+//! Instance configuration management. Every instance has a configuration store;
+//! the default is private in-memory storage. Factories, resource resolution and
+//! durable storage are supplied by the embedding host; plugin loading remains external.
 
 mod store;
 pub use store::*;
+mod authoring;
+mod memory;
+pub use authoring::{ConfigurationRequest, NewComponentDefinition};
 mod transitions;
 pub use transitions::{
     validate_recovery_resource_changes, RecoveryRetirementAuthorization, RecoveryTransitionRequired,
 };
 mod runtime;
-pub(crate) use runtime::Management;
+pub(crate) use runtime::{AuthoringOperation, Management};
+mod ordinary;
+mod updates;
+pub use ordinary::{
+    OrdinaryComponent, OrdinaryComponentDefinition, OrdinaryComponentRecord,
+    OrdinaryComponentResolver, OrdinaryComponentUpdateContext, ProcessLocalComponentKind,
+};
+pub use updates::{AcceptedComponentUpdate, ComponentUpdateCompletion, ComponentUpdateDefinition};
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -20,8 +31,27 @@ pub(crate) use runtime::{compose_definition, equivalent};
 use serde::{Deserialize, Serialize};
 
 use crate::computation::v1::{
-    DesiredTopology, FactoryRegistry, ResourceHandle, ResourceId, ResourceSpecification,
+    ComponentId, ComponentName, DesiredTopology, FactoryRegistry, ImplementationIdentity,
+    LifecyclePolicy, PortId, ResourceHandle, ResourceId, ResourceSpecification, StreamId,
 };
+
+/// Reconstructible authoring input. Identity assignment occurs inside management
+/// and commits with the existing request receipt before any factory executes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentDefinition {
+    pub name: ComponentName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<ComponentId>,
+    pub implementation: ImplementationIdentity,
+    pub configuration: serde_json::Value,
+    #[serde(default)]
+    pub dependencies: BTreeMap<Arc<str>, Vec<ResourceId>>,
+    #[serde(default)]
+    pub streams: BTreeMap<PortId, StreamId>,
+    #[serde(default)]
+    pub lifecycle: LifecyclePolicy,
+}
 
 /// Declaratively managed components in a DrasiLib instance. Generated query
 /// infrastructure and instance-provided services are not reconstruction recipes.
@@ -30,6 +60,10 @@ use crate::computation::v1::{
 pub struct DesiredInstance {
     pub version: u32,
     pub topology: DesiredTopology,
+    /// Ordinary recipes, including pending and failed declarations. These are
+    /// authoritative settings, not snapshots of constructed plugin objects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ordinary: Vec<OrdinaryComponentRecord>,
     /// A revision-bound, persisted authorization to abandon a removed domain's
     /// pending obligations. This neither deletes nor resets its stored data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,8 +73,9 @@ pub struct DesiredInstance {
 impl Default for DesiredInstance {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             retirement: None,
+            ordinary: Vec::new(),
             topology: crate::computation::v1::ComputationGraph::empty(
                 crate::computation::components::INSTANCE_GRAPH_ID,
             )
@@ -58,9 +93,10 @@ impl From<DesiredTopology> for DesiredInstance {
     fn from(mut topology: DesiredTopology) -> Self {
         topology.graph_id = crate::computation::components::INSTANCE_GRAPH_ID.into();
         Self {
-            version: 1,
+            version: 2,
             topology,
             retirement: None,
+            ordinary: Vec::new(),
         }
     }
 }
@@ -83,6 +119,23 @@ impl DesiredInstance {
 /// released if the resolver fails or its future is dropped.
 #[async_trait]
 pub trait ManagementResourceResolver: Send + Sync {
+    /// Assess an explicit provider recipe change that replaces live users.
+    ///
+    /// This is the provider owner's pure configuration assessment, not permission
+    /// from its consumers. Both topologies include the provider's prerequisites.
+    /// Currently only `Recreate` with `Preserve` is supported: reconciliation
+    /// retires old users and ownership before constructing the accepted target.
+    /// Borrowed providers cannot be updated through this contract. The separate
+    /// `validate_transition` recovery-domain policy still applies.
+    fn plan_update(
+        &self,
+        resource: &ResourceId,
+        _previous: &DesiredTopology,
+        _desired: &DesiredTopology,
+    ) -> anyhow::Result<crate::computation::v1::ComponentUpdatePlan> {
+        anyhow::bail!("resource {resource} owner does not support live recipe updates")
+    }
+
     /// Pure pre-acceptance validation, including when old resources could not be
     /// reconstructed. Resolvers offering persistent processing services must
     /// protect their recovery domains; wrappers must forward this policy.
@@ -154,11 +207,13 @@ impl ManagementResourceResolver for NoManagementResources {
     }
 }
 
-/// Optional construction and persistence services. Persistence is off by default.
+/// Construction and persistence services. An omitted backend selects the
+/// instance's private memory store; it does not disable configuration ownership.
 pub struct ManagementOptions {
     pub factories: FactoryRegistry,
     pub resources: Arc<dyn ManagementResourceResolver>,
     pub store: Option<Arc<dyn ConfigurationStore>>,
+    pub ordinary: Arc<dyn OrdinaryComponentResolver>,
 }
 
 impl Default for ManagementOptions {
@@ -167,6 +222,7 @@ impl Default for ManagementOptions {
             factories: FactoryRegistry::standard(),
             resources: Arc::new(NoManagementResources),
             store: None,
+            ordinary: Arc::new(ordinary::NoOrdinaryComponents),
         }
     }
 }
@@ -193,7 +249,72 @@ impl ManagementStatus {
 }
 
 impl crate::DrasiLib {
-    /// Whether the instance accepts revisioned desired definitions.
+    /// Accept updates and new ID-omitting definitions through one atomic request.
+    /// A matching retry returns all original assignments without recreating members.
+    pub async fn apply_configuration(
+        &self,
+        expected_revision: u64,
+        request_id: impl Into<String>,
+        request: ConfigurationRequest,
+    ) -> crate::Result<AcceptanceReceipt> {
+        self.management()?
+            .apply_configuration(expected_revision, request_id.into(), request)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Build and accept a complete native recipe batch with scoped UUID allocation.
+    /// This callback prepares definitions only: component/resource constructors run
+    /// after acceptance. Retries replay the stored allocator transcript.
+    pub async fn create_managed_components(
+        &self,
+        expected_revision: u64,
+        request_id: impl Into<String>,
+        construct: impl FnOnce(
+                &mut crate::computation::v1::ComponentIds,
+            ) -> crate::computation::v1::GraphResult<DesiredTopology>
+            + Send
+            + 'static,
+    ) -> crate::Result<AcceptanceReceipt> {
+        self.management()?
+            .accept(
+                expected_revision,
+                request_id.into(),
+                AuthoringOperation::Native(Box::new(construct)),
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Assign and accept an ordinary recipe before construction. Retry the same
+    /// request ID and original input to recover its original UUID/receipt.
+    pub async fn create_managed_ordinary_component(
+        &self,
+        expected_revision: u64,
+        request_id: impl Into<String>,
+        definition: OrdinaryComponentDefinition,
+    ) -> crate::Result<AcceptanceReceipt> {
+        self.management()?
+            .create_ordinary(expected_revision, request_id.into(), definition)
+            .await
+            .map_err(Into::into)
+    }
+    /// Allocate and durably accept one reconstructible component. Reusing the
+    /// request ID and identical input returns the same assigned UUID even after
+    /// deletion; it never readmits the removed object.
+    pub async fn create_managed_component(
+        &self,
+        expected_revision: u64,
+        request_id: impl Into<String>,
+        definition: ComponentDefinition,
+    ) -> crate::Result<AcceptanceReceipt> {
+        self.management()?
+            .create_component(expected_revision, request_id.into(), definition)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Whether this instance has initialized its configuration owner.
     pub fn has_managed_configuration(&self) -> bool {
         self.management.get().is_some()
     }
@@ -239,8 +360,7 @@ impl crate::DrasiLib {
         self.management()?.reconcile().await.map_err(Into::into)
     }
 
-    /// Supply a factory to existing declarations without enabling desired-state
-    /// management. Managed instances also retain it for later reconciliation.
+    /// Supply a factory to existing declarations and retain it for reconciliation.
     pub async fn register_component_factory(
         &self,
         factory: Arc<dyn crate::computation::v1::ComponentFactory>,
@@ -325,13 +445,9 @@ impl crate::DrasiLib {
         expected_revision: u64,
         request_id: impl Into<String>,
     ) -> crate::Result<AcceptanceReceipt> {
-        let snapshot = self
-            .load_configuration_snapshot(name)
-            .await?
-            .ok_or_else(|| {
-                crate::DrasiError::invalid_config("configuration snapshot does not exist")
-            })?;
-        self.apply_desired_state(expected_revision, request_id, snapshot.desired)
+        self.management()?
+            .restore_snapshot(name.into(), expected_revision, request_id.into())
             .await
+            .map_err(Into::into)
     }
 }

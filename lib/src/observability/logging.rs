@@ -14,19 +14,20 @@
 
 //! Consistent lifecycle log messages for component implementations.
 
+use crate::ComponentId;
 use log::{error, info};
 
 /// Log an info-level message indicating a component is starting.
-pub fn log_component_start(component: &str, id: &str) {
+pub fn log_component_start(component: &str, id: &ComponentId) {
     info!("Starting {component} component: {id}");
 }
 
 /// Log an info-level message indicating a component is stopping.
-pub fn log_component_stop(component: &str, id: &str) {
+pub fn log_component_stop(component: &str, id: &ComponentId) {
     info!("Stopping {component} component: {id}");
 }
 
 /// Log an error-level message for a component failure.
-pub fn log_component_error(component: &str, id: &str, error: &str) {
+pub fn log_component_error(component: &str, id: &ComponentId, error: &str) {
     error!("Error in {component} component {id}: {error}");
 }

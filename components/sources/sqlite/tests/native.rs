@@ -28,6 +28,10 @@ mod rest;
 #[path = "native/snapshot.rs"]
 mod snapshot;
 
+const SOURCE_ID: &str = "00000000-0000-0000-0000-00000000004d";
+const QUERY_ID: &str = "00000000-0000-0000-0000-00000000002e";
+const SINK_ID: &str = "00000000-0000-0000-0000-000000000065";
+
 fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("positive test bound")
 }
@@ -62,7 +66,7 @@ fn config(path: &Path) -> SqliteConfig {
     }
 }
 fn progress() -> Arc<QuerySourceProgress> {
-    Arc::new(QuerySourceProgress::new("native-sqlite", id("query")).expect("query progress"))
+    Arc::new(QuerySourceProgress::new("native-sqlite", id(QUERY_ID)).expect("query progress"))
 }
 async fn query(
     path: &Path,
@@ -86,7 +90,7 @@ async fn query_with_recovery(
     ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "native-sqlite".into(),
-            id: id("query"),
+            id: id(QUERY_ID),
             query: "MATCH (n:items) RETURN n.id AS id, n.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("results"),
@@ -107,7 +111,7 @@ async fn query_with_recovery(
     .with_source_progress(progress)
 }
 fn source(config: SqliteConfig, progress: Arc<QuerySourceProgress>) -> Result<SqliteSource> {
-    SqliteSource::new_replayable(id("source"), stream("changes"), config, progress)
+    SqliteSource::new_replayable(id(SOURCE_ID), stream("changes"), config, progress)
 }
 async fn next(source: &mut SqliteSource) -> Result<OutputEnvelope> {
     timeout(Duration::from_secs(3), source.next())
@@ -387,7 +391,7 @@ async fn durable_start_refuses_rebinding_missing_history_and_external_schema_cha
         let mut next_settings = settings;
         let mut second = if fault == "disable" {
             next_settings.replay = None;
-            SqliteSource::new(id("source"), stream("changes"), next_settings)?
+            SqliteSource::new(id(SOURCE_ID), stream("changes"), next_settings)?
         } else if fault == "binding" {
             next_settings.tables = vec!["items".into()];
             source(next_settings, progress)?
@@ -423,7 +427,7 @@ async fn query_deprovision_cannot_silently_resume_after_sqlite_history_retiremen
     producer.stop().await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
     consumer.stop().await?;
-    consumer.deprovision().await?;
+    consumer.delete_owned_resources().await?;
     drop(consumer);
     drop(producer);
 
@@ -526,7 +530,7 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
         }
         let (producer, snapshot) = if coordinated {
             let (producer, snapshot) = SqliteSource::coordinated(
-                id("source"),
+                id(SOURCE_ID),
                 stream("changes"),
                 settings.clone(),
                 progress.clone(),
@@ -540,10 +544,11 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
             query = query.with_bootstrap(snapshot.clone());
         }
         let results = query.results();
-        let client = Arc::new(SqliteClientResource::new(id("source"), settings.clone())?);
+        let client = Arc::new(SqliteClientResource::new(id(SOURCE_ID), settings.clone())?);
         let handle = client.handle();
         let (sink, mut received) = drasi_reaction_application::NativeApplicationReaction::channel(
-            "sink",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             QueryChangeCodec::schema().descriptor().clone(),
             size(1),
         )?;
@@ -551,8 +556,16 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
             Endpoint::new(id(component), PortId::try_new(port).expect("test port"))
         };
         let graph = ComputationGraph::builder("native-sqlite")
-            .transformer(Box::new(query))
-            .sink(Box::new(sink));
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                    .expect("fixture component name"),
+                Box::new(sink),
+            );
         let graph = if factory_created {
             let factory = Arc::new(SqliteSourceFactory::default());
             let mut graph = graph;
@@ -601,8 +614,9 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
                     .provide_resource(resource, handle)?;
             }
             graph.component(
+                drasi_lib::computation::v1::ComponentName::try_new("source")?,
                 ComponentSpecification {
-                    descriptor: SqliteSource::describe(id("source"), settings.output)?,
+                    descriptor: SqliteSource::describe(id(SOURCE_ID), settings.output)?,
                     role: ComponentRole::Source,
                     completion: None,
                     implementation: factory.descriptor().implementation.clone(),
@@ -632,17 +646,21 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
                 factory,
             )
         } else {
-            graph.source(Box::new(producer.with_client_resource(client)?))
+            graph.source(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                    .expect("fixture component name"),
+                Box::new(producer.with_client_resource(client)?),
+            )
         };
         let mut graph = graph
-            .bind_stream(endpoint("source", "out"), stream("changes"))
-            .bind_stream(endpoint("query", "out"), stream("results"))
+            .bind_stream(endpoint(SOURCE_ID, "out"), stream("changes"))
+            .bind_stream(endpoint(QUERY_ID, "out"), stream("results"))
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+                EdgeDefinition::new(endpoint(SOURCE_ID, "out"), endpoint(QUERY_ID, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+                EdgeDefinition::new(endpoint(QUERY_ID, "out"), endpoint(SINK_ID, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()?;
@@ -661,7 +679,7 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
                     if factory_created {
                         let snapshot = control.configuration_snapshot()?;
                         let CapturedComponentConfiguration::Available { values } =
-                            &snapshot.configurations[&id("source")] else {
+                            &snapshot.configurations[&id(SOURCE_ID)] else {
                                 anyhow::bail!("factory-created SQLite configuration is unavailable");
                             };
                         assert_eq!(values["rest_api"], serde_json::json!({"host":"127.0.0.1","port":0}));

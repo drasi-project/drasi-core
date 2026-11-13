@@ -35,8 +35,27 @@ mod snapshots;
 
 const QUERY: &str = "MATCH (n:Item) RETURN sum(n.value) AS total";
 const COMPONENT: &str = "durable-query";
+const COMPONENT_ID: &str = "3283a204-e18e-5bf6-8246-51c299f70b09";
 const GRAPH: &str = "native-query-durability";
 const CRASH_ROOT: &str = "DRASI_QUERY_PLUGIN_DURABILITY_ROOT";
+
+fn component_id() -> Result<ComponentId> {
+    Ok(ComponentId::try_new(COMPONENT_ID)?)
+}
+
+fn component_name() -> Result<ComponentName> {
+    Ok(ComponentName::try_new(COMPONENT)?)
+}
+
+fn output_partition() -> Result<drasi_core::interface::OutputPartition> {
+    Ok(drasi_core::interface::OutputPartition::Component(
+        component_id()?,
+    ))
+}
+
+fn metadata_checkpoint(name: &str) -> drasi_core::interface::CheckpointKey {
+    drasi_core::interface::CheckpointKey::Metadata(name.to_owned())
+}
 
 fn factory() -> Result<Arc<NativeFactory>> {
     let plugin = computation::load(library())?;
@@ -71,8 +90,8 @@ fn scope(generation: u64) -> Scope {
 
 fn create(path: &Path, text: &str, generation: u64) -> Result<NativeComponentProxy> {
     factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
-        json!({"query":text}),
+        component_id()?,
+        json!({"query":text, "stream":format!("{COMPONENT}/out")}),
         scope(generation),
         provider(path)?,
     )
@@ -128,6 +147,7 @@ async fn restart_receipt() -> Result<()> {
         1,
     )?;
     let mut query = create(path, QUERY, 1)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.has_pending_emissions());
     assert!(query.continue_transform().await?.is_empty());
@@ -140,6 +160,7 @@ async fn restart_receipt() -> Result<()> {
     drop(query);
 
     let mut query = create(path, QUERY, 2)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(
         query.has_pending_emissions(),
@@ -177,6 +198,7 @@ async fn restart_receipt() -> Result<()> {
     drop(query);
 
     let mut query = create(path, QUERY, 3)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(
         query.continue_transform().await?.is_empty(),
@@ -211,6 +233,7 @@ async fn indexed_state_progress_and_pending_output_survive_reopen_multi_thread()
 async fn indexed_deprovision_clears_owned_rows_progress_and_bootstrap_state() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
+    query.initialize().await?;
     query.start().await?;
     query
         .bootstrap_state()
@@ -230,18 +253,19 @@ async fn indexed_deprovision_clears_owned_rows_progress_and_bootstrap_state() ->
         .identity()
         .clone();
     assert!(
-        query.deprovision().await.is_err(),
+        query.delete_owned_resources().await.is_err(),
         "running work cannot be deleted"
     );
     query.stop().await?;
-    query.deprovision().await?;
-    query.deprovision().await?;
+    query.delete_owned_resources().await?;
+    query.delete_owned_resources().await?;
     assert!(
         query.start().await.is_err(),
         "a deleted instance cannot reactivate"
     );
     drop(query);
     let mut recreated = create(directory.path(), QUERY, 2)?;
+    recreated.initialize().await?;
     recreated.start().await?;
     assert!(recreated
         .bootstrap_state()
@@ -281,6 +305,7 @@ async fn indexed_preparation_exposes_actual_recovery_evidence_before_activation(
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
     let unprepared = query.recovery_contract();
+    query.initialize().await?;
     query.prepare_processing().await?;
     let prepared = query.recovery_contract();
     assert_ne!(prepared, unprepared);
@@ -324,6 +349,7 @@ async fn indexed_reopen_rejects_changed_configuration_without_erasing_state() ->
     let directory = tempfile::tempdir()?;
     let path = directory.path();
     let mut query = create(path, QUERY, 1)?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -337,6 +363,7 @@ async fn indexed_reopen_rejects_changed_configuration_without_erasing_state() ->
     query.stop().await?;
     drop(query);
     let mut changed = create(path, "MATCH (n:Item) RETURN count(n) AS total", 2)?;
+    changed.initialize().await?;
     let error = changed
         .start()
         .await
@@ -348,6 +375,7 @@ async fn indexed_reopen_rejects_changed_configuration_without_erasing_state() ->
     changed.stop().await?;
     drop(changed);
     let mut query = create(path, QUERY, 3)?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -367,6 +395,7 @@ async fn indexed_reopen_rejects_changed_configuration_without_erasing_state() ->
 async fn indexed_confirmation_cannot_discard_a_different_pending_output() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -384,6 +413,7 @@ async fn indexed_confirmation_cannot_discard_a_different_pending_output() -> Res
     query.stop().await?;
     drop(query);
     let mut query = create(directory.path(), QUERY, 2)?;
+    query.initialize().await?;
     query.start().await?;
     let progress = query
         .committed_input_progress()?
@@ -405,11 +435,12 @@ async fn indexed_confirmation_cannot_discard_a_different_pending_output() -> Res
 #[tokio::test(flavor = "current_thread")]
 async fn indexed_persistence_rejects_unqualified_storage() -> Result<()> {
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query":QUERY}),
         scope(1),
         Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
+    query.initialize().await?;
     assert!(query.start().await.is_err());
     query.stop().await?;
     Ok(())
@@ -424,6 +455,7 @@ async fn indexed_commit_exit_child() -> Result<()> {
         return non_atomic::exit_child(&path, phase.to_str().context("invalid crash phase")?).await;
     }
     let mut query = create(&path, QUERY, 1)?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -462,14 +494,16 @@ async fn process_exit_and_graph_replay() -> Result<()> {
 
     let factory = factory()?;
     let resource = ResourceId::try_new("indexes")?;
-    let mut specification =
-        factory.specification(ComponentId::try_new(COMPONENT)?, json!({"query":QUERY}))?;
+    let mut specification = factory.specification(
+        component_id()?,
+        json!({"query":QUERY, "stream":format!("{COMPONENT}/out")}),
+    )?;
     specification
         .dependencies
         .insert("processing".into(), vec![resource.clone()]);
-    let source = ComponentId::try_new("source")?;
-    let sink = ComponentId::try_new("sink")?;
-    let query = ComponentId::try_new(COMPONENT)?;
+    let source = ComponentId::try_new("47f9883c-b5bc-5df1-aef0-c070a8ad0948")?;
+    let sink = ComponentId::try_new("59819eaa-431d-5329-be28-00ff894a33d3")?;
+    let query = component_id()?;
     let output_port = PortId::try_new("out")?;
     let input_port = PortId::try_new("in")?;
     let received = Arc::new(Mutex::new(Vec::new()));
@@ -490,22 +524,35 @@ async fn process_exit_and_graph_replay() -> Result<()> {
                 )?)),
             ),
         )?
-        .source(Box::new(Source {
-            descriptor: ComponentDescriptor::try_new(
-                source.clone(),
-                vec![port("out", PortDirection::Output)?],
-            )?,
-            envelope: None,
-        }))
-        .component(specification, factory)
-        .sink(Box::new(Sink {
-            descriptor: ComponentDescriptor::try_new(
-                sink.clone(),
-                vec![port("in", PortDirection::Input)?],
-            )?,
-            received: received.clone(),
-            notification,
-        }))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(Source {
+                descriptor: ComponentDescriptor::try_new(
+                    source.clone(),
+                    vec![port("out", PortDirection::Output)?],
+                )?,
+                envelope: None,
+            }),
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            specification,
+            factory,
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(Sink {
+                descriptor: ComponentDescriptor::try_new(
+                    sink.clone(),
+                    vec![port("in", PortDirection::Input)?],
+                )?,
+                received: received.clone(),
+                notification,
+            }),
+        )
         .connect(
             EdgeDefinition::new(
                 Endpoint::new(source.clone(), output_port.clone()),
@@ -550,6 +597,7 @@ async fn process_exit_and_graph_replay() -> Result<()> {
     assert_eq!(delivered[0].envelope.system().sequence(), 2);
 
     let mut query = create(directory.path(), QUERY, 2)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(
         query.continue_transform().await?.is_empty(),

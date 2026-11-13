@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
+const SOURCE_COMPONENT_ID: &str = "64ae0536-16da-5306-9137-453be5793209";
+const REACTION_COMPONENT_ID: &str = "0ba93649-a2ad-5f34-8ee9-4b8050945416";
+
 fn init_logging() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .is_test(true)
@@ -87,14 +90,14 @@ async fn serve_feed(State(feed): State<Arc<RwLock<FeedMessage>>>) -> Vec<u8> {
 
 async fn wait_for_query_results(
     core: &Arc<DrasiLib>,
-    query_id: &str,
+    query_id: &drasi_core::ComponentName,
     predicate: impl Fn(&[serde_json::Value]) -> bool,
 ) -> Result<()> {
     let start = Instant::now();
     let timeout = Duration::from_secs(20);
 
     loop {
-        match core.get_query_results(query_id).await {
+        match core.get_query_results_by_name(query_id).await {
             Ok(results) => {
                 if predicate(&results) {
                     return Ok(());
@@ -137,9 +140,9 @@ async fn test_gtfs_rt_source_detects_insert_update_delete() -> Result<()> {
     let run_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
-    let source_id = format!("gtfs-test-source-{run_suffix}");
-    let query_id = format!("vp-query-{run_suffix}");
-    let reaction_id = format!("test-reaction-{run_suffix}");
+    let source_name = drasi_core::ComponentName::try_new(format!("gtfs-test-source-{run_suffix}"))?;
+    let query_id = drasi_core::ComponentName::try_new(format!("vp-query-{run_suffix}"))?;
+    let reaction_name = drasi_core::ComponentName::try_new(format!("test-reaction-{run_suffix}"))?;
     let core_id = format!("gtfs-test-core-{run_suffix}");
 
     let feed_state = Arc::new(RwLock::new(make_feed(&[
@@ -157,10 +160,13 @@ async fn test_gtfs_rt_source_detects_insert_update_delete() -> Result<()> {
         let _ = axum::serve(listener, app).await;
     });
 
-    let source = GtfsRtSource::builder(source_id.clone())
-        .with_vehicle_positions_url(format!("http://{addr}/vehicle_positions.pb"))
-        .with_poll_interval_secs(1)
-        .build()?;
+    let source = GtfsRtSource::builder(
+        drasi_core::ComponentId::try_new("64ae0536-16da-5306-9137-453be5793209")
+            .expect("fixture UUID"),
+    )
+    .with_vehicle_positions_url(format!("http://{addr}/vehicle_positions.pb"))
+    .with_poll_interval_secs(1)
+    .build()?;
 
     let query = Query::cypher(query_id.clone())
         .query(
@@ -169,17 +175,22 @@ async fn test_gtfs_rt_source_detects_insert_update_delete() -> Result<()> {
             RETURN vp.entity_id AS entity_id, vp.vehicle_id AS vehicle_id, vp.latitude AS latitude
             "#,
         )
-        .from_input(source_id.clone())
+        .from_input_by_name(source_name.clone())
         .auto_start(true)
         .enable_bootstrap(false)
-        .build();
+        .build()
+        .expect("valid query configuration");
 
-    let (reaction, _handle) = ApplicationReaction::builder(reaction_id)
-        .with_query(query_id.clone())
-        .build();
+    let (reaction, _handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("0ba93649-a2ad-5f34-8ee9-4b8050945416")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(query_id.clone())
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -193,9 +204,9 @@ async fn test_gtfs_rt_source_detects_insert_update_delete() -> Result<()> {
                     .clone(),
             )
             .with_id(core_id)
-            .with_source(source)
+            .with_source(source_name, source)
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(reaction_name, reaction)
             .build()
             .await?,
     );

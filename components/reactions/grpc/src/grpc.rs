@@ -43,17 +43,17 @@ pub struct GrpcReaction {
 }
 
 impl GrpcReaction {
-    pub fn builder(id: impl Into<String>) -> GrpcReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> GrpcReactionBuilder {
         GrpcReactionBuilder::new(id)
     }
 
     pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: GrpcReactionConfig,
     ) -> anyhow::Result<Self> {
-        config.validate(&queries)?;
-        let id = id.into();
+        config.validate(&drasi_lib::reactions::common::input_aliases(&queries))?;
+        let id = id.clone();
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
             base: ReactionBase::new(params),
@@ -63,13 +63,13 @@ impl GrpcReaction {
     }
 
     pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: GrpcReactionConfig,
         priority_queue_capacity: usize,
     ) -> anyhow::Result<Self> {
-        config.validate(&queries)?;
-        let id = id.into();
+        config.validate(&drasi_lib::reactions::common::input_aliases(&queries))?;
+        let id = id.clone();
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
         Ok(Self {
@@ -80,8 +80,8 @@ impl GrpcReaction {
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: GrpcReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -114,7 +114,7 @@ impl GrpcReaction {
 
 #[async_trait]
 impl Reaction for GrpcReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -128,7 +128,7 @@ impl Reaction for GrpcReaction {
         self.base.properties_or_serialize(&dto)
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -136,8 +136,8 @@ impl Reaction for GrpcReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -183,7 +183,7 @@ impl Reaction for GrpcReaction {
             .await;
 
         let shutdown_rx = self.base.create_shutdown_channel().await;
-        let reaction_name = self.base.id.clone();
+        let reaction_id = self.base.id.clone();
         let checkpoints = CheckpointState::load(&self.base).await;
         let policy = self
             .base
@@ -200,7 +200,7 @@ impl Reaction for GrpcReaction {
                     batch_flush_timeout_ms,
                 } => {
                     let params = FixedRunnerParams {
-                        reaction_name,
+                        reaction_id,
                         batch_size,
                         batch_flush_timeout_ms,
                         base,
@@ -213,7 +213,7 @@ impl Reaction for GrpcReaction {
                 }
                 adaptive @ BatchingConfig::Adaptive { .. } => {
                     let params = AdaptiveRunnerParams {
-                        reaction_name,
+                        reaction_id,
                         adaptive: adaptive.as_adaptive_config().unwrap_or_default(),
                         base,
                         config,

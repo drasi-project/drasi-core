@@ -291,14 +291,13 @@ impl Drop for Fence {
 mod tests {
     use super::*;
     use crate::computation::v1::{
-        ComponentId, GraphChangeCodec, InputPositionComparator, InputPositionPolicy, StreamId,
-        SystemMetadata,
+        GraphChangeCodec, InputPositionComparator, InputPositionPolicy, StreamId, SystemMetadata,
     };
     use bytes::Bytes;
 
     fn owner() -> Arc<QuerySourceProgress> {
         Arc::new(
-            QuerySourceProgress::new("test", ComponentId::try_new("sink").expect("sink"))
+            QuerySourceProgress::new("test", crate::test_helpers::component_id(101))
                 .expect("owner"),
         )
     }
@@ -390,7 +389,7 @@ mod tests {
         let stream = StreamId::try_new("source/out").expect("stream");
         owner
             .bind_input_boundary(
-                &ComponentId::try_new("source").expect("source"),
+                &crate::test_helpers::component_id(77),
                 crate::computation::v1::ProducerBoundary::Origin,
                 Some(Arc::new(
                     InputPositionPolicy::new(

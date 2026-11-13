@@ -30,7 +30,8 @@ use std::{
 /// deletes, rewinds or re-registers an unrelated legacy Source's WAL.
 pub struct WalSourceResource {
     pub provider: Arc<dyn WalProvider>,
-    pub partition: String,
+    pub scope: crate::StorageScope,
+    pub source_id: ComponentId,
 }
 
 pub struct WalReplaySource {
@@ -100,7 +101,7 @@ impl WalReplaySource {
         let entries = self
             .resource
             .provider
-            .read_from(&self.resource.partition, next)
+            .read_from(&self.resource.scope, &self.resource.source_id, next)
             .await?;
         let mut previous = self.cursor;
         for (sequence, event) in entries {
@@ -140,7 +141,7 @@ impl ComputationComponent for WalReplaySource {
             }
             if let Some(checkpoint) = snapshot
                 .checkpoints
-                .get(&SourceProgressKey::Source(self.resource.partition.clone()))
+                .get(&SourceProgressKey::Source(self.resource.source_id.clone()))
             {
                 if progress.replay_only() && self.resume > checkpoint.sequence {
                     anyhow::bail!(
@@ -158,7 +159,7 @@ impl ComputationComponent for WalReplaySource {
         }
         if let Some(consumers) = &self.consumers {
             let snapshot = consumers.read_only().wait_ready().await?;
-            let key = SourceProgressKey::Source(self.resource.partition.clone());
+            let key = SourceProgressKey::Source(self.resource.source_id.clone());
             let mut required = None;
             for (consumer, state) in &snapshot.consumers {
                 anyhow::ensure!(
@@ -211,7 +212,7 @@ impl EnvelopeSource for WalReplaySource {
                 )?)
                 .ok_or_else(|| anyhow::anyhow!("WAL event time cannot be represented"))?;
                 let event = Arc::new(SourceEventWrapper {
-                    source_id: self.resource.partition.clone(),
+                    source_id: self.resource.source_id.clone(),
                     event: SourceEvent::Change(change),
                     timestamp,
                     sequence,
@@ -261,6 +262,7 @@ impl Default for WalReplaySourceFactory {
                         (
                             Arc::from("stream"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::String,
                                 required: true,
                                 secret: false,
@@ -269,6 +271,7 @@ impl Default for WalReplaySourceFactory {
                         (
                             Arc::from("resume_after"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Integer,
                                 required: false,
                                 secret: false,

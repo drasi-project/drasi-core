@@ -88,7 +88,7 @@ mod tests {
         assert_eq!(size_of::<OutputSnapshotHandle>(), 2 * pointer);
         assert_eq!(size_of::<OutputSnapshotVTable>(), 16 + 2 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(ABI_VERSION, "1.0.0");
-        assert_eq!(WIRE_VERSION, 1);
+        assert_eq!(ABI_VERSION, "3.0.0");
+        assert_eq!(WIRE_VERSION, 3);
     }
 }

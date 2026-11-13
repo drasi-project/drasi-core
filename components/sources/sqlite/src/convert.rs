@@ -97,7 +97,7 @@ fn generate_element_id(
 
 pub fn change_event_to_source_change(
     event: ChangeEvent,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     configured_key_columns: Option<&[String]>,
 ) -> SourceChange {
     let labels: Arc<[Arc<str>]> = Arc::from([Arc::from(event.table.as_str())]);
@@ -117,7 +117,7 @@ pub fn change_event_to_source_change(
             SourceChange::Insert {
                 element: Element::Node {
                     metadata: ElementMetadata {
-                        reference: ElementReference::new(source_id, &element_id),
+                        reference: ElementReference::new(source_id.as_str(), &element_id),
                         labels,
                         effective_from,
                     },
@@ -137,7 +137,7 @@ pub fn change_event_to_source_change(
 
             SourceChange::update(Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(source_id, &element_id),
+                    reference: ElementReference::new(source_id.as_str(), &element_id),
                     labels,
                     effective_from,
                 },
@@ -156,7 +156,7 @@ pub fn change_event_to_source_change(
 
             SourceChange::Delete {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(source_id, &element_id),
+                    reference: ElementReference::new(source_id.as_str(), &element_id),
                     labels,
                     effective_from,
                 },
@@ -164,7 +164,7 @@ pub fn change_event_to_source_change(
         }
         _ => SourceChange::Delete {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, "unknown"),
+                reference: ElementReference::new(source_id.as_str(), "unknown"),
                 labels,
                 effective_from,
             },
@@ -192,13 +192,15 @@ mod tests {
             timestamp_ms: 123,
         };
 
-        let change =
-            change_event_to_source_change(event, "sqlite-source", Some(&["id".to_string()]));
+        let source_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000015d")
+                .expect("fixture UUID");
+        let change = change_event_to_source_change(event, &source_id, Some(&["id".to_string()]));
         match change {
             SourceChange::Insert {
                 element: Element::Node { metadata, .. },
             } => {
-                assert_eq!(metadata.reference.source_id.as_ref(), "sqlite-source");
+                assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                 assert_eq!(metadata.reference.element_id.as_ref(), "sensors:7");
                 assert_eq!(metadata.effective_from, 123);
             }
@@ -219,7 +221,12 @@ mod tests {
             timestamp_ms: 456,
         };
 
-        let change = change_event_to_source_change(event, "sqlite-source", None);
+        let change = change_event_to_source_change(
+            event,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000015d")
+                .expect("fixture UUID"),
+            None,
+        );
         match change {
             SourceChange::Update {
                 removed_properties,
@@ -249,7 +256,12 @@ mod tests {
             timestamp_ms: 789,
         };
 
-        let change = change_event_to_source_change(event, "sqlite-source", None);
+        let change = change_event_to_source_change(
+            event,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000015d")
+                .expect("fixture UUID"),
+            None,
+        );
         match change {
             SourceChange::Delete { metadata } => {
                 assert_eq!(metadata.reference.element_id.as_ref(), "events:t1:abc");

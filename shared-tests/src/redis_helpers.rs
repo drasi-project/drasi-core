@@ -52,12 +52,36 @@ pub async fn setup_redis() -> RedisGuard {
 async fn setup_redis_raw() -> (testcontainers::ContainerAsync<Redis>, String) {
     use testcontainers::runners::AsyncRunner;
 
+    let attribution = redis_attribution::from_env().expect("invalid Redis fixture attribution");
+    let observer = redis_attribution::observer_from_env(attribution.as_ref())
+        .expect("invalid Redis Observer admission");
+
     // Docker Desktop has a known bug where `PublishAllPorts: true` sporadically
     // fails to map exposed ports, returning an empty binding array even though the
     // container is running and the port is listed in ExposedPorts. Work around this
     // by retrying the entire container creation when port mapping fails.
     for attempt in 0..5u32 {
-        let container = Redis::default().with_tag("7-alpine").start().await.unwrap();
+        let mut image = Redis::default().with_tag("7-alpine");
+        if let Some(owner) = &attribution {
+            image = image
+                .with_container_name(owner.container_name(attempt + 1))
+                .with_labels(owner.labels(attempt + 1));
+        }
+        let container = if let Some(owner) = &attribution {
+            owner
+                .before_creation(attempt + 1, observer.as_ref(), || async {
+                    Ok(image.start().await?)
+                })
+                .await
+                .expect("persist and admit Redis fixture creation intent before starting")
+        } else {
+            image.start().await.unwrap()
+        };
+        if let Some(owner) = &attribution {
+            owner
+                .record_started(attempt + 1, container.id())
+                .expect("persist Redis fixture full container identity before port lookup");
+        }
 
         match container.get_host_port_ipv4(6379).await {
             Ok(redis_port) => {
@@ -75,6 +99,301 @@ async fn setup_redis_raw() -> (testcontainers::ContainerAsync<Redis>, String) {
         }
     }
     panic!("Failed to start Redis container with mapped port after 5 attempts");
+}
+
+mod redis_attribution {
+    use crate::fixture_attribution::{Attribution, Fixture, ObserverAdmission};
+    use anyhow::Result;
+    use std::ffi::OsString;
+
+    const OWNER_ENV: &str = "DRASI_REDIS_TEST_OWNER_TOKEN";
+    const DIRECTORY_ENV: &str = "DRASI_REDIS_TEST_RECEIPT_DIR";
+    const ACK_DIRECTORY_ENV: &str = "DRASI_REDIS_TEST_ACK_DIR";
+    const ACK_TIMEOUT_ENV: &str = "DRASI_REDIS_TEST_ACK_TIMEOUT_MS";
+    const ACK_EXPECTATIONS_ENV: &str = "DRASI_REDIS_TEST_ACK_EXPECTATIONS_SHA256";
+    const SOURCE: &str = "shared-tests/src/redis_helpers.rs";
+
+    pub(super) fn from_env() -> Result<Option<Attribution>> {
+        from_settings(std::env::var_os(OWNER_ENV), std::env::var_os(DIRECTORY_ENV))
+    }
+
+    pub(super) fn observer_from_env(
+        owner: Option<&Attribution>,
+    ) -> Result<Option<ObserverAdmission>> {
+        ObserverAdmission::from_settings(
+            owner,
+            std::env::var_os(ACK_DIRECTORY_ENV),
+            std::env::var_os(ACK_TIMEOUT_ENV),
+            std::env::var_os(ACK_EXPECTATIONS_ENV),
+        )
+    }
+
+    fn from_settings(
+        owner: Option<OsString>,
+        directory: Option<OsString>,
+    ) -> Result<Option<Attribution>> {
+        Attribution::from_settings(
+            Fixture::new("redis", "redis:7-alpine", SOURCE, 5),
+            (OWNER_ENV, DIRECTORY_ENV),
+            owner,
+            directory,
+        )
+    }
+
+    #[cfg(all(test, unix))]
+    mod tests {
+        use super::*;
+        use crate::fixture_attribution::directory_identity;
+        use anyhow::Context;
+        use serde_json::{json, Value};
+        use std::os::unix::{
+            ffi::OsStringExt,
+            fs::{symlink, MetadataExt, PermissionsExt},
+        };
+        use std::{
+            fs,
+            path::{Path, PathBuf},
+        };
+        use testcontainers::ImageExt;
+        use testcontainers_modules::redis::Redis;
+        use uuid::Uuid;
+
+        struct ReceiptDirectory(PathBuf);
+
+        impl ReceiptDirectory {
+            fn new() -> Result<Self> {
+                let path = std::env::temp_dir()
+                    .canonicalize()?
+                    .join(format!("drasi-redis-receipts-{}", Uuid::new_v4()));
+                fs::create_dir(&path)?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+                Ok(Self(path))
+            }
+
+            fn attribution(&self) -> Result<Attribution> {
+                from_settings(
+                    Some(Uuid::new_v4().to_string().into()),
+                    Some(self.0.clone().into_os_string()),
+                )?
+                .context("enabled Redis attribution")
+            }
+        }
+
+        impl Drop for ReceiptDirectory {
+            fn drop(&mut self) {
+                if self.0.exists() {
+                    fs::remove_dir_all(&self.0)
+                        .expect("remove this test's private receipt directory");
+                }
+            }
+        }
+
+        #[test]
+        fn attribution_is_disabled_only_when_both_settings_are_absent() -> Result<()> {
+            assert!(from_settings(None, None)?.is_none());
+            assert!(from_settings(Some(Uuid::new_v4().to_string().into()), None).is_err());
+            assert!(from_settings(None, Some("/missing".into())).is_err());
+            Ok(())
+        }
+
+        #[test]
+        fn attribution_rejects_invalid_settings() -> Result<()> {
+            let directory = ReceiptDirectory::new()?;
+            for token in [
+                "",
+                "not-a-uuid",
+                "00000000-0000-0000-0000-000000000000",
+                "AA4B0192-1F0F-5BB8-A458-820438EE7BEA",
+            ] {
+                assert!(from_settings(
+                    Some(token.into()),
+                    Some(directory.0.clone().into_os_string())
+                )
+                .is_err());
+            }
+            assert!(from_settings(
+                Some(OsString::from_vec(vec![0xff])),
+                Some(directory.0.clone().into_os_string())
+            )
+            .is_err());
+            assert!(from_settings(
+                Some(Uuid::new_v4().to_string().into()),
+                Some(OsString::from_vec(vec![0xff]))
+            )
+            .is_err());
+            assert!(directory_identity(Path::new("relative")).is_err());
+            assert!(directory_identity(&directory.0.join("missing")).is_err());
+            assert!(directory_identity(&directory.0.join("../")).is_err());
+            fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o755))?;
+            assert!(directory.attribution().is_err());
+            Ok(())
+        }
+
+        #[test]
+        fn attribution_rejects_symlink_directory_traversal() -> Result<()> {
+            let directory = ReceiptDirectory::new()?;
+            let target = ReceiptDirectory::new()?;
+            let link = directory.0.join("link");
+            symlink(&target.0, &link)?;
+            assert!(directory_identity(&link).is_err());
+            assert!(directory_identity(&link.join("missing")).is_err());
+            Ok(())
+        }
+
+        #[test]
+        fn attribution_names_and_labels_distinguish_fixtures_and_attempts() -> Result<()> {
+            let directory = ReceiptDirectory::new()?;
+            let first = directory.attribution()?;
+            let second = from_settings(
+                Some(first.owner_token.clone().into()),
+                Some(directory.0.clone().into_os_string()),
+            )?
+            .context("second fixture")?;
+            assert_ne!(first.container_name(1), first.container_name(2));
+            assert_ne!(first.container_name(1), second.container_name(1));
+            assert_eq!(first.labels(1)["drasi.test.owner"], first.owner_token);
+            assert_ne!(
+                first.labels(1)["drasi.test.fixture"],
+                second.labels(1)["drasi.test.fixture"]
+            );
+            assert_eq!(first.labels(2)["drasi.test.attempt"], "2");
+            let image = Redis::default()
+                .with_tag("7-alpine")
+                .with_container_name(first.container_name(1))
+                .with_labels(first.labels(1));
+            assert_eq!(image.container_name(), &Some(first.container_name(1)));
+            for (key, value) in first.labels(1) {
+                assert_eq!(image.labels().get(key), Some(&value));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn intent_and_started_receipts_share_exact_immutable_identity() -> Result<()> {
+            let directory = ReceiptDirectory::new()?;
+            let owner = directory.attribution()?;
+            owner.record_intent(1)?;
+            owner.record_started(1, &"a".repeat(64))?;
+            let intent_path = directory
+                .0
+                .join(format!("{}-a1.intent.json", owner.fixture_id));
+            let started_path = directory
+                .0
+                .join(format!("{}-a1.started.json", owner.fixture_id));
+            let intent: Value = serde_json::from_slice(&fs::read(&intent_path)?)?;
+            let mut started: Value = serde_json::from_slice(&fs::read(&started_path)?)?;
+            assert_eq!(started["container_id"], "a".repeat(64));
+            assert_eq!(started["phase"], "started");
+            started
+                .as_object_mut()
+                .context("started receipt")?
+                .remove("container_id");
+            started["phase"] = json!("creation_intent");
+            assert_eq!(started, intent);
+            assert_eq!(intent["actor_pid"], std::process::id());
+            assert_eq!(intent["schema_version"], 1);
+            assert_eq!(intent["image"], "redis:7-alpine");
+            assert_eq!(intent["phase"], "creation_intent");
+            assert_eq!(intent["test_name"], json!(std::thread::current().name()));
+            assert_eq!(intent["fixture_source"], SOURCE);
+            assert_eq!(
+                intent["executable"],
+                json!(std::env::current_exe()?.canonicalize()?)
+            );
+            assert_eq!(intent["container_name"], owner.container_name(1));
+            assert_eq!(intent["labels"], json!(owner.labels(1)));
+            for path in [intent_path, started_path] {
+                let metadata = fs::metadata(path)?;
+                assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+                assert_eq!(metadata.uid(), fs::metadata(&directory.0)?.uid());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn receipts_refuse_overwrite_and_noncanonical_container_ids() -> Result<()> {
+            let directory = ReceiptDirectory::new()?;
+            let owner = directory.attribution()?;
+            owner.record_intent(1)?;
+            let path = directory
+                .0
+                .join(format!("{}-a1.intent.json", owner.fixture_id));
+            let original = fs::read(&path)?;
+            assert!(owner.record_intent(1).is_err());
+            assert_eq!(fs::read(&path)?, original);
+            for id in ["short".to_owned(), "A".repeat(64), "g".repeat(64)] {
+                assert!(owner.record_started(1, &id).is_err());
+            }
+            assert_eq!(fs::read_dir(&directory.0)?.count(), 1);
+            owner.record_started(1, &"a".repeat(64))?;
+            assert!(owner.record_started(1, &"b".repeat(64)).is_err());
+            assert_eq!(fs::read(&path)?, original);
+            Ok(())
+        }
+
+        #[test]
+        fn receipt_storage_failure_is_explicit_before_creation_intent() -> Result<()> {
+            let directory = ReceiptDirectory::new()?;
+            let owner = directory.attribution()?;
+            fs::remove_dir(&directory.0)?;
+            assert!(owner.record_intent(1).is_err());
+            assert!(!directory.0.exists());
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn observer_immediate_exit_child() -> Result<()> {
+            let owner = from_env()?;
+            let observer = observer_from_env(owner.as_ref())?;
+            let calls = std::cell::Cell::new(0);
+            if let Some(observer) = &observer {
+                let owner = owner.as_ref().context("opted-in child attribution")?;
+                owner
+                    .before_creation(1, Some(observer), || async {
+                        calls.set(calls.get() + 1);
+                        println!(
+                            "{}",
+                            json!({
+                                "event": "observer-admitted-immediate-exit-child",
+                                "mode": "genuine-observer-opt-in",
+                                "actor_pid": std::process::id(),
+                                "owner_token": owner.owner_token,
+                                "fixture_id": owner.fixture_id,
+                            })
+                        );
+                        Ok(())
+                    })
+                    .await?;
+                assert_eq!(calls.get(), 1);
+                assert_eq!(
+                    fs::read_dir(
+                        std::env::var_os(DIRECTORY_ENV).context("child receipt directory")?
+                    )?
+                    .count(),
+                    1,
+                    "the immediate-exit child creates only its durable intent, never a container"
+                );
+            } else {
+                let directory = ReceiptDirectory::new()?;
+                let owner = directory.attribution()?;
+                owner
+                    .before_creation(1, None, || async {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    })
+                    .await?;
+                assert_eq!(calls.get(), 1);
+                println!(
+                    "{}",
+                    json!({
+                        "event": "observer-admission-default-off",
+                        "mode": "default-off-only-not-handshake-evidence",
+                    })
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Guard wrapper for Redis container that ensures proper cleanup

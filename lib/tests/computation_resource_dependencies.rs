@@ -1,6 +1,9 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -672,9 +675,10 @@ fn selected_snapshots_and_inspection_preserve_transitive_resource_dependencies()
             ResourceRequirement::exactly_one::<Owner>(ResourceRole::StateStore),
         )]),
     }));
-    let component = ComponentId::try_new("user")?;
+    let component = fixture_support::component_id(750);
     let descriptor = ComponentDescriptor::try_new(component.clone(), vec![])?;
     desired.components.push(DesiredComponent {
+        name: ComponentName::try_new("user")?,
         descriptor: descriptor.clone(),
         role: ComponentRole::Service,
         completion: None,

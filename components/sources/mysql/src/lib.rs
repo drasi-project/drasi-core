@@ -61,12 +61,12 @@ pub struct MySqlReplicationSource {
     /// Per-subscriber resume positions from checkpoint recovery.
     /// Populated during subscribe() when a query provides resume_from bytes.
     /// The replication stream uses the minimum position as its start point.
-    subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
+    subscriber_resume_positions: StdArc<RwLock<HashMap<drasi_lib::ComponentId, ReplicationState>>>,
 }
 
 impl MySqlReplicationSource {
-    pub fn new(id: impl Into<String>, config: MySqlSourceConfig) -> Result<Self> {
-        let id = id.into();
+    pub fn new(id: drasi_lib::ComponentId, config: MySqlSourceConfig) -> Result<Self> {
+        let id = id.clone();
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -79,12 +79,12 @@ impl MySqlReplicationSource {
     }
 
     pub fn with_dispatch(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         config: MySqlSourceConfig,
         dispatch_mode: Option<DispatchMode>,
         dispatch_buffer_capacity: Option<usize>,
     ) -> Result<Self> {
-        let id = id.into();
+        let id = id.clone();
         let mut params = SourceBaseParams::new(id);
         if let Some(mode) = dispatch_mode {
             params = params.with_dispatch_mode(mode);
@@ -102,14 +102,14 @@ impl MySqlReplicationSource {
         })
     }
 
-    pub fn builder(id: impl Into<String>) -> MySqlSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> MySqlSourceBuilder {
         MySqlSourceBuilder::new(id)
     }
 }
 
 #[async_trait]
 impl Source for MySqlReplicationSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -335,8 +335,8 @@ impl Source for MySqlReplicationSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         self.base
             .set_position_comparator(crate::types::MySqlPositionComparator)
             .await;
@@ -346,7 +346,7 @@ impl Source for MySqlReplicationSource {
         self.base.set_bootstrap_provider(provider).await;
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_lib::ComponentId) {
         // Remove the per-subscriber resume position so the replication stream
         // no longer pins its start position on behalf of this query.
         self.subscriber_resume_positions
@@ -371,7 +371,7 @@ impl Drop for MySqlReplicationSource {
 /// Provides a fluent API for constructing MySQL source configurations
 /// with sensible defaults.
 pub struct MySqlSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     host: String,
     port: u16,
     database: String,
@@ -390,9 +390,9 @@ pub struct MySqlSourceBuilder {
 }
 
 impl MySqlSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             host: "localhost".to_string(),
             port: 3306,
             database: String::new(),

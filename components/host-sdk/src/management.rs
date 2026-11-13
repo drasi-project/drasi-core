@@ -27,6 +27,23 @@ pub use native::{
 };
 pub use time_merge::SourceTimeMergeStorageConfig;
 
+fn managed_resource_component_id(
+    instance: &str,
+    graph: &str,
+    resource: &ResourceId,
+) -> Result<ComponentId> {
+    let owner = ComponentId::try_new("4970a5d6-45f1-5a0f-906f-3f164bccdc71")?;
+    Ok(ComponentId::derive_owned(
+        &owner,
+        &format!(
+            "{}:{instance}:{}:{graph}:{}",
+            instance.len(),
+            graph.len(),
+            resource.as_str()
+        ),
+    )?)
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum Recipe {
@@ -645,10 +662,7 @@ impl ManagementResourceResolver for HostManagementResources {
                     .get(&provider)
                     .context("shared storage index provider is not registered")?;
                 let scope = format!("shared/{}/{instance}/{graph}", instance.len());
-                let indexes = provider
-                    .provider
-                    .create_indexes(&scope, specification.id.as_str())
-                    .await?;
+                let indexes = provider.provider.create_indexes(&scope, &component).await?;
                 SharedStorageGroup::new(graph, component, indexes)?.resource()
             }
             Recipe::SharedQos(_) => unreachable!("shared QoS resolved with dependencies"),
@@ -713,10 +727,9 @@ impl ManagementResourceResolver for HostManagementResources {
                         "durable QoS cannot use volatile indexes"
                     );
                     let scope = format!("qos/{}/{instance}/{graph}", instance.len());
-                    let indexes = provider
-                        .provider
-                        .create_indexes(&scope, specification.id.as_str())
-                        .await?;
+                    let component =
+                        managed_resource_component_id(instance, graph, &specification.id)?;
+                    let indexes = provider.provider.create_indexes(&scope, &component).await?;
                     QosChannel::persistent_with_recovery(
                         definition,
                         indexes,
@@ -759,6 +772,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn component_id(value: u128) -> ComponentId {
+        ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+    }
+
     #[test]
     fn persistent_recipes_stay_protected_without_live_handles_and_fast_recipes_remain_editable(
     ) -> Result<()> {
@@ -774,6 +791,7 @@ mod tests {
             retention: RetentionPolicy::Backpressure,
             subscribers: BTreeMap::from([("sink".into(), SubscriptionStart::Earliest)]),
         };
+        let query = component_id(46);
         for (recipe, role, protected) in [
             (
                 json!({"kind":"memoryIndexes"}),
@@ -786,7 +804,7 @@ mod tests {
                 true,
             ),
             (
-                json!({"kind":"sharedStorage","provider":"unavailable","component":"query"}),
+                json!({"kind":"sharedStorage","provider":"unavailable","component":query.as_str()}),
                 ResourceRole::IndexBackend,
                 true,
             ),
@@ -853,7 +871,9 @@ mod tests {
             ownership: ResourceOwnership::Graph,
             binding: "journal".into(),
         };
-        let group_recipe = json!({"kind":"sharedStorage","provider":"disk","component":"query"});
+        let query = component_id(46);
+        let group_recipe =
+            json!({"kind":"sharedStorage","provider":"disk","component":query.as_str()});
         let definition = QosChannelDefinition {
             stream: StreamId::try_new("query/out")?,
             capacity: NonZeroUsize::new(4).expect("capacity"),
@@ -947,8 +967,9 @@ mod tests {
 
     #[test]
     fn recovery_recipes_bind_actual_scope_and_reject_identity_overrides() -> Result<()> {
+        let source = component_id(77);
         let recipe = json!({
-            "kind":"admission", "component":"source",
+            "kind":"admission", "component":source.as_str(),
             "failureScope":drasi_core::interface::FailureMode::ProcessRestart,
             "maxProducers":2, "receiptsPerProducer":4
         });
@@ -1018,7 +1039,7 @@ mod tests {
         };
         let mut recipe = json!({
             "kind":"qos", "definition":definition, "provider":"disk",
-            "recovery":{"kind":"admission","component":"source",
+            "recovery":{"kind":"admission","component":component_id(77).as_str(),
                 "failureScope":drasi_core::interface::FailureMode::ProcessRestart,
                 "maxProducers":2,"receiptsPerProducer":4}
         });
@@ -1041,7 +1062,9 @@ mod tests {
                 .await?;
             let channel = handle.get::<QosChannel>()?;
             let session = channel
-                .register_producer(ComponentId::try_new("client")?)
+                .register_producer(ComponentId::try_new(
+                    "aa374518-1a30-514a-9685-e7af374100c4",
+                )?)
                 .await?;
             channel.admit(&session, 1, &event).await?;
             let mut connection = definition
@@ -1089,7 +1112,8 @@ mod tests {
             ownership: ResourceOwnership::Graph,
             binding: "progress".into(),
         };
-        let recipe = json!({"kind":"sourceProgress","component":"query"});
+        let query = component_id(46);
+        let recipe = json!({"kind":"sourceProgress","component":query.as_str()});
         let first = resolver
             .resolve("first", "instance", &specification, &recipe)
             .await?;
@@ -1099,14 +1123,14 @@ mod tests {
         let first = first.get::<QuerySourceProgressResource>()?;
         let second = second.get::<QuerySourceProgressResource>()?;
         assert_eq!(first.0.graph_id(), "instance");
-        assert_eq!(first.0.query_id().as_str(), "query");
+        assert_eq!(first.0.query_id(), &query);
         assert!(!Arc::ptr_eq(&first.0, &second.0));
         for recipe in [
             json!({"kind":"sourceProgress","component":""}),
-            json!({"kind":"sourceProgress","component":"query","persistent":true}),
-            json!({"kind":"sourceProgress","component":"query","ready":true}),
-            json!({"kind":"sourceProgress","component":"query","graph":"other"}),
-            json!({"kind":"sourceProgress","component":"query","checkpoints":{}}),
+            json!({"kind":"sourceProgress","component":query.as_str(),"persistent":true}),
+            json!({"kind":"sourceProgress","component":query.as_str(),"ready":true}),
+            json!({"kind":"sourceProgress","component":query.as_str(),"graph":"other"}),
+            json!({"kind":"sourceProgress","component":query.as_str(),"checkpoints":{}}),
         ] {
             assert!(resolver
                 .resolve("first", "instance", &specification, &recipe)

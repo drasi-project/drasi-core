@@ -36,9 +36,14 @@ pub async fn read_http_request(socket: &mut tokio::net::TcpStream) -> (String, s
     (header, serde_json::from_slice(&body).unwrap())
 }
 
+fn query_id() -> drasi_lib::ComponentId {
+    drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+        .expect("lifecycle fixture query UUID")
+}
+
 pub fn result(sequence: u64) -> QueryResult {
-    QueryResult::new(
-        "q1".into(),
+    let mut result = QueryResult::new(
+        query_id(),
         sequence,
         chrono::Utc::now(),
         vec![ResultDiff::Add {
@@ -46,20 +51,27 @@ pub fn result(sequence: u64) -> QueryResult {
             row_signature: sequence,
         }],
         HashMap::new(),
-    )
+    );
+    result.query_name = Some(drasi_lib::ComponentName::try_new("q1").unwrap());
+    result
 }
 
 pub async fn initialize(reaction: &dyn Reaction, store: Arc<dyn StateStoreProvider>) {
     let (updates, _receiver) = tokio::sync::mpsc::channel(64);
     reaction
-        .initialize(drasi_lib::context::ReactionRuntimeContext::new(
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
             "lifecycle",
-            reaction.id(),
+            reaction.id().clone(),
+            vec![query_id()],
             Some(store),
             updates,
             None,
         ))
         .await;
+    reaction
+        .initialize()
+        .await
+        .expect("reaction initialization");
 }
 
 pub async fn assert_incomplete_stop(reaction: &dyn Reaction, base: &ReactionBase) {
@@ -176,57 +188,94 @@ impl ControlledStore {
 
 #[async_trait::async_trait]
 impl StateStoreProvider for ControlledStore {
-    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+    async fn get(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<Option<Vec<u8>>> {
         self.inner.get(store_id, key).await
     }
 
-    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+    async fn set(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<()> {
         self.entered.notify_one();
         self.release.acquire().await.unwrap().forget();
         assert!(!self.panic_on_write, "injected checkpoint panic");
         self.inner.set(store_id, key, value).await
     }
 
-    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn delete(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<bool> {
         self.inner.delete(store_id, key).await
     }
 
-    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn contains_key(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<bool> {
         self.inner.contains_key(store_id, key).await
     }
 
     async fn get_many(
         &self,
-        store_id: &str,
+        store_id: &drasi_core::interface::StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
         self.inner.get_many(store_id, keys).await
     }
 
-    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()> {
         for (key, value) in entries {
             self.set(store_id, key, value.to_vec()).await?;
         }
         Ok(())
     }
 
-    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+    async fn delete_many(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        keys: &[&str],
+    ) -> StateStoreResult<usize> {
         self.inner.delete_many(store_id, keys).await
     }
 
-    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn clear_store(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<usize> {
         self.inner.clear_store(store_id).await
     }
 
-    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+    async fn list_keys(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<Vec<String>> {
         self.inner.list_keys(store_id).await
     }
 
-    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+    async fn store_exists(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<bool> {
         self.inner.store_exists(store_id).await
     }
 
-    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn key_count(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<usize> {
         self.inner.key_count(store_id).await
     }
 }

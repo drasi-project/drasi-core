@@ -18,8 +18,6 @@ use drasi_computation_plugin_sdk::{
 use std::sync::Arc;
 
 pub use config::HttpSourceConfig;
-/// Compatibility name for this component's HTTP configuration.
-pub type SourceConfig = HttpSourceConfig;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const HTTP_SOURCE: &str = "drasi.network/http-source";

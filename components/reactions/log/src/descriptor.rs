@@ -116,15 +116,15 @@ impl ReactionPluginDescriptor for LogReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         let dto: LogReactionConfigDto = serde_json::from_value(config_json.clone())?;
 
-        let mut builder = LogReactionBuilder::new(id)
-            .with_queries(query_ids)
+        let mut builder = LogReactionBuilder::new(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start);
 
         if let Some(ref default_template) = dto.default_template {

@@ -46,10 +46,15 @@ fn plugins(dynamic: bool) -> Result<Vec<Arc<NativePlugin>>> {
         .map(NativePlugin::from_definition)
         .collect();
     }
-    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(|p| PathBuf::from(p).join("debug")))
-        .context("DRASI_NATIVE_PLUGIN_DIR must point to freshly built SQL Server libraries")?;
+    let directory = match std::env::var_os("DRASI_NATIVE_PLUGIN_DIR") {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_exe()?
+            .parent()
+            .context("test executable directory")?
+            .parent()
+            .context("native library directory")?
+            .join("plugins"),
+    };
     ["source_mssql", "bootstrap_mssql", "sink_storedproc_mssql"]
         .into_iter()
         .map(|name| {
@@ -217,13 +222,27 @@ async fn exercise(dynamic: bool) -> Result<()> {
             .provide_resource(resource(name), handle)?;
     }
     builder = builder
-        .component(source, source_factory)
-        .component(sink, sink_factory)
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            source,
+            source_factory,
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
+                .expect("fixture component name"),
+            sink,
+            sink_factory,
+        )
         .bind_stream(endpoint("items", "out"), stream("items"));
     for query in queries {
         let name = query.descriptor().id().to_string();
         builder = builder
-            .transformer(Box::new(query))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
             .bind_stream(endpoint(&name, "out"), stream(&name))
             .connect(
                 EdgeDefinition::new(endpoint("items", "out"), endpoint(&name, "in")),
@@ -253,10 +272,17 @@ async fn exercise(dynamic: bool) -> Result<()> {
         .await?;
     let proof = async {
         core.start().await?;
-        for name in ["all","high"] { tokio::time::timeout(Duration::from_secs(25),core.computation_component(name)?.wait_started()).await??; }
+        for name in ["all","high"] {
+            let name = drasi_core_types::ComponentName::try_new(name)?;
+            tokio::time::timeout(
+                Duration::from_secs(25),
+                core.component_by_name(&name)?.wait_started(),
+            )
+            .await??;
+        }
         wait_rows(&results[0],json!([{"id":1,"value":10},{"id":2,"value":20}])).await?;
         wait_rows(&results[1],json!([{"id":2,"value":20}])).await?;
-        let schema = tokio::time::timeout(Duration::from_secs(5),core.get_source_schema("items")).await??
+        let schema = tokio::time::timeout(Duration::from_secs(5),core.get_source_schema_by_name(&drasi_core_types::ComponentName::try_new("items").expect("fixture component name"))).await??
             .context("Host did not retain SQL Server schema capability at factory creation")?;
         ensure!(schema.nodes.iter().any(|node| node.label == "Items" &&
             node.properties.iter().any(|property| property.name == "value")),"public inspection did not return SQL Server catalog");
@@ -266,12 +292,15 @@ async fn exercise(dynamic: bool) -> Result<()> {
         db.sql("BEGIN TRANSACTION; UPDATE {{schema}}.Items SET value=999 WHERE id=1; ROLLBACK; UPDATE {{schema}}.Items SET id=4 WHERE id=1; DELETE FROM {{schema}}.Items WHERE id=2;")?;
         wait_rows(&results[0],json!([{"id":3,"value":30},{"id":4,"value":25}])).await?;
         wait_rows(&results[1],json!([{"id":3,"value":30},{"id":4,"value":25}])).await?;
-        ensure!(owners.iter().all(|owner| owner.snapshot().checkpoints.contains_key(&SourceProgressKey::Source("items".into()))),"actual query checkpoints missing");
+        ensure!(owners.iter().all(|owner| owner.snapshot().checkpoints.contains_key(&SourceProgressKey::Source(drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b3").expect("fixture UUID")))),"actual query checkpoints missing");
         core.stop().await?;
         ensure!(!db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.Effects WHERE operation=N'UPDATE' AND id=1 AND value=25")?.starts_with('0'),"procedure update was not executed");
         db.sql("UPDATE {{schema}}.Items SET value=45 WHERE id=4;")?;
         core.start().await?;
-        for name in ["all","high"] { core.computation_component(name)?.wait_started().await?; }
+        for name in ["all","high"] {
+            let name = drasi_core_types::ComponentName::try_new(name)?;
+            core.component_by_name(&name)?.wait_started().await?;
+        }
         wait_rows(&results[0],json!([{"id":3,"value":30},{"id":4,"value":45}])).await?;
         wait_rows(&results[1],json!([{"id":3,"value":30},{"id":4,"value":45}])).await?;
         Ok::<_,anyhow::Error>(())
@@ -301,18 +330,22 @@ fn dynamic_metadata_has_all_three_real_roles() -> Result<()> {
     Ok(())
 }
 #[tokio::test]
+#[ignore = "requires an explicitly configured isolated SQL Server fixture"]
 async fn static_current_thread_real_sql_server() -> Result<()> {
     exercise(false).await
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an explicitly configured isolated SQL Server fixture"]
 async fn static_multi_thread_real_sql_server() -> Result<()> {
     exercise(false).await
 }
 #[tokio::test]
+#[ignore = "requires an explicitly configured isolated SQL Server fixture"]
 async fn dynamic_current_thread_real_sql_server() -> Result<()> {
     exercise(true).await
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an explicitly configured isolated SQL Server fixture"]
 async fn dynamic_multi_thread_real_sql_server() -> Result<()> {
     exercise(true).await
 }

@@ -505,7 +505,7 @@ mod tests {
             identity: GraphProducerIdentity::volatile(
                 "scope".into(),
                 "graph".into(),
-                ComponentId::try_new("source").expect("component"),
+                crate::test_helpers::component_id(1),
                 channel.definition().stream.clone(),
             )
             .expect("identity"),
@@ -677,7 +677,7 @@ mod tests {
                 identity: GraphProducerIdentity::volatile(
                     "scope".into(),
                     "graph".into(),
-                    ComponentId::try_new("source").unwrap(),
+                    crate::test_helpers::component_id(1),
                     channel.definition().stream.clone(),
                 )
                 .unwrap(),

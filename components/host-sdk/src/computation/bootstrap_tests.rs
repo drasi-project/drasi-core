@@ -16,8 +16,11 @@ fn scope() -> sdk::Scope {
 }
 fn progress() -> Arc<QuerySourceProgress> {
     Arc::new(
-        QuerySourceProgress::new("native-bootstrap", ComponentId::try_new("query").unwrap())
-            .unwrap(),
+        QuerySourceProgress::new(
+            "native-bootstrap",
+            ComponentId::try_new("6ddf3eb2-187f-5740-a6ba-a07f98257ca8").unwrap(),
+        )
+        .unwrap(),
     )
 }
 
@@ -36,7 +39,7 @@ fn bootstrap_plugin() -> Arc<NativePlugin> {
 fn provider(config: Value) -> Arc<NativeBootstrapProxy> {
     bootstrap_plugin().bootstrap_factories()[0]
         .create_provider(
-            ComponentId::try_new("bootstrap").unwrap(),
+            ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af").unwrap(),
             config,
             None,
             None,
@@ -151,7 +154,10 @@ async fn native_bootstrap_c_boundary_preserves_state_stream_and_final_handover(
     assert_eq!(count, 3);
     let watermarks = provider.complete_snapshot().await?;
     assert_eq!(watermarks[0].sequence, u64::MAX);
-    assert_eq!(watermarks[0].source_id.as_deref(), Some("source"));
+    assert_eq!(
+        watermarks[0].source_id.as_ref(),
+        Some(&ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"))
+    );
     assert_eq!(watermarks[0].position.as_deref(), Some([255, 0].as_slice()));
     assert_eq!(
         provider.completion_state()?.as_deref(),
@@ -318,7 +324,7 @@ async fn native_bootstrap_non_ready_reprepares_without_stop_static_and_dynamic(
         ] {
             for stateful in [false, true] {
                 let provider = factory.create_provider(
-                    ComponentId::try_new("bootstrap")?,
+                    ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
                     json!({"mode":mode,"count":2}),
                     None,
                     None,
@@ -378,7 +384,7 @@ async fn native_bootstrap_non_ready_retry_preserves_snapshot_and_cancellation_gu
             ("reset", BootstrapPreparation::ResetRequired),
         ] {
             let provider = factory.create_provider(
-                ComponentId::try_new("bootstrap")?,
+                ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
                 json!({"mode":mode}),
                 None,
                 None,
@@ -398,7 +404,7 @@ async fn native_bootstrap_non_ready_retry_preserves_snapshot_and_cancellation_gu
             provider.stop().await?;
         }
         let provider = factory.create_provider(
-            ComponentId::try_new("bootstrap")?,
+            ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
             json!({"mode":"refresh-once"}),
             None,
             None,
@@ -437,7 +443,7 @@ async fn native_bootstrap_non_ready_query_reset_reprepares_static_and_dynamic() 
         for mode in ["refresh-once", "reset-once"] {
             let owner = progress();
             let bootstrap = factory.create_provider(
-                ComponentId::try_new("bootstrap")?,
+                ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
                 json!({"mode":mode, "count":2, "durability":StorageDurability::VOLATILE}),
                 None,
                 None,
@@ -491,7 +497,7 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
     let factory = &plugin.bootstrap_factories()[1];
     assert!(factory
         .create_provider(
-            ComponentId::try_new("bootstrap")?,
+            ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
             json!({}),
             Some(scope()),
             None
@@ -500,14 +506,14 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
     let owner = progress();
     assert!(factory
         .create_provider(
-            ComponentId::try_new("bootstrap")?,
+            ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
             json!({"mode":"forge-reader"}),
             Some(scope()),
             Some(owner.clone()),
         )
         .is_err());
     let changed = factory.create_provider(
-        ComponentId::try_new("bootstrap")?,
+        ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
         json!({"mode":"change-reader"}),
         Some(scope()),
         Some(owner.clone()),
@@ -521,7 +527,7 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
     changed.stop().await?;
 
     let bootstrap = factory.create_provider(
-        ComponentId::try_new("bootstrap")?,
+        ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
         json!({}),
         Some(scope()),
         Some(owner.clone()),
@@ -546,7 +552,7 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
 fn definition() -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: "native-bootstrap".into(),
-        id: ComponentId::try_new("query").unwrap(),
+        id: ComponentId::try_new("6ddf3eb2-187f-5740-a6ba-a07f98257ca8").unwrap(),
         query: "MATCH (n:Item) RETURN n.value AS value".into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("results").unwrap(),
@@ -590,7 +596,7 @@ async fn native_bootstrap_real_library_commits_snapshot_and_recovers_without_res
     for count in [3, 99] {
         let owner = progress();
         let bootstrap = factory.create_provider(
-            ComponentId::try_new("bootstrap")?,
+            ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
             json!({"count":count, "durability":StorageDurability::LOCAL_PROCESS_RESTART}),
             Some(scope()),
             Some(owner.clone()),
@@ -611,7 +617,11 @@ async fn native_bootstrap_real_library_commits_snapshot_and_recovers_without_res
             3
         );
         assert_eq!(
-            owner.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+            owner.snapshot().checkpoints[&SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            )]
+                .sequence,
             u64::MAX
         );
         query.stop().await?;
@@ -627,7 +637,7 @@ async fn native_bootstrap_real_library_preserves_initialization_intent_after_can
     for mode in ["pending", "require-replay"] {
         let owner = progress();
         let bootstrap = plugin.bootstrap_factories()[1].create_provider(
-            ComponentId::try_new("bootstrap")?,
+            ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
             json!({"mode":mode, "durability":StorageDurability::LOCAL_PROCESS_RESTART}),
             Some(scope()),
             Some(owner.clone()),
@@ -676,7 +686,7 @@ async fn native_bootstrap_recipe_uses_declared_owners_and_unresolved_secrets() -
     let progress_id = ResourceId::try_new("progress")?;
     let secrets_id = ResourceId::try_new("secrets")?;
     let config = NativeBootstrapConfig {
-        component: ComponentId::try_new("query")?,
+        component: ComponentId::try_new("6ddf3eb2-187f-5740-a6ba-a07f98257ca8")?,
         implementation: plugin.bootstrap_factories()[1]
             .metadata()
             .implementation
@@ -771,7 +781,15 @@ async fn native_bootstrap_recipe_uses_declared_owners_and_unresolved_secrets() -
         ("native-bootstrap", "native-bootstrap", "other"),
     ] {
         assert!(provider
-            .validate_query_scope(instance, graph, &ComponentId::try_new(component)?)
+            .validate_query_scope(
+                instance,
+                graph,
+                &match component {
+                    "query" => ComponentId::try_new("00000000-0000-0000-0000-00000000002e",)?,
+                    "other" => ComponentId::try_new("00000000-0000-0000-0000-00000000002f",)?,
+                    _ => unreachable!(),
+                },
+            )
             .is_err());
     }
     let directory = tempfile::tempdir()?;
@@ -790,7 +808,11 @@ async fn native_bootstrap_recipe_uses_declared_owners_and_unresolved_secrets() -
         .declare_resource(specification)?
         .provide_resource(id, handle)?
         .component(
-            service.specification(ComponentId::try_new("owner")?, json!({}))?,
+            ComponentName::try_new("owner")?,
+            service.specification(
+                ComponentId::try_new("28c0b5df-4504-5437-b597-468cb73ff237")?,
+                json!({}),
+            )?,
             service,
         )
         .build()?;
@@ -815,7 +837,7 @@ fn bootstrap_recipes_accept_native_query_owners_without_relaxing_scope() -> anyh
         Arc::new(ContinuousQueryFactory::default()),
         plugin.query_factory()?,
     ];
-    let owner = ComponentId::try_new("query")?;
+    let owner = ComponentId::try_new("6ddf3eb2-187f-5740-a6ba-a07f98257ca8")?;
     let resource = ResourceId::try_new("bootstrap")?;
     let progress = ResourceId::try_new("progress")?;
     let native = NativeBootstrapConfig {
@@ -843,6 +865,7 @@ fn bootstrap_recipes_accept_native_query_owners_without_relaxing_scope() -> anyh
             .snapshot()
             .select(GraphSelection::All)?;
         topology.components.push(DesiredComponent {
+            name: ComponentName::try_new("query")?,
             descriptor: specification.descriptor.clone(),
             role: specification.role,
             completion: None,
@@ -854,7 +877,7 @@ fn bootstrap_recipes_accept_native_query_owners_without_relaxing_scope() -> anyh
         native.validate_owner(&resource, &topology)?;
         composite.validate_owner(&resource, &topology)?;
         let mut wrong_owner = native.clone();
-        wrong_owner.component = ComponentId::try_new("other")?;
+        wrong_owner.component = ComponentId::try_new("5c68a131-749a-5277-abc3-67f2d5f067ba")?;
         assert!(wrong_owner.validate_owner(&resource, &topology).is_err());
         let mut wrong_progress = native.clone();
         wrong_progress.source_progress = Some(ResourceId::try_new("other-progress")?);

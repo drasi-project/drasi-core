@@ -54,18 +54,21 @@ impl FileReaction {
     }
 
     /// Create a builder for FileReaction.
-    pub fn builder(id: impl Into<String>) -> FileReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> FileReactionBuilder {
         FileReactionBuilder::new(id)
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: FileReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> anyhow::Result<Self> {
-        Self::validate_config(&queries, &config)?;
+        Self::validate_config(
+            &drasi_lib::reactions::common::input_aliases(&queries),
+            &config,
+        )?;
 
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
@@ -325,7 +328,7 @@ impl FileReaction {
     fn render_output(
         config: &FileReactionConfig,
         handlebars: &Handlebars<'static>,
-        query_id: &str,
+        emission: &QueryResult,
         event_timestamp: chrono::DateTime<chrono::Utc>,
         diff: &ResultDiff,
     ) -> Result<(PathBuf, String)> {
@@ -338,7 +341,12 @@ impl FileReaction {
         };
 
         let mut context = Map::new();
-        context.insert("query_name".into(), Value::String(query_id.to_string()));
+        context.insert("query_name".into(), serde_json::json!(emission.query_name));
+        context.insert("query_id".into(), serde_json::json!(emission.query_id));
+        context.insert(
+            "input_alias".into(),
+            serde_json::json!(emission.input_alias),
+        );
         context.insert(
             "operation".into(),
             Value::String(operation_name.to_string()),
@@ -390,7 +398,7 @@ impl FileReaction {
         }
 
         let content = if let Some(operation_type) = operation_type {
-            if let Some(template_spec) = config.get_template_spec(query_id, operation_type) {
+            if let Some(template_spec) = config.get_result_template_spec(emission, operation_type) {
                 handlebars.render_template(&template_spec.template, &context)?
             } else {
                 serde_json::to_string(diff)?
@@ -418,7 +426,7 @@ impl FileReaction {
             match Self::render_output(
                 config,
                 handlebars,
-                &query_result.query_id,
+                query_result,
                 query_result.timestamp,
                 diff,
             ) {
@@ -500,8 +508,8 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
 /// Construct via [`FileReaction::builder`], chain configuration methods,
 /// then call [`build`](Self::build) to create the reaction.
 pub struct FileReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     config: FileReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
@@ -509,9 +517,9 @@ pub struct FileReactionBuilder {
 
 impl FileReactionBuilder {
     /// Creates a new builder with the given reaction ID.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             config: FileReactionConfig::default(),
             priority_queue_capacity: None,
@@ -519,15 +527,42 @@ impl FileReactionBuilder {
         }
     }
 
-    /// Sets all query subscriptions at once.
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
         self
     }
 
-    /// Adds a single query subscription.
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
+    }
+
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
+        self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
     }
 
@@ -597,7 +632,7 @@ impl FileReactionBuilder {
 
 #[async_trait]
 impl Reaction for FileReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -631,7 +666,7 @@ impl Reaction for FileReaction {
         properties
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -639,8 +674,8 @@ impl Reaction for FileReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -683,7 +718,7 @@ impl Reaction for FileReaction {
                     &file_locks,
                     &repaired_files,
                     query_result_arc.as_ref(),
-                    &reaction_name,
+                    reaction_name.as_str(),
                 )
                 .await;
             }
@@ -735,8 +770,11 @@ mod tests {
             "orders.json"
         };
         FileReaction::from_builder(
-            "file-lifecycle".into(),
-            vec!["orders".into()],
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000037d")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("orders").expect("fixture component name"),
+            )],
             FileReactionConfig {
                 output_path: directory.to_string_lossy().into_owned(),
                 write_mode: mode,
@@ -759,7 +797,8 @@ mod tests {
     async fn enqueue_and_wait_for_dequeue(reaction: &FileReaction, sequence: u64) -> Result<()> {
         reaction
             .enqueue_query_result(QueryResult::new(
-                "orders".into(),
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+                    .expect("fixture UUID"),
                 sequence,
                 chrono::Utc::now(),
                 vec![lifecycle_diff(sequence)],
@@ -965,29 +1004,39 @@ mod tests {
 
     #[test]
     fn test_invalid_template_fails_build() {
-        let result = FileReaction::builder("test")
-            .with_query("query1")
-            .with_default_template(QueryConfig {
-                added: Some(TemplateSpec::new("{{after.id")),
-                ..Default::default()
-            })
-            .build();
+        let result = FileReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("{{after.id")),
+            ..Default::default()
+        })
+        .build();
 
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_route_fails_build() {
-        let result = FileReaction::builder("test")
-            .with_query("query1")
-            .with_route(
-                "non-existent-query",
-                QueryConfig {
-                    added: Some(TemplateSpec::new("{{after.id}}")),
-                    ..Default::default()
-                },
-            )
-            .build();
+        let result = FileReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_route(
+            "non-existent-query",
+            QueryConfig {
+                added: Some(TemplateSpec::new("{{after.id}}")),
+                ..Default::default()
+            },
+        )
+        .build();
 
         assert!(result.is_err());
     }
@@ -1009,7 +1058,8 @@ mod tests {
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
-            "orders".to_string(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
@@ -1043,8 +1093,9 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
-        let result = QueryResult::new(
-            "orders".to_string(),
+        let mut result = QueryResult::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
@@ -1053,6 +1104,8 @@ mod tests {
             }],
             HashMap::new(),
         );
+        result.query_name =
+            Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
 
         FileReaction::process_result(
             &config,
@@ -1090,8 +1143,9 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
-        let result = QueryResult::new(
-            "unknown-query".to_string(),
+        let mut result = QueryResult::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029c")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
@@ -1100,6 +1154,8 @@ mod tests {
             }],
             HashMap::new(),
         );
+        result.query_name =
+            Some(drasi_core::ComponentName::try_new("unknown-query").expect("fixture query name"));
 
         FileReaction::process_result(
             &config,
@@ -1146,8 +1202,9 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
-        let result = QueryResult::new(
-            "orders".to_string(),
+        let mut result = QueryResult::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
@@ -1156,6 +1213,8 @@ mod tests {
             }],
             HashMap::new(),
         );
+        result.query_name =
+            Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
 
         FileReaction::process_result(
             &config,
@@ -1275,20 +1334,30 @@ mod tests {
 
     #[test]
     fn test_empty_output_path_fails_build() {
-        let result = FileReaction::builder("test")
-            .with_query("query1")
-            .with_output_path("   ")
-            .build();
+        let result = FileReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_output_path("   ")
+        .build();
 
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_label_template_fails_build() {
-        let result = FileReaction::builder("test")
-            .with_query("query1")
-            .with_filename_template("{{unclosed")
-            .build();
+        let result = FileReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_filename_template("{{unclosed")
+        .build();
 
         assert!(result.is_err());
     }
@@ -1311,8 +1380,9 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
-        let result = QueryResult::new(
-            "orders".to_string(),
+        let mut result = QueryResult::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![ResultDiff::Update {
@@ -1324,6 +1394,8 @@ mod tests {
             }],
             HashMap::new(),
         );
+        result.query_name =
+            Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
 
         FileReaction::process_result(
             &config,
@@ -1369,8 +1441,9 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
-        let result = QueryResult::new(
-            "orders".to_string(),
+        let mut result = QueryResult::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![ResultDiff::Delete {
@@ -1379,6 +1452,8 @@ mod tests {
             }],
             HashMap::new(),
         );
+        result.query_name =
+            Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
 
         FileReaction::process_result(
             &config,
@@ -1422,8 +1497,9 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
-        let result = QueryResult::new(
-            "stats".to_string(),
+        let mut result = QueryResult::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029d")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![ResultDiff::Aggregation {
@@ -1433,6 +1509,8 @@ mod tests {
             }],
             HashMap::new(),
         );
+        result.query_name =
+            Some(drasi_core::ComponentName::try_new("stats").expect("fixture query name"));
 
         FileReaction::process_result(
             &config,
@@ -1489,8 +1567,9 @@ mod tests {
         let file_locks = FileReaction::new_file_locks();
         // Query with dotted prefix does not match the "orders" route key exactly,
         // so it falls through to default_template.
-        let result = QueryResult::new(
-            "ns.orders".to_string(),
+        let mut result = QueryResult::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029e")
+                .expect("fixture UUID"),
             0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
@@ -1499,6 +1578,8 @@ mod tests {
             }],
             HashMap::new(),
         );
+        result.query_name =
+            Some(drasi_core::ComponentName::try_new("ns.orders").expect("fixture query name"));
 
         FileReaction::process_result(
             &config,

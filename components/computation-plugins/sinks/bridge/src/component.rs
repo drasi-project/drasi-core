@@ -217,8 +217,7 @@ impl EnvelopeSink for BridgeSink {
             .egress_control
             .begin(self.control_epoch.expect("started control"))?;
         anyhow::ensure!(
-            input.port.as_str() == "in"
-                && input.envelope.system().stream().as_str() == self.config.stream,
+            input.port.as_str() == "in" && input.envelope.system().stream() == &self.config.stream,
             "bridge sink accepts only its configured input stream and port"
         );
         let bytes = self.codec.encode(&input.envelope)?;

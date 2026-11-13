@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureDrasiLibBuilderExt as _;
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
@@ -35,13 +39,16 @@ struct Input {
 #[derive(Default)]
 struct InputState {
     history: Vec<Arc<SourceEventWrapper>>,
-    subscribers: HashMap<String, ChannelChangeDispatcher<SourceEventWrapper>>,
+    subscribers: HashMap<ComponentId, ChannelChangeDispatcher<SourceEventWrapper>>,
 }
 
 impl Input {
     fn new() -> Self {
         Self {
-            status: ComponentStatusHandle::new("input"),
+            status: ComponentStatusHandle::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                    .expect("fixture UUID"),
+            ),
             state: Arc::new(Mutex::new(InputState::default())),
         }
     }
@@ -64,7 +71,8 @@ impl Input {
             SourceChange::update(element)
         };
         let event = Arc::new(SourceEventWrapper::new(
-            "input".into(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                .expect("fixture UUID"),
             SourceEvent::Change(change),
             chrono::DateTime::from_timestamp_millis(logical.try_into()?)
                 .expect("fixture timestamp"),
@@ -80,8 +88,13 @@ impl Input {
 
 #[async_trait]
 impl Source for Input {
-    fn id(&self) -> &str {
-        "input"
+    fn id(&self) -> &drasi_core_types::ComponentId {
+        static ID: std::sync::LazyLock<drasi_core_types::ComponentId> =
+            std::sync::LazyLock::new(|| {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                    .expect("fixture UUID")
+            });
+        &ID
     }
     fn type_name(&self) -> &str {
         "controlled-input-fixture"
@@ -95,7 +108,7 @@ impl Source for Input {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> Result<()> {
@@ -126,7 +139,10 @@ impl Source for Input {
             .subscribers
             .insert(settings.query_id.clone(), dispatcher);
         Ok(SubscriptionResponse {
-            source_id: "input".into(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000071",
+            )
+            .expect("fixture UUID"),
             query_id: settings.query_id,
             receiver,
             bootstrap_receiver: None,
@@ -136,20 +152,26 @@ impl Source for Input {
     }
 }
 
-fn query(id: &str, text: &str) -> Query {
+fn query(id: drasi_core_types::ComponentName, text: &str) -> Query {
     Query::cypher(id)
         .query(text)
-        .from_input("input")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+        )
         .enable_bootstrap(false)
 }
 
-async fn subscribe(core: &DrasiLib, id: &str) -> Result<QuerySubscriptionResponse> {
-    let inspector = core.inspect_query_computation(id).await?;
+async fn subscribe(
+    core: &DrasiLib,
+    id: &drasi_core_types::ComponentName,
+) -> Result<QuerySubscriptionResponse> {
+    let inspector = core.inspect_query_computation_by_name(id).await?;
+    let query_id = core.component_by_name(id)?.id().clone();
     let mut changes = inspector.subscribe();
     tokio::time::timeout(WAIT, async {
         loop {
             let snapshot = changes.borrow_and_update().clone();
-            let node = &snapshot.observed.components[&ComponentId::try_new(id)?];
+            let node = &snapshot.observed.components[&query_id];
             if let Some(failure) = &node.failure {
                 anyhow::bail!("{:#}", failure.cause);
             }
@@ -162,10 +184,15 @@ async fn subscribe(core: &DrasiLib, id: &str) -> Result<QuerySubscriptionRespons
     .await??;
     let query = core
         .query_manager()
-        .get_query_instance(id)
+        .get_query_instance_by_name(id)
         .await
         .map_err(anyhow::Error::msg)?;
-    query.subscribe("test".into()).await
+    query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        )
+        .await
 }
 
 async fn receive(subscription: &mut QuerySubscriptionResponse, sequence: u64) -> Result<()> {
@@ -174,10 +201,13 @@ async fn receive(subscription: &mut QuerySubscriptionResponse, sequence: u64) ->
     Ok(())
 }
 
-async fn rows(core: &DrasiLib, id: &str) -> Result<(u64, Vec<serde_json::Value>)> {
+async fn rows(
+    core: &DrasiLib,
+    id: &drasi_core_types::ComponentName,
+) -> Result<(u64, Vec<serde_json::Value>)> {
     let query = core
         .query_manager()
-        .get_query_instance(id)
+        .get_query_instance_by_name(id)
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
@@ -189,6 +219,7 @@ async fn rows(core: &DrasiLib, id: &str) -> Result<(u64, Vec<serde_json::Value>)
 async fn production_default_scheduler_uses_wall_clock_without_test_controls() -> Result<()> {
     let source = Input::new();
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -201,16 +232,34 @@ async fn production_default_scheduler_uses_wall_clock_without_test_controls() ->
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source.clone())
-        .with_query(query("query", EXPIRY).build())
+        .with_fixture_source(
+            drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+            source.clone(),
+        )
+        .with_query(
+            query(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+                EXPIRY,
+            )
+            .build()
+            .expect("valid query"),
+        )
         .build()
         .await?;
     core.start().await?;
-    let mut output = subscribe(&core, "query").await?;
+    let mut output = subscribe(
+        &core,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await?;
     source.send("a", 1000, 2000, 0).await?;
     receive(&mut output, 1).await?;
     receive(&mut output, 2).await?;
-    let (sequence, rows) = rows(&core, "query").await?;
+    let (sequence, rows) = rows(
+        &core,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await?;
     assert_eq!(sequence, 2);
     assert_eq!(rows[0]["expired"], true);
     assert_eq!(rows[0]["logicalTime"], 2000);
@@ -245,13 +294,17 @@ drasi.trueFor(n.ready, duration({milliseconds:1000})) AS expired";
         provider: Option<Arc<dyn IndexBackendPlugin>>,
         small_output: bool,
     ) -> Result<(DrasiLib, QuerySubscriptionResponse)> {
-        let mut query = query("query", text);
+        let mut query = query(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            text,
+        );
         if small_output {
             query = query
                 .with_outbox_capacity(2)
                 .with_dispatch_buffer_capacity(1);
         }
         let mut builder = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -265,23 +318,37 @@ drasi.trueFor(n.ready, duration({milliseconds:1000})) AS expired";
                     .clone(),
             )
             .with_id("timing-tests")
-            .with_source(source.clone());
+            .with_fixture_source(
+                drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+                source.clone(),
+            );
         if let Some(provider) = provider {
             query = query.with_storage_backend(StorageBackendRef::Named("store".into()));
             builder = builder.with_index_provider("store", provider);
         }
         let core = builder
-            .with_query(query.build())
-            .with_query_test_control("query", control.clone())
+            .with_query(query.build().expect("valid query"))
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+                control.clone(),
+            )
             .build()
             .await?;
         core.start().await?;
-        let output = subscribe(&core, "query").await?;
+        let output = subscribe(
+            &core,
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
         Ok((core, output))
     }
 
     async fn assert_expired(core: &DrasiLib, id: &str, expired: bool) -> Result<()> {
-        let (_, rows) = rows(core, "query").await?;
+        let (_, rows) = rows(
+            core,
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
         let expected = if expired {
             json!(true)
         } else {
@@ -324,7 +391,11 @@ drasi.trueFor(n.ready, duration({milliseconds:1000})) AS expired";
         assert_eq!(control.wake(WAIT).await?, first);
         assert_eq!(control.advance_to(2999, WAIT).await?.output_sequence, 3);
         assert_eq!(control.advance_to(9000, WAIT).await?.output_sequence, 4);
-        let (_, rows) = rows(&core, "query").await?;
+        let (_, rows) = rows(
+            &core,
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
         assert_eq!(
             rows.iter()
                 .find(|row| row["id"] == "b")
@@ -340,10 +411,20 @@ drasi.trueFor(n.ready, duration({milliseconds:1000})) AS expired";
         assert!(control.advance_to(8999, WAIT).await.is_err());
         assert!(control.advance_to(u64::MAX, WAIT).await.is_err());
         assert_eq!(control.now(), 9000);
-        core.stop_query("query").await?;
+        core.stop_query_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
         assert!(control.wake(WAIT).await.is_err());
-        core.start_query("query").await?;
-        subscribe(&core, "query").await?;
+        core.start_query_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
+        subscribe(
+            &core,
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
         assert_eq!(control.wake(WAIT).await?.output_sequence, 4);
         core.shutdown().await?;
         assert!(control.wake(WAIT).await.is_err());
@@ -357,6 +438,7 @@ drasi.trueFor(n.ready, duration({milliseconds:1000})) AS expired";
         let check = QueryTestControl::new(1000);
         let deadline = QueryTestControl::new(1000);
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -369,18 +451,65 @@ drasi.trueFor(n.ready, duration({milliseconds:1000})) AS expired";
                     .expect("reference query factory")
                     .clone(),
             )
-            .with_source(source.clone())
-            .with_query(query("check", EXPIRY).build())
-            .with_query(query("deadline", EXPIRY).build())
-            .with_query(query("uncontrolled", EXPIRY).build())
-            .with_query_test_control("check", check.clone())
-            .with_query_test_control("deadline", deadline.clone())
+            .with_fixture_source(
+                drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+                source.clone(),
+            )
+            .with_query(
+                query(
+                    drasi_core_types::ComponentName::try_new("check")
+                        .expect("fixture component name"),
+                    EXPIRY,
+                )
+                .build()
+                .expect("valid query"),
+            )
+            .with_query(
+                query(
+                    drasi_core_types::ComponentName::try_new("deadline")
+                        .expect("fixture component name"),
+                    EXPIRY,
+                )
+                .build()
+                .expect("valid query"),
+            )
+            .with_query(
+                query(
+                    drasi_core_types::ComponentName::try_new("uncontrolled")
+                        .expect("fixture component name"),
+                    EXPIRY,
+                )
+                .build()
+                .expect("valid query"),
+            )
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("check").expect("fixture component name"),
+                check.clone(),
+            )
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("deadline")
+                    .expect("fixture component name"),
+                deadline.clone(),
+            )
             .build()
             .await?;
         core.start().await?;
-        let mut c = subscribe(&core, "check").await?;
-        let mut d = subscribe(&core, "deadline").await?;
-        let mut u = subscribe(&core, "uncontrolled").await?;
+        let mut c = subscribe(
+            &core,
+            &drasi_core_types::ComponentName::try_new("check").expect("fixture component name"),
+        )
+        .await?;
+        let mut d = subscribe(
+            &core,
+            &drasi_core_types::ComponentName::try_new("deadline").expect("fixture component name"),
+        )
+        .await?;
+        let mut u = subscribe(
+            &core,
+            &drasi_core_types::ComponentName::try_new("uncontrolled")
+                .expect("fixture component name"),
+        )
+        .await?;
         source.send("a", 1000, 2000, 0).await?;
         receive(&mut c, 1).await?;
         receive(&mut d, 1).await?;
@@ -467,7 +596,11 @@ datetime.realtime().epochMillis AS logicalTime";
             let report = control.advance_to(due, WAIT).await?;
             assert_eq!(report.output_sequence, generation * 2 + 2);
             receive(&mut output, report.output_sequence).await?;
-            let (_, rows) = rows(&core, "query").await?;
+            let (_, rows) = rows(
+                &core,
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .await?;
             assert_eq!(rows[0]["logicalTime"], due);
             assert_expired(&core, "a", true).await?;
             assert_eq!(control.wake(WAIT).await?, report);
@@ -490,7 +623,11 @@ datetime.realtime().epochMillis AS logicalTime";
             .await
             .expect_err("output is blocked");
         assert!(error.to_string().contains("timed out"));
-        let (sequence, _) = rows(&core, "query").await?;
+        let (sequence, _) = rows(
+            &core,
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await?;
         assert!(sequence > 8 && sequence < 16, "committed prefix {sequence}");
         Ok((core, control, output))
     }
@@ -576,14 +713,14 @@ datetime.realtime().epochMillis AS logicalTime";
     impl IndexBackendPlugin for Storage {
         async fn create_indexes(
             &self,
-            id: &str,
+            id: &drasi_core_types::ComponentId,
         ) -> std::result::Result<CreatedIndexes, IndexError> {
             Ok(self.wrap(self.inner.create_indexes(id).await?))
         }
         async fn create_scoped_indexes(
             &self,
-            scope: &str,
-            id: &str,
+            scope: &drasi_core_types::StorageScope,
+            id: &drasi_core_types::ComponentId,
         ) -> std::result::Result<CreatedIndexes, IndexError> {
             Ok(self.wrap(self.inner.create_scoped_indexes(scope, id).await?))
         }
@@ -692,9 +829,19 @@ datetime.realtime().epochMillis AS logicalTime";
             assert!(!error.to_string().contains("timed out"));
             let repeated = control.wake(WAIT).await.unwrap_err();
             assert!(format!("{repeated:#}").contains(message), "{repeated:#}");
-            core.stop_query("query").await?;
-            core.start_query("query").await?;
-            subscribe(&core, "query").await?;
+            core.stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .await?;
+            core.start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .await?;
+            subscribe(
+                &core,
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .await?;
             assert_eq!(control.wake(WAIT).await?.output_sequence, 2);
             core.shutdown().await?;
         }
@@ -710,6 +857,7 @@ datetime.realtime().epochMillis AS logicalTime";
         let failed = QueryTestControl::new(1000);
         let healthy = QueryTestControl::new(1000);
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -722,21 +870,52 @@ datetime.realtime().epochMillis AS logicalTime";
                     .expect("reference query factory")
                     .clone(),
             )
-            .with_source(source.clone())
+            .with_fixture_source(
+                drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+                source.clone(),
+            )
             .with_index_provider("store", Storage::new(directory.path(), fault.clone())?)
             .with_query(
-                query("failed", EXPIRY)
-                    .with_storage_backend(StorageBackendRef::Named("store".into()))
-                    .build(),
+                query(
+                    drasi_core_types::ComponentName::try_new("failed")
+                        .expect("fixture component name"),
+                    EXPIRY,
+                )
+                .with_storage_backend(StorageBackendRef::Named("store".into()))
+                .build()
+                .expect("valid query"),
             )
-            .with_query(query("healthy", EXPIRY).build())
-            .with_query_test_control("failed", failed.clone())
-            .with_query_test_control("healthy", healthy.clone())
+            .with_query(
+                query(
+                    drasi_core_types::ComponentName::try_new("healthy")
+                        .expect("fixture component name"),
+                    EXPIRY,
+                )
+                .build()
+                .expect("valid query"),
+            )
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("failed").expect("fixture component name"),
+                failed.clone(),
+            )
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("healthy")
+                    .expect("fixture component name"),
+                healthy.clone(),
+            )
             .build()
             .await?;
         core.start().await?;
-        let mut failed_output = subscribe(&core, "failed").await?;
-        let mut healthy_output = subscribe(&core, "healthy").await?;
+        let mut failed_output = subscribe(
+            &core,
+            &drasi_core_types::ComponentName::try_new("failed").expect("fixture component name"),
+        )
+        .await?;
+        let mut healthy_output = subscribe(
+            &core,
+            &drasi_core_types::ComponentName::try_new("healthy").expect("fixture component name"),
+        )
+        .await?;
         source.send("a", 1000, 2000, 0).await?;
         receive(&mut failed_output, 1).await?;
         receive(&mut healthy_output, 1).await?;
@@ -750,7 +929,11 @@ datetime.realtime().epochMillis AS logicalTime";
         assert_eq!(healthy.advance_to(1999, WAIT).await?.output_sequence, 1);
         assert_eq!(healthy.advance_to(2000, WAIT).await?.output_sequence, 2);
         receive(&mut healthy_output, 2).await?;
-        let (sequence, rows) = rows(&core, "healthy").await?;
+        let (sequence, rows) = rows(
+            &core,
+            &drasi_core_types::ComponentName::try_new("healthy").expect("fixture component name"),
+        )
+        .await?;
         assert_eq!(sequence, 2);
         assert_eq!(rows[0]["expired"], true);
         assert_eq!(rows[0]["logicalTime"], 2000);
@@ -783,7 +966,15 @@ datetime.realtime().epochMillis AS logicalTime";
             result = &mut drain => panic!("premature drain: {result:?}"),
             result = tokio::time::timeout(WAIT, fault.entered.notified()) => { result?; },
         }
-        assert_eq!(rows(&core, "query").await?.0, 1);
+        assert_eq!(
+            rows(
+                &core,
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+            )
+            .await?
+            .0,
+            1
+        );
         assert!(futures::poll!(&mut drain).is_pending());
         fault.release.notify_one();
         let report = drain.await?;
@@ -834,7 +1025,13 @@ datetime.realtime().epochMillis AS logicalTime";
                 result = tokio::time::timeout(WAIT, fault.entered.notified()) => { result?; },
             }
             assert_eq!(
-                rows(&core, "query").await?.0,
+                rows(
+                    &core,
+                    &drasi_core_types::ComponentName::try_new("query")
+                        .expect("fixture component name")
+                )
+                .await?
+                .0,
                 1,
                 "committed output not yet published"
             );
@@ -884,6 +1081,7 @@ datetime.realtime().epochMillis AS logicalTime";
         let control = QueryTestControl::new(1000);
         assert!(control.wake(WAIT).await.is_err());
         assert!(DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -896,11 +1094,16 @@ datetime.realtime().epochMillis AS logicalTime";
                     .expect("reference query factory")
                     .clone()
             )
-            .with_query_test_control("missing", control.clone())
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("missing")
+                    .expect("fixture component name"),
+                control.clone(),
+            )
             .build()
             .await
             .is_err());
         assert!(DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -913,13 +1116,28 @@ datetime.realtime().epochMillis AS logicalTime";
                     .expect("reference query factory")
                     .clone()
             )
-            .with_query(query("query", EXPIRY).build())
-            .with_query_test_control("query", control.clone())
-            .with_query_test_control("query", control.clone())
+            .with_query(
+                query(
+                    drasi_core_types::ComponentName::try_new("query")
+                        .expect("fixture component name"),
+                    EXPIRY
+                )
+                .build()
+                .expect("valid query")
+            )
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+                control.clone(),
+            )
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+                control.clone(),
+            )
             .build()
             .await
             .is_err());
         assert!(DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -932,8 +1150,19 @@ datetime.realtime().epochMillis AS logicalTime";
                     .expect("reference query factory")
                     .clone()
             )
-            .with_query(query("query", EXPIRY).build())
-            .with_query_test_control("query", QueryTestControl::new(u64::MAX))
+            .with_query(
+                query(
+                    drasi_core_types::ComponentName::try_new("query")
+                        .expect("fixture component name"),
+                    EXPIRY
+                )
+                .build()
+                .expect("valid query")
+            )
+            .with_query_test_control_by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+                QueryTestControl::new(u64::MAX),
+            )
             .build()
             .await
             .is_err());

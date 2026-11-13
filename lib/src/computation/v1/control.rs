@@ -925,7 +925,32 @@ mod tests {
     use super::*;
 
     fn id(value: &str) -> ComponentId {
-        ComponentId::try_new(value).expect("valid component ID")
+        let value = match value {
+            "source" => 1,
+            "sink" => 2,
+            "middle" => 3,
+            "downstream" => 4,
+            "z" => 5,
+            "a" => 6,
+            "missing" => 7,
+            "other-source" => 8,
+            "other-sink" => 9,
+            "target" => 10,
+            "retained" => 11,
+            "other" => 12,
+            "unknown" => 13,
+            "component" => 14,
+            "first" => 15,
+            "second" => 16,
+            "upstream" => 17,
+            "unrelated" => 18,
+            "up-a" => 19,
+            "up-z" => 20,
+            "down-a" => 21,
+            "down-z" => 22,
+            other => panic!("missing explicit fixture component ID for {other}"),
+        };
+        crate::test_helpers::component_id(value)
     }
 
     fn attach(

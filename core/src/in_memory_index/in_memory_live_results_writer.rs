@@ -23,13 +23,14 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::interface::{IndexError, LiveResultsWriter, RowMutation};
+use crate::ComponentId;
 
 /// In-memory live results writer for testing and volatile use.
 ///
 /// Stores rows keyed by `(query_id, row_signature)`. Mutations apply
 /// immediately (no transactional batching).
 pub struct InMemoryLiveResultsWriter {
-    data: RwLock<HashMap<String, HashMap<u64, Vec<u8>>>>,
+    data: RwLock<HashMap<ComponentId, HashMap<u64, Vec<u8>>>>,
 }
 
 impl Default for InMemoryLiveResultsWriter {
@@ -50,11 +51,11 @@ impl InMemoryLiveResultsWriter {
 impl LiveResultsWriter for InMemoryLiveResultsWriter {
     async fn apply_mutations(
         &self,
-        query_id: &str,
+        query_id: &ComponentId,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         let mut store = self.data.write().await;
-        let rows = store.entry(query_id.to_string()).or_default();
+        let rows = store.entry(query_id.clone()).or_default();
         for m in mutations {
             match m.data {
                 Some(data) => {
@@ -68,7 +69,10 @@ impl LiveResultsWriter for InMemoryLiveResultsWriter {
         Ok(())
     }
 
-    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_snapshot(
+        &self,
+        query_id: &ComponentId,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         let store = self.data.read().await;
         let entries = match store.get(query_id) {
             Some(map) => map.iter().map(|(sig, data)| (*sig, data.clone())).collect(),
@@ -77,13 +81,13 @@ impl LiveResultsWriter for InMemoryLiveResultsWriter {
         Ok(entries)
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &ComponentId) -> Result<(), IndexError> {
         let mut store = self.data.write().await;
         store.remove(query_id);
         Ok(())
     }
 
-    async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
+    async fn row_count(&self, query_id: &ComponentId) -> Result<usize, IndexError> {
         let store = self.data.read().await;
         Ok(store.get(query_id).map_or(0, |m| m.len()))
     }
@@ -106,10 +110,32 @@ mod tests {
                 data: Some(b"row2"),
             },
         ];
-        writer.apply_mutations("q1", &mutations).await.unwrap();
+        writer
+            .apply_mutations(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                &mutations,
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(writer.row_count("q1").await.unwrap(), 2);
-        let snapshot = writer.read_snapshot("q1").await.unwrap();
+        assert_eq!(
+            writer
+                .row_count(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
+                .await
+                .unwrap(),
+            2
+        );
+        let snapshot = writer
+            .read_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
         assert_eq!(snapshot.len(), 2);
     }
 
@@ -118,7 +144,8 @@ mod tests {
         let writer = InMemoryLiveResultsWriter::new();
         writer
             .apply_mutations(
-                "q1",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
                 &[RowMutation {
                     row_signature: 1,
                     data: Some(b"row1"),
@@ -129,7 +156,8 @@ mod tests {
 
         writer
             .apply_mutations(
-                "q1",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
                 &[RowMutation {
                     row_signature: 1,
                     data: None,
@@ -138,7 +166,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(writer.row_count("q1").await.unwrap(), 0);
+        assert_eq!(
+            writer
+                .row_count(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -146,7 +183,8 @@ mod tests {
         let writer = InMemoryLiveResultsWriter::new();
         writer
             .apply_mutations(
-                "q1",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
                 &[RowMutation {
                     row_signature: 1,
                     data: Some(b"v1"),
@@ -156,7 +194,8 @@ mod tests {
             .unwrap();
         writer
             .apply_mutations(
-                "q1",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
                 &[RowMutation {
                     row_signature: 1,
                     data: Some(b"v2"),
@@ -165,8 +204,23 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(writer.row_count("q1").await.unwrap(), 1);
-        let snapshot = writer.read_snapshot("q1").await.unwrap();
+        assert_eq!(
+            writer
+                .row_count(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let snapshot = writer
+            .read_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
         assert_eq!(snapshot[0].1, b"v2");
     }
 
@@ -175,7 +229,8 @@ mod tests {
         let writer = InMemoryLiveResultsWriter::new();
         writer
             .apply_mutations(
-                "q1",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
                 &[RowMutation {
                     row_signature: 1,
                     data: Some(b"data"),
@@ -183,9 +238,31 @@ mod tests {
             )
             .await
             .unwrap();
-        writer.clear("q1").await.unwrap();
-        assert_eq!(writer.row_count("q1").await.unwrap(), 0);
-        assert!(writer.read_snapshot("q1").await.unwrap().is_empty());
+        writer
+            .clear(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            writer
+                .row_count(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(writer
+            .read_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -193,7 +270,8 @@ mod tests {
         let writer = InMemoryLiveResultsWriter::new();
         writer
             .apply_mutations(
-                "q1",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
                 &[RowMutation {
                     row_signature: 1,
                     data: Some(b"a"),
@@ -203,7 +281,8 @@ mod tests {
             .unwrap();
         writer
             .apply_mutations(
-                "q2",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
                 &[RowMutation {
                     row_signature: 1,
                     data: Some(b"b"),
@@ -212,8 +291,32 @@ mod tests {
             .await
             .unwrap();
 
-        writer.clear("q1").await.unwrap();
-        assert_eq!(writer.row_count("q1").await.unwrap(), 0);
-        assert_eq!(writer.row_count("q2").await.unwrap(), 1);
+        writer
+            .clear(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            writer
+                .row_count(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            writer
+                .row_count(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                        .expect("fixture UUID")
+                )
+                .await
+                .unwrap(),
+            1
+        );
     }
 }

@@ -36,7 +36,7 @@ fn metadata(shared: bool) -> BootstrapFactoryMetadata {
         .expect("constant implementation"),
         configuration_version: 1,
         configuration: ConfigSchema::from_fields([
-            ("source", ConfigType::String, true),
+            ("source", ConfigType::ComponentId, true),
             ("stream", ConfigType::String, true),
         ]),
         source_progress: true,

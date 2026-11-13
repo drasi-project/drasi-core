@@ -107,7 +107,7 @@ impl LifecycleState {
     /// expire edges immediately. `registeredAt` is set only on Service insert.
     pub fn apply(
         &mut self,
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         config: &OtelSourceConfig,
         projected: Vec<ProjectedElement>,
         received_at_millis: u64,
@@ -198,7 +198,11 @@ impl LifecycleState {
     }
 
     /// Graph deletes that would be emitted by [`Self::expire`] without mutating state.
-    pub fn preview_expire(&self, source_id: &str, now_millis: u64) -> Vec<SourceChange> {
+    pub fn preview_expire(
+        &self,
+        source_id: &drasi_lib::ComponentId,
+        now_millis: u64,
+    ) -> Vec<SourceChange> {
         self.due_records(now_millis)
             .into_iter()
             .map(|record| delete_change(source_id, &record, now_millis))
@@ -221,7 +225,11 @@ impl LifecycleState {
     }
 
     /// Delete elements whose TTL has elapsed at `now_millis`.
-    pub fn expire(&mut self, source_id: &str, now_millis: u64) -> Vec<SourceChange> {
+    pub fn expire(
+        &mut self,
+        source_id: &drasi_lib::ComponentId,
+        now_millis: u64,
+    ) -> Vec<SourceChange> {
         let due: Vec<u64> = self
             .ttls
             .keys()
@@ -248,7 +256,7 @@ impl LifecycleState {
                     changes.push(SourceChange::Delete {
                         metadata: ElementMetadata {
                             reference: ElementReference {
-                                source_id: Arc::from(source_id),
+                                namespace: Arc::from(source_id.as_str()),
                                 element_id: Arc::from(record.id.as_str()),
                             },
                             labels: Arc::from(
@@ -311,10 +319,10 @@ impl LifecycleState {
 }
 
 impl ProjectedElement {
-    fn into_element(self, source_id: &str) -> Element {
+    fn into_element(self, source_id: &drasi_lib::ComponentId) -> Element {
         let metadata = ElementMetadata {
             reference: ElementReference {
-                source_id: Arc::from(source_id),
+                namespace: Arc::from(source_id.as_str()),
                 element_id: Arc::from(self.id.as_str()),
             },
             labels: Arc::from(
@@ -334,11 +342,11 @@ impl ProjectedElement {
                 metadata,
                 properties: self.properties,
                 in_node: ElementReference {
-                    source_id: Arc::from(source_id),
+                    namespace: Arc::from(source_id.as_str()),
                     element_id: Arc::from(from.as_str()),
                 },
                 out_node: ElementReference {
-                    source_id: Arc::from(source_id),
+                    namespace: Arc::from(source_id.as_str()),
                     element_id: Arc::from(to.as_str()),
                 },
             },
@@ -366,11 +374,15 @@ fn category_from_labels(labels: &[String]) -> Option<ElementCategory> {
     })
 }
 
-fn delete_change(source_id: &str, record: &TtlRecord, now_millis: u64) -> SourceChange {
+fn delete_change(
+    source_id: &drasi_lib::ComponentId,
+    record: &TtlRecord,
+    now_millis: u64,
+) -> SourceChange {
     SourceChange::Delete {
         metadata: ElementMetadata {
             reference: ElementReference {
-                source_id: Arc::from(source_id),
+                namespace: Arc::from(source_id.as_str()),
                 element_id: Arc::from(record.id.as_str()),
             },
             labels: Arc::from(
@@ -417,7 +429,8 @@ mod tests {
         let mut state = LifecycleState::default();
         let config = OtelSourceConfig::default();
         let (first, dropped, _) = state.apply(
-            "s",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
             1_000,
@@ -425,7 +438,8 @@ mod tests {
         assert_eq!(dropped, 0);
         assert!(matches!(first[0], SourceChange::Insert { .. }));
         let (second, _, _) = state.apply(
-            "s",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
             1_000,
@@ -441,13 +455,15 @@ mod tests {
             ..OtelSourceConfig::default()
         };
         let _ = state.apply(
-            "s",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
             1_000,
         );
         let (changes, dropped, _) = state.apply(
-            "s",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
             &config,
             vec![node("svc:b", ElementCategory::Service, None)],
             1_000,
@@ -463,9 +479,25 @@ mod tests {
         let mut item = node("dep:a:b", ElementCategory::DependsOn, Some(1));
         item.labels = vec!["DEPENDS_ON".to_string()];
         item.effective_from = 1;
-        let _ = state.apply("s", &config, vec![item], 1_000);
-        assert!(state.expire("s", 1_500).is_empty());
-        let expired = state.expire("s", 2_100);
+        let _ = state.apply(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
+            &config,
+            vec![item],
+            1_000,
+        );
+        assert!(state
+            .expire(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                    .expect("fixture UUID"),
+                1_500
+            )
+            .is_empty());
+        let expired = state.expire(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
+            2_100,
+        );
         assert_eq!(expired.len(), 1);
         assert!(matches!(expired[0], SourceChange::Delete { .. }));
     }
@@ -478,9 +510,25 @@ mod tests {
         item.labels = vec!["DEPENDS_ON".to_string()];
         item.effective_from = 1;
         let received_at = 10_000;
-        let _ = state.apply("s", &config, vec![item], received_at);
-        assert!(state.expire("s", received_at + 1_000).is_empty());
-        let expired = state.expire("s", received_at + 5_000);
+        let _ = state.apply(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
+            &config,
+            vec![item],
+            received_at,
+        );
+        assert!(state
+            .expire(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                    .expect("fixture UUID"),
+                received_at + 1_000
+            )
+            .is_empty());
+        let expired = state.expire(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
+            received_at + 5_000,
+        );
         assert_eq!(expired.len(), 1);
     }
 
@@ -492,7 +540,8 @@ mod tests {
             ..OtelSourceConfig::default()
         };
         let _ = state.apply(
-            "s",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
             1_000,
@@ -501,7 +550,13 @@ mod tests {
         let mut metric = node("metric:b", ElementCategory::Metric, None);
         service.group = 7;
         metric.group = 7;
-        let (changes, dropped, _) = state.apply("s", &config, vec![service, metric], 1_000);
+        let (changes, dropped, _) = state.apply(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
+            &config,
+            vec![service, metric],
+            1_000,
+        );
         assert!(changes.is_empty());
         assert_eq!(dropped, 1);
     }
@@ -511,7 +566,8 @@ mod tests {
         let mut state = LifecycleState::default();
         let config = OtelSourceConfig::default();
         let (_, _, undo) = state.apply(
-            "s",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
             1_000,

@@ -29,10 +29,12 @@
 //!
 //! ```
 //! # fn main() -> anyhow::Result<()> {
+//! use drasi_lib::{ComponentId, ComponentName};
 //! use drasi_reaction_eventgrid::{EventGridReaction, EventGridSchema, OutputFormat};
 //!
-//! let reaction = EventGridReaction::builder("orders-eventgrid")
-//!     .with_query("orders")
+//! let reaction_id = ComponentId::try_new("00000000-0000-0000-0000-000000000051")?;
+//! let reaction = EventGridReaction::builder(reaction_id)
+//!     .with_query_by_name(ComponentName::try_new("orders")?)
 //!     .with_endpoint("https://my-topic.eastus-1.eventgrid.azure.net/api/events") // DevSkim: ignore DS137138
 //!     .with_access_key("secret")
 //!     .with_schema(EventGridSchema::CloudEvents)
@@ -62,8 +64,8 @@ use drasi_lib::recovery::ReactionRecoveryPolicy;
 
 /// Builder for the Event Grid reaction.
 pub struct EventGridReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     config: EventGridReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
@@ -71,9 +73,9 @@ pub struct EventGridReactionBuilder {
 }
 
 impl EventGridReactionBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             config: EventGridReactionConfig::default(),
             priority_queue_capacity: None,
@@ -82,19 +84,56 @@ impl EventGridReactionBuilder {
         }
     }
 
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
         self
     }
 
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
+    }
+
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
         self
     }
 
-    /// Alias of [`with_query`](Self::with_query); reads naturally at call sites.
-    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
+        self
+    }
+
+    /// Add a query input by its current name.
+    pub fn from_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
+        self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn from_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
     }
 
@@ -195,8 +234,10 @@ impl EventGridReactionBuilder {
     /// templates, an invalid Handlebars template, or a template route that
     /// matches no subscribed query.
     pub fn build(self) -> anyhow::Result<EventGridReaction> {
-        self.config
-            .validate(&self.queries, self.priority_queue_capacity)?;
+        self.config.validate(
+            &drasi_lib::reactions::common::input_aliases(&self.queries),
+            self.priority_queue_capacity,
+        )?;
         Ok(EventGridReaction::from_builder(
             self.id,
             self.queries,

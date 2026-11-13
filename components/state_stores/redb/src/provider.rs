@@ -15,6 +15,7 @@
 //! Redb-based state store provider implementation.
 
 use async_trait::async_trait;
+use drasi_core_types::StorePartition;
 use drasi_lib::{StateStoreError, StateStoreProvider, StateStoreResult};
 use log::{debug, info};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
@@ -27,6 +28,52 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
+
+const IDENTITY_FORMAT: TableDefinition<&str, u32> =
+    TableDefinition::new("drasi.state.identity-format");
+const IDENTITY_FORMAT_VERSION: u32 = 2;
+
+fn ensure_identity_format(db: &Database) -> StateStoreResult<()> {
+    let result = (|| -> Result<(), String> {
+        let mut transaction = db.begin_write().map_err(|error| error.to_string())?;
+        transaction.set_durability(redb::Durability::Immediate);
+        let existing = transaction
+            .list_tables()
+            .map_err(|error| error.to_string())?
+            .next()
+            .is_some()
+            || transaction
+                .list_multimap_tables()
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_some();
+        {
+            let mut table = transaction
+                .open_table(IDENTITY_FORMAT)
+                .map_err(|error| error.to_string())?;
+            let version = table
+                .get("version")
+                .map_err(|error| error.to_string())?
+                .map(|value| value.value());
+            match version {
+                Some(IDENTITY_FORMAT_VERSION) => {}
+                None if !existing => {
+                    table
+                        .insert("version", IDENTITY_FORMAT_VERSION)
+                        .map_err(|error| error.to_string())?;
+                }
+                _ => return Err(
+                    "unsupported state identity format; use an empty database or matching binaries"
+                        .into(),
+                ),
+            }
+        }
+        transaction.commit().map_err(|error| error.to_string())
+    })();
+    result.map_err(|error| {
+        StateStoreError::StorageError(format!("state-store format check failed: {error}"))
+    })
+}
 
 #[derive(Default)]
 struct OperationFailures(Mutex<Vec<StateStoreError>>);
@@ -115,7 +162,7 @@ impl BlockingWork {
 /// Redb-based state store provider.
 ///
 /// This provider stores state data in a redb database file with atomic transactions.
-/// Each store partition (identified by `store_id`) gets its own table.
+/// Each store partition (identified by `partition`) gets its own table.
 ///
 /// # Thread Safety
 ///
@@ -138,17 +185,17 @@ impl BlockingWork {
 /// # Memory Considerations
 ///
 /// This implementation uses `Box::leak` to create static string references required
-/// by redb's `TableDefinition` API. Each unique `store_id` allocates a small amount
+/// by redb's `TableDefinition` API. Each unique `partition` allocates a small amount
 /// of memory (the table name string) that is never freed during the process lifetime.
 ///
-/// **Important Limitation**: If your application creates many unique `store_id` values
+/// **Important Limitation**: If your application creates many unique `partition` values
 /// (e.g., thousands of per-user or per-session stores), memory usage will grow
 /// unboundedly. For typical use cases with a bounded number of plugins/stores,
 /// this is negligible. The leaked memory is reclaimed when the process exits.
 ///
 /// For applications that need to reclaim memory, use [`clear_table_name_cache()`]
 /// to clear the cache (note: this doesn't reclaim already-leaked strings, but
-/// prevents new allocations for the same store_ids).
+/// prevents new allocations for the same partitions).
 ///
 /// # Example
 ///
@@ -168,7 +215,7 @@ pub struct RedbStateStoreProvider {
     /// The redb database instance
     db: Arc<Database>,
     /// Cache of leaked table name references to avoid repeated allocations
-    /// for the same store_id
+    /// for the same partition
     table_name_cache: Arc<RwLock<HashMap<String, &'static str>>>,
     work: tokio::sync::Mutex<BlockingWork>,
     failures: Arc<OperationFailures>,
@@ -193,7 +240,8 @@ impl RedbStateStoreProvider {
     /// Create a new redb state store provider.
     ///
     /// This will create a new database file if it doesn't exist, or open
-    /// an existing one.
+    /// an existing one with the current identity format. Incompatible or
+    /// unversioned nonempty databases are rejected without resetting their state.
     ///
     /// # Arguments
     ///
@@ -216,6 +264,7 @@ impl RedbStateStoreProvider {
             ))
         })?;
 
+        ensure_identity_format(&db)?;
         info!("Opened redb state store at {:?}", path.as_ref());
 
         Ok(Self {
@@ -276,7 +325,7 @@ impl RedbStateStoreProvider {
 
     /// Clear the table name cache.
     ///
-    /// This is useful for applications that create many unique `store_id` values
+    /// This is useful for applications that create many unique `partition` values
     /// and want to reduce memory growth. Note that this doesn't reclaim
     /// already-leaked strings, but it does prevent the cache from growing
     /// and ensures new accesses will reuse existing leaked strings if available.
@@ -297,10 +346,10 @@ impl RedbStateStoreProvider {
         self.table_name_cache.read().await.len()
     }
 
-    /// Get the table name for a store_id.
+    /// Get the table name for a partition.
     /// Table names are prefixed with "store_" to avoid conflicts.
-    fn table_name(store_id: &str) -> String {
-        format!("store_{store_id}")
+    fn table_name(partition: &StorePartition) -> String {
+        format!("store_{}", partition.storage_key())
     }
 
     /// Create a table definition from a static table name.
@@ -309,10 +358,10 @@ impl RedbStateStoreProvider {
         TableDefinition::new(name)
     }
 
-    /// Get or create a static table name reference for a store_id.
+    /// Get or create a static table name reference for a partition.
     /// This caches leaked strings to avoid allocating the same string multiple times.
-    async fn get_or_create_table_name(&self, store_id: &str) -> &'static str {
-        let table_name = Self::table_name(store_id);
+    async fn get_or_create_table_name(&self, partition: &StorePartition) -> &'static str {
+        let table_name = Self::table_name(partition);
 
         // Fast path: read lock
         if let Some(&name) = self.table_name_cache.read().await.get(&table_name) {
@@ -333,16 +382,20 @@ impl StateStoreProvider for RedbStateStoreProvider {
         drasi_lib::state_store::StorageDurability::LOCAL_POWER_LOSS
     }
 
-    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn get(
+        &self,
+        partition: &StorePartition,
+        key: &str,
+    ) -> StateStoreResult<Option<Vec<u8>>> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
         let key = key.to_string();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin read transaction for store '{store_id}': {e}"
+                    "Failed to begin read transaction for store '{partition:?}': {e}"
                 ))
             })?;
 
@@ -352,7 +405,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(table) => {
                     let result = table.get(key.as_str()).map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to get key '{key}' from store '{store_id}': {e}"
+                            "Failed to get key '{key}' from store '{partition:?}': {e}"
                         ))
                     })?;
 
@@ -360,23 +413,28 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 }
                 Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
                 Err(e) => Err(StateStoreError::StorageError(format!(
-                    "Failed to open table for store '{store_id}': {e}"
+                    "Failed to open table for store '{partition:?}': {e}"
                 ))),
             }
         })
         .await
     }
 
-    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn set(
+        &self,
+        partition: &StorePartition,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<()> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
         let key = key.to_string();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin write transaction for store '{store_id}': {e}"
+                    "Failed to begin write transaction for store '{partition:?}': {e}"
                 ))
             })?;
             write_txn.set_durability(redb::Durability::Immediate);
@@ -386,13 +444,13 @@ impl StateStoreProvider for RedbStateStoreProvider {
 
                 let mut table = write_txn.open_table(table_def).map_err(|e| {
                     StateStoreError::StorageError(format!(
-                        "Failed to open table for store '{store_id}': {e}"
+                        "Failed to open table for store '{partition:?}': {e}"
                     ))
                 })?;
 
                 table.insert(key.as_str(), value.as_slice()).map_err(|e| {
                     StateStoreError::StorageError(format!(
-                        "Failed to insert key '{key}' into store '{store_id}': {e}"
+                        "Failed to insert key '{key}' into store '{partition:?}': {e}"
                     ))
                 })?;
 
@@ -403,10 +461,10 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(()) => {
                     write_txn.commit().map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to commit transaction for store '{store_id}': {e}"
+                            "Failed to commit transaction for store '{partition:?}': {e}"
                         ))
                     })?;
-                    debug!("Set key '{key}' in store '{store_id}'");
+                    debug!("Set key '{key}' in store '{partition:?}'");
                     Ok(())
                 }
                 Err(e) => {
@@ -418,16 +476,16 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .await
     }
 
-    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn delete(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
         let key = key.to_string();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin write transaction for store '{store_id}': {e}"
+                    "Failed to begin write transaction for store '{partition:?}': {e}"
                 ))
             })?;
             write_txn.set_durability(redb::Durability::Immediate);
@@ -439,14 +497,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
                     Ok(mut table) => {
                         let removed = table.remove(key.as_str()).map_err(|e| {
                             StateStoreError::StorageError(format!(
-                                "Failed to remove key '{key}' from store '{store_id}': {e}"
+                                "Failed to remove key '{key}' from store '{partition:?}': {e}"
                             ))
                         })?;
                         Ok(removed.is_some())
                     }
                     Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
                     Err(e) => Err(StateStoreError::StorageError(format!(
-                        "Failed to open table for store '{store_id}': {e}"
+                        "Failed to open table for store '{partition:?}': {e}"
                     ))),
                 }
             };
@@ -455,11 +513,11 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(existed) => {
                     write_txn.commit().map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to commit transaction for store '{store_id}': {e}"
+                            "Failed to commit transaction for store '{partition:?}': {e}"
                         ))
                     })?;
                     if existed {
-                        debug!("Deleted key '{key}' from store '{store_id}'");
+                        debug!("Deleted key '{key}' from store '{partition:?}'");
                     }
                     Ok(existed)
                 }
@@ -469,16 +527,16 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .await
     }
 
-    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn contains_key(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
         let key = key.to_string();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin read transaction for store '{store_id}': {e}"
+                    "Failed to begin read transaction for store '{partition:?}': {e}"
                 ))
             })?;
 
@@ -488,14 +546,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(table) => {
                     let result = table.get(key.as_str()).map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to check key '{key}' in store '{store_id}': {e}"
+                            "Failed to check key '{key}' in store '{partition:?}': {e}"
                         ))
                     })?;
                     Ok(result.is_some())
                 }
                 Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
                 Err(e) => Err(StateStoreError::StorageError(format!(
-                    "Failed to open table for store '{store_id}': {e}"
+                    "Failed to open table for store '{partition:?}': {e}"
                 ))),
             }
         })
@@ -504,18 +562,18 @@ impl StateStoreProvider for RedbStateStoreProvider {
 
     async fn get_many(
         &self,
-        store_id: &str,
+        partition: &StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
         let keys: Vec<String> = keys.iter().map(|k| (*k).to_string()).collect();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin read transaction for store '{store_id}': {e}"
+                    "Failed to begin read transaction for store '{partition:?}': {e}"
                 ))
             })?;
 
@@ -527,7 +585,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
                     for key in keys {
                         if let Some(value) = table.get(key.as_str()).map_err(|e| {
                             StateStoreError::StorageError(format!(
-                                "Failed to get key '{key}' from store '{store_id}': {e}"
+                                "Failed to get key '{key}' from store '{partition:?}': {e}"
                             ))
                         })? {
                             result.insert(key, value.value().to_vec());
@@ -539,7 +597,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 }
                 Err(e) => {
                     return Err(StateStoreError::StorageError(format!(
-                        "Failed to open table for store '{store_id}': {e}"
+                        "Failed to open table for store '{partition:?}': {e}"
                     )))
                 }
             }
@@ -549,10 +607,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .await
     }
 
-    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn set_many(
+        &self,
+        partition: &StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
         let entry_count = entries.len();
         // Clone entries for the blocking closure
         let entries: Vec<(String, Vec<u8>)> = entries
@@ -563,7 +625,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
         self.blocking(move || {
             let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin write transaction for store '{store_id}': {e}"
+                    "Failed to begin write transaction for store '{partition:?}': {e}"
                 ))
             })?;
             write_txn.set_durability(redb::Durability::Immediate);
@@ -573,14 +635,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
 
                 let mut table = write_txn.open_table(table_def).map_err(|e| {
                     StateStoreError::StorageError(format!(
-                        "Failed to open table for store '{store_id}': {e}"
+                        "Failed to open table for store '{partition:?}': {e}"
                     ))
                 })?;
 
                 for (key, value) in &entries {
                     table.insert(key.as_str(), value.as_slice()).map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to insert key '{key}' into store '{store_id}': {e}"
+                            "Failed to insert key '{key}' into store '{partition:?}': {e}"
                         ))
                     })?;
                 }
@@ -592,10 +654,10 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(()) => {
                     write_txn.commit().map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to commit transaction for store '{store_id}': {e}"
+                            "Failed to commit transaction for store '{partition:?}': {e}"
                         ))
                     })?;
-                    debug!("Set {entry_count} entries in store '{store_id}'");
+                    debug!("Set {entry_count} entries in store '{partition:?}'");
                     Ok(())
                 }
                 Err(e) => Err(e),
@@ -604,16 +666,20 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .await
     }
 
-    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn delete_many(
+        &self,
+        partition: &StorePartition,
+        keys: &[&str],
+    ) -> StateStoreResult<usize> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
         let keys: Vec<String> = keys.iter().map(|k| (*k).to_string()).collect();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin write transaction for store '{store_id}': {e}"
+                    "Failed to begin write transaction for store '{partition:?}': {e}"
                 ))
             })?;
             write_txn.set_durability(redb::Durability::Immediate);
@@ -627,7 +693,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
                         for key in &keys {
                             let removed = table.remove(key.as_str()).map_err(|e| {
                                 StateStoreError::StorageError(format!(
-                                    "Failed to remove key '{key}' from store '{store_id}': {e}"
+                                    "Failed to remove key '{key}' from store '{partition:?}': {e}"
                                 ))
                             })?;
                             if removed.is_some() {
@@ -638,7 +704,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
                     }
                     Err(redb::TableError::TableDoesNotExist(_)) => Ok(0),
                     Err(e) => Err(StateStoreError::StorageError(format!(
-                        "Failed to open table for store '{store_id}': {e}"
+                        "Failed to open table for store '{partition:?}': {e}"
                     ))),
                 }
             };
@@ -647,10 +713,10 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(count) => {
                     write_txn.commit().map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to commit transaction for store '{store_id}': {e}"
+                            "Failed to commit transaction for store '{partition:?}': {e}"
                         ))
                     })?;
-                    debug!("Deleted {count} keys from store '{store_id}'");
+                    debug!("Deleted {count} keys from store '{partition:?}'");
                     Ok(count)
                 }
                 Err(e) => Err(e),
@@ -659,15 +725,15 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .await
     }
 
-    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn clear_store(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin write transaction for store '{store_id}': {e}"
+                    "Failed to begin write transaction for store '{partition:?}': {e}"
                 ))
             })?;
             write_txn.set_durability(redb::Durability::Immediate);
@@ -679,7 +745,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(table) => {
                     let count = table.len().map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to count entries in store '{store_id}': {e}"
+                            "Failed to count entries in store '{partition:?}': {e}"
                         ))
                     })? as usize;
                     // Need to drop table before we can delete it
@@ -689,7 +755,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
                 Err(e) => {
                     return Err(StateStoreError::StorageError(format!(
-                        "Failed to open table for store '{store_id}': {e}"
+                        "Failed to open table for store '{partition:?}': {e}"
                     )))
                 }
             };
@@ -699,32 +765,32 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 let table_def = Self::make_table_def(table_name);
                 write_txn.delete_table(table_def).map_err(|e| {
                     StateStoreError::StorageError(format!(
-                        "Failed to delete table for store '{store_id}': {e}"
+                        "Failed to delete table for store '{partition:?}': {e}"
                     ))
                 })?;
             }
 
             write_txn.commit().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to commit transaction for store '{store_id}': {e}"
+                    "Failed to commit transaction for store '{partition:?}': {e}"
                 ))
             })?;
 
-            debug!("Cleared store '{store_id}' ({count} entries)");
+            debug!("Cleared store '{partition:?}' ({count} entries)");
             Ok(count)
         })
         .await
     }
 
-    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn list_keys(&self, partition: &StorePartition) -> StateStoreResult<Vec<String>> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin read transaction for store '{store_id}': {e}"
+                    "Failed to begin read transaction for store '{partition:?}': {e}"
                 ))
             })?;
 
@@ -735,14 +801,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(table) => {
                     let iter = table.iter().map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to iterate table for store '{store_id}': {e}"
+                            "Failed to iterate table for store '{partition:?}': {e}"
                         ))
                     })?;
 
                     for entry in iter {
                         let (key, _) = entry.map_err(|e| {
                             StateStoreError::StorageError(format!(
-                                "Failed to read entry from store '{store_id}': {e}"
+                                "Failed to read entry from store '{partition:?}': {e}"
                             ))
                         })?;
                         keys.push(key.value().to_string());
@@ -753,7 +819,7 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 }
                 Err(e) => {
                     return Err(StateStoreError::StorageError(format!(
-                        "Failed to open table for store '{store_id}': {e}"
+                        "Failed to open table for store '{partition:?}': {e}"
                     )))
                 }
             }
@@ -763,15 +829,15 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .await
     }
 
-    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn store_exists(&self, partition: &StorePartition) -> StateStoreResult<bool> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin read transaction for store '{store_id}': {e}"
+                    "Failed to begin read transaction for store '{partition:?}': {e}"
                 ))
             })?;
 
@@ -781,29 +847,29 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(table) => {
                     let len = table.len().map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to get length of store '{store_id}': {e}"
+                            "Failed to get length of store '{partition:?}': {e}"
                         ))
                     })?;
                     Ok(len > 0)
                 }
                 Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
                 Err(e) => Err(StateStoreError::StorageError(format!(
-                    "Failed to open table for store '{store_id}': {e}"
+                    "Failed to open table for store '{partition:?}': {e}"
                 ))),
             }
         })
         .await
     }
 
-    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
-        let table_name = self.get_or_create_table_name(store_id).await;
+    async fn key_count(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+        let table_name = self.get_or_create_table_name(partition).await;
         let db = self.db.clone();
-        let store_id = store_id.to_string();
+        let partition = partition.clone();
 
         self.blocking(move || {
             let read_txn = db.begin_read().map_err(|e| {
                 StateStoreError::StorageError(format!(
-                    "Failed to begin read transaction for store '{store_id}': {e}"
+                    "Failed to begin read transaction for store '{partition:?}': {e}"
                 ))
             })?;
 
@@ -813,14 +879,14 @@ impl StateStoreProvider for RedbStateStoreProvider {
                 Ok(table) => {
                     let len = table.len().map_err(|e| {
                         StateStoreError::StorageError(format!(
-                            "Failed to get length of store '{store_id}': {e}"
+                            "Failed to get length of store '{partition:?}': {e}"
                         ))
                     })?;
                     Ok(len as usize)
                 }
                 Err(redb::TableError::TableDoesNotExist(_)) => Ok(0),
                 Err(e) => Err(StateStoreError::StorageError(format!(
-                    "Failed to open table for store '{store_id}': {e}"
+                    "Failed to open table for store '{partition:?}': {e}"
                 ))),
             }
         })
@@ -897,13 +963,29 @@ mod tests {
         let directory = TempDir::new().expect("directory");
         let path = directory.path().join("cancelled.redb");
         let provider = RedbStateStoreProvider::new(&path).expect("provider");
-        provider.set("test", "value", vec![1]).await.expect("seed");
+        provider
+            .set(
+                &drasi_core_types::StorePartition::named("test"),
+                "value",
+                vec![1],
+            )
+            .await
+            .expect("seed");
         let (entered, release) = hold_next_operation(&provider);
         let mut operation = Box::pin(async {
             if write {
-                provider.set("test", "value", vec![2]).await
+                provider
+                    .set(
+                        &drasi_core_types::StorePartition::named("test"),
+                        "value",
+                        vec![2],
+                    )
+                    .await
             } else {
-                provider.get("test", "value").await.map(|_| ())
+                provider
+                    .get(&drasi_core_types::StorePartition::named("test"), "value")
+                    .await
+                    .map(|_| ())
             }
         });
         tokio::select! {
@@ -927,7 +1009,10 @@ mod tests {
 
         let reopened = RedbStateStoreProvider::new(&path).expect("immediate reopen");
         assert_eq!(
-            reopened.get("test", "value").await.expect("read"),
+            reopened
+                .get(&drasi_core_types::StorePartition::named("test"), "value")
+                .await
+                .expect("read"),
             Some(vec![if write { 2 } else { 1 }]),
         );
     }
@@ -1076,34 +1161,89 @@ mod tests {
         {
             let provider = Arc::new(RedbStateStoreProvider::new(&path).expect("provider"));
             assert_eq!(provider.durability(), StorageDurability::LOCAL_POWER_LOSS);
-            let progress = StateStoreConsumerProgress::new("graph", "consumer", provider.clone())
-                .expect("progress");
+            let progress = StateStoreConsumerProgress::new(
+                "graph",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a7")
+                    .expect("fixture UUID"),
+                provider.clone(),
+            )
+            .expect("progress");
             assert_eq!(progress.durability(), provider.durability());
             provider
-                .set("single", "removed", vec![1])
+                .set(
+                    &drasi_core_types::StorePartition::named("single"),
+                    "removed",
+                    vec![1],
+                )
                 .await
                 .expect("set");
-            provider.delete("single", "removed").await.expect("delete");
             provider
-                .set_many("batch", &[("kept", &[2]), ("removed", &[3])])
+                .delete(
+                    &drasi_core_types::StorePartition::named("single"),
+                    "removed",
+                )
+                .await
+                .expect("delete");
+            provider
+                .set_many(
+                    &drasi_core_types::StorePartition::named("batch"),
+                    &[("kept", &[2]), ("removed", &[3])],
+                )
                 .await
                 .expect("batch");
             provider
-                .delete_many("batch", &["removed"])
+                .delete_many(
+                    &drasi_core_types::StorePartition::named("batch"),
+                    &["removed"],
+                )
                 .await
                 .expect("delete batch");
-            provider.set("cleared", "key", vec![4]).await.expect("set");
-            provider.clear_store("cleared").await.expect("clear");
+            provider
+                .set(
+                    &drasi_core_types::StorePartition::named("cleared"),
+                    "key",
+                    vec![4],
+                )
+                .await
+                .expect("set");
+            provider
+                .clear_store(&drasi_core_types::StorePartition::named("cleared"))
+                .await
+                .expect("clear");
             provider.sync().await.expect("sync");
         }
         let provider = RedbStateStoreProvider::new(&path).expect("reopen");
-        assert_eq!(provider.get("single", "removed").await.expect("read"), None);
         assert_eq!(
-            provider.get("batch", "kept").await.expect("read"),
+            provider
+                .get(
+                    &drasi_core_types::StorePartition::named("single"),
+                    "removed"
+                )
+                .await
+                .expect("read"),
+            None
+        );
+        assert_eq!(
+            provider
+                .get(&drasi_core_types::StorePartition::named("batch"), "kept")
+                .await
+                .expect("read"),
             Some(vec![2])
         );
-        assert_eq!(provider.get("batch", "removed").await.expect("read"), None);
-        assert_eq!(provider.get("cleared", "key").await.expect("read"), None);
+        assert_eq!(
+            provider
+                .get(&drasi_core_types::StorePartition::named("batch"), "removed")
+                .await
+                .expect("read"),
+            None
+        );
+        assert_eq!(
+            provider
+                .get(&drasi_core_types::StorePartition::named("cleared"), "key")
+                .await
+                .expect("read"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1114,20 +1254,39 @@ mod tests {
 
         // Set a value
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
 
         // Get the value
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value1".to_vec()));
 
         // Get non-existent key
-        let result = provider.get("store1", "nonexistent").await.unwrap();
+        let result = provider
+            .get(
+                &drasi_core_types::StorePartition::named("store1"),
+                "nonexistent",
+            )
+            .await
+            .unwrap();
         assert_eq!(result, None);
 
         // Get from non-existent store
-        let result = provider.get("nonexistent", "key1").await.unwrap();
+        let result = provider
+            .get(
+                &drasi_core_types::StorePartition::named("nonexistent"),
+                "key1",
+            )
+            .await
+            .unwrap();
         assert_eq!(result, None);
     }
 
@@ -1139,18 +1298,34 @@ mod tests {
 
         // Set and delete
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
-        let deleted = provider.delete("store1", "key1").await.unwrap();
+        let deleted = provider
+            .delete(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert!(deleted);
 
         // Verify deletion
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, None);
 
         // Delete non-existent key
-        let deleted = provider.delete("store1", "nonexistent").await.unwrap();
+        let deleted = provider
+            .delete(
+                &drasi_core_types::StorePartition::named("store1"),
+                "nonexistent",
+            )
+            .await
+            .unwrap();
         assert!(!deleted);
     }
 
@@ -1161,23 +1336,42 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Key doesn't exist
-        assert!(!provider.contains_key("store1", "key1").await.unwrap());
+        assert!(!provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap());
 
         // Set a value
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
 
         // Key now exists
-        assert!(provider.contains_key("store1", "key1").await.unwrap());
+        assert!(provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap());
 
         // Different key doesn't exist
-        assert!(!provider.contains_key("store1", "key2").await.unwrap());
+        assert!(!provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key2")
+            .await
+            .unwrap());
 
         // Delete the key
-        provider.delete("store1", "key1").await.unwrap();
-        assert!(!provider.contains_key("store1", "key1").await.unwrap());
+        provider
+            .delete(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
+        assert!(!provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -1189,11 +1383,19 @@ mod tests {
         {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
             provider
-                .set("store1", "key1", b"value1".to_vec())
+                .set(
+                    &drasi_core_types::StorePartition::named("store1"),
+                    "key1",
+                    b"value1".to_vec(),
+                )
                 .await
                 .unwrap();
             provider
-                .set("store1", "key2", b"value2".to_vec())
+                .set(
+                    &drasi_core_types::StorePartition::named("store1"),
+                    "key2",
+                    b"value2".to_vec(),
+                )
                 .await
                 .unwrap();
         }
@@ -1201,9 +1403,15 @@ mod tests {
         // Create new provider and verify data is loaded
         {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
-            let result = provider.get("store1", "key1").await.unwrap();
+            let result = provider
+                .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+                .await
+                .unwrap();
             assert_eq!(result, Some(b"value1".to_vec()));
-            let result = provider.get("store1", "key2").await.unwrap();
+            let result = provider
+                .get(&drasi_core_types::StorePartition::named("store1"), "key2")
+                .await
+                .unwrap();
             assert_eq!(result, Some(b"value2".to_vec()));
         }
     }
@@ -1216,17 +1424,31 @@ mod tests {
 
         // Set same key in different stores
         provider
-            .set("store1", "key", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store2", "key", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store2"),
+                "key",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
         // Verify they don't interfere
-        let result1 = provider.get("store1", "key").await.unwrap();
-        let result2 = provider.get("store2", "key").await.unwrap();
+        let result1 = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key")
+            .await
+            .unwrap();
+        let result2 = provider
+            .get(&drasi_core_types::StorePartition::named("store2"), "key")
+            .await
+            .unwrap();
         assert_eq!(result1, Some(b"value1".to_vec()));
         assert_eq!(result2, Some(b"value2".to_vec()));
     }
@@ -1239,27 +1461,47 @@ mod tests {
 
         // Set values
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
         // Clear store
-        let count = provider.clear_store("store1").await.unwrap();
+        let count = provider
+            .clear_store(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap();
         assert_eq!(count, 2);
 
         // Verify deletion
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, None);
 
         // Store should not exist anymore
-        assert!(!provider.store_exists("store1").await.unwrap());
+        assert!(!provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
 
         // Clear non-existent store should return 0
-        let count = provider.clear_store("nonexistent").await.unwrap();
+        let count = provider
+            .clear_store(&drasi_core_types::StorePartition::named("nonexistent"))
+            .await
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1271,21 +1513,35 @@ mod tests {
 
         // Set values
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
         // List keys
-        let mut keys = provider.list_keys("store1").await.unwrap();
+        let mut keys = provider
+            .list_keys(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap();
         keys.sort();
         assert_eq!(keys, vec!["key1", "key2"]);
 
         // List keys from non-existent store
-        let keys = provider.list_keys("nonexistent").await.unwrap();
+        let keys = provider
+            .list_keys(&drasi_core_types::StorePartition::named("nonexistent"))
+            .await
+            .unwrap();
         assert!(keys.is_empty());
     }
 
@@ -1296,18 +1552,34 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Non-existent store
-        assert!(!provider.store_exists("store1").await.unwrap());
+        assert!(!provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
 
         // Set a value
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
-        assert!(provider.store_exists("store1").await.unwrap());
+        assert!(provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
 
         // Clear the store
-        provider.clear_store("store1").await.unwrap();
-        assert!(!provider.store_exists("store1").await.unwrap());
+        provider
+            .clear_store(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap();
+        assert!(!provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -1317,28 +1589,75 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Empty/non-existent store has 0 keys
-        assert_eq!(provider.key_count("store1").await.unwrap(), 0);
-        assert_eq!(provider.key_count("nonexistent").await.unwrap(), 0);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("nonexistent"))
+                .await
+                .unwrap(),
+            0
+        );
 
         // Set values
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
-        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            1
+        );
 
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
-        assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            2
+        );
 
         // Different store still has 0 keys
-        assert_eq!(provider.key_count("store2").await.unwrap(), 0);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store2"))
+                .await
+                .unwrap(),
+            0
+        );
 
         // Delete a key
-        provider.delete("store1", "key1").await.unwrap();
-        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+        provider
+            .delete(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1349,21 +1668,36 @@ mod tests {
 
         // Set multiple values
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key3", b"value3".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key3",
+                b"value3".to_vec(),
+            )
             .await
             .unwrap();
 
         // Get multiple (including non-existent key)
         let result = provider
-            .get_many("store1", &["key1", "key2", "nonexistent"])
+            .get_many(
+                &drasi_core_types::StorePartition::named("store1"),
+                &["key1", "key2", "nonexistent"],
+            )
             .await
             .unwrap();
         assert_eq!(result.len(), 2);
@@ -1372,7 +1706,10 @@ mod tests {
 
         // Get from non-existent store returns empty HashMap
         let result = provider
-            .get_many("nonexistent_store", &["key1", "key2"])
+            .get_many(
+                &drasi_core_types::StorePartition::named("nonexistent_store"),
+                &["key1", "key2"],
+            )
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -1386,14 +1723,23 @@ mod tests {
 
         // Set multiple values atomically
         provider
-            .set_many("store1", &[("key1", b"value1"), ("key2", b"value2")])
+            .set_many(
+                &drasi_core_types::StorePartition::named("store1"),
+                &[("key1", b"value1"), ("key2", b"value2")],
+            )
             .await
             .unwrap();
 
         // Verify
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value1".to_vec()));
-        let result = provider.get("store1", "key2").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key2")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value2".to_vec()));
     }
 
@@ -1406,7 +1752,7 @@ mod tests {
         // Set multiple values
         provider
             .set_many(
-                "store1",
+                &drasi_core_types::StorePartition::named("store1"),
                 &[
                     ("key1", b"value1"),
                     ("key2", b"value2"),
@@ -1418,15 +1764,24 @@ mod tests {
 
         // Delete some atomically
         let count = provider
-            .delete_many("store1", &["key1", "key2", "nonexistent"])
+            .delete_many(
+                &drasi_core_types::StorePartition::named("store1"),
+                &["key1", "key2", "nonexistent"],
+            )
             .await
             .unwrap();
         assert_eq!(count, 2);
 
         // Verify
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, None);
-        let result = provider.get("store1", "key3").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key3")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value3".to_vec()));
     }
 
@@ -1439,12 +1794,19 @@ mod tests {
         // Store binary data
         let binary_data: Vec<u8> = vec![0, 1, 2, 3, 255, 254, 253, 0];
         provider
-            .set("store1", "binary", binary_data.clone())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "binary",
+                binary_data.clone(),
+            )
             .await
             .unwrap();
 
         // Retrieve and verify
-        let result = provider.get("store1", "binary").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "binary")
+            .await
+            .unwrap();
         assert_eq!(result, Some(binary_data));
     }
 
@@ -1459,13 +1821,20 @@ mod tests {
 
         // Set some data and sync again
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider.sync().await.unwrap();
 
         // Verify data is still there
-        let result = provider.get("store1", "key1").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value1".to_vec()));
     }
 
@@ -1492,14 +1861,22 @@ mod tests {
 
         // Access a store
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         assert_eq!(provider.cached_table_name_count().await, 1);
 
         // Access another store
         provider
-            .set("store2", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store2"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         assert_eq!(provider.cached_table_name_count().await, 2);
@@ -1522,8 +1899,17 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let key = format!("key{i}");
                 let value = vec![i as u8; 10];
-                p.set("store", &key, value.clone()).await.unwrap();
-                let result = p.get("store", &key).await.unwrap();
+                p.set(
+                    &drasi_core_types::StorePartition::named("store"),
+                    &key,
+                    value.clone(),
+                )
+                .await
+                .unwrap();
+                let result = p
+                    .get(&drasi_core_types::StorePartition::named("store"), &key)
+                    .await
+                    .unwrap();
                 assert_eq!(result, Some(value));
             }));
         }
@@ -1534,7 +1920,13 @@ mod tests {
         }
 
         // Verify all keys exist
-        assert_eq!(provider.key_count("store").await.unwrap(), 10);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store"))
+                .await
+                .unwrap(),
+            10
+        );
     }
 
     #[tokio::test]
@@ -1548,7 +1940,7 @@ mod tests {
         for i in 0..10 {
             let p = provider.clone();
             handles.push(tokio::spawn(async move {
-                let store_id = format!("store{i}");
+                let store_id = drasi_core_types::StorePartition::named(format!("store{i}"));
                 for j in 0..5 {
                     let key = format!("key{j}");
                     let value = vec![i as u8, j as u8];
@@ -1564,7 +1956,7 @@ mod tests {
 
         // Verify each store has 5 keys
         for i in 0..10 {
-            let store_id = format!("store{i}");
+            let store_id = drasi_core_types::StorePartition::named(format!("store{i}"));
             assert_eq!(provider.key_count(&store_id).await.unwrap(), 5);
         }
     }
@@ -1580,12 +1972,25 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Empty key should work
-        provider.set("store1", "", b"value".to_vec()).await.unwrap();
-        let result = provider.get("store1", "").await.unwrap();
+        provider
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "",
+                b"value".to_vec(),
+            )
+            .await
+            .unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value".to_vec()));
 
         // Should be listable
-        let keys = provider.list_keys("store1").await.unwrap();
+        let keys = provider
+            .list_keys(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap();
         assert_eq!(keys, vec![""]);
     }
 
@@ -1596,13 +2001,32 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Empty value should work
-        provider.set("store1", "key", vec![]).await.unwrap();
-        let result = provider.get("store1", "key").await.unwrap();
+        provider
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key")
+            .await
+            .unwrap();
         assert_eq!(result, Some(vec![]));
 
         // Key should exist and be counted
-        assert!(provider.contains_key("store1", "key").await.unwrap());
-        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+        assert!(provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key")
+            .await
+            .unwrap());
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1612,8 +2036,18 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Empty store_id should work (prefixed with "store_")
-        provider.set("", "key", b"value".to_vec()).await.unwrap();
-        let result = provider.get("", "key").await.unwrap();
+        provider
+            .set(
+                &drasi_core_types::StorePartition::named(""),
+                "key",
+                b"value".to_vec(),
+            )
+            .await
+            .unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named(""), "key")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value".to_vec()));
     }
 
@@ -1625,32 +2059,59 @@ mod tests {
 
         // Unicode in keys
         provider
-            .set("store1", "キー", b"value".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "キー",
+                b"value".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "مفتاح", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "مفتاح",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "🔑", b"value3".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "🔑",
+                b"value3".to_vec(),
+            )
             .await
             .unwrap();
 
         assert_eq!(
-            provider.get("store1", "キー").await.unwrap(),
+            provider
+                .get(&drasi_core_types::StorePartition::named("store1"), "キー")
+                .await
+                .unwrap(),
             Some(b"value".to_vec())
         );
         assert_eq!(
-            provider.get("store1", "مفتاح").await.unwrap(),
+            provider
+                .get(&drasi_core_types::StorePartition::named("store1"), "مفتاح")
+                .await
+                .unwrap(),
             Some(b"value2".to_vec())
         );
         assert_eq!(
-            provider.get("store1", "🔑").await.unwrap(),
+            provider
+                .get(&drasi_core_types::StorePartition::named("store1"), "🔑")
+                .await
+                .unwrap(),
             Some(b"value3".to_vec())
         );
 
-        assert_eq!(provider.key_count("store1").await.unwrap(), 3);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            3
+        );
     }
 
     #[tokio::test]
@@ -1661,20 +2122,34 @@ mod tests {
 
         // Unicode in store_id
         provider
-            .set("商店", "key", b"value".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("商店"),
+                "key",
+                b"value".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("متجر", "key", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("متجر"),
+                "key",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
         assert_eq!(
-            provider.get("商店", "key").await.unwrap(),
+            provider
+                .get(&drasi_core_types::StorePartition::named("商店"), "key")
+                .await
+                .unwrap(),
             Some(b"value".to_vec())
         );
         assert_eq!(
-            provider.get("متجر", "key").await.unwrap(),
+            provider
+                .get(&drasi_core_types::StorePartition::named("متجر"), "key")
+                .await
+                .unwrap(),
             Some(b"value2".to_vec())
         );
     }
@@ -1699,16 +2174,29 @@ mod tests {
         ];
 
         for (i, key) in special_keys.iter().enumerate() {
-            provider.set("store1", key, vec![i as u8]).await.unwrap();
+            provider
+                .set(
+                    &drasi_core_types::StorePartition::named("store1"),
+                    key,
+                    vec![i as u8],
+                )
+                .await
+                .unwrap();
         }
 
         for (i, key) in special_keys.iter().enumerate() {
-            let result = provider.get("store1", key).await.unwrap();
+            let result = provider
+                .get(&drasi_core_types::StorePartition::named("store1"), key)
+                .await
+                .unwrap();
             assert_eq!(result, Some(vec![i as u8]), "Failed for key: {key:?}");
         }
 
         assert_eq!(
-            provider.key_count("store1").await.unwrap(),
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
             special_keys.len()
         );
     }
@@ -1722,11 +2210,18 @@ mod tests {
         // Large value (1MB)
         let large_value: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
         provider
-            .set("store1", "large", large_value.clone())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "large",
+                large_value.clone(),
+            )
             .await
             .unwrap();
 
-        let result = provider.get("store1", "large").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "large")
+            .await
+            .unwrap();
         assert_eq!(result, Some(large_value));
     }
 
@@ -1739,11 +2234,21 @@ mod tests {
         // Very long key (10KB)
         let long_key: String = "k".repeat(10_000);
         provider
-            .set("store1", &long_key, b"value".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                &long_key,
+                b"value".to_vec(),
+            )
             .await
             .unwrap();
 
-        let result = provider.get("store1", &long_key).await.unwrap();
+        let result = provider
+            .get(
+                &drasi_core_types::StorePartition::named("store1"),
+                &long_key,
+            )
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value".to_vec()));
     }
 
@@ -1754,7 +2259,7 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Very long store_id (1KB - keeping shorter for table names)
-        let long_store_id: String = "s".repeat(1_000);
+        let long_store_id = drasi_core_types::StorePartition::named("s".repeat(1_000));
         provider
             .set(&long_store_id, "key", b"value".to_vec())
             .await
@@ -1772,19 +2277,36 @@ mod tests {
 
         // Overwrite existing key
         provider
-            .set("store1", "key", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
-        let result = provider.get("store1", "key").await.unwrap();
+        let result = provider
+            .get(&drasi_core_types::StorePartition::named("store1"), "key")
+            .await
+            .unwrap();
         assert_eq!(result, Some(b"value2".to_vec()));
 
         // Should still be just 1 key
-        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1794,12 +2316,19 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
 
         // Empty keys array
-        let result = provider.get_many("store1", &[]).await.unwrap();
+        let result = provider
+            .get_many(&drasi_core_types::StorePartition::named("store1"), &[])
+            .await
+            .unwrap();
         assert!(result.is_empty());
     }
 
@@ -1810,10 +2339,16 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         // Empty entries should succeed
-        provider.set_many("store1", &[]).await.unwrap();
+        provider
+            .set_many(&drasi_core_types::StorePartition::named("store1"), &[])
+            .await
+            .unwrap();
 
         // Store should not exist (no data added)
-        assert!(!provider.store_exists("store1").await.unwrap());
+        assert!(!provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -1823,20 +2358,33 @@ mod tests {
         let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
 
         // Empty keys array should delete nothing
-        let count = provider.delete_many("store1", &[]).await.unwrap();
+        let count = provider
+            .delete_many(&drasi_core_types::StorePartition::named("store1"), &[])
+            .await
+            .unwrap();
         assert_eq!(count, 0);
 
         // Key should still exist
-        assert!(provider.contains_key("store1", "key1").await.unwrap());
+        assert!(provider
+            .contains_key(&drasi_core_types::StorePartition::named("store1"), "key1")
+            .await
+            .unwrap());
 
         // Delete from non-existent store should return 0
         let count = provider
-            .delete_many("nonexistent_store", &["key1", "key2"])
+            .delete_many(
+                &drasi_core_types::StorePartition::named("nonexistent_store"),
+                &["key1", "key2"],
+            )
             .await
             .unwrap();
         assert_eq!(count, 0);
@@ -1852,7 +2400,7 @@ mod tests {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
             provider
                 .set_many(
-                    "store1",
+                    &drasi_core_types::StorePartition::named("store1"),
                     &[
                         ("key1", b"value1"),
                         ("key2", b"value2"),
@@ -1867,11 +2415,23 @@ mod tests {
         {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
-            assert!(provider.store_exists("store1").await.unwrap());
-            assert_eq!(provider.key_count("store1").await.unwrap(), 3);
+            assert!(provider
+                .store_exists(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap());
+            assert_eq!(
+                provider
+                    .key_count(&drasi_core_types::StorePartition::named("store1"))
+                    .await
+                    .unwrap(),
+                3
+            );
 
             let result = provider
-                .get_many("store1", &["key1", "key2", "key3"])
+                .get_many(
+                    &drasi_core_types::StorePartition::named("store1"),
+                    &["key1", "key2", "key3"],
+                )
                 .await
                 .unwrap();
             assert_eq!(result.len(), 3);
@@ -1885,15 +2445,28 @@ mod tests {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
             // Delete one key
-            provider.delete("store1", "key2").await.unwrap();
-
-            // Update another
             provider
-                .set("store1", "key1", b"updated".to_vec())
+                .delete(&drasi_core_types::StorePartition::named("store1"), "key2")
                 .await
                 .unwrap();
 
-            assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+            // Update another
+            provider
+                .set(
+                    &drasi_core_types::StorePartition::named("store1"),
+                    "key1",
+                    b"updated".to_vec(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                provider
+                    .key_count(&drasi_core_types::StorePartition::named("store1"))
+                    .await
+                    .unwrap(),
+                2
+            );
         }
 
         // Fourth instance - verify final state
@@ -1901,12 +2474,24 @@ mod tests {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
             assert_eq!(
-                provider.get("store1", "key1").await.unwrap(),
+                provider
+                    .get(&drasi_core_types::StorePartition::named("store1"), "key1")
+                    .await
+                    .unwrap(),
                 Some(b"updated".to_vec())
             );
-            assert_eq!(provider.get("store1", "key2").await.unwrap(), None);
             assert_eq!(
-                provider.get("store1", "key3").await.unwrap(),
+                provider
+                    .get(&drasi_core_types::StorePartition::named("store1"), "key2")
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                provider
+                    .get(&drasi_core_types::StorePartition::named("store1"), "key3")
+                    .await
+                    .unwrap(),
                 Some(b"value3".to_vec())
             );
         }
@@ -1922,7 +2507,7 @@ mod tests {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
             for i in 0..5 {
-                let store_id = format!("store{i}");
+                let store_id = drasi_core_types::StorePartition::named(format!("store{i}"));
                 for j in 0..3 {
                     let key = format!("key{j}");
                     let value = format!("value_{i}_{j}").into_bytes();
@@ -1936,7 +2521,7 @@ mod tests {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
             for i in 0..5 {
-                let store_id = format!("store{i}");
+                let store_id = drasi_core_types::StorePartition::named(format!("store{i}"));
                 assert!(provider.store_exists(&store_id).await.unwrap());
                 assert_eq!(provider.key_count(&store_id).await.unwrap(), 3);
             }
@@ -1946,11 +2531,23 @@ mod tests {
         {
             let provider = RedbStateStoreProvider::new(&db_path).unwrap();
 
-            provider.clear_store("store2").await.unwrap();
+            provider
+                .clear_store(&drasi_core_types::StorePartition::named("store2"))
+                .await
+                .unwrap();
 
-            assert!(!provider.store_exists("store2").await.unwrap());
-            assert!(provider.store_exists("store0").await.unwrap());
-            assert!(provider.store_exists("store4").await.unwrap());
+            assert!(!provider
+                .store_exists(&drasi_core_types::StorePartition::named("store2"))
+                .await
+                .unwrap());
+            assert!(provider
+                .store_exists(&drasi_core_types::StorePartition::named("store0"))
+                .await
+                .unwrap());
+            assert!(provider
+                .store_exists(&drasi_core_types::StorePartition::named("store4"))
+                .await
+                .unwrap());
         }
     }
 
@@ -1963,7 +2560,11 @@ mod tests {
         // Access same store multiple times
         for i in 0..10 {
             provider
-                .set("store1", &format!("key{i}"), vec![i as u8])
+                .set(
+                    &drasi_core_types::StorePartition::named("store1"),
+                    &format!("key{i}"),
+                    vec![i as u8],
+                )
                 .await
                 .unwrap();
         }
@@ -1972,8 +2573,22 @@ mod tests {
         assert_eq!(provider.cached_table_name_count().await, 1);
 
         // Access different stores
-        provider.set("store2", "key", vec![]).await.unwrap();
-        provider.set("store3", "key", vec![]).await.unwrap();
+        provider
+            .set(
+                &drasi_core_types::StorePartition::named("store2"),
+                "key",
+                vec![],
+            )
+            .await
+            .unwrap();
+        provider
+            .set(
+                &drasi_core_types::StorePartition::named("store3"),
+                "key",
+                vec![],
+            )
+            .await
+            .unwrap();
 
         // Now should have 3 cached names
         assert_eq!(provider.cached_table_name_count().await, 3);
@@ -1987,31 +2602,67 @@ mod tests {
 
         // Add data
         provider
-            .set("store1", "key1", b"value1".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key1",
+                b"value1".to_vec(),
+            )
             .await
             .unwrap();
         provider
-            .set("store1", "key2", b"value2".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "key2",
+                b"value2".to_vec(),
+            )
             .await
             .unwrap();
 
-        assert_eq!(provider.key_count("store1").await.unwrap(), 2);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            2
+        );
 
         // Clear the store
-        let count = provider.clear_store("store1").await.unwrap();
+        let count = provider
+            .clear_store(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap();
         assert_eq!(count, 2);
-        assert!(!provider.store_exists("store1").await.unwrap());
+        assert!(!provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
 
         // Reuse the same store
         provider
-            .set("store1", "newkey", b"newvalue".to_vec())
+            .set(
+                &drasi_core_types::StorePartition::named("store1"),
+                "newkey",
+                b"newvalue".to_vec(),
+            )
             .await
             .unwrap();
 
-        assert!(provider.store_exists("store1").await.unwrap());
-        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+        assert!(provider
+            .store_exists(&drasi_core_types::StorePartition::named("store1"))
+            .await
+            .unwrap());
         assert_eq!(
-            provider.get("store1", "newkey").await.unwrap(),
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            provider
+                .get(&drasi_core_types::StorePartition::named("store1"), "newkey")
+                .await
+                .unwrap(),
             Some(b"newvalue".to_vec())
         );
     }
@@ -2025,7 +2676,7 @@ mod tests {
         // Set many should be atomic
         provider
             .set_many(
-                "store1",
+                &drasi_core_types::StorePartition::named("store1"),
                 &[
                     ("key1", b"value1"),
                     ("key2", b"value2"),
@@ -2036,15 +2687,30 @@ mod tests {
             .unwrap();
 
         // All should exist
-        assert_eq!(provider.key_count("store1").await.unwrap(), 3);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            3
+        );
 
         // Delete many should be atomic
         let deleted = provider
-            .delete_many("store1", &["key1", "key2"])
+            .delete_many(
+                &drasi_core_types::StorePartition::named("store1"),
+                &["key1", "key2"],
+            )
             .await
             .unwrap();
         assert_eq!(deleted, 2);
-        assert_eq!(provider.key_count("store1").await.unwrap(), 1);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store1"))
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2060,10 +2726,19 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let key = format!("key{i}");
                 let value = vec![i as u8; 100];
-                p.set("store", &key, value.clone()).await.unwrap();
+                p.set(
+                    &drasi_core_types::StorePartition::named("store"),
+                    &key,
+                    value.clone(),
+                )
+                .await
+                .unwrap();
 
                 // Verify our write
-                let result = p.get("store", &key).await.unwrap();
+                let result = p
+                    .get(&drasi_core_types::StorePartition::named("store"), &key)
+                    .await
+                    .unwrap();
                 assert_eq!(result, Some(value));
             }));
         }
@@ -2073,6 +2748,12 @@ mod tests {
         }
 
         // Verify all keys written
-        assert_eq!(provider.key_count("store").await.unwrap(), 50);
+        assert_eq!(
+            provider
+                .key_count(&drasi_core_types::StorePartition::named("store"))
+                .await
+                .unwrap(),
+            50
+        );
     }
 }

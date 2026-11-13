@@ -56,13 +56,19 @@ async fn channel(directory: &Path) -> Result<Arc<QosChannel>> {
             retention: RetentionPolicy::Backpressure,
             subscribers: BTreeMap::from([("capture".into(), SubscriptionStart::Earliest)]),
         },
-        provider.create_indexes(GRAPH, "input-journal").await?,
+        provider
+            .create_indexes(
+                GRAPH,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000132")
+                    .expect("fixture UUID"),
+            )
+            .await?,
         codec,
         "application",
         QosRecoveryOptions::Admission(AdmissionOptions {
             construction_scope: GRAPH.into(),
             graph_id: GRAPH.into(),
-            component_id: ComponentId::try_new("input")?,
+            component_id: ComponentId::try_new("8e4daf7b-2ea0-555a-8546-199f53b070f1")?,
             failure_scope: FailureMode::ProcessRestart,
             max_producers: size(2),
             receipts_per_producer: size(4),
@@ -108,7 +114,10 @@ fn graph(
     admission: &Arc<SourceAdmission>,
     block: bool,
 ) -> Result<(ComputationGraph, mpsc::Receiver<ChangeEnvelope>)> {
-    let source = NativeApplicationSource::durable("input", admission.clone())?;
+    let source = NativeApplicationSource::durable(
+        ComponentId::try_new("8e4daf7b-2ea0-555a-8546-199f53b070f1")?,
+        admission.clone(),
+    )?;
     assert!(source.get_handle().is_none());
     assert_eq!(source.configuration()?["durable"], true);
     let output = source.output();
@@ -122,31 +131,42 @@ fn graph(
             binding: "application-input".into(),
         })?
         .provide_resource(journal.clone(), admission.channel().resource())?
-        .source(Box::new(source))
-        .sink(Box::new(Capture {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("capture")?,
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    GraphChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?,
-            output: sender,
-            block,
-        }))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(source),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(Capture {
+                descriptor: ComponentDescriptor::try_new(
+                    ComponentId::try_new("701d75b8-b661-5f75-a091-8e21d0bfa98d")?,
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?,
+                output: sender,
+                block,
+            }),
+        )
         .bind_stream(output.clone(), StreamId::try_new("input/out")?)
         .connect(
             EdgeDefinition::new(
                 output,
-                Endpoint::new(ComponentId::try_new("capture")?, PortId::try_new("in")?),
+                Endpoint::new(
+                    ComponentId::try_new("701d75b8-b661-5f75-a091-8e21d0bfa98d")?,
+                    PortId::try_new("in")?,
+                ),
             ),
             Box::new(admission.channel().definition().pipe(journal, "capture")),
         )
         .build()?;
     let recovery = graph.recovery_report(&RecoveryRequirement {
-        consumer: ComponentId::try_new("input")?,
+        consumer: ComponentId::try_new("8e4daf7b-2ea0-555a-8546-199f53b070f1")?,
         scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
         guarantees: [RecoveryGuarantee::Acceptance].into(),
     })?;
@@ -206,13 +226,24 @@ async fn lifecycle_contract() -> Result<()> {
     let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
     assert!(matches!(
         admission
-            .register_producer(ComponentId::try_new("client")?)
+            .register_producer(ComponentId::try_new(
+                "05917d50-b359-5767-9855-c3b33fa5e5e9"
+            )?)
             .await,
         Err(PipeError::Closed)
     ));
-    assert!(NativeApplicationSource::durable("another-source", admission.clone()).is_err());
+    assert!(NativeApplicationSource::durable(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000135")
+            .expect("fixture UUID"),
+        admission.clone()
+    )
+    .is_err());
     let wrong_port = SourceAdmission::new(channel.clone(), PortId::try_new("elsewhere")?).await?;
-    assert!(NativeApplicationSource::durable("input", wrong_port).is_err());
+    assert!(NativeApplicationSource::durable(
+        ComponentId::try_new("8e4daf7b-2ea0-555a-8546-199f53b070f1")?,
+        wrong_port
+    )
+    .is_err());
     {
         let (mut graph, mut delivered) = graph(&admission, false)?;
         let run = graph.start()?;
@@ -221,7 +252,7 @@ async fn lifecycle_contract() -> Result<()> {
             let result = async {
                 control.startup_report().await?;
                 active(&admission).await?;
-                let session = admission.register_producer(ComponentId::try_new("client")?).await?;
+                let session = admission.register_producer(ComponentId::try_new("05917d50-b359-5767-9855-c3b33fa5e5e9")?).await?;
                 let input = event(1)?;
                 let receipt = admit(&admission, &session, 1, &input).await?;
                 receive(&mut delivered, "1").await?;
@@ -231,13 +262,13 @@ async fn lifecycle_contract() -> Result<()> {
                 assert!(matches!(conflict, Err(PipeError::Backend(error))
                     if error.downcast_ref::<AdmissionRejection>() == Some(&AdmissionRejection::PayloadConflict(1))));
                 assert_eq!(channel.progress().await?.accepted, 1);
-                let source = control.component_handle(&ComponentId::try_new("input")?)?;
+                let source = control.component_handle_by_id(&ComponentId::try_new("8e4daf7b-2ea0-555a-8546-199f53b070f1")?)?;
                 source.stop().await?;
                 assert!(matches!(admission.admit(&session, 2, &event(2)?).await, Err(PipeError::Closed)));
                 assert_eq!(channel.progress().await?.accepted, 1);
                 source.start().await?;
                 active(&admission).await?;
-                assert_eq!(admission.register_producer(ComponentId::try_new("client")?).await?, session);
+                assert_eq!(admission.register_producer(ComponentId::try_new("05917d50-b359-5767-9855-c3b33fa5e5e9")?).await?, session);
                 admit(&admission, &session, 2, &event(2)?).await?;
                 receive(&mut delivered, "2").await?;
                 Ok::<_, anyhow::Error>(())
@@ -272,7 +303,9 @@ async fn reopen_contract() -> Result<()> {
                     control.startup_report().await?;
                     active(&admission).await?;
                     let session = admission
-                        .register_producer(ComponentId::try_new("client")?)
+                        .register_producer(ComponentId::try_new(
+                            "05917d50-b359-5767-9855-c3b33fa5e5e9",
+                        )?)
                         .await?;
                     let receipt = admit(&admission, &session, 1, &event(1)?).await?;
                     if let Some(original) = &accepted {
@@ -335,11 +368,15 @@ async fn removal_contract() -> Result<()> {
                 assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
                 active(&admission).await?;
                 let session = admission
-                    .register_producer(ComponentId::try_new("client")?)
+                    .register_producer(ComponentId::try_new(
+                        "05917d50-b359-5767-9855-c3b33fa5e5e9",
+                    )?)
                     .await?;
                 if remove {
                     control
-                        .component_handle(&ComponentId::try_new("capture")?)?
+                        .component_handle_by_id(&ComponentId::try_new(
+                            "701d75b8-b661-5f75-a091-8e21d0bfa98d",
+                        )?)?
                         .stop()
                         .await
                         .context("pausing the consumer before admitting input")?;
@@ -353,7 +390,9 @@ async fn removal_contract() -> Result<()> {
                             if error.downcast_ref::<AdmissionRejection>()
                                 == Some(&AdmissionRejection::PendingObligations)
                     ));
-                    let source = control.component_handle(&ComponentId::try_new("input")?)?;
+                    let source = control.component_handle_by_id(&ComponentId::try_new(
+                        "8e4daf7b-2ea0-555a-8546-199f53b070f1",
+                    )?)?;
                     source
                         .stop()
                         .await
@@ -390,7 +429,9 @@ async fn removal_contract() -> Result<()> {
                         channel.admission_receipt(&session, 1).await?,
                         Some(receipt.clone())
                     );
-                    let consumer = control.component_handle(&ComponentId::try_new("capture")?)?;
+                    let consumer = control.component_handle_by_id(&ComponentId::try_new(
+                        "701d75b8-b661-5f75-a091-8e21d0bfa98d",
+                    )?)?;
                     consumer.start().await?;
                     receive(&mut delivered, "1").await?;
                     tokio::time::timeout(Duration::from_secs(5), async {
@@ -437,7 +478,9 @@ async fn removal_contract() -> Result<()> {
                                 == Some(&AdmissionRejection::SessionExpired)
                     ));
                     let replacement = admission
-                        .register_producer(ComponentId::try_new("client")?)
+                        .register_producer(ComponentId::try_new(
+                            "05917d50-b359-5767-9855-c3b33fa5e5e9",
+                        )?)
                         .await?;
                     assert_ne!(replacement, session);
                     admit(&admission, &replacement, 1, &event(2)?).await?;
@@ -506,7 +549,10 @@ async fn query_contract() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let journal = channel(directory.path()).await?;
     let admission = SourceAdmission::new(journal.clone(), PortId::try_new("out")?).await?;
-    let source = NativeApplicationSource::durable("input", admission.clone())?;
+    let source = NativeApplicationSource::durable(
+        ComponentId::try_new("8e4daf7b-2ea0-555a-8546-199f53b070f1")?,
+        admission.clone(),
+    )?;
     let output = source.output();
     let provider = LegacyIndexProviderAdapter::new(Arc::new(
         RocksDbIndexProvider::new(directory.path(), false, false)
@@ -515,7 +561,7 @@ async fn query_contract() -> Result<()> {
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: GRAPH.into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new("bcabe476-8ac6-5d54-8fe4-8f803b96ab96")?,
             query: "MATCH (n:Item) RETURN count(n) AS count".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -528,13 +574,17 @@ async fn query_contract() -> Result<()> {
     .with_delivery_tracking();
     let rows = query.results();
     let (reaction, mut received) = NativeApplicationReaction::channel(
-        "application",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000136")
+            .expect("fixture UUID"),
         QueryChangeCodec::schema().descriptor().clone(),
         size(8),
     )?;
     let reaction_input = reaction.input();
     let resource = ResourceId::try_new("journal")?;
-    let query_output = Endpoint::new(ComponentId::try_new("query")?, PortId::try_new("out")?);
+    let query_output = Endpoint::new(
+        ComponentId::try_new("bcabe476-8ac6-5d54-8fe4-8f803b96ab96")?,
+        PortId::try_new("out")?,
+    );
     let mut graph = ComputationGraph::builder(GRAPH)
         .declare_resource(ResourceSpecification {
             id: resource.clone(),
@@ -543,15 +593,30 @@ async fn query_contract() -> Result<()> {
             binding: "application-input".into(),
         })?
         .provide_resource(resource.clone(), journal.resource())?
-        .source(Box::new(source))
-        .transformer(Box::new(query))
-        .sink(Box::new(reaction))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-2")
+                .expect("fixture component name"),
+            Box::new(source),
+        )
+        .transformer(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                .expect("fixture component name"),
+            Box::new(query),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-2")
+                .expect("fixture component name"),
+            Box::new(reaction),
+        )
         .bind_stream(output.clone(), StreamId::try_new("input/out")?)
         .bind_stream(query_output.clone(), StreamId::try_new("query/out")?)
         .connect(
             EdgeDefinition::new(
                 output,
-                Endpoint::new(ComponentId::try_new("query")?, PortId::try_new("in")?),
+                Endpoint::new(
+                    ComponentId::try_new("bcabe476-8ac6-5d54-8fe4-8f803b96ab96")?,
+                    PortId::try_new("in")?,
+                ),
             ),
             Box::new(journal.definition().pipe(resource, "capture")),
         )
@@ -567,7 +632,9 @@ async fn query_contract() -> Result<()> {
             control.startup_report().await?;
             active(&admission).await?;
             let session = admission
-                .register_producer(ComponentId::try_new("client")?)
+                .register_producer(ComponentId::try_new(
+                    "05917d50-b359-5767-9855-c3b33fa5e5e9",
+                )?)
                 .await?;
             let receipt = admit(&admission, &session, 1, &event(1)?).await?;
             let result = tokio::time::timeout(Duration::from_secs(5), received.recv())
@@ -576,7 +643,7 @@ async fn query_contract() -> Result<()> {
             assert_eq!(result.envelope.system().stream().as_str(), "query/out");
             assert_eq!(
                 QueryChangeCodec::metadata(&result.envelope)?.query_id,
-                "query"
+                ComponentId::try_new("bcabe476-8ac6-5d54-8fe4-8f803b96ab96")?
             );
             let delivered = result
                 .envelope

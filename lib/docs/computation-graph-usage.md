@@ -68,8 +68,11 @@ endpoint to the shared query builder:
 ```rust,ignore
 use drasi_lib::{Query, computation::v1::*};
 
+let application = ComponentId::try_new("378f451c-8e3b-435b-9c2a-a91ac4fb1762")?;
+let query = ComponentId::derive_owned(&application, "order-names")?;
+let source = drasi.component_by_name("orders")?;
 let source_output = Endpoint::new(
-    ComponentId::try_new("orders")?,
+    source.id().clone(),
     PortId::try_new("out")?,
 );
 let batch = drasi.computation_pipeline()?
@@ -77,10 +80,10 @@ let batch = drasi.computation_pipeline()?
     .query(Query::cypher("order-names")
         .query("MATCH (o:Order) RETURN o.name AS name")
         .from_input("orders")
-        .build())
+        .build()?
+        .with_assigned_id(query))
     .build()?;
-let report = drasi.add_components(batch).await?;
-anyhow::ensure!(report.committed, "{report:?}");
+drasi.add_components(batch).await?;
 ```
 
 This reuses the existing query evaluator, ranked input, indexes, middleware,
@@ -223,8 +226,9 @@ update, deletion, aggregation update or no-op; it is not just a JSON row.
 For a current view rather than the change stream:
 
 ```rust,ignore
-let rows = drasi.get_query_results("order-names").await?;
-let metrics = drasi.get_query_output_metrics("order-names").await?;
+let query_id = drasi.component_by_name("order-names")?.id().clone();
+let rows = drasi.get_query_results_by_id(&query_id).await?;
+let metrics = drasi.get_query_output_metrics_by_id(&query_id).await?;
 ```
 
 The [application reaction guide](../../components/reactions/application/README.md)
@@ -245,24 +249,30 @@ not live delivery. Pipeline assembly supplies the outlet automatically.
 `start_query` and `stop_query` include the query's dedicated subscription readers,
 timer source and result outlet; they do not stop a shared application source or
 another query's work.
-Pipeline queries also support `update_query` and `remove_query`. Replacement
-rewires subscription readers and retains transport ordering without stopping
-shared sources or sibling queries. Replacing an ordinary source reconnects all
-of its pipeline queries together. Reactions can be updated to consume these
-queries through the normal reaction API.
+Pipeline queries also expose `update_query` and `remove_query`. Managed updates
+require an explicitly registered factory to assess the proposed change; creation
+support alone does not grant update support. DrasiLib retains the accepted plan
+and coordinates lifecycle and downstream boundaries. Current Core rejects every
+`Rebootstrap` plan, including semantic query changes, rather than resetting data
+without a safe snapshot/live handover. Supported state-preserving updates retain
+the logical UUID; recreation gives the object a fresh generation.
+
+Ordinary dynamically loaded Source/Reaction ABI 0.18 plugins do not expose managed
+update planning. For those or other externally constructed components without an
+update-capable factory, explicitly disconnect dependencies, remove the old
+component, create the replacement and reconnect using its new UUID. There is no
+automatic remove/recreate fallback.
 
 Removal rejects dependent consumers, stops the query's dedicated helpers,
 erases its owned processing state and removes unused resource declarations.
 Ordinary stop and instance shutdown retain processing state. Custom native
-components must implement `deprovision` to support permanent state removal;
+components must implement `delete_owned_resources` to remove their owned state;
 arbitrary factory/input rewiring still uses explicit computation operations.
-QueryConfig replacement applies to pipeline queries, not opaque external
-query implementations or custom graph input layouts.
-
-Replacement does not override consumer recovery policy. A strict reaction
-with a checkpoint from the previous query generation rejects a reset rather
-than silently abandoning its progress. Query configuration can be committed
-even when restarting such a consumer fails; inspect the affected nodes.
+The optional `dispose` hook runs at final retirement, including partial
+initialization failure, but is not authorization to delete persistent state.
+Neither manual replacement nor an accepted state-preserving update overrides
+consumer recovery policy. A strict consumer rejects incompatible progress
+rather than silently abandoning it; inspect failed or pending reconciliation.
 
 Factory-created declarations retain their configuration when construction
 fails. Native wrappers can forward the optional `QueryApi` read capability from
@@ -287,7 +297,8 @@ Start with the component's status and error, then inspect its instance graph:
 
 ```rust,ignore
 let status = drasi.get_query_status("order-names").await?;
-let graph = drasi.inspect_query_computation("order-names").await?;
+let query = drasi.component_by_name("order-names")?;
+let graph = drasi.inspect_query_computation(query.id().as_str()).await?;
 let inventory = drasi.inspect_computation_inventory().await?;
 ```
 

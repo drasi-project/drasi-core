@@ -661,7 +661,7 @@ impl Database {
                 }
                 SqliteOutput::Transactions => {
                     let mut builder =
-                        SourceTransactionBuilder::new(source.as_str(), self.config.transactions)?;
+                        SourceTransactionBuilder::new(&source, self.config.transactions)?;
                     for change in changes {
                         builder.push(change)?;
                     }

@@ -142,8 +142,8 @@ pub fn build_proto_change(
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChangeBatchKey {
     pub alias: String,
-    pub component: String,
-    pub port: String,
+    pub component: drasi_computation_contracts::ComponentId,
+    pub port: drasi_computation_contracts::PortId,
     metadata: Vec<(String, String)>,
 }
 
@@ -153,8 +153,8 @@ impl ChangeBatchKey {
         metadata.sort();
         Self {
             alias: output.alias().to_owned(),
-            component: output.output().component.as_str().to_owned(),
-            port: output.output().port.as_str().to_owned(),
+            component: output.output().component.clone(),
+            port: output.output().port.clone(),
             metadata,
         }
     }
@@ -167,8 +167,8 @@ impl ChangeBatchKey {
     pub fn output_identity(&self) -> OutputIdentity {
         OutputIdentity {
             alias: self.alias.clone(),
-            component: self.component.clone(),
-            port: self.port.clone(),
+            component: self.component.to_string(),
+            port: self.port.to_string(),
         }
     }
 
@@ -245,9 +245,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    const COMPONENT_ID: &str = "b50ecd46-da38-5c2e-b0c9-c84623afc625";
+
     fn metadata() -> ElementMetadata {
         ElementMetadata {
-            reference: ElementReference::new("db", "r1"),
+            reference: ElementReference::new(COMPONENT_ID, "r1"),
             labels: Arc::from([Arc::<str>::from("Room")]),
             effective_from: 1_000,
         }
@@ -285,7 +287,7 @@ mod tests {
         let outputs = SinkOutputs::new(BTreeMap::from([(
             "db".to_owned(),
             SinkOutput {
-                component: ComponentId::try_new("facilities-db").unwrap(),
+                component: ComponentId::try_new(COMPONENT_ID).unwrap(),
                 port: PortId::try_new("out").unwrap(),
                 stream: StreamId::try_new("db/out").unwrap(),
             },
@@ -320,7 +322,7 @@ mod tests {
             assert_eq!(
                 change.identity,
                 Some(ElementIdentity {
-                    namespace: "db".into(),
+                    namespace: COMPONENT_ID.into(),
                     id: "r1".into()
                 })
             );
@@ -362,17 +364,18 @@ mod tests {
         pending.push(built[1].clone());
         assert!(pending.can_accept(&key));
         let mut other_port = key.clone();
-        other_port.port = "errors".into();
+        other_port.port =
+            drasi_computation_contracts::PortId::try_new("errors").expect("fixture PortId");
         assert!(
             !pending.can_accept(&other_port),
             "a second port of one component is another output"
         );
-        assert_eq!(key.endpoint(), "facilities-db/out");
+        assert_eq!(key.endpoint(), format!("{COMPONENT_ID}/out"));
         assert_eq!(
             key.output_identity(),
             OutputIdentity {
                 alias: "db".into(),
-                component: "facilities-db".into(),
+                component: COMPONENT_ID.into(),
                 port: "out".into()
             }
         );

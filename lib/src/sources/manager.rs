@@ -14,6 +14,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use crate::{ComponentId, ComponentName};
 use anyhow::Result;
 use drasi_core::models::{ElementPropertyMap, ElementValue};
 use ordered_float::OrderedFloat;
@@ -71,53 +72,65 @@ impl SourceManager {
         Self { runtime }
     }
 
-    pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
-        self.runtime.source(id).await.ok()
+    pub async fn get_source_instance_by_id(&self, id: &ComponentId) -> Result<Arc<dyn Source>> {
+        self.runtime.source(id).await
     }
 
-    pub async fn provision_source(&self, source: impl Source + 'static) -> Result<()> {
+    pub async fn provision_source(
+        &self,
+        name: crate::config::ComponentName,
+        source: impl Source + 'static,
+    ) -> Result<()> {
         self.runtime
-            .add_source(Box::new(source), HashMap::new(), false)
+            .add_source(name, Box::new(source), HashMap::new(), false)
             .await?;
         Ok(())
     }
 
-    pub async fn start_source(&self, id: String) -> Result<()> {
-        self.runtime.start_component(&id, "source").await
+    pub async fn start_source_by_id(&self, id: &ComponentId) -> Result<()> {
+        self.runtime.start_component(id, "source").await
     }
 
     /// Stop a running, starting, or failed source by ID, transitioning it to Stopped.
     ///
     /// # Errors
     /// Returns an error if the source is not found or the stop operation fails.
-    pub async fn stop_source(&self, id: String) -> Result<()> {
-        self.runtime.stop_component(&id, "source").await
+    pub async fn stop_source_by_id(&self, id: &ComponentId) -> Result<()> {
+        self.runtime.stop_component(id, "source").await
     }
 
-    pub async fn get_source_status(&self, id: String) -> Result<ComponentStatus> {
-        self.runtime.component_status(&id, "source").await
+    pub async fn get_source_status_by_id(&self, id: &ComponentId) -> Result<ComponentStatus> {
+        self.runtime.component_status(id, "source").await
     }
 
-    pub async fn list_sources(&self) -> crate::error::Result<Vec<(String, ComponentStatus)>> {
+    pub async fn list_sources(
+        &self,
+    ) -> crate::error::Result<Vec<crate::config::ComponentListEntry>> {
         Ok(self.runtime.list_components("source").await?)
     }
 
-    pub async fn get_source(&self, id: String) -> Result<SourceRuntime> {
-        self.runtime.source_info(&id).await
+    pub async fn get_source_by_id(&self, id: &ComponentId) -> Result<SourceRuntime> {
+        self.runtime.source_info(id).await
     }
 
     /// Inspect native or legacy source-data schemas. Unsupported discovery returns
     /// `None`; discovery and lifecycle errors remain errors.
-    pub async fn get_source_schema(&self, id: String) -> Result<Option<SourceSchema>> {
-        self.runtime.source_schema(&id).await
+    pub async fn get_source_schema_by_id(&self, id: &ComponentId) -> Result<Option<SourceSchema>> {
+        self.runtime.source_schema(id).await
     }
 
-    pub async fn teardown_source(&self, id: String, cleanup: bool) -> Result<()> {
-        self.runtime.remove_component(&id, "source", cleanup).await
+    pub async fn teardown_source_by_id(&self, id: &ComponentId, cleanup: bool) -> Result<()> {
+        self.runtime.remove_component(id, "source", cleanup).await
     }
 
-    pub async fn update_source(&self, id: String, source: impl Source + 'static) -> Result<()> {
-        self.runtime.update_source(&id, Box::new(source)).await
+    pub async fn update_source_by_id(
+        &self,
+        id: &ComponentId,
+        definition: crate::management::OrdinaryComponentRecord,
+    ) -> Result<()> {
+        self.runtime
+            .update_ordinary_definition(id, "source", definition)
+            .await
     }
 
     pub async fn start_all(&self) -> Result<()> {
@@ -132,17 +145,17 @@ impl SourceManager {
         self.runtime.subscriptions_complete().await
     }
 
-    pub async fn get_source_events(&self, id: &str) -> Vec<ComponentEvent> {
-        self.runtime.component_events(id).await
+    pub async fn get_source_events_by_id(&self, id: &ComponentId) -> Result<Vec<ComponentEvent>> {
+        Ok(self.runtime.component_events(id).await)
     }
 
     pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
         self.runtime.events(Some(ComponentType::Source)).await
     }
 
-    pub async fn subscribe_logs(
+    pub async fn subscribe_logs_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<LogMessage>,
         tokio::sync::broadcast::Receiver<LogMessage>,
@@ -150,13 +163,93 @@ impl SourceManager {
         Ok(self.runtime.subscribe_logs(id, "source").await?)
     }
 
-    pub async fn subscribe_events(
+    pub async fn subscribe_events_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         Ok(self.runtime.subscribe_events(id, "source").await?)
+    }
+
+    pub async fn get_source_instance_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<Arc<dyn Source>> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.get_source_instance_by_id(&id).await
+    }
+
+    pub async fn start_source_by_name(&self, name: &ComponentName) -> Result<()> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.start_source_by_id(&id).await
+    }
+
+    pub async fn stop_source_by_name(&self, name: &ComponentName) -> Result<()> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.stop_source_by_id(&id).await
+    }
+
+    pub async fn get_source_status_by_name(&self, name: &ComponentName) -> Result<ComponentStatus> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.get_source_status_by_id(&id).await
+    }
+
+    pub async fn get_source_by_name(&self, name: &ComponentName) -> Result<SourceRuntime> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.get_source_by_id(&id).await
+    }
+
+    pub async fn get_source_schema_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<Option<SourceSchema>> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.get_source_schema_by_id(&id).await
+    }
+
+    pub async fn teardown_source_by_name(&self, name: &ComponentName, cleanup: bool) -> Result<()> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.teardown_source_by_id(&id, cleanup).await
+    }
+
+    pub async fn update_source_by_name(
+        &self,
+        name: &ComponentName,
+        definition: crate::management::OrdinaryComponentRecord,
+    ) -> Result<()> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.update_source_by_id(&id, definition).await
+    }
+
+    pub async fn get_source_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<Vec<ComponentEvent>> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.get_source_events_by_id(&id).await
+    }
+
+    pub async fn subscribe_logs_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<LogMessage>,
+        tokio::sync::broadcast::Receiver<LogMessage>,
+    )> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.subscribe_logs_by_id(&id).await
+    }
+
+    pub async fn subscribe_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        let id = self.runtime.component_id_by_name(name, Some("source"))?;
+        self.subscribe_events_by_id(&id).await
     }
 }

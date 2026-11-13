@@ -23,8 +23,8 @@ use drasi_core::models::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// The current, unreleased v1 definition replaces the previous implementation.
-pub(crate) const WAL_FORMAT_VERSION: u32 = 1;
+/// Typed owner/scope format; previous storage is rejected before use.
+pub(crate) const WAL_FORMAT_VERSION: u32 = 2;
 
 /// Envelope around every persisted event — carries the format version.
 #[derive(Debug, Serialize, Deserialize)]
@@ -160,7 +160,7 @@ impl From<&ElementMetadata> for ElementMetadataDto {
 impl From<&ElementReference> for ElementReferenceDto {
     fn from(r: &ElementReference) -> Self {
         ElementReferenceDto {
-            source_id: r.source_id.to_string(),
+            source_id: r.namespace.to_string(),
             element_id: r.element_id.to_string(),
         }
     }

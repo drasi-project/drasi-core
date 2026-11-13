@@ -31,7 +31,10 @@ impl NativeQueryProvider {
         let bytes = self.reader.read(code, &[]).await?;
         let wire: WireQueryObservation = self.reader.outcome(&bytes)?;
         let observation = wire.into_observation()?;
-        observation.validate(&self.reader.endpoint.component, &self.description)?;
+        observation.validate(
+            &self.reader.endpoint.component,
+            &self.current_description()?,
+        )?;
         Ok(observation)
     }
 

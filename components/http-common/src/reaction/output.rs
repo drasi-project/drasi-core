@@ -35,6 +35,7 @@
 //! request.
 
 use drasi_computation_contracts::exchange::{QueryResult, ResultDiff};
+use drasi_computation_contracts::{ComponentId, ComponentName};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -74,7 +75,15 @@ pub struct DefaultChangeNotification {
     /// What kind of change this notification represents.
     pub operation: Operation,
     /// The continuous query that produced the change.
-    pub query_id: String,
+    #[schema(inline)]
+    pub query_id: ComponentId,
+    /// The graph-owned query name, when supplied by the owning runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(inline)]
+    pub query_name: Option<ComponentName>,
+    /// Presentation/routing alias assigned to this input, never a query identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_alias: Option<String>,
     /// Monotonic per-query sequence number identifying this emission.
     pub sequence_id: u64,
     /// RFC 3339 timestamp of the originating query emission (UTC).
@@ -131,6 +140,8 @@ impl DefaultChangeNotification {
         Some(Self {
             operation,
             query_id: query_result.query_id.clone(),
+            query_name: query_result.query_name.clone(),
+            input_alias: query_result.input_alias.clone(),
             sequence_id: query_result.sequence,
             timestamp,
             before,
@@ -195,7 +206,14 @@ mod tests {
         metadata: HashMap<String, serde_json::Value>,
         diff: ResultDiff,
     ) -> QueryResult {
-        QueryResult::new("q".to_string(), sequence, fixed_ts(), vec![diff], metadata)
+        QueryResult::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            sequence,
+            fixed_ts(),
+            vec![diff],
+            metadata,
+        )
     }
 
     fn single(diff: ResultDiff) -> QueryResult {
@@ -217,7 +235,10 @@ mod tests {
         let v = serde_json::to_value(&n).unwrap();
         assert!(v.get("before").is_none(), "before should be omitted");
         assert_eq!(v.get("operation"), Some(&json!("ADD")));
-        assert_eq!(v.get("queryId"), Some(&json!("q")));
+        assert_eq!(
+            v.get("queryId"),
+            Some(&json!("00000000-0000-0000-0000-000000000081"))
+        );
         assert_eq!(v.get("sequenceId"), Some(&json!(0)));
         assert!(
             v.get("metadata").is_none(),

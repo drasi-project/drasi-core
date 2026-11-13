@@ -47,7 +47,7 @@ pub struct EventGridReaction {
 
 impl EventGridReaction {
     /// Create a builder for the Event Grid reaction.
-    pub fn builder(id: impl Into<String>) -> EventGridReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> EventGridReactionBuilder {
         EventGridReactionBuilder::new(id)
     }
 
@@ -55,12 +55,12 @@ impl EventGridReaction {
     /// `queries`. Mirrors the builder's `build()` so direct construction cannot
     /// produce an invalid reaction that only fails at `start()`.
     pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: EventGridReactionConfig,
     ) -> Result<Self> {
-        config.validate(&queries, None)?;
-        let params = ReactionBaseParams::new(id.into(), queries);
+        config.validate(&drasi_lib::reactions::common::input_aliases(&queries), None)?;
+        let params = ReactionBaseParams::new(id.clone(), queries);
         Ok(Self {
             base: ReactionBase::new(params),
             config,
@@ -68,8 +68,8 @@ impl EventGridReaction {
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: EventGridReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -115,14 +115,15 @@ pub(crate) fn build_handlebars() -> Handlebars<'static> {
 
 /// Build the Handlebars render context for a single diff.
 fn build_context(
-    query_id: &str,
+    emission: &QueryResult,
     op: ChangeOp,
     diff: &ResultDiff,
     timestamp: &str,
 ) -> Map<String, Value> {
     let mut context = Map::new();
-    context.insert("query_name".into(), json!(query_id));
-    context.insert("query_id".into(), json!(query_id));
+    context.insert("query_name".into(), json!(emission.query_name));
+    context.insert("query_id".into(), json!(emission.query_id));
+    context.insert("input_alias".into(), json!(emission.input_alias));
     context.insert("timestamp".into(), json!(timestamp));
     let op_name = match op {
         ChangeOp::Insert => "ADD",
@@ -171,11 +172,10 @@ fn operation_type(diff: &ResultDiff) -> Option<OperationType> {
 
 /// Build the events for one [`QueryResult`] according to the configured format.
 pub(crate) fn build_events(
-    reaction_id: &str,
+    reaction_id: &drasi_lib::ComponentId,
     config: &EventGridReactionConfig,
     handlebars: &Handlebars<'static>,
     query_result: &QueryResult,
-    reaction_name: &str,
 ) -> Vec<EventEnvelope> {
     let query_id = &query_result.query_id;
     let time = query_result.timestamp.to_rfc3339();
@@ -231,17 +231,17 @@ pub(crate) fn build_events(
                     continue;
                 };
 
-                let spec = config.get_template_spec(query_id, operation);
+                let spec = config.get_result_template_spec(query_result, operation);
                 let (data, metadata) = match spec {
                     Some(spec) if !spec.template.is_empty() => {
-                        let context = build_context(query_id, op, diff, &time);
+                        let context = build_context(query_result, op, diff, &time);
                         let rendered = handlebars.render_template(&spec.template, &context);
                         let data = match rendered {
                             Ok(text) => match serde_json::from_str::<Value>(&text) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     warn!(
-                                        "[{reaction_name}] Template for query '{query_id}' ({}) rendered invalid JSON: {e} — using unpacked notification",
+                                        "[{reaction_id}] Template for query '{query_id}' ({}) rendered invalid JSON: {e} — using unpacked notification",
                                         op.code()
                                     );
                                     fallback_data.clone()
@@ -249,7 +249,7 @@ pub(crate) fn build_events(
                             },
                             Err(e) => {
                                 warn!(
-                                    "[{reaction_name}] Template render failed for query '{query_id}' ({}): {e} — using unpacked notification",
+                                    "[{reaction_id}] Template render failed for query '{query_id}' ({}): {e} — using unpacked notification",
                                     op.code()
                                 );
                                 fallback_data.clone()
@@ -290,7 +290,11 @@ pub(crate) fn build_events(
 
 /// Encode a batch of events into a JSON array for `schema`, warning once if any
 /// metadata had to be dropped (native EventGrid schema).
-fn encode_batch(events: &[EventEnvelope], schema: EventGridSchema, reaction_name: &str) -> Value {
+fn encode_batch(
+    events: &[EventEnvelope],
+    schema: EventGridSchema,
+    reaction_id: &drasi_lib::ComponentId,
+) -> Value {
     let mut dropped = false;
     let arr: Vec<Value> = events
         .iter()
@@ -302,7 +306,7 @@ fn encode_batch(events: &[EventEnvelope], schema: EventGridSchema, reaction_name
         .collect();
     if dropped {
         warn!(
-            "[{reaction_name}] Template metadata dropped: native EventGrid schema has no extension-attribute support (use CloudEvents schema to carry metadata)"
+            "[{reaction_id}] Template metadata dropped: native EventGrid schema has no extension-attribute support (use CloudEvents schema to carry metadata)"
         );
     }
     Value::Array(arr)
@@ -356,7 +360,7 @@ enum AuthOutcome {
 async fn resolve_auth_with_retry(
     config: &EventGridReactionConfig,
     base: &ReactionBase,
-    reaction_name: &str,
+    reaction_id: &drasi_lib::ComponentId,
     shutdown_rx: &mut oneshot::Receiver<()>,
 ) -> AuthOutcome {
     let mut backoff = AUTH_INITIAL_BACKOFF;
@@ -367,12 +371,12 @@ async fn resolve_auth_with_retry(
             Err(e) => {
                 attempt += 1;
                 warn!(
-                    "[{reaction_name}] Authentication attempt {attempt} failed: {e:#} — retrying in {backoff:?}"
+                    "[{reaction_id}] Authentication attempt {attempt} failed: {e:#} — retrying in {backoff:?}"
                 );
                 tokio::select! {
                     biased;
                     _ = &mut *shutdown_rx => {
-                        debug!("[{reaction_name}] Shutdown signal received during auth retry backoff");
+                        debug!("[{reaction_id}] Shutdown signal received during auth retry backoff");
                         return AuthOutcome::Shutdown;
                     }
                     _ = tokio::time::sleep(backoff) => {}
@@ -385,7 +389,7 @@ async fn resolve_auth_with_retry(
 
 #[async_trait]
 impl Reaction for EventGridReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -398,7 +402,7 @@ impl Reaction for EventGridReaction {
         self.base.properties_or_serialize(&dto)
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -406,8 +410,8 @@ impl Reaction for EventGridReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_identity_provider(
@@ -428,7 +432,10 @@ impl Reaction for EventGridReaction {
             self.base.id, self.config.endpoint, self.config.schema, self.config.format
         );
 
-        if let Err(e) = self.config.validate(&self.base.queries, None) {
+        if let Err(e) = self.config.validate(
+            &drasi_lib::reactions::common::input_aliases(&self.base.queries),
+            None,
+        ) {
             error!(
                 "[{}] Invalid Event Grid reaction config: {e:#}",
                 self.base.id
@@ -483,7 +490,7 @@ impl Reaction for EventGridReaction {
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
         let base = self.base.clone_shared();
         let config = self.config.clone();
-        let reaction_name = self.base.id.clone();
+        let reaction_id = self.base.id.clone();
         let status_handle = self.base.status_handle();
 
         let handle = tokio::spawn(async move {
@@ -501,7 +508,7 @@ impl Reaction for EventGridReaction {
                 let query_result_arc = tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => {
-                        debug!("[{reaction_name}] Shutdown signal received");
+                        debug!("[{reaction_id}] Shutdown signal received");
                         break;
                     }
                     result = base.priority_queue.dequeue() => result,
@@ -512,21 +519,15 @@ impl Reaction for EventGridReaction {
                     continue;
                 }
 
-                let events = build_events(
-                    &reaction_name,
-                    &config,
-                    &handlebars,
-                    query_result,
-                    &reaction_name,
-                );
+                let events = build_events(&reaction_id, &config, &handlebars, query_result);
                 if events.is_empty() {
                     continue;
                 }
 
-                let body = encode_batch(&events, config.schema, &reaction_name);
+                let body = encode_batch(&events, config.schema, &reaction_id);
 
                 let auth =
-                    match resolve_auth_with_retry(&config, &base, &reaction_name, &mut shutdown_rx)
+                    match resolve_auth_with_retry(&config, &base, &reaction_id, &mut shutdown_rx)
                         .await
                     {
                         AuthOutcome::Ok(a) => a,
@@ -539,25 +540,25 @@ impl Reaction for EventGridReaction {
                     &auth,
                     content_type,
                     &body,
-                    &reaction_name,
+                    reaction_id.as_str(),
                 )
                 .await
                 {
                     error!(
-                        "[{reaction_name}] Failed to publish {} event(s) for query '{}': {e:#}",
+                        "[{reaction_id}] Failed to publish {} event(s) for query '{}': {e:#}",
                         events.len(),
                         query_result.query_id
                     );
                 } else {
                     debug!(
-                        "[{reaction_name}] Published {} event(s) for query '{}'",
+                        "[{reaction_id}] Published {} event(s) for query '{}'",
                         events.len(),
                         query_result.query_id
                     );
                 }
             }
 
-            info!("[{reaction_name}] Event Grid reaction stopped");
+            info!("[{reaction_id}] Event Grid reaction stopped");
             status_handle
                 .set_status(
                     ComponentStatus::Stopped,

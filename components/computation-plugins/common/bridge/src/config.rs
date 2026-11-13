@@ -5,9 +5,9 @@ use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use drasi_core::interface::FailureMode;
 use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComponentId, ComponentRole, ComponentSpecification, ConfigurationValue,
-    GraphChangeCodec, ImplementationIdentity, PipeCapability, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, Schema, SchemaDescriptor, SinkCompletion,
+    BinaryEnvelopeCodec, ComponentDescriptor, ComponentId, ComponentRole, ComponentSpecification,
+    ConfigurationValue, GraphChangeCodec, ImplementationIdentity, PipeCapability, PipeRequirements,
+    PortDescriptor, PortDirection, PortId, Schema, SchemaDescriptor, SinkCompletion, StreamId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,7 +39,7 @@ pub enum Profile {
 
 /// Version one deliberately uses an identity mapping. The list is an explicit
 /// authority declaration over graph element namespaces
-/// (`ElementReference::source_id`), not an instruction to modify a business ID.
+/// (`ElementReference::namespace`), not an instruction to modify a business ID.
 ///
 /// Source, query and transformer outputs are the same graph data, so one list
 /// covers physical source namespaces and derived output dataset namespaces
@@ -65,7 +65,7 @@ impl Namespace {
         Ok(())
     }
 
-    pub(crate) fn source(&self, id: &str) -> Result<()> {
+    pub(crate) fn validate_namespace(&self, id: &str) -> Result<()> {
         identifier(id)?;
         if !self.source_prefixes.iter().any(|entry| {
             if entry.ends_with('/') {
@@ -238,11 +238,11 @@ pub struct BridgeConfig {
     pub link_id: String,
     pub sender_instance: String,
     pub receiver_instance: String,
-    pub sender_endpoint: String,
-    pub receiver_endpoint: String,
+    pub sender_endpoint: ComponentId,
+    pub receiver_endpoint: ComponentId,
     /// This component's local output/input binding.
-    pub stream: String,
-    pub peer_stream: String,
+    pub stream: StreamId,
+    pub peer_stream: StreamId,
     pub delivery: PortableDelivery,
     pub profile: Profile,
     #[serde(default = "failure_scope")]
@@ -259,10 +259,6 @@ impl BridgeConfig {
             &self.link_id,
             &self.sender_instance,
             &self.receiver_instance,
-            &self.sender_endpoint,
-            &self.receiver_endpoint,
-            &self.stream,
-            &self.peer_stream,
         ] {
             identifier(id)?;
         }
@@ -297,11 +293,11 @@ impl BridgeConfig {
             requirements.extend([DurableAcceptance, ExplicitAcknowledgement, Replay]);
         }
         Ok(ComponentDescriptor::try_new(
-            ComponentId::try_new(if source {
-                self.receiver_endpoint.as_str()
+            if source {
+                self.receiver_endpoint.clone()
             } else {
-                self.sender_endpoint.as_str()
-            })?,
+                self.sender_endpoint.clone()
+            },
             vec![PortDescriptor::new(
                 PortId::try_new(if source { "out" } else { "in" })?,
                 if source {
@@ -349,8 +345,8 @@ impl BridgeConfig {
 
     pub fn contract(&self, source: bool) -> LinkContract {
         LinkContract {
-            version: 1,
-            envelope_version: 2,
+            version: u32::from(crate::protocol::PROTOCOL_VERSION),
+            envelope_version: BinaryEnvelopeCodec::VERSION,
             link_id: self.link_id.clone(),
             sender_instance: self.sender_instance.clone(),
             receiver_instance: self.receiver_instance.clone(),
@@ -386,10 +382,10 @@ pub struct LinkContract {
     pub link_id: String,
     pub sender_instance: String,
     pub receiver_instance: String,
-    pub sender_endpoint: String,
-    pub receiver_endpoint: String,
-    pub sender_stream: String,
-    pub receiver_stream: String,
+    pub sender_endpoint: ComponentId,
+    pub receiver_endpoint: ComponentId,
+    pub sender_stream: StreamId,
+    pub receiver_stream: StreamId,
     pub delivery: PortableDelivery,
     pub schema_descriptor: SchemaDescriptor,
     pub profile: Profile,

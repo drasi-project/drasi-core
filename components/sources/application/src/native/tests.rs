@@ -8,6 +8,8 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 use drasi_lib::computation::v1::*;
 use std::{future::Future, time::Duration};
 
+const SOURCE_ID: &str = "64ae0536-16da-5306-9137-453be5793209";
+
 fn both_runtimes<F, Fut>(scenario: F)
 where
     F: Fn() -> Fut,
@@ -29,7 +31,8 @@ fn source(capacity: usize) -> (ApplicationSource, ApplicationSourceHandle) {
     ApplicationSource::channel(
         "test-instance",
         "native-application-input",
-        "input",
+        drasi_core::ComponentId::try_new("64ae0536-16da-5306-9137-453be5793209")
+            .expect("fixture UUID"),
         StreamId::try_new("input/out").unwrap(),
         NonZeroUsize::new(capacity).unwrap(),
     )
@@ -50,15 +53,8 @@ fn construction_validates_identity_and_real_channel_capacity() {
     assert!(ApplicationSource::channel(
         "test-instance",
         "native-application-input",
-        "",
-        StreamId::try_new("out").unwrap(),
-        NonZeroUsize::new(1).unwrap(),
-    )
-    .is_err());
-    assert!(ApplicationSource::channel(
-        "test-instance",
-        "native-application-input",
-        "input",
+        drasi_core::ComponentId::try_new("64ae0536-16da-5306-9137-453be5793209")
+            .expect("fixture UUID"),
         StreamId::try_new("out").unwrap(),
         NonZeroUsize::new(usize::MAX).unwrap(),
     )
@@ -76,7 +72,7 @@ fn construction_validates_identity_and_real_channel_capacity() {
             "stream":"input/out","durable":false,"capacity":7,"properties":{"name":"example"}
         })
     );
-    assert_eq!(source.output().component.as_str(), "input");
+    assert_eq!(source.output().component.as_str(), SOURCE_ID);
     assert_eq!(source.output().port.as_str(), "out");
 }
 
@@ -85,7 +81,11 @@ fn shared_handles_preserve_nodes_relations_properties_and_source_identity() {
     both_runtimes(|| async {
         let (mut source, handle) = source(8);
         let clone = source.get_handle().unwrap();
-        assert_eq!(clone.source_id(), "input");
+        assert_eq!(
+            clone.source_id(),
+            &drasi_core::ComponentId::try_new("64ae0536-16da-5306-9137-453be5793209")
+                .expect("fixture UUID")
+        );
         let properties = PropertyMapBuilder::new()
             .with_string("name", "Ada")
             .with_integer("value", 7)
@@ -119,7 +119,7 @@ fn shared_handles_preserve_nodes_relations_properties_and_source_identity() {
             assert_eq!(progress.sequence(), expected);
             let changes = GraphChangeCodec::decode_changes(&envelope).unwrap();
             assert_eq!(changes.len(), 1);
-            assert_eq!(changes[0].get_reference().source_id.as_ref(), "input");
+            assert_eq!(changes[0].get_reference().namespace.as_ref(), SOURCE_ID);
             match (&changes[0], expected) {
                 (
                     SourceChange::Insert {
@@ -250,7 +250,7 @@ fn batches_and_closed_receivers_keep_the_existing_handle_contract() {
         let changes: Vec<_> = (0..3)
             .map(|index| SourceChange::Delete {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("input", &index.to_string()),
+                    reference: ElementReference::new(SOURCE_ID, &index.to_string()),
                     labels: Arc::from(vec![Arc::from("Item")]),
                     effective_from: index,
                 },
@@ -277,7 +277,7 @@ fn encoding_failure_retains_the_admitted_event_and_sequence() {
         handle
             .send(SourceChange::Delete {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("input", "bad-time"),
+                    reference: ElementReference::new(SOURCE_ID, "bad-time"),
                     labels: Arc::from(vec![]),
                     effective_from: u64::MAX,
                 },
@@ -341,7 +341,7 @@ fn the_graph_polls_application_input_without_an_adapter_or_processing_task() {
         let (sender, mut receiver) = mpsc::channel(2);
         let sink = Capture {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("capture").unwrap(),
+                ComponentId::try_new("0ba93649-a2ad-5f34-8ee9-4b8050945416").unwrap(),
                 vec![PortDescriptor::new(
                     PortId::try_new("in").unwrap(),
                     PortDirection::Input,
@@ -353,14 +353,22 @@ fn the_graph_polls_application_input_without_an_adapter_or_processing_task() {
             output: sender,
         };
         let mut graph = ComputationGraph::builder("native-application-input")
-            .source(Box::new(source))
-            .sink(Box::new(sink))
+            .source(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                    .expect("fixture component name"),
+                Box::new(source),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                    .expect("fixture component name"),
+                Box::new(sink),
+            )
             .bind_stream(output.clone(), StreamId::try_new("input/out").unwrap())
             .connect(
                 EdgeDefinition::new(
                     output,
                     Endpoint::new(
-                        ComponentId::try_new("capture").unwrap(),
+                        ComponentId::try_new("0ba93649-a2ad-5f34-8ee9-4b8050945416").unwrap(),
                         PortId::try_new("in").unwrap(),
                     ),
                 ),

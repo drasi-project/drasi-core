@@ -139,7 +139,7 @@ impl BootstrapProvider for KubernetesBootstrapProvider {
                 let list = api.list(&list_params).await?;
                 for obj in list.items {
                     let changes = build_insert_changes(
-                        &context.source_id,
+                        context.source_id.as_str(),
                         &target.resource.kind,
                         &obj,
                         &self.source_config,
@@ -261,7 +261,8 @@ mod tests {
 
     fn make_request(node_labels: &[&str], relation_labels: &[&str]) -> BootstrapRequest {
         BootstrapRequest {
-            query_id: "test-query".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             node_labels: node_labels.iter().map(|s| s.to_string()).collect(),
             relation_labels: relation_labels.iter().map(|s| s.to_string()).collect(),
             request_id: "req-1".to_string(),

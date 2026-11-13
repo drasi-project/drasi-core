@@ -160,7 +160,7 @@ impl SourcePluginDescriptor for CloudflareRadarSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -175,7 +175,7 @@ impl SourcePluginDescriptor for CloudflareRadarSourceDescriptor {
             }
         };
 
-        let mut builder = CloudflareRadarSourceBuilder::new(id)
+        let mut builder = CloudflareRadarSourceBuilder::new(id.clone())
             .with_api_token(mapper.resolve_string(&dto.api_token).await?)
             .with_api_base_url(mapper.resolve_string(&dto.api_base_url).await?)
             .with_poll_interval_secs(mapper.resolve_typed(&dto.poll_interval_secs).await?)

@@ -50,6 +50,11 @@ fn compute_signature(secret: &str, body: &[u8]) -> String {
     format!("sha256={}", hex::encode(result.into_bytes()))
 }
 
+fn component_id() -> drasi_lib::ComponentId {
+    drasi_lib::ComponentId::try_new(uuid::Uuid::new_v4().to_string())
+        .expect("generated UUID is a valid component ID")
+}
+
 /// Test that webhook events flow through DrasiLib and reach the reaction
 #[tokio::test]
 async fn test_webhook_event_flows_to_reaction() {
@@ -86,7 +91,7 @@ async fn test_webhook_event_flows_to_reaction() {
     };
 
     // Create HTTP source with webhook config
-    let http_source = HttpSourceBuilder::new("webhook-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -95,20 +100,28 @@ async fn test_webhook_event_flows_to_reaction() {
         .unwrap();
 
     // Create query that matches our webhook events
-    let query = Query::cypher("test-query")
-        .query("MATCH (e:TestEvent) RETURN e.name AS name, e.value AS value")
-        .from_input("webhook-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+    )
+    .query("MATCH (e:TestEvent) RETURN e.name AS name, e.value AS value")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("webhook-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
     // Create application reaction to capture results
-    let (reaction, handle) = ApplicationReactionBuilder::new("test-reaction")
-        .with_query("test-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        )
         .build();
 
     // Build DrasiLib instance
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -122,13 +135,29 @@ async fn test_webhook_event_flows_to_reaction() {
                     .clone(),
             )
             .with_id("webhook-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("webhook-source")
+                    .expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("test-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
     );
+
+    let query_id = core
+        .get_query_info_by_name(
+            &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        )
+        .await
+        .unwrap()
+        .id;
 
     // Start the system
     core.start().await.unwrap();
@@ -165,7 +194,7 @@ async fn test_webhook_event_flows_to_reaction() {
     assert!(result.is_some(), "Expected to receive query result");
 
     let query_result = result.unwrap();
-    assert_eq!(query_result.query_id, "test-query");
+    assert_eq!(query_result.query_id, query_id);
     assert!(
         !query_result.results.is_empty(),
         "Expected at least one result"
@@ -222,7 +251,7 @@ async fn test_webhook_path_params_flow_to_reaction() {
         }],
     };
 
-    let http_source = HttpSourceBuilder::new("path-param-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -230,18 +259,26 @@ async fn test_webhook_path_params_flow_to_reaction() {
         .build()
         .unwrap();
 
-    let query = Query::cypher("path-query")
-        .query("MATCH (e:UserEvent) RETURN e.user_id AS user_id, e.event_type AS event_type")
-        .from_input("path-param-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("path-query").expect("fixture component name"),
+    )
+    .query("MATCH (e:UserEvent) RETURN e.user_id AS user_id, e.event_type AS event_type")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("path-param-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("path-reaction")
-        .with_query("path-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("path-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -255,9 +292,17 @@ async fn test_webhook_path_params_flow_to_reaction() {
                     .clone(),
             )
             .with_id("path-param-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("path-param-source")
+                    .expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("path-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -345,7 +390,7 @@ async fn test_webhook_hmac_auth_flows_correctly() {
         }],
     };
 
-    let http_source = HttpSourceBuilder::new("hmac-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -353,18 +398,26 @@ async fn test_webhook_hmac_auth_flows_correctly() {
         .build()
         .unwrap();
 
-    let query = Query::cypher("hmac-query")
-        .query("MATCH (e:SecureEvent) RETURN e.data AS data")
-        .from_input("hmac-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("hmac-query").expect("fixture component name"),
+    )
+    .query("MATCH (e:SecureEvent) RETURN e.data AS data")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("hmac-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("hmac-reaction")
-        .with_query("hmac-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("hmac-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -378,9 +431,16 @@ async fn test_webhook_hmac_auth_flows_correctly() {
                     .clone(),
             )
             .with_id("hmac-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("hmac-source").expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("hmac-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -480,7 +540,7 @@ async fn test_webhook_bearer_auth_flows_correctly() {
         }],
     };
 
-    let http_source = HttpSourceBuilder::new("bearer-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -488,18 +548,26 @@ async fn test_webhook_bearer_auth_flows_correctly() {
         .build()
         .unwrap();
 
-    let query = Query::cypher("bearer-query")
-        .query("MATCH (d:ApiData) RETURN d.content AS content")
-        .from_input("bearer-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("bearer-query").expect("fixture component name"),
+    )
+    .query("MATCH (d:ApiData) RETURN d.content AS content")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("bearer-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("bearer-reaction")
-        .with_query("bearer-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("bearer-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -513,9 +581,17 @@ async fn test_webhook_bearer_auth_flows_correctly() {
                     .clone(),
             )
             .with_id("bearer-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("bearer-source")
+                    .expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("bearer-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -650,7 +726,7 @@ async fn test_webhook_condition_routing_flows_correctly() {
         }],
     };
 
-    let http_source = HttpSourceBuilder::new("cond-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -659,18 +735,26 @@ async fn test_webhook_condition_routing_flows_correctly() {
         .unwrap();
 
     // Query that returns Commits (simpler query without labels() function)
-    let query = Query::cypher("cond-query")
-        .query("MATCH (c:Commit) RETURN c.message AS content, 'Commit' AS type")
-        .from_input("cond-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("cond-query").expect("fixture component name"),
+    )
+    .query("MATCH (c:Commit) RETURN c.message AS content, 'Commit' AS type")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("cond-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("cond-reaction")
-        .with_query("cond-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("cond-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -684,9 +768,16 @@ async fn test_webhook_condition_routing_flows_correctly() {
                     .clone(),
             )
             .with_id("cond-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("cond-source").expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("cond-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -775,7 +866,7 @@ async fn test_webhook_yaml_content_flows_correctly() {
         }],
     };
 
-    let http_source = HttpSourceBuilder::new("yaml-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -783,18 +874,26 @@ async fn test_webhook_yaml_content_flows_correctly() {
         .build()
         .unwrap();
 
-    let query = Query::cypher("yaml-query")
-        .query("MATCH (e:YamlEvent) RETURN e.name AS name, e.count AS count")
-        .from_input("yaml-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("yaml-query").expect("fixture component name"),
+    )
+    .query("MATCH (e:YamlEvent) RETURN e.name AS name, e.count AS count")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("yaml-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("yaml-reaction")
-        .with_query("yaml-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("yaml-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -808,9 +907,16 @@ async fn test_webhook_yaml_content_flows_correctly() {
                     .clone(),
             )
             .with_id("yaml-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("yaml-source").expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("yaml-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -923,7 +1029,7 @@ async fn test_webhook_update_operation_flows_correctly() {
         }],
     };
 
-    let http_source = HttpSourceBuilder::new("update-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -931,18 +1037,26 @@ async fn test_webhook_update_operation_flows_correctly() {
         .build()
         .unwrap();
 
-    let query = Query::cypher("update-query")
-        .query("MATCH (i:Item) RETURN i.status AS status")
-        .from_input("update-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("update-query").expect("fixture component name"),
+    )
+    .query("MATCH (i:Item) RETURN i.status AS status")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("update-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("update-reaction")
-        .with_query("update-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("update-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -956,9 +1070,17 @@ async fn test_webhook_update_operation_flows_correctly() {
                     .clone(),
             )
             .with_id("update-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("update-source")
+                    .expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("update-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -1039,25 +1161,34 @@ async fn test_standard_mode_flows_to_reaction() {
     let port = find_available_port().await;
 
     // No webhook config = standard mode
-    let http_source = HttpSourceBuilder::new("standard-source")
+    let source_id = component_id();
+    let http_source = HttpSourceBuilder::new(source_id.clone())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_auto_start(true)
         .build()
         .unwrap();
 
-    let query = Query::cypher("standard-query")
-        .query("MATCH (t:TestNode) RETURN t.value AS value")
-        .from_input("standard-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("standard-query").expect("fixture component name"),
+    )
+    .query("MATCH (t:TestNode) RETURN t.value AS value")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("standard-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("standard-reaction")
-        .with_query("standard-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("standard-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1071,9 +1202,17 @@ async fn test_standard_mode_flows_to_reaction() {
                     .clone(),
             )
             .with_id("standard-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("standard-source")
+                    .expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("standard-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -1104,7 +1243,7 @@ async fn test_standard_mode_flows_to_reaction() {
 
     let response = client
         .post(format!(
-            "http://127.0.0.1:{port}/sources/standard-source/events"
+            "http://127.0.0.1:{port}/sources/{source_id}/events"
         ))
         .header("Content-Type", "application/json")
         .json(&payload)
@@ -1168,7 +1307,7 @@ async fn test_webhook_relation_accepted_successfully() {
         }],
     };
 
-    let http_source = HttpSourceBuilder::new("relation-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -1177,18 +1316,26 @@ async fn test_webhook_relation_accepted_successfully() {
         .unwrap();
 
     // Simple query - we're mainly testing the webhook processing
-    let query = Query::cypher("relation-query")
-        .query("MATCH (n) RETURN n")
-        .from_input("relation-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("relation-query").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("relation-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, _handle) = ApplicationReactionBuilder::new("relation-reaction")
-        .with_query("relation-query")
+    let (reaction, _handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("relation-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1202,9 +1349,17 @@ async fn test_webhook_relation_accepted_successfully() {
                     .clone(),
             )
             .with_id("relation-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("relation-source")
+                    .expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("relation-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -1274,7 +1429,7 @@ async fn test_webhook_payload_spread_as_properties() {
         }],
     };
 
-    let http_source = HttpSourceBuilder::new("spread-source")
+    let http_source = HttpSourceBuilder::new(component_id())
         .with_host("127.0.0.1")
         .with_port(port)
         .with_webhooks(webhook_config)
@@ -1283,20 +1438,23 @@ async fn test_webhook_payload_spread_as_properties() {
         .unwrap();
 
     // Query that returns multiple fields from the spread properties
-    let query = Query::cypher("spread-query")
+    let query = Query::cypher(drasi_core::ComponentName::try_new("spread-query").expect("fixture component name"))
         .query(
             "MATCH (e:SpreadEvent) RETURN e.id AS id, e.name AS name, e.status AS status, e.count AS count",
         )
-        .from_input("spread-source")
+        .from_input_by_name(drasi_core::ComponentName::try_new("spread-source").expect("fixture component name"))
         .auto_start(true)
-        .build();
+        .build().expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("spread-reaction")
-        .with_query("spread-query")
+    let (reaction, handle) = ApplicationReactionBuilder::new(component_id())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("spread-query").expect("fixture component name"),
+        )
         .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1310,9 +1468,17 @@ async fn test_webhook_payload_spread_as_properties() {
                     .clone(),
             )
             .with_id("spread-e2e-test")
-            .with_source(http_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("spread-source")
+                    .expect("fixture component name"),
+                http_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("spread-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),

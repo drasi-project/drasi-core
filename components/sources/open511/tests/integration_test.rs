@@ -39,6 +39,11 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Instant};
 
+const SOURCE_NAME: &str = "road-events";
+const SOURCE_COMPONENT_ID: &str = "64ae0536-16da-5306-9137-453be5793209";
+const REACTION_NAME: &str = "test-reaction";
+const REACTION_COMPONENT_ID: &str = "0ba93649-a2ad-5f34-8ee9-4b8050945416";
+
 #[derive(Clone)]
 struct MockServerState {
     events: Arc<RwLock<HashMap<String, Open511Event>>>,
@@ -244,31 +249,46 @@ async fn test_open511_change_detection_with_client_harness() -> Result<()> {
         .context("failed to start mock open511 server")?;
         let port = server.port;
 
-        let source = Open511Source::builder("road-events")
-            .with_base_url(format!("http://127.0.0.1:{port}"))
-            .with_poll_interval_secs(1)
-            .with_full_sweep_interval(2)
-            .with_status_filter("ACTIVE")
-            .with_start_from_beginning()
-            .build()
-            .context("failed to build Open511 source")?;
+        let source = Open511Source::builder(
+            drasi_core::ComponentId::try_new("64ae0536-16da-5306-9137-453be5793209")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(format!("http://127.0.0.1:{port}"))
+        .with_poll_interval_secs(1)
+        .with_full_sweep_interval(2)
+        .with_status_filter("ACTIVE")
+        .with_start_from_beginning()
+        .build()
+        .context("failed to build Open511 source")?;
 
-        let query = DrasiQuery::cypher("road-events-query")
-            .query(
-                r#"
+        let query = DrasiQuery::cypher(
+            drasi_core::ComponentName::try_new("road-events-query")
+                .expect("fixture component name"),
+        )
+        .query(
+            r#"
                 MATCH (e:RoadEvent)-[:AFFECTS_ROAD]->(r:Road)
                 RETURN e.id AS event_id, e.severity AS severity, r.name AS road_name
             "#,
-            )
-            .from_input("road-events")
-            .auto_start(true)
-            .build();
+        )
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("road-events").expect("fixture component name"),
+        )
+        .auto_start(true)
+        .build()?;
 
-        let (reaction, handle) = ApplicationReactionBuilder::new("test-reaction")
-            .with_query("road-events-query")
-            .build();
+        let (reaction, handle) = ApplicationReactionBuilder::new(
+            drasi_core::ComponentId::try_new("0ba93649-a2ad-5f34-8ee9-4b8050945416")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("road-events-query")
+                .expect("fixture component name"),
+        )
+        .build();
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -282,9 +302,16 @@ async fn test_open511_change_detection_with_client_harness() -> Result<()> {
                     .clone(),
             )
             .with_id("open511-integration-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("road-events").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("test-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .context("failed to build DrasiLib")?;

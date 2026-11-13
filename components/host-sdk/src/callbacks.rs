@@ -24,6 +24,7 @@ use std::sync::Arc;
 use drasi_lib::channels::events::{ComponentEvent, ComponentStatus, ComponentType};
 use drasi_lib::channels::{ComponentUpdate, ComponentUpdateSender};
 use drasi_lib::observability::{ComponentEventHistory, ComponentLogRegistry, LogLevel, LogMessage};
+use drasi_lib::ComponentId;
 use drasi_plugin_sdk::ffi::{
     FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, FfiLogLevelFilter,
     LifecycleCallbackFn, LogCallbackFn,
@@ -228,12 +229,19 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
 
         // Route into DrasiLib's ComponentLogRegistry if we have both context and instance info
         if !ctx.is_null() && !instance_id.is_empty() && !component_id.is_empty() {
+            let component_id = match ComponentId::try_new(component_id) {
+                Ok(id) => id,
+                Err(error) => {
+                    log::warn!("Rejecting plugin log component identity: {error}");
+                    return;
+                }
+            };
             let context = unsafe { CallbackContext::from_raw_ref(ctx) };
             let log_message = LogMessage::with_instance(
                 ffi_log_level_to_log_level(level),
                 message,
                 &instance_id,
-                &component_id,
+                component_id,
                 ComponentType::Source, // TODO: parse from entry if available
             );
             let registry = context.log_registry.clone();
@@ -254,7 +262,13 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
 pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let event = unsafe { &*event };
-        let component_id = unsafe { event.component_id.to_string() };
+        let component_id = match ComponentId::try_new(unsafe { event.component_id.to_string() }) {
+            Ok(id) => id,
+            Err(error) => {
+                log::warn!("Rejecting plugin lifecycle component identity: {error}");
+                return;
+            }
+        };
         let component_type_str = unsafe { event.component_type.to_string() };
         let message = unsafe { event.message.to_string() };
         let event_type = event.event_type;
@@ -349,10 +363,16 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
             } else {
                 &instance_id
             };
-            let log_component_id = if component_id.is_empty() {
-                &plugin_id
-            } else {
-                &component_id
+            // An unscoped log still reaches the host logger, not a fabricated component.
+            if component_id.is_empty() {
+                return;
+            }
+            let log_component_id = match ComponentId::try_new(component_id) {
+                Ok(id) => id,
+                Err(error) => {
+                    log::warn!("Rejecting plugin log component identity: {error}");
+                    return;
+                }
             };
             let log_message = LogMessage::with_instance(
                 ffi_log_level_to_log_level(level),
@@ -382,7 +402,13 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
 pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let event = unsafe { &*event };
-        let component_id = unsafe { event.component_id.to_string() };
+        let component_id = match ComponentId::try_new(unsafe { event.component_id.to_string() }) {
+            Ok(id) => id,
+            Err(error) => {
+                log::warn!("Rejecting plugin lifecycle component identity: {error}");
+                return;
+            }
+        };
         let component_type_str = unsafe { event.component_type.to_string() };
         let message = unsafe { event.message.to_string() };
         let event_type = event.event_type;

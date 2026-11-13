@@ -37,17 +37,17 @@ pub trait ConsumerProgressStore: Send + Sync {
         drasi_core::computation::StorageDurability::UNKNOWN
     }
 
-    async fn load(&self, query: &str) -> anyhow::Result<Option<ConsumerCheckpoint>>;
+    async fn load(&self, query: &super::ComponentId) -> anyhow::Result<Option<ConsumerCheckpoint>>;
     async fn commit_handled(
         &self,
-        query: &str,
+        query: &super::ComponentId,
         checkpoint: ConsumerCheckpoint,
     ) -> anyhow::Result<()>;
     /// Commit an explicitly handled replacement or accepted skip, conditional on
     /// the cursor that authorized it. Ordinary commits must not change identity.
     async fn commit_recovery(
         &self,
-        _query: &str,
+        _query: &super::ComponentId,
         _previous: Option<ConsumerCheckpoint>,
         _checkpoint: ConsumerCheckpoint,
     ) -> anyhow::Result<()> {
@@ -96,7 +96,7 @@ pub enum ConsumerRecoveryError {
 }
 
 impl ConsumerCheckpoint {
-    fn validate(&self, query: &str) -> anyhow::Result<()> {
+    fn validate(&self, query: &super::ComponentId) -> anyhow::Result<()> {
         self.identity.validate()?;
         if self.identity.query_id() != query {
             return Err(QueryIdentityError::Mismatch.into());
@@ -149,8 +149,8 @@ fn validate_commit(
 
 #[derive(Default)]
 pub struct MemoryConsumerProgress {
-    handled: Mutex<HashMap<String, ConsumerCheckpoint>>,
-    sequences: Mutex<HashMap<String, u64>>,
+    handled: Mutex<HashMap<super::ComponentId, ConsumerCheckpoint>>,
+    sequences: Mutex<HashMap<StreamId, u64>>,
 }
 
 #[async_trait]
@@ -159,12 +159,12 @@ impl ConsumerProgressStore for MemoryConsumerProgress {
         drasi_core::computation::StorageDurability::VOLATILE
     }
 
-    async fn load(&self, query: &str) -> anyhow::Result<Option<ConsumerCheckpoint>> {
+    async fn load(&self, query: &super::ComponentId) -> anyhow::Result<Option<ConsumerCheckpoint>> {
         Ok(self.handled.lock().await.get(query).cloned())
     }
     async fn commit_handled(
         &self,
-        query: &str,
+        query: &super::ComponentId,
         checkpoint: ConsumerCheckpoint,
     ) -> anyhow::Result<()> {
         checkpoint.validate(query)?;
@@ -175,7 +175,7 @@ impl ConsumerProgressStore for MemoryConsumerProgress {
     }
     async fn commit_recovery(
         &self,
-        query: &str,
+        query: &super::ComponentId,
         previous: Option<ConsumerCheckpoint>,
         checkpoint: ConsumerCheckpoint,
     ) -> anyhow::Result<()> {
@@ -190,11 +190,11 @@ impl ConsumerProgressStore for MemoryConsumerProgress {
     }
     async fn allocate_sequence(&self, stream: &StreamId) -> anyhow::Result<u64> {
         let mut sequences = self.sequences.lock().await;
-        let previous = sequences.get(stream.as_str()).copied().unwrap_or(0);
+        let previous = sequences.get(stream).copied().unwrap_or(0);
         let next = previous
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("replay producer sequence exhausted"))?;
-        sequences.insert(stream.to_string(), next);
+        sequences.insert(stream.clone(), next);
         Ok(next)
     }
 }
@@ -205,7 +205,7 @@ impl ConsumerProgressStore for MemoryConsumerProgress {
 /// Unidentified legacy records and unknown versions fail instead of seeding a cursor.
 pub struct StateStoreConsumerProgress {
     provider: Arc<dyn crate::state_store::StateStoreProvider>,
-    partition: String,
+    partition: crate::StorePartition,
     lock: Arc<Mutex<()>>,
 }
 
@@ -218,9 +218,9 @@ struct CheckpointRecord {
 
 fn state_store_lock(
     provider: &Arc<dyn crate::state_store::StateStoreProvider>,
-    partition: &str,
+    partition: &crate::StorePartition,
 ) -> anyhow::Result<Arc<Mutex<()>>> {
-    type Locks = HashMap<(usize, String), Weak<Mutex<()>>>;
+    type Locks = HashMap<(usize, crate::StorePartition), Weak<Mutex<()>>>;
     static LOCKS: OnceLock<std::sync::Mutex<Locks>> = OnceLock::new();
     let mut locks = LOCKS
         .get_or_init(Default::default)
@@ -242,22 +242,20 @@ fn state_store_lock(
 impl StateStoreConsumerProgress {
     pub fn new(
         graph: &str,
-        consumer: &str,
+        consumer: &super::ComponentId,
         provider: Arc<dyn crate::state_store::StateStoreProvider>,
     ) -> anyhow::Result<Self> {
         super::data::validate_identifier("graph", graph)?;
-        super::data::validate_identifier("consumer", consumer)?;
         let encode = |value: &str| {
             value
                 .bytes()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         };
-        let partition = format!(
-            "computation-consumer:{}:{}",
-            encode(graph),
-            encode(consumer)
-        );
+        let partition = crate::StorePartition::Component {
+            scope: crate::StorageScope::new(format!("computation-consumer:{}", encode(graph))),
+            id: consumer.clone(),
+        };
         let lock = state_store_lock(&provider, &partition)?;
         Ok(Self {
             provider,
@@ -279,7 +277,7 @@ impl StateStoreConsumerProgress {
 
     async fn write_checkpoint(
         &self,
-        query: &str,
+        query: &super::ComponentId,
         checkpoint: ConsumerCheckpoint,
     ) -> anyhow::Result<()> {
         self.provider
@@ -302,7 +300,7 @@ impl ConsumerProgressStore for StateStoreConsumerProgress {
         self.provider.durability()
     }
 
-    async fn load(&self, query: &str) -> anyhow::Result<Option<ConsumerCheckpoint>> {
+    async fn load(&self, query: &super::ComponentId) -> anyhow::Result<Option<ConsumerCheckpoint>> {
         self.provider
             .get(&self.partition, &format!("handled:{query}"))
             .await?
@@ -329,7 +327,7 @@ impl ConsumerProgressStore for StateStoreConsumerProgress {
     }
     async fn commit_handled(
         &self,
-        query: &str,
+        query: &super::ComponentId,
         checkpoint: ConsumerCheckpoint,
     ) -> anyhow::Result<()> {
         checkpoint.validate(query)?;
@@ -339,7 +337,7 @@ impl ConsumerProgressStore for StateStoreConsumerProgress {
     }
     async fn commit_recovery(
         &self,
-        query: &str,
+        query: &super::ComponentId,
         previous: Option<ConsumerCheckpoint>,
         checkpoint: ConsumerCheckpoint,
     ) -> anyhow::Result<()> {
@@ -493,7 +491,7 @@ impl WakeupSource for ReplayWakeup {
 /// already bound live pipe. Consumer checkpoints are written only by actual sinks.
 pub struct QueryReplayTransformer {
     descriptor: ComponentDescriptor,
-    query_id: String,
+    query_id: crate::ComponentId,
     results: Arc<dyn QueryRecoveryReader>,
     progress: Arc<dyn ConsumerProgressStore>,
     policy: ConsumerRecoveryPolicy,
@@ -505,7 +503,7 @@ pub struct QueryReplayTransformer {
 impl QueryReplayTransformer {
     pub fn new(
         id: ComponentId,
-        query_id: String,
+        query_id: crate::ComponentId,
         stream: StreamId,
         results: QueryResults,
         progress: Arc<dyn ConsumerProgressStore>,
@@ -516,7 +514,7 @@ impl QueryReplayTransformer {
 
     pub fn with_reader(
         id: ComponentId,
-        query_id: String,
+        query_id: crate::ComponentId,
         stream: StreamId,
         results: Arc<dyn QueryRecoveryReader>,
         progress: Arc<dyn ConsumerProgressStore>,
@@ -578,7 +576,7 @@ impl QueryReplayTransformer {
     ) -> anyhow::Result<u64> {
         let identity = QueryRecoveryIdentity::from_envelope(envelope)?;
         if identity != head.identity
-            || identity.query_id() != self.query_id
+            || identity.query_id() != &self.query_id
             || QueryChangeCodec::metadata(envelope)?.query_id != self.query_id
         {
             return Err(QueryIdentityError::Mismatch.into());
@@ -706,7 +704,7 @@ impl QueryReplayTransformer {
         });
         let view = self.results.recovery_view(replay_after).await?;
         let head = view.head();
-        if view.identity.query_id() != self.query_id {
+        if view.identity.query_id() != &self.query_id {
             return Err(QueryIdentityError::Mismatch.into());
         }
         if let Some(input) = input {
@@ -990,21 +988,33 @@ impl ComputationComponent for CheckpointedSink {
     fn requires_readiness_confirmation(&self) -> bool {
         self.inner.requires_readiness_confirmation()
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.inner.initialize().await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.inner.dispose().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.inner.pause_processing().await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.inner.resume_processing().await
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.inner.start().await
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.inner.stop().await
     }
-    async fn reconfigure(&mut self, context: super::ConstructionContext) -> anyhow::Result<()> {
-        self.inner.reconfigure(context).await?;
+    async fn apply_update(&mut self, context: super::ComponentUpdateContext) -> anyhow::Result<()> {
+        self.inner.apply_update(context).await?;
         anyhow::ensure!(
             self.inner.recovery_contract().delivery.is_none(),
             "checkpointed sink cannot forward retirement proof that excludes its progress store"
         );
         Ok(())
     }
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         anyhow::bail!("checkpointed sink cannot delete its inner state without scoped progress-store deletion")
     }
 }
@@ -1165,6 +1175,7 @@ impl Default for QueryReplayFactory {
                             (
                                 Arc::from(name),
                                 super::ConfigurationField {
+                                    constraint: None,
                                     value_type: super::ConfigurationType::String,
                                     required,
                                     secret: false,
@@ -1281,7 +1292,7 @@ impl super::ComponentFactory for QueryReplayFactory {
         };
         let instance = QueryReplayTransformer::with_reader(
             context.component_id.clone(),
-            query.to_owned(),
+            super::ComponentId::try_new(query).map_err(super::ComponentCreationError::terminal)?,
             StreamId::try_new(stream).map_err(super::ComponentCreationError::terminal)?,
             results.0.clone(),
             progress.0.clone(),
@@ -1355,7 +1366,7 @@ mod capability_tests {
 
     #[tokio::test]
     async fn wrapper_preserves_input_control_readiness_configuration_and_batch_policy() {
-        let id = ComponentId::try_new("wrapped").unwrap();
+        let id = crate::test_helpers::component_id(726);
         let plane = super::super::ControlPlane::new(4).unwrap();
         let generation = super::super::ComponentGeneration(1);
         let (control, _receiver) = plane.attach(id.clone(), generation).unwrap();
@@ -1386,7 +1397,7 @@ mod capability_tests {
         assert!(plane.is_ready(&id, generation));
         assert!(wrapped.handle_batch(Vec::new()).await.is_err());
         assert!(wrapped
-            .deprovision()
+            .delete_owned_resources()
             .await
             .unwrap_err()
             .to_string()

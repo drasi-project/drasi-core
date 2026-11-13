@@ -485,9 +485,10 @@ mod tests {
         let foreign: Arc<dyn ComputationIndexProvider> = LegacyIndexProviderAdapter::new(Arc::new(
             RocksDbIndexProvider::new(directory.path(), false, false),
         ));
+        let query_id = crate::test_helpers::component_id(46);
         let transaction = Arc::new(
             ComputationTransaction::try_new(
-                provider.create_indexes("graph", "query").await.unwrap(),
+                provider.create_indexes("graph", &query_id).await.unwrap(),
             )
             .unwrap(),
         );
@@ -525,7 +526,7 @@ mod tests {
     fn destination(index: usize) -> OutputDestination {
         OutputDestination {
             output: PortId::try_new("out").unwrap(),
-            consumer: ComponentId::try_new(format!("consumer-{index:03}")).unwrap(),
+            consumer: crate::test_helpers::component_id(index as u128 + 1),
             input: PortId::try_new("in").unwrap(),
             journal: uuid::Uuid::from_u128(1),
             subscriber: format!("subscriber-{index:03}"),
@@ -541,7 +542,7 @@ mod tests {
             let mut changed = destination(0);
             match field {
                 0 => changed.output = PortId::try_new("different").unwrap(),
-                1 => changed.consumer = ComponentId::try_new("different").unwrap(),
+                1 => changed.consumer = crate::test_helpers::component_id(766),
                 2 => changed.input = PortId::try_new("different").unwrap(),
                 3 => changed.journal = uuid::Uuid::from_u128(2),
                 4 => changed.subscriber = "different".into(),
@@ -599,7 +600,7 @@ mod tests {
         assert!(OutputBindings::try_new((0..=MAX_DESTINATIONS).map(destination)).is_err());
         let mut longest = destination(0);
         longest.output = PortId::try_new("x".repeat(256)).unwrap();
-        longest.consumer = ComponentId::try_new("x".repeat(256)).unwrap();
+        longest.consumer = crate::test_helpers::component_id(767);
         longest.input = PortId::try_new("x".repeat(256)).unwrap();
         longest.subscriber = "x".repeat(256);
         OutputBindings::try_new([longest.clone()])

@@ -48,8 +48,7 @@ fn labels(values: &[String]) -> Result<()> {
     Ok(())
 }
 #[cfg(feature = "http-source")]
-pub fn http_change(mut change: HttpSourceChange, source_id: &str) -> Result<SourceChange> {
-    ComponentId::try_new(source_id)?;
+pub fn http_change(mut change: HttpSourceChange, source_id: &ComponentId) -> Result<SourceChange> {
     let timestamp = match &mut change {
         HttpSourceChange::Insert { element, timestamp }
         | HttpSourceChange::Update { element, timestamp } => {
@@ -96,23 +95,19 @@ pub fn http_change(mut change: HttpSourceChange, source_id: &str) -> Result<Sour
     }
     // Reuse the existing published DTO converter, including the deliberately
     // different HTTP nested-value and nanoseconds-to-milliseconds semantics.
-    drasi_http_common::convert_http_to_source_change(&change, source_id)
+    drasi_http_common::convert_http_to_source_change(&change, source_id.as_str())
 }
 
 #[cfg(feature = "grpc-source")]
 fn reference(value: &source::ElementReference) -> Result<ElementReference> {
-    ComponentId::try_new(value.source_id.as_str())?;
+    element_id(&value.namespace)?;
     element_id(&value.element_id)?;
-    Ok(ElementReference::new(&value.source_id, &value.element_id))
+    Ok(ElementReference::new(&value.namespace, &value.element_id))
 }
 #[cfg(feature = "grpc-source")]
-fn metadata(value: Option<source::ElementMetadata>, source_id: &str) -> Result<ElementMetadata> {
+fn metadata(value: Option<source::ElementMetadata>) -> Result<ElementMetadata> {
     let value = value.context("element metadata is required")?;
     let source_ref = value.reference.context("element reference is required")?;
-    ensure!(
-        source_ref.source_id == source_id,
-        "element source ID does not match configured sourceId"
-    );
     labels(&value.labels)?;
     Ok(ElementMetadata {
         reference: reference(&source_ref)?,
@@ -126,11 +121,10 @@ fn metadata(value: Option<source::ElementMetadata>, source_id: &str) -> Result<E
     })
 }
 #[cfg(feature = "grpc-source")]
-pub fn grpc_change(change: source::SourceChange, source_id: &str) -> Result<SourceChange> {
-    ComponentId::try_new(source_id)?;
+pub fn grpc_change(change: source::SourceChange, source_id: &ComponentId) -> Result<SourceChange> {
     ensure!(
-        change.source_id == source_id,
-        "event source ID does not match configured sourceId"
+        &ComponentId::try_new(change.source_id)? == source_id,
+        "event source ID does not match the source component UUID"
     );
     if let Some(timestamp) = &change.timestamp {
         ensure!(
@@ -146,11 +140,11 @@ pub fn grpc_change(change: source::SourceChange, source_id: &str) -> Result<Sour
         ) => {
             let element = match element.element.context("node or relation is required")? {
                 source::element::Element::Node(node) => Element::Node {
-                    metadata: metadata(node.metadata, source_id)?,
+                    metadata: metadata(node.metadata)?,
                     properties: properties(node.properties)?,
                 },
                 source::element::Element::Relation(relation) => Element::Relation {
-                    metadata: metadata(relation.metadata, source_id)?,
+                    metadata: metadata(relation.metadata)?,
                     properties: properties(relation.properties)?,
                     in_node: reference(&relation.in_node.context("relation in_node is required")?)?,
                     out_node: reference(
@@ -166,7 +160,7 @@ pub fn grpc_change(change: source::SourceChange, source_id: &str) -> Result<Sour
         }
         (source::ChangeType::Delete, Some(source::source_change::Change::Metadata(value))) => {
             Ok(SourceChange::Delete {
-                metadata: metadata(Some(value), source_id)?,
+                metadata: metadata(Some(value))?,
             })
         }
         _ => anyhow::bail!("invalid source change type or missing data"),

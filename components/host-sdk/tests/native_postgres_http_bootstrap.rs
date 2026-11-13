@@ -225,12 +225,15 @@ fn plugins(dynamic: bool) -> Result<Vec<Arc<NativePlugin>>> {
         .map(NativePlugin::from_definition)
         .collect();
     }
-    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("CARGO_TARGET_DIR").map(|path| PathBuf::from(path).join("debug"))
-        })
-        .context("set DRASI_NATIVE_PLUGIN_DIR or CARGO_TARGET_DIR for rebuilt libraries")?;
+    let directory = match std::env::var_os("DRASI_NATIVE_PLUGIN_DIR") {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_exe()?
+            .parent()
+            .context("test executable directory")?
+            .parent()
+            .context("native library directory")?
+            .join("plugins"),
+    };
     [
         "source_postgres",
         "bootstrap_postgres",
@@ -376,12 +379,12 @@ async fn exercise(dynamic: bool) -> Result<()> {
             })?.provide_resource(resource(name),handle)?;
         }
         let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone()).with_id(INSTANCE).with_components(builder
-            .component(specification,pg_source)
-            .component(price_factory.specification(id("price-feed"),json!({
+            .component(drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1").expect("fixture component name"), specification,pg_source)
+            .component(drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2").expect("fixture component name"), price_factory.specification(id("price-feed"),json!({
                 "stream":stream("price-feed"),"sourceId":"price-feed","host":"127.0.0.1","port":price_port,
             }))?,price_factory)
-            .transformer(Box::new(query))
-            .sink(Box::new(Output { descriptor: ComponentDescriptor::try_new(id("output"), vec![
+            .transformer(drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1").expect("fixture component name"), Box::new(query))
+            .sink(drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1").expect("fixture component name"), Box::new(Output { descriptor: ComponentDescriptor::try_new(id("output"), vec![
                 PortDescriptor::new(PortId::try_new("in")?, PortDirection::Input,
                     QueryChangeCodec::schema().descriptor().clone(), PipeRequirements::default()),
             ])? }))
@@ -395,7 +398,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
         let proof = async {
             let initialize = async {
                 core.start().await?;
-                core.computation_component("joined")?.wait_started().await?;
+                core.component_by_name(&drasi_core_types::ComponentName::try_new("joined").expect("fixture component name"))?.wait_started().await?;
                 Result::<()>::Ok(())
             };
             let concurrent_write = async {
@@ -446,7 +449,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
             lease.resume();
             database.sql("UPDATE stocks SET name='offline' WHERE id=1")?;
             core.start().await?;
-            core.computation_component("joined")?.wait_started().await?;
+            core.component_by_name(&drasi_core_types::ComponentName::try_new("joined").expect("fixture component name"))?.wait_started().await?;
             wait("offline",175.5).await?;
             anyhow::ensure!(snapshots.load(Ordering::SeqCst) == 2, "price initialization was skipped or duplicated");
             Result::<()>::Ok(())

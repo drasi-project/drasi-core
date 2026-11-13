@@ -13,15 +13,21 @@
 // limitations under the License.
 
 use anyhow::Result;
+use drasi_lib::{config::ComponentReference, ComponentId, ComponentName};
 use drasi_reaction_log::{LogReaction, LogReactionConfig};
 use shared_tests::recovery_test_helpers::exercise_autoskipgap_recovery;
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_log_reaction_autoskipgap_recovery() -> Result<()> {
     let reaction = LogReaction::new(
-        "log-autoskip",
-        vec!["q1".to_string()],
+        ComponentId::generate(),
+        vec![ComponentReference::by_name(ComponentName::try_new("q1")?)],
         LogReactionConfig::default(),
     )?;
-    exercise_autoskipgap_recovery("log-autoskipgap", "log-autoskip", reaction).await
+    exercise_autoskipgap_recovery(
+        "log-autoskipgap",
+        &ComponentName::try_new("log-autoskip")?,
+        reaction,
+    )
+    .await
 }

@@ -81,14 +81,14 @@ impl BootstrapProvider for BootstrapProviderProxy {
             // Non-blocking: spawns the provider and returns push-based handles.
             let stream_ptr = (self.vtable.bootstrap_fn)(
                 self.vtable.state,
-                FfiStr::from_str(&request.query_id),
+                FfiStr::from_str(request.query_id.as_str()),
                 node_ffi.as_ptr(),
                 node_ffi.len(),
                 rel_ffi.as_ptr(),
                 rel_ffi.len(),
                 FfiStr::from_str(&request.request_id),
                 FfiStr::from_str(&context.server_id),
-                FfiStr::from_str(&context.source_id),
+                FfiStr::from_str(context.source_id.as_str()),
                 FfiStr::from_str(&settings_json),
                 FfiStr::from_str(&properties_json),
             );

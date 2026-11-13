@@ -50,12 +50,13 @@ use std::sync::Arc;
 /// ## With Application Source
 ///
 /// ```no_run
+/// use drasi_lib::ComponentId;
 /// use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 /// use std::collections::HashMap;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = ApplicationSourceConfig { properties: HashMap::new(), durability: None };
-/// let (source, handle) = ApplicationSource::new("events", config)?;
+/// let (source, handle) = ApplicationSource::new(ComponentId::generate(), config)?;
 ///
 /// // Create a user node with multiple properties
 /// let properties = PropertyMapBuilder::new()

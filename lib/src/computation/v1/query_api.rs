@@ -4,16 +4,15 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    config::QueryConfig,
+    config::{AssignedQueryConfig, ResolvedQueryConfig as QueryConfig},
     metrics::QueryOutputMetrics,
     queries::{FetchError, OutboxResponse, SnapshotResponse},
 };
 
 use super::{query_catalog::LocalQueryOutput, QueryResultsCatalog};
 use drasi_computation_contracts::{
-    ChangeEnvelope, ComponentId, OutputCursor, OutputReadError, QueryDescription,
-    QueryOutputObservation, QueryOutputView, QueryResultSnapshot, QueryViewProvider,
-    ResultNodeProjector,
+    ChangeEnvelope, ComponentId, OutputCursor, OutputReadError, QueryOutputObservation,
+    QueryOutputView, QueryResultSnapshot, QueryViewProvider, ResultNodeProjector,
 };
 use drasi_query_common::QueryExecutionSettingsExt;
 #[cfg(test)]
@@ -24,7 +23,6 @@ pub(super) enum QueryApiOutput {
     Local(LocalQueryOutput),
     Native {
         reader: Arc<dyn QueryViewProvider>,
-        description: Arc<QueryDescription>,
         progress: Option<Arc<super::QuerySourceProgress>>,
     },
 }
@@ -50,6 +48,14 @@ pub struct QueryApi {
 }
 
 impl QueryApi {
+    pub(crate) fn native_activation_recorded(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .native_progress
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native query metrics poisoned"))?
+            .is_some())
+    }
+
     pub fn recovery_reader(
         &self,
     ) -> Option<Arc<dyn drasi_computation_contracts::QueryRecoveryReader>> {
@@ -78,10 +84,10 @@ impl QueryApi {
         &self,
         observation: &QueryOutputObservation,
     ) -> anyhow::Result<()> {
-        let QueryApiOutput::Native { description, .. } = self.output.as_ref() else {
+        let QueryApiOutput::Native { reader, .. } = self.output.as_ref() else {
             anyhow::bail!("native observation requires a native query");
         };
-        observation.validate(&ComponentId::try_new(self.config.id.as_str())?, description)?;
+        observation.validate(&self.config.id, &reader.description())?;
         self.metrics.update_outbox(
             observation.outbox_size,
             observation.oldest_sequence.unwrap_or(0),
@@ -127,14 +133,12 @@ impl QueryApi {
         observation: Option<&QueryOutputObservation>,
     ) -> anyhow::Result<()> {
         let QueryApiOutput::Native {
-            description,
-            progress,
-            reader,
-            ..
+            progress, reader, ..
         } = self.output.as_ref()
         else {
             return Ok(());
         };
+        let description = reader.description();
         let mut stored = self
             .native_progress
             .lock()
@@ -145,7 +149,7 @@ impl QueryApi {
             .ok_or_else(|| anyhow::anyhow!("native query progress was not initialized"))?;
         let previous = next.clone();
         if let Some(observation) = observation {
-            observation.validate(&ComponentId::try_new(self.config.id.as_str())?, description)?;
+            observation.validate(&self.config.id, &description)?;
             anyhow::ensure!(
                 observation.generation >= previous.generation,
                 "native query observation regressed its output generation"
@@ -168,7 +172,7 @@ impl QueryApi {
             emitted = true;
             let identity = super::QueryRecoveryIdentity::from_query_output(&output.envelope)?;
             anyhow::ensure!(
-                identity.query_id() == self.config.id
+                identity.query_id() == &self.config.id
                     && identity.graph_id() == description.graph_id
                     && identity.configuration_hash() == description.configuration_hash,
                 "query progress output belongs to a different configuration"
@@ -264,17 +268,13 @@ impl QueryApi {
             } else {
                 super::QueryRecoveryPolicy::Strict
             },
-        );
+        )?;
         Ok(Arc::new(Self {
             config,
             catalog: None,
             metrics: Arc::new(QueryOutputMetrics::new()),
             native_progress: Default::default(),
-            output: Arc::new(QueryApiOutput::Native {
-                reader,
-                description: Arc::new(description),
-                progress,
-            }),
+            output: Arc::new(QueryApiOutput::Native { reader, progress }),
             _registration: None,
             links: std::sync::Mutex::new(Vec::new()),
         }))
@@ -291,20 +291,34 @@ impl QueryApi {
         let mut config = self.config.clone();
         config.dispatch_mode = Some(mode);
         config.dispatch_buffer_capacity = Some(capacity);
-        self.with_native_configuration(config, Some(catalog), capacity)
+        self.with_resolved_configuration(config, Some(catalog), capacity)
     }
 
     /// Keep the ordinary declaration intact while binding the plugin's actual
     /// read capability to the existing result outlet.
     pub fn with_native_configuration(
         &self,
-        config: QueryConfig,
+        config: AssignedQueryConfig,
         catalog: Option<QueryResultsCatalog>,
         default_dispatch_capacity: usize,
     ) -> anyhow::Result<Arc<Self>> {
-        let QueryApiOutput::Native { description, .. } = self.output.as_ref() else {
+        self.with_resolved_configuration(
+            config.into_resolved()?,
+            catalog,
+            default_dispatch_capacity,
+        )
+    }
+
+    fn with_resolved_configuration(
+        &self,
+        mut config: QueryConfig,
+        catalog: Option<QueryResultsCatalog>,
+        default_dispatch_capacity: usize,
+    ) -> anyhow::Result<Arc<Self>> {
+        let QueryApiOutput::Native { reader, .. } = self.output.as_ref() else {
             anyhow::bail!("linked queries bind their catalogue on the executing transformer");
         };
+        let description = reader.description();
         anyhow::ensure!(
             self.catalog.is_none(),
             "query result catalogue is already bound"
@@ -313,11 +327,11 @@ impl QueryApi {
             config.id == self.config.id,
             "query declaration belongs to another component"
         );
-        let mut execution = super::QueryExecutionSettings::from_legacy_config(&config);
-        execution.source_transactions = description.execution.source_transactions;
+        config.source_transactions = description.execution.source_transactions;
+        let execution = config.execution_settings();
         let definition = super::ContinuousQueryDefinition {
             graph_id: description.graph_id.clone(),
-            id: ComponentId::try_new(config.id.as_str())?,
+            id: config.id.clone(),
             query: config.query.clone(),
             language: match config.query_language {
                 crate::config::QueryLanguage::Cypher => super::ComputationQueryLanguage::Cypher,
@@ -342,10 +356,7 @@ impl QueryApi {
                     self.metrics.clone(),
                     default_dispatch_capacity,
                 )?;
-                catalog.register_output(
-                    ComponentId::try_new(config.id.as_str())?,
-                    self.output.clone(),
-                )
+                catalog.register_output(config.id.clone(), self.output.clone())
             })
             .transpose()?;
         Ok(Arc::new(Self {
@@ -364,11 +375,10 @@ impl QueryApi {
         component: &super::ObservedComponent,
     ) -> anyhow::Result<Option<crate::metrics::QueryProgressMetricsSnapshot>> {
         if let QueryApiOutput::Native {
-            description,
-            progress,
-            ..
+            reader, progress, ..
         } = self.output.as_ref()
         {
+            let description = reader.description();
             let Some(progress) = progress else {
                 return Ok(None);
             };
@@ -475,11 +485,8 @@ impl QueryApi {
     ) -> Result<OutboxResponse, FetchError> {
         let output = match self.output.as_ref() {
             QueryApiOutput::Local(output) => output,
-            QueryApiOutput::Native {
-                reader,
-                description,
-                ..
-            } => {
+            QueryApiOutput::Native { reader, .. } => {
+                let description = reader.description();
                 let read = async {
                     let (head, generation) = reader.query_head().await?;
                     if after == u64::MAX {
@@ -596,7 +603,7 @@ impl QueryApiOutput {
     pub(super) fn configuration_hash(&self) -> u64 {
         match self {
             Self::Local(output) => output.config_hash,
-            Self::Native { description, .. } => description.configuration_hash,
+            Self::Native { reader, .. } => reader.description().configuration_hash,
         }
     }
 
@@ -658,12 +665,9 @@ impl QueryApiOutput {
                 output.results.wait_ready().await?;
                 Ok(output.reader.query_view()?.snapshot)
             }
-            Self::Native {
-                reader,
-                description,
-                ..
-            } => {
+            Self::Native { reader, .. } => {
                 let (snapshot, generation) = reader.query_snapshot().await?;
+                let description = reader.description();
                 Ok(QueryResultSnapshot {
                     projector: ResultNodeProjector::try_new(
                         snapshot.dataset(),
@@ -694,7 +698,7 @@ impl QueryApiOutput {
     pub(super) fn is_persistent(&self) -> anyhow::Result<bool> {
         let output = match self {
             QueryApiOutput::Local(output) => output,
-            QueryApiOutput::Native { description, .. } => return Ok(!description.volatile),
+            QueryApiOutput::Native { reader, .. } => return Ok(!reader.description().volatile),
         };
         output
             .output_persistence

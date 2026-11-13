@@ -81,10 +81,11 @@
 //! # Example
 //!
 //! ```rust,no_run
+//! use drasi_lib::ComponentId;
 //! use drasi_source_otel::OtelSource;
 //!
 //! # fn example() -> anyhow::Result<()> {
-//! let source = OtelSource::builder("otel")
+//! let source = OtelSource::builder(ComponentId::generate())
 //!     .with_grpc_bind("127.0.0.1:4317")
 //!     .with_metric_allowlist(["latency_p99_ms"])
 //!     .with_heartbeat_metric("health.heartbeat")
@@ -169,7 +170,7 @@ impl OtelSource {
     /// # Arguments
     ///
     /// * `id` - Unique source instance id used in element references
-    pub fn builder(id: impl Into<String>) -> OtelSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> OtelSourceBuilder {
         OtelSourceBuilder::new(id)
     }
 
@@ -178,7 +179,7 @@ impl OtelSource {
     /// # Errors
     ///
     /// Returns an error if [`OtelSourceConfig::validate`] fails.
-    pub fn new(id: impl Into<String>, config: OtelSourceConfig) -> Result<Self> {
+    pub fn new(id: drasi_lib::ComponentId, config: OtelSourceConfig) -> Result<Self> {
         Self::builder(id).with_config(config).build()
     }
 
@@ -194,7 +195,7 @@ impl OtelSource {
 
 #[async_trait]
 impl Source for OtelSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -283,7 +284,13 @@ impl Source for OtelSource {
             .await;
 
         if let Some(store) = self.base.state_store().await {
-            if let Ok(Some(bytes)) = store.get(&self.base.id, "lifecycle").await {
+            if let Ok(Some(bytes)) = store
+                .get(
+                    &drasi_lib::StorePartition::component(self.base.id.clone()),
+                    "lifecycle",
+                )
+                .await
+            {
                 match LifecycleState::from_bytes(&bytes) {
                     Ok(state) => *self.lifecycle.write().await = state,
                     Err(e) => warn!("[{}] failed to load lifecycle state: {e}", self.base.id),
@@ -306,12 +313,19 @@ impl Source for OtelSource {
                 .as_ref()
                 .expect("durability checked above")
                 .to_wal_config();
-            wal.register(&self.base.id, wal_config.clone())
+            wal.register(
+                &drasi_lib::StorageScope::default(),
+                &self.base.id,
+                wal_config.clone(),
+            )
+            .await
+            .with_context(|| format!("Failed to register WAL for source '{}'", self.base.id))?;
+            let head = wal
+                .head_sequence(&drasi_lib::StorageScope::default(), &self.base.id)
                 .await
-                .with_context(|| format!("Failed to register WAL for source '{}'", self.base.id))?;
-            let head = wal.head_sequence(&self.base.id).await.with_context(|| {
-                format!("Failed to read WAL head for source '{}'", self.base.id)
-            })?;
+                .with_context(|| {
+                    format!("Failed to read WAL head for source '{}'", self.base.id)
+                })?;
             if head > 0 {
                 self.base.set_next_sequence(head);
             }
@@ -393,7 +407,10 @@ impl Source for OtelSource {
                 loop {
                     interval.tick().await;
                     if let Some(confirmed) = base.compute_confirmed_position().await {
-                        if let Err(e) = wal.prune_up_to(&source_id, confirmed).await {
+                        if let Err(e) = wal
+                            .prune_up_to(&drasi_lib::StorageScope::default(), &source_id, confirmed)
+                            .await
+                        {
                             warn!("[{source_id}] WAL prune failed: {e}");
                         }
                     }
@@ -449,7 +466,11 @@ impl Source for OtelSource {
                 let wal_clone = wal.clone();
                 drop(wal_guard);
                 match wal_clone
-                    .read_from(&self.base.id, resume_seq.saturating_add(1))
+                    .read_from(
+                        &drasi_lib::StorageScope::default(),
+                        &self.base.id,
+                        resume_seq.saturating_add(1),
+                    )
                     .await
                 {
                     Err(drasi_lib::wal::WalError::PositionUnavailable {
@@ -485,23 +506,24 @@ impl Source for OtelSource {
         self
     }
 
-    async fn deprovision(&self) -> Result<()> {
+    async fn delete_owned_resources(&self) -> Result<()> {
         let wal_guard = self.wal.read().await;
         if let Some(ref wal) = *wal_guard {
-            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
-            if let Err(e) = wal.delete_wal(&self.base.id).await {
-                warn!(
-                    "[{}] Failed to delete WAL during deprovision: {}",
-                    self.base.id, e
-                );
+            info!("[{}] Deleting owned WAL data", self.base.id);
+            if let Err(e) = wal
+                .delete_wal(&drasi_lib::StorageScope::default(), &self.base.id)
+                .await
+            {
+                warn!("[{}] Failed to delete owned WAL data: {}", self.base.id, e);
+                return Err(e.into());
             }
         }
         drop(wal_guard);
-        self.base.deprovision_common().await
+        self.base.delete_owned_resources_common().await
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         if let Some(identity) = self.pending_identity.write().await.take() {
             self.base.set_identity_provider(identity).await;
         }
@@ -518,7 +540,7 @@ impl Source for OtelSource {
         self.base.set_identity_provider(provider).await;
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_lib::ComponentId) {
         self.base.remove_position_handle(query_id).await;
     }
 }
@@ -528,7 +550,7 @@ impl Source for OtelSource {
 /// Starts from [`OtelSourceConfig`] defaults. Call [`OtelSourceBuilder::build`]
 /// to validate the configuration and construct the source.
 pub struct OtelSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: OtelSourceConfig,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -539,9 +561,9 @@ pub struct OtelSourceBuilder {
 
 impl OtelSourceBuilder {
     /// Create a builder with default configuration for `id`.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: OtelSourceConfig::default(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -664,7 +686,7 @@ impl OtelSourceBuilder {
     /// Returns an error if binds, TTLs, or TLS paths are invalid.
     pub fn build(self) -> Result<OtelSource> {
         self.config.validate()?;
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -751,7 +773,11 @@ async fn persist_lifecycle(base: &SourceBase, lifecycle: &RwLock<LifecycleState>
         .to_bytes()
         .with_context(|| format!("OTel source '{}' lifecycle serialization", base.id))?;
     store
-        .set(&base.id, "lifecycle", bytes)
+        .set(
+            &drasi_lib::StorePartition::component(base.id.clone()),
+            "lifecycle",
+            bytes,
+        )
         .await
         .with_context(|| format!("OTel source '{}' lifecycle persistence", base.id))
 }
@@ -780,56 +806,102 @@ mod tests {
 
     #[async_trait]
     impl StateStoreProvider for RejectLifecycleWrite {
-        async fn get(&self, _: &str, _: &str) -> StateStoreResult<Option<Vec<u8>>> {
+        async fn get(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+            _: &str,
+        ) -> StateStoreResult<Option<Vec<u8>>> {
             unreachable!("shutdown does not read state")
         }
-        async fn set(&self, store: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
-            assert_eq!(store, "failed-save");
+        async fn set(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+            key: &str,
+            value: Vec<u8>,
+        ) -> StateStoreResult<()> {
+            assert_eq!(
+                store,
+                &drasi_core::interface::StorePartition::component(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007f")
+                        .expect("fixture UUID")
+                )
+            );
             assert_eq!(key, "lifecycle");
             assert!(!value.is_empty());
             Err(StateStoreError::StorageError(
                 "injected write failure".into(),
             ))
         }
-        async fn delete(&self, _: &str, _: &str) -> StateStoreResult<bool> {
+        async fn delete(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+            _: &str,
+        ) -> StateStoreResult<bool> {
             unreachable!("shutdown does not delete state")
         }
-        async fn contains_key(&self, _: &str, _: &str) -> StateStoreResult<bool> {
+        async fn contains_key(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+            _: &str,
+        ) -> StateStoreResult<bool> {
             unreachable!("shutdown does not inspect keys")
         }
         async fn get_many(
             &self,
-            _: &str,
+            _: &drasi_core::interface::StorePartition,
             _: &[&str],
         ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
             unreachable!("shutdown does not read state")
         }
-        async fn set_many(&self, _: &str, _: &[(&str, &[u8])]) -> StateStoreResult<()> {
+        async fn set_many(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+            _: &[(&str, &[u8])],
+        ) -> StateStoreResult<()> {
             unreachable!("shutdown writes one lifecycle record")
         }
-        async fn delete_many(&self, _: &str, _: &[&str]) -> StateStoreResult<usize> {
+        async fn delete_many(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+            _: &[&str],
+        ) -> StateStoreResult<usize> {
             unreachable!("shutdown does not delete state")
         }
-        async fn clear_store(&self, _: &str) -> StateStoreResult<usize> {
+        async fn clear_store(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+        ) -> StateStoreResult<usize> {
             unreachable!("shutdown must preserve state")
         }
-        async fn list_keys(&self, _: &str) -> StateStoreResult<Vec<String>> {
+        async fn list_keys(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+        ) -> StateStoreResult<Vec<String>> {
             unreachable!("shutdown does not inspect keys")
         }
-        async fn store_exists(&self, _: &str) -> StateStoreResult<bool> {
+        async fn store_exists(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+        ) -> StateStoreResult<bool> {
             unreachable!("shutdown does not inspect stores")
         }
-        async fn key_count(&self, _: &str) -> StateStoreResult<usize> {
+        async fn key_count(
+            &self,
+            _: &drasi_core::interface::StorePartition,
+        ) -> StateStoreResult<usize> {
             unreachable!("shutdown does not inspect keys")
         }
     }
 
     #[tokio::test]
     async fn failed_shutdown_save_is_typed_and_does_not_report_stopped() {
-        let source = OtelSource::builder("failed-save")
-            .with_state_store(Arc::new(RejectLifecycleWrite))
-            .build()
-            .unwrap();
+        let source = OtelSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007f")
+                .expect("fixture UUID"),
+        )
+        .with_state_store(Arc::new(RejectLifecycleWrite))
+        .build()
+        .unwrap();
         let error = source.stop().await.unwrap_err();
         assert!(matches!(
             error.downcast_ref::<StateStoreError>(),
@@ -840,7 +912,12 @@ mod tests {
 
     #[tokio::test]
     async fn stop_joins_the_wal_pruner() {
-        let source = OtelSource::builder("pruner").build().unwrap();
+        let source = OtelSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000080")
+                .expect("fixture UUID"),
+        )
+        .build()
+        .unwrap();
         let (started, ready) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             started.send(()).unwrap();
@@ -859,16 +936,28 @@ mod tests {
 
         #[test]
         fn new_with_valid_config() {
-            let source = OtelSource::new("otel", OtelSourceConfig::default());
+            let source = OtelSource::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                    .expect("fixture UUID"),
+                OtelSourceConfig::default(),
+            );
             assert!(source.is_ok());
         }
 
         #[test]
         fn builder_defaults() {
-            let source = OtelSource::builder("otel").build();
+            let source = OtelSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                    .expect("fixture UUID"),
+            )
+            .build();
             assert!(source.is_ok());
             let source = source.unwrap();
-            assert_eq!(source.id(), "otel");
+            assert_eq!(
+                source.id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                    .expect("fixture UUID")
+            );
             assert_eq!(source.type_name(), "otel");
             assert!(!source.supports_replay());
         }
@@ -879,12 +968,15 @@ mod tests {
 
         #[test]
         fn properties_contain_bind_and_allowlist() {
-            let source = OtelSource::builder("otel")
-                .with_grpc_bind("127.0.0.1:4317")
-                .with_metric_allowlist(["latency_p99_ms"])
-                .with_auth_token("s3cret")
-                .build()
-                .unwrap();
+            let source = OtelSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                    .expect("fixture UUID"),
+            )
+            .with_grpc_bind("127.0.0.1:4317")
+            .with_metric_allowlist(["latency_p99_ms"])
+            .with_auth_token("s3cret")
+            .build()
+            .unwrap();
             let props = source.properties();
             assert!(props.contains_key("grpcBind"));
             assert!(props.contains_key("authToken"));
@@ -897,13 +989,16 @@ mod tests {
 
         #[test]
         fn builder_chaining_overrides() {
-            let source = OtelSource::builder("otel")
-                .with_grpc_bind("127.0.0.1:1")
-                .with_grpc_bind("127.0.0.1:4317")
-                .with_auto_start(false)
-                .with_dispatch_mode(DispatchMode::Channel)
-                .build()
-                .unwrap();
+            let source = OtelSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                    .expect("fixture UUID"),
+            )
+            .with_grpc_bind("127.0.0.1:1")
+            .with_grpc_bind("127.0.0.1:4317")
+            .with_auto_start(false)
+            .with_dispatch_mode(DispatchMode::Channel)
+            .build()
+            .unwrap();
             assert!(!source.auto_start());
             let bind = source.properties().get("grpcBind").cloned().unwrap();
             assert!(bind.to_string().contains("127.0.0.1:4317"));
@@ -935,7 +1030,13 @@ mod tests {
 
     #[test]
     fn empty_binds_fail_validation() {
-        let err = match OtelSource::builder("otel").with_grpc_bind("").build() {
+        let err = match OtelSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+        )
+        .with_grpc_bind("")
+        .build()
+        {
             Ok(_) => panic!("expected validation error"),
             Err(err) => err,
         };
@@ -944,10 +1045,13 @@ mod tests {
 
     #[tokio::test]
     async fn initial_status_is_stopped() {
-        let source = OtelSource::builder("otel")
-            .with_grpc_bind("127.0.0.1:0")
-            .build()
-            .unwrap();
+        let source = OtelSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+        )
+        .with_grpc_bind("127.0.0.1:0")
+        .build()
+        .unwrap();
         assert_eq!(source.status().await, ComponentStatus::Stopped);
     }
 
@@ -962,22 +1066,28 @@ mod tests {
 
     #[test]
     fn durability_enables_replay() {
-        let source = OtelSource::builder("otel")
-            .with_durability(drasi_lib::DurabilityConfig {
-                enabled: true,
-                ..Default::default()
-            })
-            .build()
-            .unwrap();
+        let source = OtelSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+        )
+        .with_durability(drasi_lib::DurabilityConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
         assert!(source.supports_replay());
     }
 
     #[tokio::test]
     async fn start_fails_when_bind_fails() {
-        let source = OtelSource::builder("otel")
-            .with_grpc_bind("127.0.0.1:1")
-            .build()
-            .unwrap();
+        let source = OtelSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+        )
+        .with_grpc_bind("127.0.0.1:1")
+        .build()
+        .unwrap();
         let err = source
             .start()
             .await
@@ -991,17 +1101,22 @@ mod tests {
 
     #[tokio::test]
     async fn resume_from_short_position_is_rejected() {
-        let source = OtelSource::builder("otel")
-            .with_durability(drasi_lib::DurabilityConfig {
-                enabled: true,
-                ..Default::default()
-            })
-            .build()
-            .unwrap();
+        let source = OtelSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+        )
+        .with_durability(drasi_lib::DurabilityConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
         *source.wal.write().await = Some(Arc::new(MemoryWal::default()));
         let settings = drasi_lib::config::SourceSubscriptionSettings {
-            source_id: "otel".to_string(),
-            query_id: "q".to_string(),
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             nodes: Default::default(),
             relations: Default::default(),
             enable_bootstrap: false,
@@ -1018,20 +1133,25 @@ mod tests {
 
     #[tokio::test]
     async fn resume_from_pruned_position_is_unavailable() {
-        let source = OtelSource::builder("otel")
-            .with_durability(drasi_lib::DurabilityConfig {
-                enabled: true,
-                ..Default::default()
-            })
-            .build()
-            .unwrap();
+        let source = OtelSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+        )
+        .with_durability(drasi_lib::DurabilityConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
         *source.wal.write().await = Some(Arc::new(MemoryWal {
             oldest: 10,
             unavailable: true,
         }));
         let settings = drasi_lib::config::SourceSubscriptionSettings {
-            source_id: "otel".to_string(),
-            query_id: "q".to_string(),
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             nodes: Default::default(),
             relations: Default::default(),
             enable_bootstrap: false,
@@ -1062,7 +1182,8 @@ mod tests {
     impl WalProvider for MemoryWal {
         async fn register(
             &self,
-            _source_id: &str,
+            _scope: &drasi_core::interface::StorageScope,
+            _source_id: &drasi_core::ComponentId,
             _config: drasi_lib::wal::WriteAheadLogConfig,
         ) -> std::result::Result<(), drasi_lib::wal::WalError> {
             Ok(())
@@ -1070,7 +1191,8 @@ mod tests {
 
         async fn append(
             &self,
-            _source_id: &str,
+            _scope: &drasi_core::interface::StorageScope,
+            _source_id: &drasi_core::ComponentId,
             _event: &drasi_core::models::SourceChange,
         ) -> std::result::Result<u64, drasi_lib::wal::WalError> {
             Ok(1)
@@ -1078,7 +1200,8 @@ mod tests {
 
         async fn read_from(
             &self,
-            source_id: &str,
+            _scope: &drasi_core::interface::StorageScope,
+            source_id: &drasi_core::ComponentId,
             sequence: u64,
         ) -> std::result::Result<
             Vec<(u64, drasi_core::models::SourceChange)>,
@@ -1086,7 +1209,7 @@ mod tests {
         > {
             if self.unavailable {
                 return Err(drasi_lib::wal::WalError::PositionUnavailable {
-                    source_id: source_id.to_string(),
+                    source_id: source_id.clone(),
                     requested: sequence,
                     oldest_available: Some(self.oldest),
                 });
@@ -1096,7 +1219,8 @@ mod tests {
 
         async fn prune_up_to(
             &self,
-            _source_id: &str,
+            _scope: &drasi_core::interface::StorageScope,
+            _source_id: &drasi_core::ComponentId,
             _sequence: u64,
         ) -> std::result::Result<u64, drasi_lib::wal::WalError> {
             Ok(0)
@@ -1104,28 +1228,32 @@ mod tests {
 
         async fn head_sequence(
             &self,
-            _source_id: &str,
+            _scope: &drasi_core::interface::StorageScope,
+            _source_id: &drasi_core::ComponentId,
         ) -> std::result::Result<u64, drasi_lib::wal::WalError> {
             Ok(0)
         }
 
         async fn oldest_sequence(
             &self,
-            _source_id: &str,
+            _scope: &drasi_core::interface::StorageScope,
+            _source_id: &drasi_core::ComponentId,
         ) -> std::result::Result<Option<u64>, drasi_lib::wal::WalError> {
             Ok(Some(self.oldest))
         }
 
         async fn event_count(
             &self,
-            _source_id: &str,
+            _scope: &drasi_core::interface::StorageScope,
+            _source_id: &drasi_core::ComponentId,
         ) -> std::result::Result<u64, drasi_lib::wal::WalError> {
             Ok(0)
         }
 
         async fn delete_wal(
             &self,
-            _source_id: &str,
+            _scope: &drasi_core::interface::StorageScope,
+            _source_id: &drasi_core::ComponentId,
         ) -> std::result::Result<(), drasi_lib::wal::WalError> {
             Ok(())
         }

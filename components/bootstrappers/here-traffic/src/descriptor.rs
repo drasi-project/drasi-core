@@ -144,7 +144,7 @@ impl BootstrapPluginDescriptor for HereTrafficBootstrapDescriptor {
             config.base_url = mapper.resolve_string(&base_url).await?;
         }
 
-        let provider = HereTrafficBootstrapProvider::new("here-traffic-bootstrap", config)?;
+        let provider = HereTrafficBootstrapProvider::new(config)?;
         Ok(Box::new(provider))
     }
 }

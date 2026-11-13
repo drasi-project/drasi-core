@@ -105,7 +105,7 @@ fn query(
     bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
 ) -> Result<NativeComponentProxy> {
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query":text,"bootstrap":true,"recovery":"auto_reset"}),
         scope(generation),
         super::super::provider(indexes)?,
@@ -132,6 +132,7 @@ async fn interrupted_after_row() -> Result<()> {
             gate: gate.clone(),
         })),
     )?;
+    loading.initialize().await?;
     let snapshot = reader(&loading)?;
     let progress = loading
         .processing_progress_owner()
@@ -169,6 +170,7 @@ async fn interrupted_after_row() -> Result<()> {
     drop(loading);
 
     let mut strict = file_query(&database, &indexes, 2)?;
+    strict.initialize().await?;
     let failure = strict
         .start()
         .await
@@ -179,6 +181,7 @@ async fn interrupted_after_row() -> Result<()> {
 
     gate.release();
     let mut resumed = query(&indexes, TEXT, 3, Some(file_provider(&database, 3)?))?;
+    resumed.initialize().await?;
     resumed.start().await?;
     assert_eq!(total(&reader(&resumed)?.snapshot().await?)?, 30.0);
     let progress = resumed
@@ -209,6 +212,7 @@ async fn indexed_bootstrap_auto_reset_requires_provider_and_changes_output_epoch
     let indexes = directory.path().join("indexes");
     sqlite::create_database(&database)?;
     let mut original = file_query(&database, &indexes, 1)?;
+    original.initialize().await?;
     original.start().await?;
     let producer = reader(&original)?
         .snapshot()
@@ -220,9 +224,11 @@ async fn indexed_bootstrap_auto_reset_requires_provider_and_changes_output_epoch
     drop(original);
     let text = "MATCH (n:items) RETURN sum(n.amount * 2) AS total";
     let mut unbound = query(&indexes, text, 2, None)?;
+    unbound.initialize().await?;
     assert!(unbound.start().await.is_err());
     drop(unbound);
     let mut unchanged = file_query(&database, &indexes, 3)?;
+    unchanged.initialize().await?;
     unchanged.start().await?;
     let snapshot = reader(&unchanged)?.snapshot().await?;
     assert_eq!(total(&snapshot)?, 30.0);
@@ -230,6 +236,7 @@ async fn indexed_bootstrap_auto_reset_requires_provider_and_changes_output_epoch
     unchanged.stop().await?;
     drop(unchanged);
     let mut reset = query(&indexes, text, 4, Some(file_provider(&database, 4)?))?;
+    reset.initialize().await?;
     reset.start().await?;
     let snapshot = reader(&reset)?.snapshot().await?;
     assert_eq!(total(&snapshot)?, 60.0);
@@ -246,6 +253,7 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
     let indexes = directory.path().join("indexes");
     sqlite::create_database(&database)?;
     let mut original = file_query(&database, &indexes, 1)?;
+    original.initialize().await?;
     original.start().await?;
     let producer = reader(&original)?
         .snapshot()
@@ -260,11 +268,12 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
     gate.release();
     gate.fresh_snapshot.store(true, Ordering::Release);
     let mut strict = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query":TEXT,"bootstrap":true}),
         scope(2),
         super::super::provider(&indexes)?,
     )?;
+    strict.initialize().await?;
     strict.bind_bootstrap(Arc::new(NativeBootstrapResource(Arc::new(
         PausedProvider {
             inner: file_provider(&database, 2)?,
@@ -287,6 +296,7 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
             gate,
         })),
     )?;
+    reset.initialize().await?;
     reset.start().await?;
     let snapshot = reader(&reset)?.snapshot().await?;
     assert_eq!(total(&snapshot)?, 31.0);
@@ -310,6 +320,7 @@ async fn indexed_bootstrap_auto_reset_preserves_unconfirmed_output() -> Result<(
     let indexes = directory.path().join("indexes");
     sqlite::create_database(&database)?;
     let mut original = file_query(&database, &indexes, 1)?;
+    original.initialize().await?;
     original.start().await?;
     let output = original
         .transform(input(
@@ -335,6 +346,7 @@ async fn indexed_bootstrap_auto_reset_preserves_unconfirmed_output() -> Result<(
         2,
         Some(file_provider(&database, 2)?),
     )?;
+    reset.initialize().await?;
     let failure = reset
         .start()
         .await
@@ -343,6 +355,7 @@ async fn indexed_bootstrap_auto_reset_preserves_unconfirmed_output() -> Result<(
     reset.stop().await?;
     drop(reset);
     let mut retained = file_query(&database, &indexes, 3)?;
+    retained.initialize().await?;
     retained.start().await?;
     let replayed = retained.continue_transform().await?;
     aggregate(&replayed, Some(30.0), 35.0, 1)?;

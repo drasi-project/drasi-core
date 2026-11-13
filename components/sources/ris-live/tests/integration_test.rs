@@ -171,32 +171,51 @@ async fn test_change_detection_with_websocket_harness() {
     let (listener, port) = find_available_port().await;
     let harness_tx = start_mock_ris_server(listener).await;
 
-    let source = RisLiveSource::builder("ris-source")
-        .with_websocket_url(format!("ws://127.0.0.1:{port}/v1/ws/"))
-        .with_host("rrc00")
-        .with_start_from_now()
-        .with_auto_start(true)
-        .build()
-        .unwrap();
+    let source = RisLiveSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000006")
+            .expect("fixture UUID"),
+    )
+    .with_websocket_url(format!("ws://127.0.0.1:{port}/v1/ws/"))
+    .with_host("rrc00")
+    .with_start_from_now()
+    .with_auto_start(true)
+    .build()
+    .unwrap();
 
-    let routes_query = Query::cypher("routes-query")
-        .query(
-            "MATCH (peer:Peer)-[r:ROUTES]->(p:Prefix) \
+    let routes_query = Query::cypher(
+        drasi_core::ComponentName::try_new("routes-query").expect("fixture component name"),
+    )
+    .query(
+        "MATCH (peer:Peer)-[r:ROUTES]->(p:Prefix) \
              RETURN peer.peer_ip AS peer, p.prefix AS prefix, r.next_hop AS next_hop",
-        )
-        .from_input("ris-source")
-        .auto_start(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("ris-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid routes query");
 
-    let peer_query = Query::cypher("peer-query")
-        .query("MATCH (peer:Peer) RETURN peer.peer_ip AS peer, peer.state AS state")
-        .from_input("ris-source")
-        .auto_start(true)
-        .build();
+    let peer_query = Query::cypher(
+        drasi_core::ComponentName::try_new("peer-query").expect("fixture component name"),
+    )
+    .query("MATCH (peer:Peer) RETURN peer.peer_ip AS peer, peer.state AS state")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("ris-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid peer query");
 
-    let (reaction, handle) = ApplicationReactionBuilder::new("app-reaction")
-        .with_queries(vec!["routes-query".to_string(), "peer-query".to_string()])
-        .build();
+    let (reaction, handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000001")
+            .expect("fixture UUID"),
+    )
+    .with_queries_by_name(vec![
+        drasi_core::ComponentName::try_new("routes-query").expect("fixture component name"),
+        drasi_core::ComponentName::try_new("peer-query").expect("fixture component name"),
+    ])
+    .build();
 
     let drasi = Arc::new(
         DrasiLib::builder()
@@ -213,10 +232,16 @@ async fn test_change_detection_with_websocket_harness() {
                     .clone(),
             )
             .with_id("ris-live-integration-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("ris-source").expect("fixture component name"),
+                source,
+            )
             .with_query(routes_query)
             .with_query(peer_query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("capture").unwrap(),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -239,7 +264,10 @@ async fn test_change_detection_with_websocket_harness() {
         .unwrap();
 
     let found_insert = wait_for_result(&mut subscription, Duration::from_secs(10), |result| {
-        if result.query_id != "routes-query" {
+        if result.query_id
+            != drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000007")
+                .expect("fixture UUID")
+        {
             return false;
         }
         result.results.iter().any(|diff| match diff {
@@ -260,7 +288,10 @@ async fn test_change_detection_with_websocket_harness() {
         .unwrap();
 
     let found_update = wait_for_result(&mut subscription, Duration::from_secs(10), |result| {
-        if result.query_id != "routes-query" {
+        if result.query_id
+            != drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000007")
+                .expect("fixture UUID")
+        {
             return false;
         }
         result.results.iter().any(|diff| match diff {
@@ -280,7 +311,10 @@ async fn test_change_detection_with_websocket_harness() {
         .unwrap();
 
     let found_delete = wait_for_result(&mut subscription, Duration::from_secs(10), |result| {
-        if result.query_id != "routes-query" {
+        if result.query_id
+            != drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000007")
+                .expect("fixture UUID")
+        {
             return false;
         }
         result.results.iter().any(|diff| match diff {
@@ -301,7 +335,10 @@ async fn test_change_detection_with_websocket_harness() {
         .unwrap();
 
     let found_peer_state = wait_for_result(&mut subscription, Duration::from_secs(10), |result| {
-        if result.query_id != "peer-query" {
+        if result.query_id
+            != drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000008")
+                .expect("fixture UUID")
+        {
             return false;
         }
         result.results.iter().any(|diff| match diff {

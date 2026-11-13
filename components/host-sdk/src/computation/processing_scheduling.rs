@@ -3,6 +3,7 @@
 
 //! Scheduling metadata and Core queue mutations in the existing processing owner.
 
+use drasi_core_types::CheckpointKey;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::c_void,
@@ -97,7 +98,7 @@ async fn load(resources: &ComputationIndexes) -> anyhow::Result<Records> {
     let checkpoint = resources
         .checkpoint_store()
         .context("scheduled processing requires checkpoints")?
-        .read_checkpoint(CHECKPOINT)
+        .read_checkpoint(&CheckpointKey::Metadata(CHECKPOINT.into()))
         .await?;
     let records = match checkpoint {
         Some(checkpoint) => {
@@ -384,7 +385,7 @@ impl Draft {
             resources
                 .checkpoint_store()
                 .context("missing scheduling checkpoint store")?
-                .stage_checkpoint(CHECKPOINT, 1, Some(&bytes))
+                .stage_checkpoint(&CheckpointKey::Metadata(CHECKPOINT.into()), 1, Some(&bytes))
                 .await?;
         }
         *self

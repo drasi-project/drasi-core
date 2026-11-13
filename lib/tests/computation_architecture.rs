@@ -81,7 +81,11 @@ async fn shared_status_and_query_contracts_preserve_legacy_import_paths() {
     let (sender, mut receiver) =
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(1);
     let handle: drasi_lib::channels::ComponentStatusHandle =
-        drasi_lib::component_graph::ComponentStatusHandle::new_wired("component", sender);
+        drasi_lib::component_graph::ComponentStatusHandle::new_wired(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000033")
+                .expect("fixture UUID"),
+            sender,
+        );
     handle
         .set_status(drasi_lib::ComponentStatus::Running, None)
         .await;

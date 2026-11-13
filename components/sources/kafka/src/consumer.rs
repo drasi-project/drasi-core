@@ -36,9 +36,9 @@ pub struct KafkaConsumerTask {
     pub mappings: Vec<SourceMapping>,
     pub engine: Arc<SourceMappingEngine>,
     pub base: SourceBase,
-    pub source_id: String,
+    pub source_id: drasi_lib::ComponentId,
     pub shutdown_rx: watch::Receiver<bool>,
-    pub resume_positions: Arc<RwLock<HashMap<String, Vec<i64>>>>,
+    pub resume_positions: Arc<RwLock<HashMap<drasi_lib::ComponentId, Vec<i64>>>>,
 }
 
 impl KafkaConsumerTask {
@@ -386,7 +386,7 @@ impl KafkaConsumerTask {
             .ok_or_else(|| anyhow!("No matching mapping found for message"))?;
 
         self.engine
-            .process_mapping(mapping, &context, &self.source_id)
+            .process_mapping(mapping, &context, self.source_id.as_str())
     }
 
     /// Process a tombstone (null payload) as a Delete event.
@@ -399,7 +399,7 @@ impl KafkaConsumerTask {
 
         let metadata = ElementMetadata {
             reference: ElementReference {
-                source_id: Arc::from(self.source_id.as_str()),
+                namespace: Arc::from(self.source_id.as_str()),
                 element_id: Arc::from(key),
             },
             labels: Arc::from(vec![Arc::from(self.config.node_label.as_str())]),
@@ -421,7 +421,8 @@ mod tests {
     /// Helper to create a minimal KafkaConsumerTask for testing.
     fn test_task(mappings: Vec<SourceMapping>) -> KafkaConsumerTask {
         let config = KafkaSourceConfig {
-            id: "test-source".to_string(),
+            id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             bootstrap_servers: "localhost:9092".to_string(),
             topic: "test-topic".to_string(),
             group_id: "test-group".to_string(),
@@ -435,7 +436,11 @@ mod tests {
             additional_properties: HashMap::new(),
         };
 
-        let params = SourceBaseParams::new("test-source").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).expect("SourceBase creation failed");
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -444,7 +449,8 @@ mod tests {
             mappings,
             engine: Arc::new(SourceMappingEngine::new()),
             base,
-            source_id: "test-source".to_string(),
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             shutdown_rx,
             resume_positions: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -485,7 +491,7 @@ mod tests {
         match result {
             SourceChange::Delete { metadata } => {
                 assert_eq!(&*metadata.reference.element_id, "order-42");
-                assert_eq!(&*metadata.reference.source_id, "test-source");
+                assert_eq!(&*metadata.reference.namespace, task.source_id.as_str());
                 assert_eq!(&*metadata.labels[0], "TestNode");
             }
             _ => panic!("Expected SourceChange::Delete, got {result:?}"),
@@ -537,8 +543,16 @@ mod tests {
         let task = test_task(vec![]);
         {
             let mut positions = task.resume_positions.write().await;
-            positions.insert("query-a".to_string(), vec![10, 5, 8]);
-            positions.insert("query-b".to_string(), vec![7, 9, 3]);
+            positions.insert(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000078")
+                    .expect("fixture UUID"),
+                vec![10, 5, 8],
+            );
+            positions.insert(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000079")
+                    .expect("fixture UUID"),
+                vec![7, 9, 3],
+            );
         }
 
         let result = task.minimum_resume_offsets(3).await;
@@ -551,8 +565,16 @@ mod tests {
         {
             let mut positions = task.resume_positions.write().await;
             // This one has wrong length (2 instead of 3) — should be skipped
-            positions.insert("query-bad".to_string(), vec![1, 2]);
-            positions.insert("query-good".to_string(), vec![5, 5, 5]);
+            positions.insert(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007a")
+                    .expect("fixture UUID"),
+                vec![1, 2],
+            );
+            positions.insert(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007b")
+                    .expect("fixture UUID"),
+                vec![5, 5, 5],
+            );
         }
 
         let result = task.minimum_resume_offsets(3).await;

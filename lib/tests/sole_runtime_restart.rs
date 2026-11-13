@@ -49,7 +49,10 @@ struct OptionalSnapshotSource {
 impl OptionalSnapshotSource {
     fn new(snapshot: Option<Arc<AtomicU64>>) -> Self {
         Self {
-            status: ComponentStatusHandle::new("source"),
+            status: ComponentStatusHandle::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             dispatchers: Arc::new(Mutex::new(Vec::new())),
             sequence: Arc::new(AtomicU64::new(1)),
             snapshot,
@@ -60,7 +63,8 @@ impl OptionalSnapshotSource {
         anyhow::ensure!(self.status.get_status().await == ComponentStatus::Running);
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let event = Arc::new(SourceEventWrapper::new(
-            "source".into(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             SourceEvent::Change(person(value, sequence)),
             chrono::DateTime::from_timestamp_millis(sequence as i64).expect("time"),
             sequence,
@@ -87,8 +91,13 @@ fn person(value: u64, sequence: u64) -> SourceChange {
 
 #[async_trait]
 impl Source for OptionalSnapshotSource {
-    fn id(&self) -> &str {
-        "source"
+    fn id(&self) -> &drasi_core_types::ComponentId {
+        static ID: std::sync::LazyLock<drasi_core_types::ComponentId> =
+            std::sync::LazyLock::new(|| {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            });
+        &ID
     }
     fn type_name(&self) -> &str {
         "optional-snapshot"
@@ -102,7 +111,7 @@ impl Source for OptionalSnapshotSource {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> Result<()> {
@@ -129,7 +138,10 @@ impl Source for OptionalSnapshotSource {
                 let (sender, receiver) = mpsc::channel(1);
                 sender
                     .send(BootstrapEvent {
-                        source_id: "source".into(),
+                        source_id: drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
                         change: person(value.load(Ordering::Acquire), 0),
                         timestamp: chrono::Utc::now(),
                         sequence: 0,
@@ -140,7 +152,10 @@ impl Source for OptionalSnapshotSource {
                 None
             };
         Ok(SubscriptionResponse {
-            source_id: "source".into(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000004d",
+            )
+            .expect("fixture UUID"),
             query_id: settings.query_id,
             receiver,
             bootstrap_receiver,
@@ -157,20 +172,20 @@ struct RecordingReaction {
 
 #[async_trait]
 impl Reaction for RecordingReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         self.base.get_id()
     }
     fn type_name(&self) -> &str {
         "recording"
     }
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()
     }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
     async fn start(&self) -> Result<()> {
         self.base.set_status(ComponentStatus::Running, None).await;
@@ -207,10 +222,10 @@ impl Reaction for RecordingReaction {
     }
 }
 
-async fn ready(core: &DrasiLib, component: &str) -> Result<()> {
+async fn ready(core: &DrasiLib, component: &drasi_core_types::ComponentName) -> Result<()> {
     tokio::time::timeout(
         Duration::from_secs(5),
-        core.computation_component(component)?.wait_started(),
+        core.component_by_name(component)?.wait_started(),
     )
     .await??;
     Ok(())
@@ -223,6 +238,7 @@ async fn no_snapshot_source_keeps_committed_query_state_and_strict_reaction_prog
     let (sender, mut received) = mpsc::unbounded_channel();
     let state = Arc::new(drasi_lib::MemoryStateStoreProvider::new());
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -236,22 +252,43 @@ async fn no_snapshot_source_keeps_committed_query_state_and_strict_reaction_prog
                 .clone(),
         )
         .with_id("no-snapshot-restart")
-        .with_source(source.clone())
-        .with_query(
-            Query::cypher("query")
-                .query("MATCH (p:Person) RETURN p.value AS value")
-                .from_input("source")
-                .build(),
+        .with_source(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            source.clone(),
         )
-        .with_reaction(RecordingReaction {
-            base: ReactionBase::new(ReactionBaseParams::new("reaction", vec!["query".into()])),
-            results: sender,
-        })
+        .with_query(
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .query("MATCH (p:Person) RETURN p.value AS value")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            )
+            .build()?,
+        )
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+            RecordingReaction {
+                base: ReactionBase::new(ReactionBaseParams::new(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                        .expect("fixture UUID"),
+                    vec![drasi_computation_contracts::ComponentReference::by_name(
+                        drasi_core_types::ComponentName::try_new("query")
+                            .expect("fixture component name"),
+                    )],
+                )),
+                results: sender,
+            },
+        )
         .with_state_store_provider(state)
         .build()
         .await?;
     core.start().await?;
-    ready(&core, "reaction").await?;
+    ready(
+        &core,
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await?;
     source.emit(1).await?;
     let first = tokio::time::timeout(Duration::from_secs(5), received.recv())
         .await?
@@ -259,14 +296,20 @@ async fn no_snapshot_source_keeps_committed_query_state_and_strict_reaction_prog
     assert_eq!(first.sequence, 1);
     let query = core
         .query_manager()
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let before = query.fetch_snapshot().await?;
     assert_eq!(before.to_vec(), [serde_json::json!({"value":1})]);
     core.stop().await?;
     core.start().await?;
-    ready(&core, "reaction").await?;
+    ready(
+        &core,
+        &drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+    )
+    .await?;
     let restored = query.fetch_snapshot().await?;
     assert_eq!(restored.output_generation, before.output_generation);
     assert_eq!(restored.as_of_sequence, before.as_of_sequence);
@@ -293,6 +336,7 @@ async fn real_volatile_snapshot_still_refreshes_state_and_advances_reset_generat
     let snapshot_value = Arc::new(AtomicU64::new(1));
     let source = OptionalSnapshotSource::new(Some(snapshot_value.clone()));
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -306,20 +350,33 @@ async fn real_volatile_snapshot_still_refreshes_state_and_advances_reset_generat
                 .clone(),
         )
         .with_id("actual-snapshot-restart")
-        .with_source(source)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            source,
+        )
         .with_query(
-            Query::cypher("query")
-                .query("MATCH (p:Person) RETURN p.value AS value")
-                .from_input("source")
-                .build(),
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .query("MATCH (p:Person) RETURN p.value AS value")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            )
+            .build()?,
         )
         .build()
         .await?;
     core.start().await?;
-    ready(&core, "query").await?;
+    ready(
+        &core,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await?;
     let query = core
         .query_manager()
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let before = query.fetch_snapshot().await?;
@@ -327,7 +384,11 @@ async fn real_volatile_snapshot_still_refreshes_state_and_advances_reset_generat
     core.stop().await?;
     snapshot_value.store(2, Ordering::Release);
     core.start().await?;
-    ready(&core, "query").await?;
+    ready(
+        &core,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await?;
     let after = query.fetch_snapshot().await?;
     assert_eq!(after.to_vec(), [serde_json::json!({"value":2})]);
     assert!(after.output_generation > before.output_generation);

@@ -51,7 +51,7 @@ use drasi_lib::computation::v1::{
 };
 
 let definition = MiddlewareTransformerDefinition {
-    id: ComponentId::try_new("normalize")?,
+    id: ComponentId::generate(),
     output_stream: StreamId::try_new("normalize/out")?,
     middleware: serde_json::from_value(serde_json::json!([
         {

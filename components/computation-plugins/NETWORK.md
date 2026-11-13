@@ -3,12 +3,12 @@
 The six [independent network component crates](README.md) provide native
 ComputationGraph HTTP/gRPC transport, HTTP bootstrap and browser SSE delivery. Each library
 registers only its own factory and uses its package name as its plugin identity.
-Native ABI is **1.0.0**, independently of the workspace package version.
+Native ABI is **2.0.0**, independently of the workspace package version.
 Native wire version is **2**, using binary computation envelopes
-and bulk MessagePack buffers. Rebuild prototype wire-version-1 native libraries.
+and bulk MessagePack buffers. Rebuild native ABI-1 or wire-version-1 libraries.
 Each implementation has version `"1"` and configuration version `1`. The legacy
-Source/Reaction/Bootstrap ABI **0.17.0** (with 0.16 fast-mode compatibility)
-is independently versioned.
+Source/Reaction/Bootstrap ABI **0.18.0** is independently versioned; earlier
+ordinary layouts are rejected.
 
 | Factory | Native role | Port/schema |
 |---|---|---|
@@ -39,7 +39,7 @@ consuming standard graph-change envelopes from any producer directly from graph 
 
 ```json
 {
-  "outputs": {"example-query": {"component": "example-query", "port": "out"}},
+  "outputs": {"example-query": {"component": "bc769198-8a46-426c-acb5-435b084520d0", "port": "out"}},
   "host": "127.0.0.1",
   "port": 8080,
   "ssePath": "/events",
@@ -48,7 +48,8 @@ consuming standard graph-change envelopes from any producer directly from graph 
 }
 ```
 
-No setting is required; the default host is `0.0.0.0`, with the other
+Use the producer's assigned UUID in `component`; `example-query` is only an
+output alias. No listener setting is required; the default host is `0.0.0.0`, with the other
 defaults shown above. Each input's stream selects the declared incoming output
 (a real component and output port of a source, transformer or query); a stream
 that is not a declared edge fails. Connect every output to the sink's `in` port. The untemplated data frame is
@@ -87,8 +88,8 @@ authenticated reverse proxy before exposing private results.
 
 The `drasi_computation_sink_http::delivery` module provides `HttpDeliveryHandler` and
 `HttpDeliveryEndpoint`. None of the factories constructs them automatically;
-ordinary configurations, legacy protocols and ABI 1.0 fast-mode binaries are
-unchanged. These services are not yet exposed through native service negotiation.
+ordinary configurations and legacy protocols do not opt into them. These
+services are not yet exposed through native service negotiation.
 
 Use `HttpDeliveryHandler` with the shared
 [`DeliveryRunner`](../../lib/docs/computation-graph-qos.md#opt-in-operation-completion)
@@ -152,7 +153,6 @@ Both sources require `stream`, matching the graph's output stream binding:
 ```json
 {
   "stream": "facilities-db",
-  "sourceId": "facilities-db",
   "host": "0.0.0.0",
   "port": 9000,
   "timeoutMs": 60000,
@@ -175,8 +175,9 @@ an unbounded waiting queue. A full event queue backpressures admitted requests
 until `timeoutMs`; health traffic does not acquire a data admission permit.
 Request/message sizes and HTTP batch counts have separate explicit limits.
 
-HTTP exposes `POST /sources/{sourceId}/events`, `POST
-/sources/{sourceId}/events/batch` with `{"events":[...]}`, and `GET /health`.
+HTTP exposes `POST /sources/{componentId}/events`, `POST
+/sources/{componentId}/events/batch` with `{"events":[...]}`, and `GET /health`,
+where `componentId` is the source component UUID.
 The existing `HttpSourceChange` JSON shape is preserved: node/relation insert,
 update and delete, labels, IDs, properties and relation `from`/`to` endpoints.
 HTTP timestamps are nanoseconds, converted to millisecond `effective_from`.
@@ -213,7 +214,7 @@ The gRPC mapping preserves nanosecond-to-millisecond effective timestamps, scala
 integer/float distinctions and cross-source relation endpoints. Nested protobuf
 list/object properties retain the legacy gRPC source's JSON-**string** mapping,
 which is deliberately different from HTTP. Event and element source IDs must
-match `sourceId`; relation endpoint source IDs may differ. Missing/invalid IDs,
+match the source component UUID; relation endpoint source IDs may differ. Missing/invalid IDs,
 unsupported change types and nonfinite protobuf numeric properties reject.
 
 ### Optional durable admission
@@ -227,14 +228,14 @@ The source's `stream` must match the channel. Missing service support, incompati
 storage, foreign scope or a memory/mixed output path rejects rather than silently
 downgrading. Construction still performs no network I/O.
 
-This uses the optional native service-v1 interface. Existing ABI 1.0 binaries
-remain usable in fast mode but must be rebuilt for durable admission. No volatile
+This uses the optional native service-v1 interface with ABI 2.0 libraries.
+Fast-mode support alone does not provide durable admission. No volatile
 event queue, local producer sequence or second journal is allocated in durable
 mode. HTTP and gRPC acknowledge only after host graph validation and the outgoing
 QoS commit. That is not completion or exactly-once execution of downstream effects.
 
 HTTP durable routes are all `POST` under
-`/sources/{sourceId}/admission/v1`:
+`/sources/{componentId}/admission/v1`, where `componentId` is the source UUID:
 
 | Route | Request | Successful response |
 |---|---|---|
@@ -434,7 +435,7 @@ request/retry timings.
 Client requests live in host-polled operation futures, not background sink
 processing queues. Cancellation drops pending calls/backoff; stop drops owned
 client/channel handles after the host drains/cancels operations. The plugin's I/O
-runtime and library remain process-pinned according to ABI 1.0. Cancellation is
+runtime and library remain process-pinned according to ABI 2.0. Cancellation is
 not rollback or exactly-once delivery.
 
 The optional batching extension leaves frozen native metadata/base layouts

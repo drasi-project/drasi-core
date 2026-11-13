@@ -41,6 +41,7 @@ use log::warn;
 use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::reactions::common::base::ReactionBase;
 use crate::recovery::ReactionRecoveryPolicy;
+use crate::ComponentId;
 
 /// Total write attempts under [`ReactionRecoveryPolicy::AutoReset`] (initial try
 /// plus bounded retries).
@@ -66,7 +67,7 @@ const AUTO_RESET_CHECKPOINT_BASE_BACKOFF: Duration = Duration::from_millis(10);
 /// in-memory view only and reprocesses from the start on restart.
 pub struct CheckpointState {
     /// Cache of the last known checkpoint per query, seeded lazily from the store.
-    checkpoints: HashMap<String, ReactionCheckpoint>,
+    checkpoints: HashMap<crate::ComponentId, ReactionCheckpoint>,
     has_store: bool,
 }
 
@@ -83,7 +84,11 @@ impl CheckpointState {
 
     /// Seed the in-memory checkpoint for `query_id` from the store on first use,
     /// capturing the host-persisted `config_hash` and sequence baseline.
-    async fn ensure_seeded(&mut self, base: &ReactionBase, query_id: &str) -> anyhow::Result<()> {
+    async fn ensure_seeded(
+        &mut self,
+        base: &ReactionBase,
+        query_id: &crate::ComponentId,
+    ) -> anyhow::Result<()> {
         if self.checkpoints.contains_key(query_id) {
             return Ok(());
         }
@@ -93,7 +98,7 @@ impl CheckpointState {
             None
         };
         self.checkpoints.insert(
-            query_id.to_string(),
+            query_id.clone(),
             seed.unwrap_or(ReactionCheckpoint {
                 sequence: 0,
                 config_hash: 0,
@@ -105,14 +110,14 @@ impl CheckpointState {
     /// Seed in-memory checkpoints (for example from bootstrap). Existing
     /// entries are left unchanged so a later lazy store read cannot clobber
     /// a caller-provided seed.
-    pub fn seed(&mut self, initial: HashMap<String, ReactionCheckpoint>) {
+    pub fn seed(&mut self, initial: HashMap<crate::ComponentId, ReactionCheckpoint>) {
         for (query_id, checkpoint) in initial {
             self.checkpoints.entry(query_id).or_insert(checkpoint);
         }
     }
 
     /// Last known checkpoint for `query_id`, if seeded or previously advanced.
-    pub fn get(&self, query_id: &str) -> Option<&ReactionCheckpoint> {
+    pub fn get(&self, query_id: &crate::ComponentId) -> Option<&ReactionCheckpoint> {
         self.checkpoints.get(query_id)
     }
 
@@ -123,7 +128,7 @@ impl CheckpointState {
     pub async fn advance(
         &mut self,
         base: &ReactionBase,
-        query_id: &str,
+        query_id: &crate::ComponentId,
         sequence: u64,
     ) -> anyhow::Result<()> {
         self.ensure_seeded(base, query_id).await?;
@@ -141,7 +146,7 @@ impl CheckpointState {
         if self.has_store {
             base.write_checkpoint(query_id, &cp).await?;
         }
-        self.checkpoints.insert(query_id.to_string(), cp);
+        self.checkpoints.insert(query_id.clone(), cp);
         Ok(())
     }
 
@@ -155,7 +160,7 @@ impl CheckpointState {
     pub async fn advance_with_policy(
         &mut self,
         base: &ReactionBase,
-        query_id: &str,
+        query_id: &crate::ComponentId,
         sequence: u64,
         policy: ReactionRecoveryPolicy,
     ) -> anyhow::Result<()> {
@@ -174,7 +179,7 @@ impl CheckpointState {
         if self.has_store {
             persist_with_recovery_policy(policy, || base.write_checkpoint(query_id, &cp)).await?;
         }
-        self.checkpoints.insert(query_id.to_string(), cp);
+        self.checkpoints.insert(query_id.clone(), cp);
         Ok(())
     }
 
@@ -191,7 +196,7 @@ impl CheckpointState {
     pub async fn advance_completed_after_ack(
         &mut self,
         base: &ReactionBase,
-        completed: &HashMap<String, u64>,
+        completed: &HashMap<crate::ComponentId, u64>,
         policy: ReactionRecoveryPolicy,
     ) -> anyhow::Result<()> {
         let mut entries: Vec<_> = completed.iter().collect();
@@ -262,12 +267,14 @@ where
 ///   batches only advances once the batch holding its terminal item lands.
 /// * `seen` — the max sequence of **any** item, used only to advance past a
 ///   dropped batch under the `AutoSkipGap` policy (which accepts loss).
-pub fn batch_checkpoint_candidates<I>(items: I) -> (HashMap<String, u64>, HashMap<String, u64>)
+pub fn batch_checkpoint_candidates<I>(
+    items: I,
+) -> (HashMap<ComponentId, u64>, HashMap<ComponentId, u64>)
 where
-    I: IntoIterator<Item = (String, u64, bool)>,
+    I: IntoIterator<Item = (ComponentId, u64, bool)>,
 {
-    let mut completed: HashMap<String, u64> = HashMap::new();
-    let mut seen: HashMap<String, u64> = HashMap::new();
+    let mut completed: HashMap<ComponentId, u64> = HashMap::new();
+    let mut seen: HashMap<ComponentId, u64> = HashMap::new();
     for (query_id, sequence, is_terminal) in items {
         let e = seen.entry(query_id.clone()).or_insert(0);
         *e = (*e).max(sequence);
@@ -359,29 +366,46 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StateStoreProvider for FailWritesStore {
-        async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+        async fn get(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<Option<Vec<u8>>> {
             self.inner.get(store_id, key).await
         }
-        async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+        async fn set(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            key: &str,
+            value: Vec<u8>,
+        ) -> StateStoreResult<()> {
             self.fail_if_needed(key)?;
             self.inner.set(store_id, key, value).await
         }
-        async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        async fn delete(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<bool> {
             self.inner.delete(store_id, key).await
         }
-        async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        async fn contains_key(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<bool> {
             self.inner.contains_key(store_id, key).await
         }
         async fn get_many(
             &self,
-            store_id: &str,
+            store_id: &drasi_core_types::StorePartition,
             keys: &[&str],
         ) -> StateStoreResult<std::collections::HashMap<String, Vec<u8>>> {
             self.inner.get_many(store_id, keys).await
         }
         async fn set_many(
             &self,
-            store_id: &str,
+            store_id: &drasi_core_types::StorePartition,
             entries: &[(&str, &[u8])],
         ) -> StateStoreResult<()> {
             for (key, _) in entries {
@@ -389,45 +413,87 @@ mod tests {
             }
             self.inner.set_many(store_id, entries).await
         }
-        async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+        async fn delete_many(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+            keys: &[&str],
+        ) -> StateStoreResult<usize> {
             self.inner.delete_many(store_id, keys).await
         }
-        async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+        async fn clear_store(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<usize> {
             self.inner.clear_store(store_id).await
         }
-        async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+        async fn list_keys(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<Vec<String>> {
             self.inner.list_keys(store_id).await
         }
-        async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+        async fn store_exists(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<bool> {
             self.inner.store_exists(store_id).await
         }
-        async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+        async fn key_count(
+            &self,
+            store_id: &drasi_core_types::StorePartition,
+        ) -> StateStoreResult<usize> {
             self.inner.key_count(store_id).await
         }
     }
 
-    async fn store_backed_base(id: &str) -> ReactionBase {
+    async fn store_backed_base(id: drasi_core_types::ComponentId) -> ReactionBase {
         store_backed_base_with(id, Arc::new(MemoryStateStoreProvider::new())).await
     }
 
-    async fn store_backed_base_with(id: &str, store: Arc<dyn StateStoreProvider>) -> ReactionBase {
+    async fn store_backed_base_with(
+        id: drasi_core_types::ComponentId,
+        store: Arc<dyn StateStoreProvider>,
+    ) -> ReactionBase {
         let base = ReactionBase::new(ReactionBaseParams::new(
-            id,
-            vec!["q1".to_string(), "q2".to_string()],
+            id.clone(),
+            vec![
+                drasi_computation_contracts::ComponentReference::by_name(
+                    drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+                ),
+                drasi_computation_contracts::ComponentReference::by_name(
+                    drasi_core_types::ComponentName::try_new("q2").expect("fixture component name"),
+                ),
+            ],
         ));
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
-        let ctx =
-            crate::context::ReactionRuntimeContext::new("inst", id, Some(store), update_tx, None);
-        base.initialize(ctx).await;
+        let ctx = crate::context::ReactionRuntimeContext::new(
+            "inst",
+            id,
+            vec![
+                crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                crate::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+            ],
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.bind_runtime_context(ctx).await;
         base
     }
 
     #[tokio::test]
     async fn advance_persists_monotonically_and_preserves_seeded_config_hash() {
-        let base = store_backed_base("ckpt-test").await;
+        let base = store_backed_base(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000435")
+                .expect("fixture UUID"),
+        )
+        .await;
         // The host seeds a checkpoint with a non-zero config_hash at startup.
         base.write_checkpoint(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &ReactionCheckpoint {
                 sequence: 3,
                 config_hash: 99,
@@ -440,8 +506,23 @@ mod tests {
 
         // A forward advance persists and preserves the seeded config_hash, even
         // though `load` ran before the seed was read (lazy seeding).
-        state.advance(&base, "q1", 7).await.unwrap();
-        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        state
+            .advance(
+                &base,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                7,
+            )
+            .await
+            .unwrap();
+        let cp = base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 7);
         assert_eq!(
             cp.config_hash, 99,
@@ -449,56 +530,104 @@ mod tests {
         );
 
         // A non-forward advance is a no-op.
-        state.advance(&base, "q1", 5).await.unwrap();
+        state
+            .advance(
+                &base,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                5,
+            )
+            .await
+            .unwrap();
         assert_eq!(
-            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            base.read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
             7
         );
     }
 
     #[tokio::test]
     async fn advance_without_store_is_a_noop() {
-        let base = ReactionBase::new(ReactionBaseParams::new("no-store", vec!["q1".to_string()]));
+        let base = ReactionBase::new(ReactionBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000022e")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+        ));
         let mut state = CheckpointState::load(&base).await;
-        state.advance(&base, "q1", 7).await.unwrap();
-        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        state
+            .advance(
+                &base,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                7,
+            )
+            .await
+            .unwrap();
+        assert!(base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn candidates_advance_completed_only_for_terminal_items() {
         // One query, one result split into 3 items at seq 9; terminal is last.
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID");
         let (completed, seen) = batch_checkpoint_candidates([
-            ("q1".to_string(), 9, false),
-            ("q1".to_string(), 9, false),
-            ("q1".to_string(), 9, true),
+            (query_id.clone(), 9, false),
+            (query_id.clone(), 9, false),
+            (query_id.clone(), 9, true),
         ]);
-        assert_eq!(completed.get("q1"), Some(&9));
-        assert_eq!(seen.get("q1"), Some(&9));
+        assert_eq!(completed.get(&query_id), Some(&9));
+        assert_eq!(seen.get(&query_id), Some(&9));
     }
 
     #[test]
     fn candidates_do_not_advance_completed_for_a_split_tail() {
         // The terminal item of seq 9 is NOT in this batch (it lands later), so
         // `completed` must not reach 9 — only `seen` does.
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID");
         let (completed, seen) = batch_checkpoint_candidates([
-            ("q1".to_string(), 8, true),  // seq 8 fully delivered
-            ("q1".to_string(), 9, false), // seq 9 non-terminal head only
+            (query_id.clone(), 8, true),  // seq 8 fully delivered
+            (query_id.clone(), 9, false), // seq 9 non-terminal head only
         ]);
-        assert_eq!(completed.get("q1"), Some(&8));
-        assert_eq!(seen.get("q1"), Some(&9));
+        assert_eq!(completed.get(&query_id), Some(&8));
+        assert_eq!(seen.get(&query_id), Some(&9));
     }
 
     #[test]
     fn candidates_track_multiple_queries_independently() {
+        let query_one =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID");
+        let query_two =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                .expect("fixture UUID");
         let (completed, seen) = batch_checkpoint_candidates([
-            ("q1".to_string(), 4, true),
-            ("q2".to_string(), 11, true),
-            ("q1".to_string(), 5, false),
+            (query_one.clone(), 4, true),
+            (query_two.clone(), 11, true),
+            (query_one.clone(), 5, false),
         ]);
-        assert_eq!(completed.get("q1"), Some(&4));
-        assert_eq!(completed.get("q2"), Some(&11));
-        assert_eq!(seen.get("q1"), Some(&5));
-        assert_eq!(seen.get("q2"), Some(&11));
+        assert_eq!(completed.get(&query_one), Some(&4));
+        assert_eq!(completed.get(&query_two), Some(&11));
+        assert_eq!(seen.get(&query_one), Some(&5));
+        assert_eq!(seen.get(&query_two), Some(&11));
     }
 
     #[test]
@@ -583,9 +712,14 @@ mod tests {
 
     #[tokio::test]
     async fn batch_checkpoints_max_sequence_only_after_ack() {
-        let base = store_backed_base("batch-ack").await;
+        let base = store_backed_base(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000436")
+                .expect("fixture UUID"),
+        )
+        .await;
         base.write_checkpoint(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &ReactionCheckpoint {
                 sequence: 4,
                 config_hash: 7,
@@ -595,11 +729,10 @@ mod tests {
         .unwrap();
         let mut state = CheckpointState::load(&base).await;
 
-        let items = [
-            ("q1".to_string(), 5, true),
-            ("q1".to_string(), 6, true),
-            ("q1".to_string(), 7, true),
-        ];
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID");
+        let items = [(query_id.clone(), 5, true), (query_id.clone(), 6, true), (query_id, 7, true)];
         let (completed, _) = batch_checkpoint_candidates(items);
 
         // Kill after send, before ack: the batch is not checkpointed.
@@ -611,7 +744,14 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            base.read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
             4,
             "a batch must not checkpoint until the ack succeeds"
         );
@@ -622,15 +762,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            base.read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
             7
         );
         assert_eq!(
-            base.read_checkpoint("q1")
-                .await
-                .unwrap()
-                .unwrap()
-                .config_hash,
+            base.read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .config_hash,
             7
         );
     }
@@ -638,10 +788,18 @@ mod tests {
     #[tokio::test]
     async fn advance_with_policy_autoskip_does_not_return_err_on_write_failure() {
         let store = Arc::new(FailWritesStore::always());
-        let base = store_backed_base_with("autoskip-write", store).await;
+        let base = store_backed_base_with(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000040b")
+                .expect("fixture UUID"),
+            store,
+        )
+        .await;
         let mut state = CheckpointState::load(&base).await;
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID");
         state.seed(HashMap::from([(
-            "q1".to_string(),
+            query_id.clone(),
             ReactionCheckpoint {
                 sequence: 1,
                 config_hash: 3,
@@ -649,12 +807,26 @@ mod tests {
         )]));
 
         state
-            .advance_with_policy(&base, "q1", 4, ReactionRecoveryPolicy::AutoSkipGap)
+            .advance_with_policy(&base, &query_id, 4, ReactionRecoveryPolicy::AutoSkipGap)
             .await
             .unwrap();
-        assert_eq!(state.get("q1").map(|cp| cp.sequence), Some(4));
+        assert_eq!(
+            state
+                .get(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
+                .map(|cp| cp.sequence),
+            Some(4)
+        );
         assert!(
-            base.read_checkpoint("q1").await.unwrap().is_none(),
+            base.read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "AutoSkipGap must not persist a failed write"
         );
     }
@@ -662,18 +834,29 @@ mod tests {
     #[tokio::test]
     async fn batch_autoskip_attempts_every_query_when_writes_fail() {
         let store = Arc::new(FailWritesStore::always());
-        let base = store_backed_base_with("batch-skip", store).await;
+        let base = store_backed_base_with(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000040c")
+                .expect("fixture UUID"),
+            store,
+        )
+        .await;
         let mut state = CheckpointState::load(&base).await;
+        let query_one =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID");
+        let query_two =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                .expect("fixture UUID");
         state.seed(HashMap::from([
             (
-                "q1".to_string(),
+                query_one.clone(),
                 ReactionCheckpoint {
                     sequence: 1,
                     config_hash: 1,
                 },
             ),
             (
-                "q2".to_string(),
+                query_two.clone(),
                 ReactionCheckpoint {
                     sequence: 1,
                     config_hash: 1,
@@ -681,23 +864,61 @@ mod tests {
             ),
         ]));
 
-        let completed = HashMap::from([("q1".to_string(), 5), ("q2".to_string(), 6)]);
+        let completed = HashMap::from([(query_one, 5), (query_two, 6)]);
         state
             .advance_completed_after_ack(&base, &completed, ReactionRecoveryPolicy::AutoSkipGap)
             .await
             .unwrap();
-        assert_eq!(state.get("q1").map(|cp| cp.sequence), Some(5));
-        assert_eq!(state.get("q2").map(|cp| cp.sequence), Some(6));
-        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
-        assert!(base.read_checkpoint("q2").await.unwrap().is_none());
+        assert_eq!(
+            state
+                .get(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
+                .map(|cp| cp.sequence),
+            Some(5)
+        );
+        assert_eq!(
+            state
+                .get(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                        .expect("fixture UUID")
+                )
+                .map(|cp| cp.sequence),
+            Some(6)
+        );
+        assert!(base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert!(base
+            .read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
     async fn batch_strict_stops_after_first_failed_query_in_sorted_order() {
-        let store = Arc::new(FailWritesStore::for_key_substring("q2"));
-        let base = store_backed_base_with("batch-strict", store).await;
+        let store = Arc::new(FailWritesStore::for_key_substring(
+            "00000000-0000-0000-0000-00000000002c",
+        ));
+        let base = store_backed_base_with(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000040d")
+                .expect("fixture UUID"),
+            store,
+        )
+        .await;
         base.write_checkpoint(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &ReactionCheckpoint {
                 sequence: 1,
                 config_hash: 9,
@@ -706,16 +927,22 @@ mod tests {
         .await
         .unwrap();
         let mut state = CheckpointState::load(&base).await;
+        let query_one =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID");
+        let query_two =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                .expect("fixture UUID");
         state.seed(HashMap::from([
             (
-                "q1".to_string(),
+                query_one.clone(),
                 ReactionCheckpoint {
                     sequence: 1,
                     config_hash: 9,
                 },
             ),
             (
-                "q2".to_string(),
+                query_two.clone(),
                 ReactionCheckpoint {
                     sequence: 1,
                     config_hash: 9,
@@ -723,20 +950,41 @@ mod tests {
             ),
         ]));
 
-        let completed = HashMap::from([("q1".to_string(), 5), ("q2".to_string(), 6)]);
+        let completed = HashMap::from([(query_one, 5), (query_two, 6)]);
         let result = state
             .advance_completed_after_ack(&base, &completed, ReactionRecoveryPolicy::Strict)
             .await;
         assert!(result.is_err());
         assert_eq!(
-            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            base.read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
             5,
             "q1 is persisted before the sorted q2 write fails"
         );
         assert!(
-            base.read_checkpoint("q2").await.unwrap().is_none(),
+            base.read_checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "failed query must not advance the durable checkpoint"
         );
-        assert_eq!(state.get("q2").map(|cp| cp.sequence), Some(1));
+        assert_eq!(
+            state
+                .get(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                        .expect("fixture UUID")
+                )
+                .map(|cp| cp.sequence),
+            Some(1)
+        );
     }
 }

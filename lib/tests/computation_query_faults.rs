@@ -15,6 +15,9 @@
 #![cfg(test)]
 #![cfg(feature = "computation-rocksdb-tests")]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::{
@@ -22,8 +25,9 @@ use drasi_core::{
         ComputationIndexProvider, ComputationIndexes, ComputationResource, TransactionDomain,
     },
     interface::{
-        CheckpointStore, FutureElementRef, FutureQueue, IndexError, IndexSet, LiveResultsWriter,
-        PushType, RowMutation, SessionControl, SourceCheckpoint,
+        CheckpointKey, CheckpointStore, FutureElementRef, FutureQueue, IndexError, IndexSet,
+        LiveResultsWriter, OutputPartition, PushType, RowMutation, SessionControl,
+        SourceCheckpoint,
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
@@ -45,6 +49,15 @@ const BOOTSTRAP: &str = "\0computation:query-bootstrap:v1";
 const PENDING: &str = "\0computation:pending-output:v1";
 const DELIVERED: &str = "\0computation:query-delivered:v1";
 const DELIVERY_SEQUENCE: &str = "\0computation:query-delivery-sequence:v1";
+const INPUT_TRANSPORT: &str = "\0computation:input-transport:v1:";
+
+fn query_id() -> ComponentId {
+    fixture_support::component_id(46)
+}
+
+fn query_output() -> OutputPartition {
+    OutputPartition::Component(query_id())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fault {
@@ -120,25 +133,26 @@ impl CheckpointStore for Checkpoints {
     }
     async fn stage_checkpoint(
         &self,
-        key: &str,
+        key: &CheckpointKey,
         sequence: u64,
         position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
-        let fault = if key.starts_with("\0computation:input-transport:v1:") {
+        let metadata = key.metadata_name();
+        let fault = if key.associated_checkpoint(INPUT_TRANSPORT).is_some() {
             Some(Fault::InputTransport)
-        } else if key == DELIVERY_SEQUENCE {
+        } else if metadata == Some(DELIVERY_SEQUENCE) {
             Some(Fault::DeliverySequence)
-        } else if key == DELIVERED {
+        } else if metadata == Some(DELIVERED) {
             Some(Fault::DeliveryConfirmed)
-        } else if key.starts_with("computation:input:") {
+        } else if key.is_progress() {
             Some(Fault::InputCheckpoint)
-        } else if key == PENDING && position.is_some() {
+        } else if metadata == Some(PENDING) && position.is_some() {
             Some(Fault::PendingStart)
-        } else if key == PENDING && sequence > 0 {
+        } else if metadata == Some(PENDING) && sequence > 0 {
             Some(Fault::PendingStage)
-        } else if key == PENDING {
+        } else if metadata == Some(PENDING) {
             Some(Fault::PendingClear)
-        } else if key == BOOTSTRAP && sequence == 1 {
+        } else if metadata == Some(BOOTSTRAP) && sequence == 1 {
             Some(Fault::BootstrapComplete)
         } else {
             None
@@ -148,10 +162,15 @@ impl CheckpointStore for Checkpoints {
         }
         self.inner.stage_checkpoint(key, sequence, position).await
     }
-    async fn read_checkpoint(&self, key: &str) -> Result<Option<SourceCheckpoint>, IndexError> {
+    async fn read_checkpoint(
+        &self,
+        key: &CheckpointKey,
+    ) -> Result<Option<SourceCheckpoint>, IndexError> {
         self.inner.read_checkpoint(key).await
     }
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
         self.inner.read_all_checkpoints().await
     }
     async fn clear_checkpoints(&self) -> Result<(), IndexError> {
@@ -163,22 +182,37 @@ impl CheckpointStore for Checkpoints {
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
         self.inner.read_config_hash().await
     }
-    async fn stage_result_sequence(&self, id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(
+        &self,
+        id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         if self.fault.take(Fault::ResultSequence) {
             return Err(IndexError::IOError);
         }
         self.inner.stage_result_sequence(id, sequence).await
     }
-    async fn write_result_sequence(&self, id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn write_result_sequence(
+        &self,
+        id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         self.inner.write_result_sequence(id, sequence).await
     }
-    async fn read_result_sequence(&self, id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(&self, id: &OutputPartition) -> Result<Option<u64>, IndexError> {
         self.inner.read_result_sequence(id).await
     }
-    async fn write_output_generation(&self, id: &str, generation: u64) -> Result<(), IndexError> {
+    async fn write_output_generation(
+        &self,
+        id: &OutputPartition,
+        generation: u64,
+    ) -> Result<(), IndexError> {
         self.inner.write_output_generation(id, generation).await
     }
-    async fn read_output_generation(&self, id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_output_generation(
+        &self,
+        id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_output_generation(id).await
     }
 }
@@ -189,22 +223,26 @@ struct Live {
 }
 #[async_trait]
 impl LiveResultsWriter for Live {
-    async fn apply_mutations(&self, id: &str, rows: &[RowMutation<'_>]) -> Result<(), IndexError> {
+    async fn apply_mutations(
+        &self,
+        id: &ComponentId,
+        rows: &[RowMutation<'_>],
+    ) -> Result<(), IndexError> {
         if self.fault.take(Fault::LiveRows) {
             return Err(IndexError::IOError);
         }
         self.inner.apply_mutations(id, rows).await
     }
-    async fn read_snapshot(&self, id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_snapshot(&self, id: &ComponentId) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         if self.fault.take(Fault::ReadLiveRows) {
             return Err(IndexError::IOError);
         }
         self.inner.read_snapshot(id).await
     }
-    async fn clear(&self, id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, id: &ComponentId) -> Result<(), IndexError> {
         self.inner.clear(id).await
     }
-    async fn row_count(&self, id: &str) -> Result<usize, IndexError> {
+    async fn row_count(&self, id: &ComponentId) -> Result<usize, IndexError> {
         self.inner.row_count(id).await
     }
 }
@@ -276,7 +314,7 @@ impl ComputationIndexProvider for Provider {
     async fn create_indexes(
         &self,
         graph: &str,
-        id: &str,
+        id: &ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         let original = self.inner.create_indexes(graph, id).await?;
         let set = original.indexes();
@@ -389,7 +427,7 @@ fn provider_for(path: &std::path::Path, backend: Backend) -> Arc<dyn Computation
 fn definition(temporal: bool) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: "faults".into(),
-        id: ComponentId::try_new("query").expect("id"),
+        id: query_id(),
         query: if temporal {
             "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name"
         } else {
@@ -474,10 +512,7 @@ async fn schedule_writes_and_pops_roll_back_with_input_state_and_recover_exactly
                 let directory = tempfile::tempdir()?;
                 let base = provider_for(directory.path(), backend);
                 let fault = Injection::new(point);
-                let progress = Arc::new(QuerySourceProgress::new(
-                    "faults",
-                    ComponentId::try_new("query")?,
-                )?);
+                let progress = Arc::new(QuerySourceProgress::new("faults", query_id())?);
                 let query = ContinuousQueryTransformer::new(
                     scheduling_definition(point),
                     Arc::new(Provider {
@@ -509,7 +544,7 @@ async fn schedule_writes_and_pops_roll_back_with_input_state_and_recover_exactly
                 query.stop().await?;
                 drop(query);
 
-                let stored = base.create_indexes("faults", "query").await?;
+                let stored = base.create_indexes("faults", &query_id()).await?;
                 assert_eq!(
                     stored.indexes().future_queue.peek_due_time().await?,
                     (point != Fault::SchedulePush).then_some(2000),
@@ -518,13 +553,13 @@ async fn schedule_writes_and_pops_roll_back_with_input_state_and_recover_exactly
                 assert!(stored
                     .outbox_writer()
                     .unwrap()
-                    .read_from("query", 0)
+                    .read_from(&query_output(), 0)
                     .await?
                     .is_empty());
                 assert!(stored
                     .live_results_writer()
                     .unwrap()
-                    .read_snapshot("query")
+                    .read_snapshot(&query_id())
                     .await?
                     .is_empty());
                 stored.cleanup().unwrap().shutdown().await?;
@@ -598,10 +633,7 @@ async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
         let temp = tempfile::tempdir().expect("temp");
         let base = provider_for(temp.path(), backend);
         let fault = Injection::new(point);
-        let progress = Arc::new(
-            QuerySourceProgress::new("faults", ComponentId::try_new("query").expect("id"))
-                .expect("scope"),
-        );
+        let progress = Arc::new(QuerySourceProgress::new("faults", query_id()).expect("scope"));
         {
             let query = ContinuousQueryTransformer::new(
                 definition(false),
@@ -638,7 +670,7 @@ async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
         }
         {
             let stored = base
-                .create_indexes("faults", "query")
+                .create_indexes("faults", &query_id())
                 .await
                 .expect("independent reopen");
             let checkpoints = stored.checkpoint_store().unwrap();
@@ -648,12 +680,12 @@ async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
                     .await
                     .unwrap()
                     .keys()
-                    .all(|key| !key.starts_with("computation:input:")),
+                    .all(|key| !key.is_progress()),
                 "{backend:?}/{entry:?}/{point:?}"
             );
             assert_eq!(
                 checkpoints
-                    .read_result_sequence("query")
+                    .read_result_sequence(&query_output())
                     .await
                     .unwrap()
                     .unwrap_or(0),
@@ -662,14 +694,14 @@ async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
             assert!(stored
                 .outbox_writer()
                 .unwrap()
-                .read_from("query", 0)
+                .read_from(&query_output(), 0)
                 .await
                 .unwrap()
                 .is_empty());
             assert!(stored
                 .live_results_writer()
                 .unwrap()
-                .read_snapshot("query")
+                .read_snapshot(&query_id())
                 .await
                 .unwrap()
                 .is_empty());
@@ -1211,22 +1243,25 @@ async fn strict_recovery_output_validation(backend: Backend) {
         }
         {
             let resources = base
-                .create_indexes("faults", "query")
+                .create_indexes("faults", &query_id())
                 .await
                 .expect("resources");
             let outbox = resources.outbox_writer().expect("outbox");
-            let rows = outbox.read_from("query", 0).await.expect("retained");
+            let rows = outbox
+                .read_from(&query_output(), 0)
+                .await
+                .expect("retained");
             resources
                 .indexes()
                 .session_control
                 .begin()
                 .await
                 .expect("begin");
-            outbox.clear("query").await.expect("clear");
+            outbox.clear(&query_output()).await.expect("clear");
             if gap {
                 for (sequence, bytes) in rows.iter().filter(|(sequence, _)| *sequence != 2) {
                     outbox
-                        .append("query", *sequence, bytes)
+                        .append(&query_output(), *sequence, bytes)
                         .await
                         .expect("interior gap");
                 }
@@ -1262,7 +1297,7 @@ fn replayed_source_input(transport: u64) -> InputEnvelope {
         .expect("original source change")
         .remove(0);
     let source = drasi_lib::channels::SourceEventWrapper::new(
-        "people".into(),
+        fixture_support::component_id(78),
         drasi_lib::channels::SourceEvent::Change(change),
         chrono::DateTime::from_timestamp_millis(1000).expect("timestamp"),
         1,
@@ -1271,7 +1306,7 @@ fn replayed_source_input(transport: u64) -> InputEnvelope {
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(source),
-            &ComponentId::try_new("source").expect("source"),
+            &fixture_support::component_id(77),
             StreamId::try_new("source/out").expect("stream"),
             transport,
             None,
@@ -1286,10 +1321,7 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
         let directory = tempfile::tempdir().expect("storage");
         let base = provider_for(directory.path(), backend);
         let fault = Injection::new(Fault::InputTransport);
-        let progress = Arc::new(
-            QuerySourceProgress::new("faults", ComponentId::try_new("query").expect("query"))
-                .expect("progress"),
-        );
+        let progress = Arc::new(QuerySourceProgress::new("faults", query_id()).expect("progress"));
         {
             let query = ContinuousQueryTransformer::new(
                 definition(false),
@@ -1316,7 +1348,7 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
         }
         {
             let stored = base
-                .create_indexes("faults", "query")
+                .create_indexes("faults", &query_id())
                 .await
                 .expect("reopen failed transaction");
             let checkpoints = stored
@@ -1327,19 +1359,19 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
                 .expect("durable checkpoints");
             assert!(checkpoints
                 .keys()
-                .all(|key| !key.starts_with("computation:input:")
-                    && !key.starts_with("\0computation:input-transport:v1:")));
+                .all(|key| !key.is_progress()
+                    && key.associated_checkpoint(INPUT_TRANSPORT).is_none()));
             assert!(stored
                 .outbox_writer()
                 .expect("outbox")
-                .read_from("query", 0)
+                .read_from(&query_output(), 0)
                 .await
                 .expect("durable output")
                 .is_empty());
             assert!(stored
                 .live_results_writer()
                 .expect("rows")
-                .read_snapshot("query")
+                .read_snapshot(&query_id())
                 .await
                 .expect("durable rows")
                 .is_empty());
@@ -1371,7 +1403,8 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
             assert_eq!(output.len(), 1);
             query.delivery_completed(&output).await.expect("confirm");
             assert_eq!(
-                progress.snapshot().checkpoints[&SourceProgressKey::Source("people".into())]
+                progress.snapshot().checkpoints
+                    [&SourceProgressKey::Source(fixture_support::component_id(78))]
                     .sequence,
                 1
             );
@@ -1389,7 +1422,7 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
         }
         {
             let stored = base
-                .create_indexes("faults", "query")
+                .create_indexes("faults", &query_id())
                 .await
                 .expect("independent durable inspection");
             let all = stored
@@ -1400,7 +1433,7 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
                 .expect("committed checkpoints");
             let transport: Vec<_> = all
                 .iter()
-                .filter(|(key, _)| key.starts_with("\0computation:input-transport:v1:"))
+                .filter(|(key, _)| key.associated_checkpoint(INPUT_TRANSPORT).is_some())
                 .collect();
             assert_eq!(transport.len(), 1);
             assert_eq!(
@@ -1411,7 +1444,7 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
                 stored
                     .outbox_writer()
                     .expect("outbox")
-                    .read_from("query", 0)
+                    .read_from(&query_output(), 0)
                     .await
                     .expect("committed outputs")
                     .len(),

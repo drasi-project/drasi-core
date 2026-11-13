@@ -11,7 +11,8 @@ fn ordinary_input(
 ) -> Result<InputEnvelope> {
     use drasi_computation_contracts::exchange::{SourceEvent, SourceEventWrapper};
     let event = SourceEventWrapper::new(
-        "source".into(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
         SourceEvent::Change(SourceChange::Replace {
             element: item(value, logical),
         }),
@@ -23,7 +24,7 @@ fn ordinary_input(
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(event),
-            &ComponentId::try_new("source")?,
+            &ComponentId::try_new("6ac20a86-56ca-570c-acfe-f60547d48b98")?,
             StreamId::try_new("source/out")?,
             transport,
             None,
@@ -33,17 +34,15 @@ fn ordinary_input(
 
 async fn shared_ordinary_progress() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let owner = Arc::new(QuerySourceProgress::new(
-        GRAPH,
-        ComponentId::try_new(COMPONENT)?,
-    )?);
+    let owner = Arc::new(QuerySourceProgress::new(GRAPH, component_id()?)?);
     let mut query = factory()?.create_component_with_processing_owner(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": QUERY}),
         scope(1),
         provider(directory.path())?,
         Some(owner.clone()),
     )?;
+    query.initialize().await?;
     assert!(Arc::ptr_eq(
         &owner,
         &query.processing_progress_owner().context("actual owner")?
@@ -51,7 +50,7 @@ async fn shared_ordinary_progress() -> Result<()> {
     assert!(
         factory()?
             .create_component_with_processing_owner(
-                ComponentId::try_new(COMPONENT)?,
+                component_id()?,
                 json!({"query": QUERY}),
                 scope(1),
                 provider(directory.path())?,
@@ -66,7 +65,10 @@ async fn shared_ordinary_progress() -> Result<()> {
         .await?;
     aggregate(&first, Some(0.0), 10.0, 1)?;
     query.delivery_completed(&first).await?;
-    let key = SourceProgressKey::Source("source".into());
+    let key = SourceProgressKey::Source(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
     let stream = StreamId::try_new("source/out")?;
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 5);
     assert_eq!(
@@ -95,12 +97,13 @@ async fn shared_ordinary_progress() -> Result<()> {
     query.stop().await?;
     drop(query);
     let mut query = factory()?.create_component_with_processing_owner(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": QUERY}),
         scope(2),
         provider(directory.path())?,
         Some(owner.clone()),
     )?;
+    query.initialize().await?;
     query.start().await?;
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 6);
     assert_eq!(owner.snapshot().transport_sequences[&stream], 50);
@@ -127,12 +130,13 @@ async fn loaded_query_reuses_ordinary_source_progress_multi_thread() -> Result<(
 async fn loaded_query_reuses_core_persistent_producer_gap_checks() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
+    query.initialize().await?;
     let owner = query.processing_progress_owner().context("actual owner")?;
     query.start().await?;
     let identity = GraphProducerIdentity::new(
         GRAPH.into(),
         GRAPH.into(),
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("6ac20a86-56ca-570c-acfe-f60547d48b98")?,
         StreamId::try_new("source/out")?,
         true,
     )?;
@@ -162,6 +166,7 @@ async fn loaded_query_reuses_core_persistent_producer_gap_checks() -> Result<()>
     query.stop().await?;
     drop(query);
     let mut query = create(directory.path(), QUERY, 2)?;
+    query.initialize().await?;
     query.start().await?;
     let mut next = input(
         SourceChange::Replace {
@@ -186,11 +191,12 @@ async fn loaded_query_complete_transaction_mode_requires_framed_input() -> Resul
         max_duration_ms: std::num::NonZeroU64::new(10_000).context("positive deadline")?,
     };
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": QUERY, "source_transactions": limits}),
         scope(1),
         provider(directory.path())?,
     )?;
+    query.initialize().await?;
     let owner = query.processing_progress_owner().context("actual owner")?;
     query.start().await?;
     assert!(query
@@ -241,12 +247,13 @@ async fn actual_loaded_progress() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let text = "MATCH (n:Item) RETURN abs(n.value) AS value";
     let mut query = create(directory.path(), text, 1)?;
+    query.initialize().await?;
     let view = query
         .committed_input_progress()?
         .context("actual indexed progress reader")?;
     assert!(view.same_owner(&query.committed_input_progress()?.context("same reader")?));
     assert_eq!(view.graph_id(), GRAPH);
-    assert_eq!(view.component_id().as_str(), COMPONENT);
+    assert_eq!(view.component_id(), &component_id()?);
     assert!(!view.snapshot()?.recovered);
     query.start().await?;
     let ready = view.wait_ready().await?;
@@ -292,6 +299,7 @@ async fn actual_loaded_progress() -> Result<()> {
     assert!(view.snapshot().is_err());
     drop(query);
     let mut query = create(directory.path(), text, 2)?;
+    query.initialize().await?;
     let restored = query
         .committed_input_progress()?
         .context("restored progress")?;
@@ -314,7 +322,7 @@ async fn actual_loaded_progress() -> Result<()> {
     let producer = GraphProducerIdentity::new(
         GRAPH.into(),
         GRAPH.into(),
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("6ac20a86-56ca-570c-acfe-f60547d48b98")?,
         StreamId::try_new("source/out")?,
         true,
     )?;
@@ -355,9 +363,10 @@ async fn volatile_query_does_not_acquire_a_committed_progress_view() -> Result<(
         })
         .context("volatile factory")?;
     let mut query = factory.create_component(
-        ComponentId::try_new("volatile")?,
+        ComponentId::try_new("a4e18a8d-c209-5e45-8f98-663600681e28")?,
         json!({"query":QUERY, "volatile":true}),
     )?;
+    query.initialize().await?;
     assert!(query.committed_input_progress()?.is_none());
     query.start().await?;
     assert!(query.committed_input_progress()?.is_none());

@@ -129,7 +129,7 @@ impl SourcePluginDescriptor for Neo4jSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -147,7 +147,7 @@ impl SourcePluginDescriptor for Neo4jSourceDescriptor {
             start_cursor: dto.start_cursor.into(),
         };
 
-        let source = crate::Neo4jSourceBuilder::new(id)
+        let source = crate::Neo4jSourceBuilder::new(id.clone())
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;

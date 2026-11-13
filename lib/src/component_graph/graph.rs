@@ -17,7 +17,11 @@ use tokio::sync::RwLock;
 
 use crate::{
     channels::{ComponentEvent, ComponentEventBroadcastReceiver, ComponentStatus},
-    computation::{runtime::Runtime, v1::ComputationInspector},
+    computation::{
+        runtime::Runtime,
+        v1::{ComputationInspector, GraphEntityId},
+    },
+    ComponentId, ComponentName,
 };
 
 use super::{ComponentNode, GraphSnapshot, RelationshipKind};
@@ -63,8 +67,17 @@ impl ComponentGraphView {
         runtime.graph_snapshot(status).await
     }
 
-    pub async fn get_events(&self, id: &str) -> anyhow::Result<Vec<ComponentEvent>> {
+    pub async fn get_events_by_id(&self, id: &ComponentId) -> anyhow::Result<Vec<ComponentEvent>> {
         Ok(self.runtime()?.component_events(id).await)
+    }
+
+    pub async fn get_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> anyhow::Result<Vec<ComponentEvent>> {
+        let runtime = self.runtime()?;
+        let id = runtime.component_id_by_name(name, None)?;
+        Ok(runtime.component_events(&id).await)
     }
 
     pub async fn get_all_events(&self) -> anyhow::Result<Vec<ComponentEvent>> {
@@ -81,27 +94,65 @@ impl ComponentGraphView {
 }
 
 impl GraphSnapshot {
-    pub fn get_component(&self, id: &str) -> Option<&ComponentNode> {
-        self.nodes.iter().find(|node| node.id == id)
+    pub fn get_entity(&self, id: &GraphEntityId) -> Option<&ComponentNode> {
+        self.nodes.iter().find(|node| &node.id == id)
     }
 
-    pub fn contains(&self, id: &str) -> bool {
-        self.get_component(id).is_some()
+    pub fn get_component_by_id(&self, id: &ComponentId) -> Option<&ComponentNode> {
+        self.get_entity(&GraphEntityId::Component(id.clone()))
     }
 
-    pub fn get_dependents(&self, id: &str) -> Vec<&ComponentNode> {
-        self.get_neighbors(id, &RelationshipKind::Feeds)
+    pub fn get_component_by_name(&self, name: &ComponentName) -> Option<&ComponentNode> {
+        self.nodes
+            .iter()
+            .find(|node| node.id.component_id().is_some() && node.name.as_ref() == Some(name))
     }
 
-    pub fn get_dependencies(&self, id: &str) -> Vec<&ComponentNode> {
-        self.get_neighbors(id, &RelationshipKind::SubscribesTo)
+    pub fn contains_by_id(&self, id: &ComponentId) -> bool {
+        self.get_component_by_id(id).is_some()
     }
 
-    pub fn get_neighbors(&self, id: &str, relationship: &RelationshipKind) -> Vec<&ComponentNode> {
+    pub fn contains_by_name(&self, name: &ComponentName) -> bool {
+        self.get_component_by_name(name).is_some()
+    }
+
+    pub fn get_dependents_by_id(&self, id: &ComponentId) -> Vec<&ComponentNode> {
+        self.get_neighbors(
+            &GraphEntityId::Component(id.clone()),
+            &RelationshipKind::Feeds,
+        )
+    }
+
+    pub fn get_dependents_by_name(&self, name: &ComponentName) -> Option<Vec<&ComponentNode>> {
+        Some(self.get_neighbors(
+            &self.get_component_by_name(name)?.id,
+            &RelationshipKind::Feeds,
+        ))
+    }
+
+    pub fn get_dependencies_by_id(&self, id: &ComponentId) -> Vec<&ComponentNode> {
+        self.get_neighbors(
+            &GraphEntityId::Component(id.clone()),
+            &RelationshipKind::SubscribesTo,
+        )
+    }
+
+    pub fn get_dependencies_by_name(&self, name: &ComponentName) -> Option<Vec<&ComponentNode>> {
+        Some(self.get_neighbors(
+            &self.get_component_by_name(name)?.id,
+            &RelationshipKind::SubscribesTo,
+        ))
+    }
+
+    pub fn get_neighbors(
+        &self,
+        id: &GraphEntityId,
+        relationship: &RelationshipKind,
+    ) -> Vec<&ComponentNode> {
         self.edges
             .iter()
-            .filter(|edge| edge.from == id && &edge.relationship == relationship)
-            .filter_map(|edge| self.get_component(&edge.to))
+            .filter(|edge| &edge.from == id && &edge.relationship == relationship)
+            .filter_map(|edge| self.get_entity(&edge.to))
             .collect()
     }
 }

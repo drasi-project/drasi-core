@@ -44,18 +44,15 @@ pub(crate) async fn raw_store(
         .expect("native checkpoint resource")
 }
 
-pub(crate) fn storage_id(query: &str) -> String {
-    if !query.starts_with("computation-v2-") {
-        return crate::computation::v1::LegacyIndexProviderAdapter::storage_key(
-            Some("test-instance"),
-            crate::computation::v1::ComponentBatch::GRAPH_ID,
-            query,
-        );
-    }
-    query.to_owned()
+pub(crate) fn storage_scope(query: &crate::ComponentId) -> crate::StorageScope {
+    crate::computation::v1::LegacyIndexProviderAdapter::storage_key(
+        Some("test-instance"),
+        crate::computation::v1::ComponentBatch::GRAPH_ID,
+        query,
+    )
 }
 
-/// A semantic checkpoint view: translate storage keys, never checkpoint values.
+/// A progress-only view over the canonical source and stream checkpoint keys.
 struct NativeCheckpoints(Arc<dyn CheckpointStore>);
 #[async_trait::async_trait]
 impl CheckpointStore for NativeCheckpoints {
@@ -64,50 +61,35 @@ impl CheckpointStore for NativeCheckpoints {
     }
     async fn stage_checkpoint(
         &self,
-        source: &str,
+        source: &drasi_core_types::CheckpointKey,
         sequence: u64,
         position: Option<&bytes::Bytes>,
     ) -> Result<(), drasi_core::interface::IndexError> {
-        self.0
-            .stage_checkpoint(
-                &crate::computation::v1::progress_key("", Some(source)),
-                sequence,
-                position,
-            )
-            .await
+        self.0.stage_checkpoint(source, sequence, position).await
     }
     async fn read_checkpoint(
         &self,
-        source: &str,
+        source: &drasi_core_types::CheckpointKey,
     ) -> Result<Option<drasi_core::interface::SourceCheckpoint>, drasi_core::interface::IndexError>
     {
-        self.0
-            .read_checkpoint(&crate::computation::v1::progress_key("", Some(source)))
-            .await
+        self.0.read_checkpoint(source).await
     }
     async fn read_all_checkpoints(
         &self,
     ) -> Result<
-        std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>,
+        std::collections::HashMap<
+            drasi_core_types::CheckpointKey,
+            drasi_core::interface::SourceCheckpoint,
+        >,
         drasi_core::interface::IndexError,
     > {
-        let mut result = std::collections::HashMap::new();
-        for (key, checkpoint) in self.0.read_all_checkpoints().await? {
-            if !key.starts_with("computation:input:") {
-                continue;
-            }
-            match crate::computation::v1::progress_identity(&key).map_err(|error| {
-                drasi_core::interface::IndexError::Other(error.into_boxed_dyn_error())
-            })? {
-                crate::computation::v1::SourceProgressKey::Source(source) => {
-                    result.insert(source, checkpoint);
-                }
-                crate::computation::v1::SourceProgressKey::Stream(stream) => {
-                    result.insert(stream.as_str().to_owned(), checkpoint);
-                }
-            }
-        }
-        Ok(result)
+        Ok(self
+            .0
+            .read_all_checkpoints()
+            .await?
+            .into_iter()
+            .filter(|(key, _)| key.is_progress())
+            .collect())
     }
     async fn clear_checkpoints(&self) -> Result<(), drasi_core::interface::IndexError> {
         self.0.clear_checkpoints().await
@@ -120,34 +102,34 @@ impl CheckpointStore for NativeCheckpoints {
     }
     async fn stage_result_sequence(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         sequence: u64,
     ) -> Result<(), drasi_core::interface::IndexError> {
         self.0.stage_result_sequence(query, sequence).await
     }
     async fn write_result_sequence(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         sequence: u64,
     ) -> Result<(), drasi_core::interface::IndexError> {
         self.0.write_result_sequence(query, sequence).await
     }
     async fn read_result_sequence(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
     ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
         self.0.read_result_sequence(query).await
     }
     async fn write_output_generation(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         generation: u64,
     ) -> Result<(), drasi_core::interface::IndexError> {
         self.0.write_output_generation(query, generation).await
     }
     async fn read_output_generation(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
     ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
         self.0.read_output_generation(query).await
     }

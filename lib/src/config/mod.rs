@@ -12,21 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod input;
 pub mod runtime;
 pub mod schema;
 pub mod snapshot;
+pub use input::QueryInputConfig;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export runtime types
-pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};
+pub use runtime::{
+    ComponentListEntry, QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime,
+};
 
 // Re-export schema types
 pub use schema::*;
 
 // Re-export snapshot types
 pub use snapshot::{
-    BootstrapSnapshot, ConfigurationSnapshot, QueryConfigurationSnapshot, ReactionSnapshot,
-    SourceSnapshot,
+    BootstrapSnapshot, ComponentConfigurationUnavailable, ConfigurationSnapshot,
+    QueryConfigurationSnapshot, ReactionSnapshot, SourceSnapshot,
 };

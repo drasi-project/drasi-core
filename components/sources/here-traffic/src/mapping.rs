@@ -176,13 +176,13 @@ pub fn segment_changed(
 }
 
 pub fn build_segment_change(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     segment: &TrafficSegmentSnapshot,
     change: ChangeKind,
 ) -> SourceChange {
     let element_id = segment.id.as_str();
     let metadata = ElementMetadata {
-        reference: ElementReference::new(source_id, element_id),
+        reference: ElementReference::new(source_id.as_str(), element_id),
         labels: Arc::from([Arc::from("TrafficSegment")]),
         effective_from: current_timestamp_millis(),
     };
@@ -205,13 +205,13 @@ pub fn build_segment_change(
 }
 
 pub fn build_incident_change(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     incident: &TrafficIncidentSnapshot,
     change: ChangeKind,
 ) -> SourceChange {
     let element_id = incident.id.as_str();
     let metadata = ElementMetadata {
-        reference: ElementReference::new(source_id, element_id),
+        reference: ElementReference::new(source_id.as_str(), element_id),
         labels: Arc::from([Arc::from("TrafficIncident")]),
         effective_from: current_timestamp_millis(),
     };
@@ -234,12 +234,12 @@ pub fn build_incident_change(
 }
 
 pub fn build_relation_change(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     relation: &RelationSnapshot,
     change: ChangeKind,
 ) -> SourceChange {
     let metadata = ElementMetadata {
-        reference: ElementReference::new(source_id, relation.id.as_str()),
+        reference: ElementReference::new(source_id.as_str(), relation.id.as_str()),
         labels: Arc::from([Arc::from("AFFECTS")]),
         effective_from: current_timestamp_millis(),
     };
@@ -250,8 +250,8 @@ pub fn build_relation_change(
             let properties = build_relation_properties(relation);
             let element = Element::Relation {
                 metadata,
-                in_node: ElementReference::new(source_id, relation.incident_id.as_str()),
-                out_node: ElementReference::new(source_id, relation.segment_id.as_str()),
+                in_node: ElementReference::new(source_id.as_str(), relation.incident_id.as_str()),
+                out_node: ElementReference::new(source_id.as_str(), relation.segment_id.as_str()),
                 properties,
             };
 

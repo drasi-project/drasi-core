@@ -110,6 +110,7 @@ impl DurableQuery {
         let policy = self.recovery;
         let bootstrap = self.bootstrap_configured;
         let reset_configuration = self.reset_configuration;
+        let update_operation = self.update_operation.clone();
         processing
             .run(move |context| async move {
                 let profile = context.state_info().await?;
@@ -123,10 +124,13 @@ impl DurableQuery {
                     &context,
                     &configuration,
                     &candidate,
-                    policy,
-                    bootstrap,
-                    force,
-                    reset_configuration,
+                    recovery::ResetIntent {
+                        policy,
+                        bootstrap_configured: bootstrap,
+                        force,
+                        reset_configuration,
+                        update_operation: update_operation.as_deref(),
+                    },
                 )
                 .await?
                 .is_some()

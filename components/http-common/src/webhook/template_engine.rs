@@ -20,6 +20,7 @@
 use super::config::WebhookMapping;
 use anyhow::Result;
 use drasi_core_types::models::{ElementValue, SourceChange};
+use drasi_core_types::ComponentId;
 use drasi_source_mapping::SourceMappingEngine;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -45,8 +46,8 @@ pub struct TemplateContext {
     pub method: String,
     /// Request path
     pub path: String,
-    /// Source ID
-    pub source_id: String,
+    /// Actual component owner, independent of the output data namespace.
+    pub source_id: ComponentId,
 }
 
 /// Compiled template engine with pre-registered templates.
@@ -81,11 +82,11 @@ impl TemplateEngine {
         &self,
         mapping: &WebhookMapping,
         context: &TemplateContext,
-        source_id: &str,
+        namespace: &str,
     ) -> Result<SourceChange> {
         let json_context = context_to_json(context);
         self.inner
-            .process_mapping(mapping, &json_context, source_id)
+            .process_mapping(mapping, &json_context, namespace)
     }
 
     /// Render a single property value (used internally by tests)
@@ -156,7 +157,10 @@ mod tests {
             headers,
             method: "POST".to_string(),
             path: "/webhooks/test".to_string(),
-            source_id: "test-source".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000001d",
+            )
+            .expect("fixture UUID"),
         }
     }
 
@@ -415,7 +419,10 @@ mod tests {
             headers: HashMap::new(),
             method: "POST".to_string(),
             path: "/events".to_string(),
-            source_id: "test".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000051",
+            )
+            .expect("fixture UUID"),
         };
 
         let mut operation_map = HashMap::new();

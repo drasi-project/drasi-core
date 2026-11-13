@@ -13,6 +13,9 @@ mod bootstrap;
 #[doc(hidden)]
 pub mod codec;
 mod component_data;
+mod component_reference;
+mod component_update;
+mod configuration_constraint;
 mod consumer_progress;
 #[doc(hidden)]
 pub mod delivery;
@@ -60,6 +63,9 @@ pub mod workers;
 pub use binary_codec::*;
 pub use codec::*;
 pub use component_data::*;
+pub use component_reference::*;
+pub use component_update::*;
+pub use configuration_constraint::ConfigurationConstraint;
 pub use consumer_progress::*;
 pub use data::*;
 pub use drasi_core_types::{profiling, schema};

@@ -36,22 +36,30 @@ pub struct LegacyIndexProviderAdapter {
 }
 
 impl LegacyIndexProviderAdapter {
-    pub(crate) fn storage_key(namespace: Option<&str>, graph: &str, query: &str) -> String {
+    pub(crate) fn storage_key(
+        namespace: Option<&str>,
+        graph: &str,
+        query: &super::ComponentId,
+    ) -> drasi_core::interface::StorageScope {
         let encode = |value: &str| {
             value
                 .bytes()
                 .map(|value| format!("{value:02x}"))
                 .collect::<String>()
         };
-        match namespace {
+        drasi_core::interface::StorageScope::new(match namespace {
             Some(scope) => format!(
                 "computation-v2-{}-{}-{}",
                 encode(scope),
                 encode(graph),
-                encode(query)
+                encode(query.as_str())
             ),
-            None => format!("computation-v1-{}-{}", encode(graph), encode(query)),
-        }
+            None => format!(
+                "computation-v1-{}-{}",
+                encode(graph),
+                encode(query.as_str())
+            ),
+        })
     }
     pub fn new(provider: Arc<dyn IndexBackendPlugin>) -> Arc<Self> {
         Arc::new(Self {
@@ -99,12 +107,11 @@ impl ComputationIndexProvider for LegacyIndexProviderAdapter {
     async fn create_indexes(
         &self,
         graph: &str,
-        query: &str,
+        query: &super::ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         super::data::validate_identifier("graph", graph).map_err(IndexError::other)?;
-        super::data::validate_identifier("query", query).map_err(IndexError::other)?;
-        let key = Self::storage_key(self.namespace.as_deref(), graph, query);
-        let query_id = query.to_owned();
+        let query_id = query.clone();
+        let key = Self::storage_key(self.namespace.as_deref(), graph, &query_id);
         let provider = self.provider.clone();
         let original = self
             .construction

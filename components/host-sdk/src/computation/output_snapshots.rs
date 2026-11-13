@@ -254,9 +254,7 @@ unsafe extern "C" fn open(
         let bytes = unsafe { transport::borrowed_bytes(request, MAX_OPEN_BYTES)? };
         let open: SnapshotOpen =
             wire::decode(bytes).map_err(|error| Failure::protocol(error.to_string()))?;
-        let endpoint = open
-            .endpoint()
-            .map_err(|error| Failure::protocol(error.to_string()))?;
+        let endpoint = open.endpoint();
         if !resource.permits(&state.catalogue, &endpoint) {
             return Err(Failure::new(
                 abi::status::INVALID_ARGUMENT,
@@ -405,8 +403,8 @@ async fn read(reader: &Reader, code: u32) -> Result<Vec<u8>, Failure> {
                 .cmp(&(right.identity().namespace(), right.identity().value()))
         });
         let header = OutputSnapshotHeader {
-            component: reader.endpoint.component.to_string(),
-            port: reader.endpoint.port.to_string(),
+            component: reader.endpoint.component.clone(),
+            port: reader.endpoint.port.clone(),
             cursor: WireCursor::new(snapshot.cursor()),
             dataset: snapshot.dataset().to_owned(),
             schema: snapshot.schema().clone(),

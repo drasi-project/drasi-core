@@ -15,6 +15,10 @@
 #![cfg(test)]
 #![cfg(feature = "computation-rocksdb-tests")]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
@@ -30,7 +34,7 @@ use drasi_core::{
     computation::{
         ComputationIndexProvider, ComputationIndexes, ComputationResource, TransactionDomain,
     },
-    interface::{IndexError, IndexSet, SessionControl},
+    interface::{CheckpointKey, IndexError, IndexSet, SessionControl},
     models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
     },
@@ -48,8 +52,47 @@ mod reliability;
 
 type TestResult<T> = anyhow::Result<T>;
 
+const COMPONENTS: &[(&str, u128)] = &[
+    ("first", 1),
+    ("second", 2),
+    ("third", 3),
+    ("sequence", 4),
+    ("source", 5),
+    ("sink", 6),
+    ("relay", 7),
+    ("collector", 8),
+    ("delivery", 9),
+    ("admission", 10),
+    ("expand", 11),
+    ("decode", 12),
+    ("parse", 13),
+    ("ordinary", 14),
+    ("query", 15),
+    ("rows", 16),
+    ("second-container", 17),
+    ("detect-gap", 18),
+    ("reject-volatile", 19),
+    ("different", 20),
+    ("stage-0", 21),
+    ("stage-1", 22),
+    ("stage-2", 23),
+    ("stage-3", 24),
+    ("stage-4", 25),
+];
+
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("id")
+    let (_, uuid) = COMPONENTS
+        .iter()
+        .find(|(name, _)| *name == value)
+        .expect("explicit fixture identity");
+    fixture_support::component_id(*uuid)
+}
+fn label(component: &ComponentId) -> &'static str {
+    COMPONENTS
+        .iter()
+        .find(|(_, uuid)| *uuid == component.as_uuid().as_u128())
+        .expect("explicit fixture name")
+        .0
 }
 fn port(value: &str) -> PortId {
     PortId::try_new(value).expect("port")
@@ -149,11 +192,11 @@ impl Arithmetic {
                 let value = (value + self.config.add) * self.config.multiply;
                 properties.insert("value", ElementValue::Integer(value));
                 properties.insert(
-                    &format!("{}_count", self.descriptor.id()),
+                    &format!("{}_count", label(self.descriptor.id())),
                     ElementValue::Integer(count),
                 );
                 self.probe.trace.lock().expect("trace").push((
-                    self.descriptor.id().to_string(),
+                    label(self.descriptor.id()).to_owned(),
                     value,
                     count,
                 ));
@@ -174,7 +217,7 @@ impl Arithmetic {
         Ok(GraphChangeCodec::derive_changes(
             input,
             &output,
-            stream(&format!("{}/out", self.descriptor.id())),
+            stream(&format!("{}/out", label(self.descriptor.id()))),
             input.system().sequence(),
         )?)
     }
@@ -426,7 +469,7 @@ impl ComputationIndexProvider for CountProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &ComponentId,
     ) -> std::result::Result<ComputationIndexes, IndexError> {
         let original = self.inner.create_indexes(graph, component).await?;
         let set = original.indexes();
@@ -851,13 +894,15 @@ async fn output_bindings_commit_with_the_existing_owner_and_resume_without_recom
             subject.stop().await.unwrap();
         }
         let indexes = provider
-            .create_indexes("transactions", "sequence")
+            .create_indexes("transactions", &id("sequence"))
             .await
             .unwrap();
         let saved = indexes
             .checkpoint_store()
             .unwrap()
-            .read_checkpoint("\0computation:output-bindings:v1")
+            .read_checkpoint(&CheckpointKey::Metadata(
+                OUTPUT_BINDINGS_CHECKPOINT.to_owned(),
+            ))
             .await
             .unwrap();
         assert_eq!(saved.is_some(), committed);
@@ -896,8 +941,8 @@ const BINDING_CRASH_BEFORE: &str = "DRASI_OUTPUT_BINDING_CRASH_BEFORE";
 
 #[tokio::test]
 async fn output_bindings_cannot_disappear_from_committed_progress() {
-    const MEMBERSHIP: &str = "\0computation:output-bindings:v1";
-    const HEAD: &str = "\0computation:middleware-head:v1";
+    let membership = CheckpointKey::Metadata(OUTPUT_BINDINGS_CHECKPOINT.to_owned());
+    let head = CheckpointKey::Metadata("\0computation:middleware-head:v1".to_owned());
     for corruption in [
         "missing-membership",
         "missing-fingerprint",
@@ -918,29 +963,30 @@ async fn output_bindings_cannot_disappear_from_committed_progress() {
             subject.stop().await.unwrap();
         }
         let indexes = provider
-            .create_indexes("transactions", "sequence")
+            .create_indexes("transactions", &id("sequence"))
             .await
             .unwrap();
         let checkpoint = indexes.checkpoint_store().unwrap().clone();
         let mut saved = checkpoint.read_all_checkpoints().await.unwrap();
-        assert_eq!(saved[HEAD].sequence, 1);
-        assert_eq!(saved[HEAD].source_position.as_ref().unwrap().len(), 32);
+        assert_eq!(saved[&head].sequence, 1);
+        assert_eq!(saved[&head].source_position.as_ref().unwrap().len(), 32);
         match corruption {
             "missing-membership" => {
-                saved.remove(MEMBERSHIP);
+                saved.remove(&membership);
             }
             "missing-progress" => {
-                saved.remove(HEAD);
+                saved.remove(&head);
             }
-            "missing-fingerprint" => saved.get_mut(HEAD).unwrap().source_position = None,
+            "missing-fingerprint" => saved.get_mut(&head).unwrap().source_position = None,
             "changed-fingerprint" => {
-                saved.get_mut(HEAD).unwrap().source_position = Some(Bytes::from_static(b"wrong"))
+                saved.get_mut(&head).unwrap().source_position = Some(Bytes::from_static(b"wrong"))
             }
             "changed-membership" => {
-                let record = saved.get_mut(MEMBERSHIP).unwrap();
+                let record = saved.get_mut(&membership).unwrap();
                 let mut content: serde_json::Value =
                     serde_json::from_slice(record.source_position.as_ref().unwrap()).unwrap();
-                content["destinations"][0]["consumer"] = "different".into();
+                content["destinations"][0]["consumer"] =
+                    serde_json::to_value(id("different")).unwrap();
                 record.source_position = Some(serde_json::to_vec(&content).unwrap().into());
             }
             _ => unreachable!(),
@@ -971,7 +1017,7 @@ async fn output_bindings_cannot_disappear_from_committed_progress() {
         subject.stop().await.unwrap();
         drop(subject);
         let indexes = provider
-            .create_indexes("transactions", "sequence")
+            .create_indexes("transactions", &id("sequence"))
             .await
             .unwrap();
         let after = indexes
@@ -982,10 +1028,13 @@ async fn output_bindings_cannot_disappear_from_committed_progress() {
             .unwrap();
         assert_eq!(after.len(), saved.len(), "{corruption}");
         for (key, record) in saved {
-            assert_eq!(after[&key].sequence, record.sequence, "{corruption}: {key}");
+            assert_eq!(
+                after[&key].sequence, record.sequence,
+                "{corruption}: {key:?}"
+            );
             assert_eq!(
                 after[&key].source_position, record.source_position,
-                "{corruption}: {key}"
+                "{corruption}: {key:?}"
             );
         }
         let owner = drasi_core::computation::ComputationTransaction::try_new(indexes).unwrap();
@@ -1296,7 +1345,7 @@ async fn replay_contract_builder(
     let delivery = Arc::new(
         IndexedEnvelopeStore::try_new(
             provider
-                .create_indexes("transactions", "delivery")
+                .create_indexes("transactions", &id("delivery"))
                 .await
                 .expect("delivery indexes"),
             Arc::new(codec),
@@ -1336,7 +1385,7 @@ async fn replay_contract_builder(
             )
             .with_cleanup(delivery),
         )?
-        .source(Box::new(JournalSource {
+        .fixture_source(Box::new(JournalSource {
             descriptor: ComponentDescriptor::try_new(
                 id("source"),
                 vec![PortDescriptor::new(
@@ -1351,12 +1400,12 @@ async fn replay_contract_builder(
             progress: supplied,
             position: 0,
         }))
-        .transformer(Box::new(ReplayRelay {
+        .fixture_transformer(Box::new(ReplayRelay {
             descriptor: descriptor(id("relay"), false),
             stateless,
         }))
-        .transformer(Box::new(owner))
-        .sink(Box::new(Collector {
+        .fixture_transformer(Box::new(owner))
+        .fixture_sink(Box::new(Collector {
             descriptor: ComponentDescriptor::try_new(
                 id("sink"),
                 vec![PortDescriptor::new(
@@ -1406,7 +1455,7 @@ async fn reopen_through_stateless_relay() {
         let store = Arc::new(
             IndexedEnvelopeStore::try_new(
                 provider
-                    .create_indexes("transactions", "admission")
+                    .create_indexes("transactions", &id("admission"))
                     .await
                     .expect("admission indexes"),
                 Arc::new(codec),
@@ -1530,7 +1579,7 @@ async fn publication_assertion_rejects_unbinding_its_output_before_mutation() {
     let store = Arc::new(
         IndexedEnvelopeStore::try_new(
             provider
-                .create_indexes("transactions", "admission")
+                .create_indexes("transactions", &id("admission"))
                 .await
                 .expect("admission indexes"),
             Arc::new(codec),
@@ -1647,7 +1696,7 @@ async fn stateful_intermediates_and_matching_progress_names_do_not_prove_recover
         let store = Arc::new(
             IndexedEnvelopeStore::try_new(
                 provider
-                    .create_indexes("transactions", "admission")
+                    .create_indexes("transactions", &id("admission"))
                     .await
                     .expect("indexes"),
                 Arc::new(codec),
@@ -1695,7 +1744,7 @@ async fn another_branch_cannot_borrow_the_transaction_owners_checkpoint() {
     let store = Arc::new(
         IndexedEnvelopeStore::try_new(
             provider
-                .create_indexes("transactions", "admission")
+                .create_indexes("transactions", &id("admission"))
                 .await
                 .expect("indexes"),
             Arc::new(codec),
@@ -1804,7 +1853,7 @@ async fn factory_constructs_one_graph_node_and_durable_external_delivery_confirm
         .register_schema(GraphChangeCodec::schema())
         .expect("schema");
     let delivery_indexes = provider
-        .create_indexes("transactions", "delivery")
+        .create_indexes("transactions", &id("delivery"))
         .await
         .expect("delivery indexes");
     let store = Arc::new(
@@ -1863,7 +1912,7 @@ async fn factory_constructs_one_graph_node_and_durable_external_delivery_confirm
             ),
         )
         .expect("store resource")
-        .source(Box::new(FiniteSource {
+        .fixture_source(Box::new(FiniteSource {
             descriptor: ComponentDescriptor::try_new(
                 id("source"),
                 vec![PortDescriptor::new(
@@ -1877,12 +1926,13 @@ async fn factory_constructs_one_graph_node_and_durable_external_delivery_confirm
             inputs: VecDeque::from([input(1, 3).envelope]),
         }))
         .component(
+            fixture_support::component_name(),
             definition
                 .specification(&registry, transformers, indexes)
                 .expect("spec"),
             Arc::new(TransactionTransformerFactory::default()),
         )
-        .sink(Box::new(Collector {
+        .fixture_sink(Box::new(Collector {
             descriptor: ComponentDescriptor::try_new(
                 id("collector"),
                 vec![PortDescriptor::new(
@@ -2466,7 +2516,10 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     gap.stop().await.expect("stop");
 
     query.stop().await.expect("stop before reset");
-    query.deprovision().await.expect("reset query state");
+    query
+        .delete_owned_resources()
+        .await
+        .expect("explicitly delete query state");
     query.start().await.expect("restart reset query");
     let reset = query.transform(input(1, 3)).await.expect("reset output");
     assert_ne!(

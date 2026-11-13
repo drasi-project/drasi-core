@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
+use drasi_lib::config::ComponentId;
 use drasi_lib::reactions::common::{AdaptiveBatchConfig, TemplateSpec};
 use drasi_lib::{DrasiLib, Query, Reaction};
 use drasi_reaction_grpc::{
@@ -42,6 +43,14 @@ use drasi_reaction_grpc::{
 use serde_json::json;
 
 use crate::mock_server::struct_to_json;
+
+fn query_name(value: &str) -> drasi_core::ComponentName {
+    drasi_core::ComponentName::try_new(value).expect("fixture component name")
+}
+
+fn query_reference(value: &str) -> drasi_lib::config::ComponentReference {
+    drasi_lib::config::ComponentReference::by_name(query_name(value))
+}
 use crate::mock_source::{MockSource, PropertyMapBuilder};
 
 // Mirrors of the prost-generated QueryResultItemType numeric tags so
@@ -51,6 +60,10 @@ use crate::mock_source::{MockSource, PropertyMapBuilder};
 const ITEM_TYPE_ADD: i32 = 1;
 const ITEM_TYPE_UPDATE: i32 = 2;
 const ITEM_TYPE_DELETE: i32 = 3;
+
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
 
 fn add(data: serde_json::Value, row_signature: u64) -> ResultDiff {
     ResultDiff::Add {
@@ -88,28 +101,26 @@ fn aggregation(
     }
 }
 
-fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
-    QueryResult::new(query_id.to_string(), 0, Utc::now(), diffs, HashMap::new())
+fn make_query_result(query_id: drasi_core::ComponentId, diffs: Vec<ResultDiff>) -> QueryResult {
+    QueryResult::new(query_id, 0, Utc::now(), diffs, HashMap::new())
 }
 
-fn make_query_result_seq(query_id: &str, sequence: u64, diffs: Vec<ResultDiff>) -> QueryResult {
-    QueryResult::new(
-        query_id.to_string(),
-        sequence,
-        Utc::now(),
-        diffs,
-        HashMap::new(),
-    )
+fn make_query_result_seq(
+    query_id: drasi_core::ComponentId,
+    sequence: u64,
+    diffs: Vec<ResultDiff>,
+) -> QueryResult {
+    QueryResult::new(query_id, sequence, Utc::now(), diffs, HashMap::new())
 }
 
 fn make_query_result_full(
-    query_id: &str,
+    query_id: drasi_core::ComponentId,
     sequence: u64,
     timestamp: chrono::DateTime<Utc>,
     diffs: Vec<ResultDiff>,
     metadata: HashMap<String, serde_json::Value>,
 ) -> QueryResult {
-    QueryResult::new(query_id.to_string(), sequence, timestamp, diffs, metadata)
+    QueryResult::new(query_id, sequence, timestamp, diffs, metadata)
 }
 
 fn template_added(template: &str) -> GrpcQueryConfig {
@@ -156,17 +167,21 @@ async fn shutdown(reaction: &GrpcReaction) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixed_add_no_template_emits_raw_row_in_after_and_no_before() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-fixed-add-raw")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000174")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![add(json!({"id": 7, "name": "alice"}), 42)],
         ))
         .await
@@ -181,7 +196,7 @@ async fn fixed_add_no_template_emits_raw_row_in_after_and_no_before() {
     let batches = server.recorder.batches().await;
     assert_eq!(batches.len(), 1, "expected exactly one ProcessResults RPC");
     let batch = &batches[0];
-    assert_eq!(batch.query_id, "q1");
+    assert_eq!(batch.query_id, "00000000-0000-0000-0000-00000000002b");
     assert!(batch.had_rfc3339_timestamp);
 
     let item = &batch.items[0];
@@ -205,18 +220,22 @@ async fn fixed_add_with_template_renders_into_payload() {
         default_template: Some(template_added(r#"{"event":"created","id":"{{row.id}}"}"#)),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-fixed-add-tmpl")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000175")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![add(json!({"id": "abc", "extra": "ignored"}), 0)],
         ))
         .await
@@ -252,17 +271,21 @@ async fn fixed_add_with_template_renders_into_payload() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixed_delete_no_template_emits_raw_row_in_before_and_no_after() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-fixed-del-raw")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000176")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![delete(json!({"id": "x42"}), 13)],
         ))
         .await
@@ -293,18 +316,22 @@ async fn fixed_delete_with_template_renders_into_payload() {
         default_template: Some(template_deleted(r#"{"removed":"{{row.id}}"}"#)),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-fixed-del-tmpl")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000177")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![delete(json!({"id": "x42"}), 0)],
         ))
         .await
@@ -340,17 +367,21 @@ async fn fixed_delete_with_template_renders_into_payload() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixed_update_no_template_emits_raw_before_and_after() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-fixed-upd-raw")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000178")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![update(json!({"v": "old"}), json!({"v": "new"}), 7)],
         ))
         .await
@@ -386,18 +417,22 @@ async fn fixed_update_template_renders_body_payload() {
         )),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-fixed-upd-tmpl")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000179")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![update(json!({"v": "old"}), json!({"v": "new"}), 99)],
         ))
         .await
@@ -440,18 +475,22 @@ async fn fixed_update_template_sees_standard_before_after_keys() {
         )),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-fixed-upd-side")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000017a")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![update(json!({"v": "old"}), json!({"v": "new"}), 0)],
         ))
         .await
@@ -491,17 +530,24 @@ async fn fixed_template_render_failure_falls_back_to_canonical_payload() {
         default_template: Some(template_added("plain text {{row.id}}")),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-fixed-render-fail")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000017b")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 99}), 0)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 99}), 0)],
+        ))
         .await
         .expect("enqueue");
 
@@ -528,7 +574,10 @@ async fn fixed_template_render_failure_falls_back_to_canonical_payload() {
         .expect("render failure falls back to canonical payload");
     assert_eq!(payload.get("operation"), Some(&json!("ADD")));
     assert_eq!(payload.get("after"), Some(&json!({"id": 99})));
-    assert_eq!(payload.get("queryId"), Some(&json!("q1")));
+    assert_eq!(
+        payload.get("queryId"),
+        Some(&json!("00000000-0000-0000-0000-00000000002b"))
+    );
 
     shutdown(&reaction).await;
     server.shutdown().await;
@@ -545,18 +594,22 @@ async fn aggregation_emits_as_update_on_the_wire_with_both_sides_templated() {
         default_template: Some(template_updated(r#"{"sum":{{after.sum}}}"#)),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-agg")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000017c")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![aggregation(Some(json!({"sum": 1})), json!({"sum": 5}), 0)],
         ))
         .await
@@ -596,17 +649,21 @@ async fn aggregation_emits_as_update_on_the_wire_with_both_sides_templated() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn noop_results_are_not_emitted_on_the_wire() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-noop-drop")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000017d")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![ResultDiff::Noop, add(json!({"id": 1}), 0), ResultDiff::Noop],
         ))
         .await
@@ -637,18 +694,25 @@ async fn noop_results_are_not_emitted_on_the_wire() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metadata_is_propagated_as_grpc_headers_end_to_end() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-meta")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_metadata("authorization", "Bearer test-token")
-        .with_metadata("x-tenant", "tenant-42")
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000017e")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_metadata("authorization", "Bearer test-token")
+    .with_metadata("x-tenant", "tenant-42")
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 1}), 0)],
+        ))
         .await
         .expect("enqueue");
 
@@ -689,17 +753,24 @@ async fn template_extension_metadata_is_rendered_as_grpc_headers() {
         }),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-template-meta")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000017f")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 1}), 0)],
+        ))
         .await
         .expect("enqueue");
 
@@ -709,7 +780,10 @@ async fn template_extension_metadata_is_rendered_as_grpc_headers() {
         .await;
     let batches = server.recorder.batches().await;
     let observed = &batches[0].metadata_headers;
-    assert_eq!(observed.get("x-query").map(String::as_str), Some("q1"));
+    assert_eq!(
+        observed.get("x-query").map(String::as_str),
+        Some("00000000-0000-0000-0000-00000000002b")
+    );
     assert_eq!(observed.get("x-op").map(String::as_str), Some("ADD"));
 
     shutdown(&reaction).await;
@@ -723,17 +797,21 @@ async fn template_extension_metadata_is_rendered_as_grpc_headers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sequence_is_propagated_on_the_wire() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-seq")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000180")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result_seq(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             777,
             vec![add(json!({"id": 1}), 9)],
         ))
@@ -756,12 +834,15 @@ async fn sequence_is_propagated_on_the_wire() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn event_timestamp_and_query_metadata_are_propagated_on_the_wire() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-ts-meta")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000181")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     let timestamp = chrono::DateTime::parse_from_rfc3339("2026-06-17T01:02:03Z")
@@ -771,7 +852,8 @@ async fn event_timestamp_and_query_metadata_are_propagated_on_the_wire() {
     metadata.insert("tenant".to_string(), json!("acme"));
     reaction
         .enqueue_query_result(make_query_result_full(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             88,
             timestamp,
             vec![add(json!({"id": 1}), 9)],
@@ -821,17 +903,24 @@ async fn template_uses_portable_standard_keys_end_to_end() {
         )),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-portable")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000182")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": "abc"}), 0)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": "abc"}), 0)],
+        ))
         .await
         .expect("enqueue");
 
@@ -867,13 +956,23 @@ async fn descriptor_resolves_metadata_config_value_to_header() {
     });
     let descriptor = GrpcReactionDescriptor;
     let reaction = descriptor
-        .create_reaction("test-desc-meta", vec!["q1".into()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000183")
+                .expect("fixture UUID"),
+            vec![query_reference("q1")],
+            &cfg,
+            true,
+        )
         .await
         .expect("create_reaction resolves metadata ConfigValues");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 1}), 0)],
+        ))
         .await
         .expect("enqueue");
 
@@ -902,18 +1001,25 @@ async fn descriptor_resolves_metadata_config_value_to_header() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adaptive_delivers_steady_load() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-adaptive")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into(), "q2".into()])
-        .with_min_batch_size(1)
-        .with_max_batch_size(50)
-        .with_batch_timeout_ms(100)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000184")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1"), query_name("q2")])
+    .with_min_batch_size(1)
+    .with_max_batch_size(50)
+    .with_batch_timeout_ms(100)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     for i in 0..10 {
-        let q = if i % 2 == 0 { "q1" } else { "q2" };
+        let q = if i % 2 == 0 {
+            component_id(43)
+        } else {
+            component_id(44)
+        };
         reaction
             .enqueue_query_result(make_query_result(q, vec![add(json!({"id": i}), i as u64)]))
             .await
@@ -947,21 +1053,28 @@ async fn adaptive_delivers_steady_load() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adaptive_flushes_low_volume_batch_after_timeout() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-adaptive-drain")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_adaptive_batching(AdaptiveBatchConfig {
-            adaptive_min_batch_size: 10,
-            adaptive_max_batch_size: 100,
-            adaptive_window_size: 10,
-            adaptive_batch_timeout_ms: 100,
-        })
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000185")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_adaptive_batching(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 10,
+        adaptive_max_batch_size: 100,
+        adaptive_window_size: 10,
+        adaptive_batch_timeout_ms: 100,
+    })
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 1}), 0)],
+        ))
         .await
         .expect("enqueue");
 
@@ -981,21 +1094,28 @@ async fn adaptive_flushes_low_volume_batch_after_timeout() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adaptive_shutdown_completes_within_bounded_window() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-adaptive-stop")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_adaptive_batching(AdaptiveBatchConfig {
-            adaptive_min_batch_size: 1,
-            adaptive_max_batch_size: 10,
-            adaptive_window_size: 10,
-            adaptive_batch_timeout_ms: 50,
-        })
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000186")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_adaptive_batching(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 1,
+        adaptive_max_batch_size: 10,
+        adaptive_window_size: 10,
+        adaptive_batch_timeout_ms: 50,
+    })
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 1}), 0)],
+        ))
         .await
         .expect("enqueue");
 
@@ -1025,23 +1145,34 @@ async fn end_to_end_through_drasilib_delivers_to_grpc_server() {
     // `DrasiLib::builder()` so the runtime owns the query subscription, then
     // assert the change reaches the downstream gRPC server.
     let server = mock_server::start().await;
-    let (mock_source, handle) = MockSource::new("e2e-source").expect("mock source");
+    let source_name = "e2e-source";
+    let (mock_source, handle) =
+        MockSource::new(component_id(508), "mock-source").expect("mock source");
 
-    let query = Query::cypher("e2e-query")
-        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_input("e2e-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("e2e-query").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("e2e-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let reaction = GrpcReaction::builder("e2e-grpc")
+    let reaction_name = "e2e-grpc";
+    let reaction = GrpcReaction::builder(component_id(1006).clone())
         .with_endpoint(server.endpoint.clone())
-        .from_query("e2e-query")
+        .from_query_by_name(
+            drasi_core::ComponentName::try_new("e2e-query").expect("fixture component name"),
+        )
         .with_fixed_batching(1, 500)
         .build()
         .expect("reaction builder");
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1055,9 +1186,15 @@ async fn end_to_end_through_drasilib_delivers_to_grpc_server() {
                     .clone(),
             )
             .with_id("e2e-core")
-            .with_source(mock_source)
+            .with_source(
+                drasi_core::ComponentName::try_new("e2e-source").expect("fixture component name"),
+                mock_source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("e2e-grpc").expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .expect("build core"),
@@ -1096,7 +1233,7 @@ async fn end_to_end_through_drasilib_delivers_to_grpc_server() {
         "the query result row must reach the gRPC server"
     );
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
     server.shutdown().await;
 }
 
@@ -1107,17 +1244,24 @@ async fn end_to_end_through_drasilib_delivers_to_grpc_server() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn proto_output_without_template_omits_payload_but_keeps_raw_after() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-proto-raw")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_format(OutputFormat::Proto)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000187")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_format(OutputFormat::Proto)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 5}), 1)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 5}), 1)],
+        ))
         .await
         .expect("enqueue");
 
@@ -1148,18 +1292,25 @@ async fn proto_output_with_template_still_emits_rendered_payload() {
         default_template: Some(template_added(r#"{"id":"{{after.id}}"}"#)),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-proto-tmpl")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_format(OutputFormat::Proto)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000188")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_format(OutputFormat::Proto)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 5}), 1)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 5}), 1)],
+        ))
         .await
         .expect("enqueue");
 
@@ -1186,18 +1337,22 @@ async fn proto_output_with_template_still_emits_rendered_payload() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiple_items_fill_a_single_rpc_preserving_order() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-multi")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        // batch_size == item count, so all three flush together in one RPC.
-        .with_fixed_batching(3, 10_000)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000189")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    // batch_size == item count, so all three flush together in one RPC.
+    .with_fixed_batching(3, 10_000)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 add(json!({"id": 0}), 0),
                 add(json!({"id": 1}), 1),
@@ -1223,22 +1378,33 @@ async fn multiple_items_fill_a_single_rpc_preserving_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_query_result_produces_no_rpc() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-empty")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000018a")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     // An empty result set must be skipped entirely.
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![],
+        ))
         .await
         .expect("enqueue empty");
     // A subsequent real event proves the runner kept running.
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 1)]))
+        .enqueue_query_result(make_query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            vec![add(json!({"id": 1}), 1)],
+        ))
         .await
         .expect("enqueue real");
 
@@ -1281,20 +1447,24 @@ async fn items_with_distinct_rendered_metadata_split_into_separate_batches() {
         }),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-meta-split")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        // Large batch size with a short flush so the trailing batch drains via
-        // the timer rather than on size.
-        .with_fixed_batching(100, 200)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000018b")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    // Large batch size with a short flush so the trailing batch drains via
+    // the timer rather than on size.
+    .with_fixed_batching(100, 200)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![add(json!({"id": 1}), 1), delete(json!({"id": 2}), 2)],
         ))
         .await
@@ -1341,14 +1511,21 @@ async fn descriptor_honors_camel_case_batch_size_end_to_end() {
         "batching": { "mode": "fixed", "batchSize": 2, "batchFlushTimeoutMs": 10000 }
     });
     let reaction = GrpcReactionDescriptor
-        .create_reaction("desc-batch", vec!["q1".into()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000018c")
+                .expect("fixture UUID"),
+            vec![query_reference("q1")],
+            &cfg,
+            true,
+        )
         .await
         .expect("create_reaction");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![
                 add(json!({"id": 0}), 0),
                 add(json!({"id": 1}), 1),
@@ -1384,7 +1561,7 @@ async fn descriptor_honors_camel_case_batch_size_end_to_end() {
 async fn per_query_routes_select_templates_over_the_wire() {
     let server = mock_server::start().await;
     // A per-query route keyed `orders` plus a fallback default template. The
-    // reaction subscribes to a dotted wire id (`source.orders`) so this also
+    // reaction subscribes to a dotted query name (`source.orders`) so this also
     // exercises the last-dotted-segment route resolution over the socket.
     let mut routes = HashMap::new();
     routes.insert(
@@ -1395,29 +1572,38 @@ async fn per_query_routes_select_templates_over_the_wire() {
         default_template: Some(template_added(r#"{"kind":"default","id":"{{after.id}}"}"#)),
         routes,
     };
-    let reaction = GrpcReaction::builder("test-routes")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["source.orders".into(), "widgets".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000018d")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("source.orders"), query_name("widgets")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     // `source.orders` resolves to the `orders` route via last-segment fallback.
+    let mut order_result = make_query_result(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b4")
+            .expect("fixture UUID"),
+        vec![add(json!({"id": "o1"}), 1)],
+    );
+    order_result.query_name = Some(query_name("source.orders"));
     reaction
-        .enqueue_query_result(make_query_result(
-            "source.orders",
-            vec![add(json!({"id": "o1"}), 1)],
-        ))
+        .enqueue_query_result(order_result)
         .await
         .expect("enqueue order");
     // `widgets` has no matching route and falls through to the default template.
+    let mut widget_result = make_query_result(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b5")
+            .expect("fixture UUID"),
+        vec![add(json!({"id": "w1"}), 2)],
+    );
+    widget_result.query_name = Some(query_name("widgets"));
     reaction
-        .enqueue_query_result(make_query_result(
-            "widgets",
-            vec![add(json!({"id": "w1"}), 2)],
-        ))
+        .enqueue_query_result(widget_result)
         .await
         .expect("enqueue widget");
 
@@ -1429,17 +1615,17 @@ async fn per_query_routes_select_templates_over_the_wire() {
 
     let order_batch = batches
         .iter()
-        .find(|b| b.query_id == "source.orders")
+        .find(|b| b.query_id == "00000000-0000-0000-0000-0000000003b4")
         .expect("order batch delivered");
     assert_eq!(
         order_batch.items[0].payload.as_ref().map(struct_to_json),
         Some(json!({"kind": "order", "id": "o1"})),
-        "dotted wire id must resolve to the per-query route template"
+        "dotted query name must resolve to the per-query route template"
     );
 
     let widget_batch = batches
         .iter()
-        .find(|b| b.query_id == "widgets")
+        .find(|b| b.query_id == "00000000-0000-0000-0000-0000000003b5")
         .expect("widget batch delivered");
     assert_eq!(
         widget_batch.items[0].payload.as_ref().map(struct_to_json),
@@ -1464,18 +1650,22 @@ async fn json_helper_embeds_nested_row_over_the_wire() {
         )),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-json-helper")
-        .with_endpoint(server.endpoint.clone())
-        .with_queries(vec!["q1".into()])
-        .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
-        .build()
-        .expect("builder");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000018e")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint(server.endpoint.clone())
+    .with_queries_by_name(vec![query_name("q1")])
+    .with_fixed_batching(1, 10_000)
+    .with_output_templates(templates)
+    .build()
+    .expect("builder");
     reaction.start().await.expect("start");
 
     reaction
         .enqueue_query_result(make_query_result(
-            "q1",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             vec![add(json!({"id": 7, "name": "alice"}), 1)],
         ))
         .await

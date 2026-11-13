@@ -44,16 +44,12 @@ use std::sync::Arc;
 
 pub struct SuiDeepBookBootstrapProvider {
     config: SuiDeepBookBootstrapConfig,
-    source_id: String,
 }
 
 impl SuiDeepBookBootstrapProvider {
-    pub fn new(source_id: impl Into<String>, config: SuiDeepBookBootstrapConfig) -> Result<Self> {
+    pub fn new(config: SuiDeepBookBootstrapConfig) -> Result<Self> {
         config.validate()?;
-        Ok(Self {
-            config,
-            source_id: source_id.into(),
-        })
+        Ok(Self { config })
     }
 
     pub fn builder() -> SuiDeepBookBootstrapProviderBuilder {
@@ -70,11 +66,7 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> Result<BootstrapResult> {
-        let source_id = if context.source_id.is_empty() {
-            self.source_id.as_str()
-        } else {
-            context.source_id.as_str()
-        };
+        let source_id = &context.source_id;
         info!(
             "Starting Sui DeepBook bootstrap for source '{}' and query '{}'",
             source_id, request.query_id
@@ -193,7 +185,7 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
                 for ec in enrichment_changes {
                     event_tx
                         .send(BootstrapEvent {
-                            source_id: source_id.to_string(),
+                            source_id: source_id.clone(),
                             change: ec,
                             timestamp: chrono::Utc::now(),
                             sequence: context.next_sequence(),
@@ -207,7 +199,7 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
                 let change = map_event_to_insert_change(source_id, &event);
                 event_tx
                     .send(BootstrapEvent {
-                        source_id: source_id.to_string(),
+                        source_id: source_id.clone(),
                         change,
                         timestamp: chrono::Utc::now(),
                         sequence: context.next_sequence(),
@@ -229,7 +221,7 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
                         );
                         event_tx
                             .send(BootstrapEvent {
-                                source_id: source_id.to_string(),
+                                source_id: source_id.clone(),
                                 change: rel,
                                 timestamp: chrono::Utc::now(),
                                 sequence: context.next_sequence(),
@@ -251,7 +243,7 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
                     );
                     event_tx
                         .send(BootstrapEvent {
-                            source_id: source_id.to_string(),
+                            source_id: source_id.clone(),
                             change: rel,
                             timestamp: chrono::Utc::now(),
                             sequence: context.next_sequence(),
@@ -273,7 +265,7 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
                         );
                         event_tx
                             .send(BootstrapEvent {
-                                source_id: source_id.to_string(),
+                                source_id: source_id.clone(),
                                 change: rel,
                                 timestamp: chrono::Utc::now(),
                                 sequence: context.next_sequence(),
@@ -307,21 +299,14 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
 }
 
 pub struct SuiDeepBookBootstrapProviderBuilder {
-    source_id: String,
     config: SuiDeepBookBootstrapConfig,
 }
 
 impl SuiDeepBookBootstrapProviderBuilder {
     pub fn new() -> Self {
         Self {
-            source_id: "sui-deepbook-bootstrap".to_string(),
             config: SuiDeepBookBootstrapConfig::default(),
         }
-    }
-
-    pub fn with_source_id(mut self, source_id: impl Into<String>) -> Self {
-        self.source_id = source_id.into();
-        self
     }
 
     pub fn with_rpc_endpoint(mut self, rpc_endpoint: impl Into<String>) -> Self {
@@ -395,7 +380,7 @@ impl SuiDeepBookBootstrapProviderBuilder {
     }
 
     pub fn build(self) -> Result<SuiDeepBookBootstrapProvider> {
-        SuiDeepBookBootstrapProvider::new(self.source_id, self.config)
+        SuiDeepBookBootstrapProvider::new(self.config)
     }
 }
 
@@ -412,7 +397,10 @@ mod tests {
     #[test]
     fn test_builder_defaults() {
         let provider = SuiDeepBookBootstrapProvider::builder().build().unwrap();
-        assert_eq!(provider.source_id, "sui-deepbook-bootstrap");
+        assert!(serde_json::to_value(&provider.config)
+            .unwrap()
+            .get("sourceId")
+            .is_none());
         assert_eq!(provider.config.request_limit, 100);
         assert!(matches!(
             provider.config.start_position,
@@ -423,7 +411,6 @@ mod tests {
     #[test]
     fn test_builder_custom_values() {
         let provider = SuiDeepBookBootstrapProvider::builder()
-            .with_source_id("source-a")
             .with_rpc_endpoint("https://fullnode.testnet.sui.io:443")
             .with_deepbook_package_id("0xabc")
             .with_request_limit(25)
@@ -432,7 +419,10 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(provider.source_id, "source-a");
+        assert!(serde_json::to_value(&provider.config)
+            .unwrap()
+            .get("sourceId")
+            .is_none());
         assert_eq!(
             provider.config.rpc_endpoint,
             "https://fullnode.testnet.sui.io:443"

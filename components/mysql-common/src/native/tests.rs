@@ -63,7 +63,7 @@ fn gtids_and_manual_keys_are_validated_without_changing_existing_configuration_s
 }
 
 #[test]
-fn existing_shared_transaction_binding_bytes_remain_unchanged() -> Result<()> {
+fn shared_transaction_binding_uses_the_component_uuid_stably() -> Result<()> {
     use sha2::{Digest, Sha256};
     let mut value = config(3306, MySqlOutput::Transactions);
     value.start = MySqlStartPosition::Position {
@@ -81,9 +81,10 @@ fn existing_shared_transaction_binding_bytes_remain_unchanged() -> Result<()> {
             collation: None,
         }],
     )]);
-    let source = drasi_computation_contracts::ComponentId::try_new("source")?;
+    let source =
+        drasi_computation_contracts::ComponentId::try_new("8c950040-bfe1-5104-b7f0-744bb1e73e84")?;
     let stream = drasi_computation_contracts::StreamId::try_new("changes")?;
-    let original = br#"["mysql-native-consumers-v1","server","test",{"items":[{"name":"id","sql_type":"int","key":true,"nullable":false,"charset":null,"collation":null}]},"source","changes",{"mode":"position","file":"mysql-bin.000001","position":4},["graph","source"]]"#;
+    let original = br#"["mysql-native-consumers-v1","server","test",{"items":[{"name":"id","sql_type":"int","key":true,"nullable":false,"charset":null,"collation":null}]},"8c950040-bfe1-5104-b7f0-744bb1e73e84","changes",{"mode":"position","file":"mysql-bin.000001","position":4},["graph","8c950040-bfe1-5104-b7f0-744bb1e73e84"]]"#;
     let expected: [u8; 32] = Sha256::digest(original).into();
     assert_eq!(
         source::shared_source_binding(&value, "server", &tables, &source, &stream, "graph")?,

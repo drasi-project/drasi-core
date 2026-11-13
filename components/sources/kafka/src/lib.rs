@@ -66,13 +66,14 @@ pub struct KafkaSource {
     base: SourceBase,
     config: KafkaSourceConfig,
     shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
-    subscriber_resume_positions: Arc<RwLock<HashMap<String, Vec<i64>>>>,
+    subscriber_resume_positions: Arc<RwLock<HashMap<drasi_lib::ComponentId, Vec<i64>>>>,
 }
 
 impl KafkaSource {
     /// Create a new KafkaSource with the given configuration.
     pub fn new(config: KafkaSourceConfig) -> anyhow::Result<Self> {
-        let params = SourceBaseParams::new(&config.id).with_dispatch_mode(DispatchMode::Channel);
+        let params =
+            SourceBaseParams::new(config.id.clone()).with_dispatch_mode(DispatchMode::Channel);
         Self::with_params(config, params)
     }
 
@@ -89,7 +90,7 @@ impl KafkaSource {
     }
 
     /// Create a builder for constructing a KafkaSource.
-    pub fn builder(id: impl Into<String>) -> KafkaSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> KafkaSourceBuilder {
         KafkaSourceBuilder::new(id)
     }
 
@@ -117,7 +118,7 @@ impl KafkaSource {
 
 #[async_trait]
 impl Source for KafkaSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -310,8 +311,8 @@ impl Source for KafkaSource {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -321,7 +322,7 @@ impl Source for KafkaSource {
         self.base.set_bootstrap_provider(provider).await;
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_lib::ComponentId) {
         self.subscriber_resume_positions
             .write()
             .await

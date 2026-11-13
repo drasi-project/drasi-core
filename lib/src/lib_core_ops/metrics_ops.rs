@@ -16,14 +16,18 @@
 //!
 //! This module exposes observability metrics snapshots for queries, reactions,
 //! and lifecycle events.
+//! Per-component `ComponentName` selectors are exact current names; use the paired
+//! `_by_id` methods for explicit [`crate::config::ComponentId`] selection.
 
 use std::collections::HashMap;
 
+use crate::config::ComponentId;
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::metrics::{
     LifecycleMetricsSnapshot, QueryOutputMetricsSnapshot, ReactionMetricsSnapshot,
 };
+use crate::ComponentName;
 
 impl DrasiLib {
     /// Read committed input and produced-output progress for ready queries.
@@ -44,7 +48,7 @@ impl DrasiLib {
             .map_err(|error| {
                 crate::DrasiError::operation_failed(
                     "instance",
-                    &self.config.id,
+                    crate::error::OperationSubject::Instance(self.config.id.clone()),
                     "get_query_progress_metrics",
                     error.to_string(),
                 )
@@ -62,17 +66,28 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let metrics = core.get_query_output_metrics("my_query").await?;
+    /// let metrics = core.get_query_output_metrics_by_name(&drasi_lib::ComponentName::try_new("my_query")?).await?;
     /// println!("Outbox size: {}", metrics.outbox_size);
     /// println!("Sequence advances: {}", metrics.result_seq_advances);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_output_metrics(
+    pub async fn get_query_output_metrics_by_name(
         &self,
-        query_id: &str,
+        query_name: &ComponentName,
     ) -> Result<QueryOutputMetricsSnapshot> {
-        self.inspection.get_query_output_metrics(query_id).await
+        let query_id = self.resolve_component_name(query_name, "query")?;
+        self.get_query_output_metrics_by_id(&query_id).await
+    }
+
+    /// Get query output metrics by immutable UUID.
+    pub async fn get_query_output_metrics_by_id(
+        &self,
+        query_id: &ComponentId,
+    ) -> Result<QueryOutputMetricsSnapshot> {
+        self.inspection
+            .get_query_output_metrics_by_id(query_id)
+            .await
     }
 
     /// Get per-reaction metrics for a specific reaction.
@@ -87,18 +102,29 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let metrics = core.get_reaction_metrics("my_reaction").await?;
+    /// let metrics = core.get_reaction_metrics_by_name(&drasi_lib::ComponentName::try_new("my_reaction")?).await?;
     /// for (query_id, snapshot) in &metrics {
     ///     println!("  Query '{}': dedup_skip={}", query_id, snapshot.dedup_skip_count);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_reaction_metrics(
+    pub async fn get_reaction_metrics_by_name(
         &self,
-        reaction_id: &str,
-    ) -> Result<HashMap<String, ReactionMetricsSnapshot>> {
-        self.inspection.get_reaction_metrics(reaction_id).await
+        reaction_name: &ComponentName,
+    ) -> Result<HashMap<ComponentId, ReactionMetricsSnapshot>> {
+        let reaction_id = self.resolve_component_name(reaction_name, "reaction")?;
+        self.get_reaction_metrics_by_id(&reaction_id).await
+    }
+
+    /// Get reaction metrics by immutable UUID.
+    pub async fn get_reaction_metrics_by_id(
+        &self,
+        reaction_id: &ComponentId,
+    ) -> Result<HashMap<ComponentId, ReactionMetricsSnapshot>> {
+        self.inspection
+            .get_reaction_metrics_by_id(reaction_id)
+            .await
     }
 
     /// Get global lifecycle metrics.

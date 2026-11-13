@@ -27,10 +27,14 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{config::ComponentId, DrasiLib, Query};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 
 use drasi_reaction_mcp::{McpReaction, NotificationTemplate, QueryConfig};
+
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
 
 struct McpTestClient {
     base_url: String,
@@ -128,9 +132,11 @@ impl McpTestClient {
                 "params": params,
             }))
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
 
         let body: Value = response.json().await?;
+        anyhow::ensure!(body.get("error").is_none(), "MCP request failed: {body}");
         Ok(body["result"].clone())
     }
 
@@ -159,21 +165,31 @@ async fn wait_for_port(handle: &Arc<AtomicU16>) -> Result<u16> {
 
 #[tokio::test]
 async fn test_mcp_reaction_end_to_end() -> Result<()> {
+    let source_name = "test-source";
     let (source, source_handle) = ApplicationSource::new(
-        "test-source",
+        component_id(29).clone(),
         ApplicationSourceConfig {
             properties: std::collections::HashMap::new(),
             durability: None,
         },
     )?;
 
-    let query = Query::cypher("test-query")
-        .query("MATCH (n:TestNode) RETURN n.id AS id, n.value AS value")
-        .from_input("test-source")
-        .build();
+    let query_id = component_id(30);
+    let query_uri = format!("drasi://query/{query_id}");
+    let query = Query::cypher(
+        drasi_lib::ComponentName::try_new("test-query").expect("fixture component name"),
+    )
+    .with_id(query_id)
+    .query("MATCH (n:TestNode) RETURN n.id AS id, n.value AS value")
+    .from_input_by_name(
+        drasi_lib::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .build()
+    .expect("valid query configuration");
 
-    let reaction = McpReaction::builder("test-reaction")
-        .with_query("test-query")
+    let reaction_name = "test-reaction";
+    let reaction = McpReaction::builder(component_id(33).clone())
+        .with_query_by_name(drasi_lib::ComponentName::try_new("test-query").expect("fixture component name"))
         .with_port(0)
         .with_bearer_token("test-secret-token")
         .with_route(
@@ -199,6 +215,7 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
     let port_handle = reaction.bound_port_handle();
 
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -212,9 +229,15 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
                 .clone(),
         )
         .with_id("test-core")
-        .with_source(source)
+        .with_source(
+            drasi_lib::ComponentName::try_new("test-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_lib::ComponentName::try_new("test-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 
@@ -245,7 +268,7 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
     let mut client = McpTestClient::connect(base_url.clone(), "test-secret-token").await?;
-    client.subscribe("drasi://query/test-query").await?;
+    client.subscribe(&query_uri).await?;
 
     let insert_props = PropertyMapBuilder::new()
         .with_integer("id", 1)
@@ -256,6 +279,7 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
         .await?;
 
     let notification = client.next_notification(Duration::from_secs(5)).await?;
+    assert_eq!(notification["params"]["uri"], query_uri);
     assert_eq!(notification["params"]["operation"], "added");
     assert_eq!(notification["params"]["data"]["op"], "add");
     assert_eq!(notification["params"]["data"]["id"], 1);
@@ -284,7 +308,7 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
     let resources = list_result["resources"].as_array().unwrap();
     assert!(resources
         .iter()
-        .any(|resource| { resource["uri"] == "drasi://query/test-query" }));
+        .any(|resource| { resource["uri"] == query_uri }));
 
     let insert_props = PropertyMapBuilder::new()
         .with_integer("id", 2)
@@ -296,11 +320,7 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
     let _ = client.next_notification(Duration::from_secs(5)).await?;
 
     let read_result = client
-        .request(
-            11,
-            "resources/read",
-            json!({ "uri": "drasi://query/test-query" }),
-        )
+        .request(11, "resources/read", json!({ "uri": query_uri }))
         .await?;
     let text = read_result["contents"][0]["text"]
         .as_str()

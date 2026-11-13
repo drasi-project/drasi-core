@@ -37,7 +37,7 @@ pub(super) fn family_plugin(kind: &str, linked: bool) -> Result<Arc<NativePlugin
     };
     let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| target.join("debug"));
+        .unwrap_or_else(|| target.join("debug/plugins"));
     computation::load(directory.join(format!(
         "{}drasi_computation_bootstrap_http{}",
         std::env::consts::DLL_PREFIX,
@@ -47,13 +47,13 @@ pub(super) fn family_plugin(kind: &str, linked: bool) -> Result<Arc<NativePlugin
 
 pub(super) fn family_component(
     kind: &str,
-    name: &str,
+    id: &str,
     config: Value,
     linked: bool,
 ) -> Result<NativeComponentProxy> {
-    crate::sink_inputs::create(
+    network_component(
         &family_plugin(kind, linked)?.factories()[0],
-        ComponentId::try_new(name)?,
+        ComponentId::try_new(id)?,
         config,
     )
 }
@@ -66,7 +66,7 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
     for linked in [true, false] {
         let port = free_port()?;
         let config = json!({
-            "stream":"hooks/out","sourceId":"hooks","host":"127.0.0.1","port":port,
+            "stream":"hooks/out","host":"127.0.0.1","port":port,
             "ingressCapacity":4,"adaptiveEnabled":true,"adaptiveMinBatchSize":2,"adaptiveMaxBatchSize":2,
             "webhooks":{"errorBehavior":"reject","cors":{"allowOrigins":["https://example.test"]},
                 "routes":[{
@@ -88,7 +88,8 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
                 }]
             }
         });
-        let mut source = family_component(HTTP_SOURCE, "hooks", config, linked)?;
+        let mut source = family_component(HTTP_SOURCE, NETWORK_SOURCE_ID, config, linked)?;
+        source.initialize().await?;
         source.start().await?;
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{port}/hooks/acme?region=west%20coast");
@@ -122,7 +123,7 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
         else {
             anyhow::bail!("expected mapped node");
         };
-        assert_eq!(metadata.reference.source_id.as_ref(), "hooks");
+        assert_eq!(metadata.reference.namespace.as_ref(), NETWORK_SOURCE_ID);
         assert_eq!(metadata.reference.element_id.as_ref(), "r1");
         assert_eq!(metadata.effective_from, 1_700_000_000_000);
         assert_eq!(
@@ -174,6 +175,7 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
             "https://example.test"
         );
         source.stop().await?;
+        source.dispose().await?;
         drop(TcpListener::bind(("127.0.0.1", port)).await?);
     }
     std::env::remove_var("NATIVE_HTTP_FAMILY_HMAC_TEST");
@@ -188,7 +190,7 @@ async fn native_http_adaptive_prefetch_keeps_the_first_event_when_next_is_cancel
         let port = free_port()?;
         let mut source = family_component(
             HTTP_SOURCE,
-            "adaptive",
+            NETWORK_SOURCE_ID,
             json!({
                 "stream":"facilities-db/out","host":"127.0.0.1","port":port,"ingressCapacity":3,
                 "adaptiveEnabled":true,"adaptiveMinBatchSize":3,"adaptiveMaxBatchSize":3,
@@ -196,9 +198,10 @@ async fn native_http_adaptive_prefetch_keeps_the_first_event_when_next_is_cancel
             }),
             linked,
         )?;
+        source.initialize().await?;
         source.start().await?;
         let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{port}/sources/facilities-db/events");
+        let url = format!("http://127.0.0.1:{port}/sources/{NETWORK_SOURCE_ID}/events");
         client
             .post(&url)
             .json(&http_event(1))
@@ -224,6 +227,7 @@ async fn native_http_adaptive_prefetch_keeps_the_first_event_when_next_is_cancel
             assert_eq!(envelope.system().sequence(), value as u64);
         }
         source.stop().await?;
+        source.dispose().await?;
     }
     Ok(())
 }
@@ -328,7 +332,7 @@ async fn rest() -> Result<RestServer> {
 
 fn snapshot_config(address: SocketAddr) -> Value {
     json!({
-        "source":"source","stream":"source/out","outputCapacity":1,
+        "source":NETWORK_SOURCE_ID,"stream":"source/out","outputCapacity":1,
         "maxDurationMs":5000,"settings":{"maxRetries":1,"retryDelayMs":1,"maxPages":4,
             "endpoints":[{
                 "url":format!("http://{address}/rows"),
@@ -349,18 +353,20 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
     for linked in [true, false] {
         let mut sink = family_component(
             HTTP_SINK,
-            "templated",
+            NETWORK_SINK_ID,
             json!({
-                "outputs":{"q":{"component":"q","port":"out"}},"baseUrl":format!("http://{}",server.address),
+                "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"baseUrl":format!("http://{}",server.address),
                 "outputTemplates":{"routes":{"q":{"added":{"method":"PUT","url":"/row/{{after.value}}",
                     "headers":{"x-rendered-output":"{{output.component}}/{{output.port}}"},
                     "template":"{\"value\":{{after.value}},\"operation\":\"{{operation}}\",\"identity\":{{json identity}}}"}}}}
             }),
             linked,
         )?;
+        sink.initialize().await?;
         sink.start().await?;
         sink.handle(result_input(1)?).await?;
         sink.stop().await?;
+        sink.dispose().await?;
         let request = server
             .state
             .requests
@@ -371,8 +377,11 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
             .clone();
         assert_eq!(request.0, Method::PUT);
         assert_eq!(request.1, "/row/42");
-        assert_eq!(request.2["x-rendered-output"], "q/out");
-        assert_eq!(request.2["x-drasi-component"], "q");
+        assert_eq!(
+            request.2["x-rendered-output"],
+            format!("{RESULT_QUERY_ID}/out")
+        );
+        assert_eq!(request.2["x-drasi-component"], RESULT_QUERY_ID);
         assert_eq!(request.2["x-drasi-port"], "out");
         assert_eq!(request.3["value"], 42);
         assert_eq!(request.3["operation"], "ADD");
@@ -380,19 +389,21 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
         assert_eq!(request.3["identity"]["id"].as_str().map(str::len), Some(16));
         let mut batch = family_component(
             HTTP_SINK,
-            "batch",
+            "00000000-0000-0000-0000-000000000608",
             json!({
-                "outputs":{"q":{"component":"q","port":"out"}},"baseUrl":format!("http://{}",server.address),
+                "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"baseUrl":format!("http://{}",server.address),
                 "adaptive":{"adaptiveMinBatchSize":2,"adaptiveMaxBatchSize":2,"adaptiveBatchTimeoutMs":50},
                 "batchEndpoint":"/batch"
             }),
             linked,
         )?;
+        batch.initialize().await?;
         batch.start().await?;
         batch
             .handle_batch(vec![result_input(2)?, result_input(3)?])
             .await?;
         batch.stop().await?;
+        batch.dispose().await?;
         let request = server
             .state
             .requests
@@ -435,28 +446,31 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
                     .clone(),
             )
             .with_id("http-family")
+            .with_allow_external_component_ids(true)
             .build()
             .await?;
         let port = free_port()?;
         let result = async {
             let source = family_component(
                 HTTP_SOURCE,
-                "source",
+                NETWORK_SOURCE_ID,
                 json!({
-                    "sourceId":"source","stream":"source/out","host":"127.0.0.1","port":port
+                    "stream":"source/out","host":"127.0.0.1","port":port
                 }),
                 linked,
             )?;
-            let output = Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?);
+            let source_id = source.descriptor().id().clone();
+            let query_id = ComponentId::try_new(RESULT_QUERY_ID)?;
+            let output = Endpoint::new(source_id.clone(), PortId::try_new("out")?);
             core.add_components(
                 ComponentBatch::builder()
-                    .source(Box::new(source))
+                    .source(drasi_lib::computation::v1::ComponentName::try_new("source").expect("fixture component name"), Box::new(source))
                     .bind_stream(output.clone(), stream("source/out"))
                     .build()?,
             )
             .await?;
             let snapshot = native.bootstrap_factories()[0].create_provider(
-                ComponentId::try_new("q")?,
+                ComponentId::try_new(RESULT_QUERY_ID)?,
                 snapshot_config(server.address),
                 Some(Scope {
                     instance_id: "http-family".into(),
@@ -472,30 +486,41 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
             let pipeline = core
                 .computation_pipeline()?
                 .native_source(output)?
-                .query_bootstrap("q", snapshot)?
+                .query_bootstrap(&query_id, snapshot)?
                 .query(
-                    drasi_lib::Query::cypher("q")
+                    drasi_lib::Query::cypher(drasi_core_types::ComponentName::try_new("q").expect("fixture component name"))
                         .query("MATCH (r:Room) RETURN elementId(r) AS id,r.value AS value")
-                        .from_input("source")
+                        .from_input_by_id(source_id.clone())
                         .enable_bootstrap(true)
-                        .build(),
+                        .build()?
+                        .with_assigned_id(query_id.clone()),
                 );
             core.add_components(pipeline.build()?).await?;
-            let sink = family_component(
-                HTTP_SINK,
-                "sink",
+            let query_port = PortId::try_new("out")?;
+            let query_stream = core.computation_control()?.desired_snapshot().nodes.iter()
+                .find(|node| node.descriptor.id() == &query_id)
+                .and_then(|node| node.output_streams.get(&query_port))
+                .cloned()
+                .context("actual query output stream")?;
+            let sink = family_plugin(HTTP_SINK, linked)?.factories()[0].create_component_with_inputs(
+                ComponentId::try_new(NETWORK_SINK_ID)?,
                 json!({
-                    "outputs":{"q":{"component":"q","port":"out"}},"url":format!("http://{}/reaction",server.address)
+                    "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"url":format!("http://{}/reaction",server.address)
                 }),
-                linked,
+                vec![InputBinding {
+                    input_port: PortId::try_new("in")?,
+                    output: OutputEndpoint::new(query_id.clone(), query_port),
+                    stream: query_stream,
+                }],
             )?;
+            let sink_id = sink.descriptor().id().clone();
             core.add_components(
                 ComponentBatch::builder()
-                    .sink(Box::new(sink))
+                    .sink(drasi_lib::computation::v1::ComponentName::try_new("sink").expect("fixture component name"), Box::new(sink))
                     .connect(
                         EdgeDefinition::new(
-                            Endpoint::new(ComponentId::try_new("q")?, PortId::try_new("out")?),
-                            Endpoint::new(ComponentId::try_new("sink")?, PortId::try_new("in")?),
+                            Endpoint::new(query_id, PortId::try_new("out")?),
+                            Endpoint::new(sink_id, PortId::try_new("in")?),
                         ),
                         Box::new(BoundedPipeConfig { capacity: 2 }),
                     )
@@ -503,15 +528,15 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
             )
             .await?;
             core.start().await?;
-            tokio::time::timeout(DEADLINE, core.computation_component("q")?.wait_started())
+            tokio::time::timeout(DEADLINE, core.component_by_name(&drasi_core_types::ComponentName::try_new("q").expect("fixture component name"))?.wait_started())
                 .await??;
-            let mut results = core.subscribe_query_results("q").await?;
+            let mut results = core.subscribe_query_results_by_name(&drasi_core_types::ComponentName::try_new("q").expect("fixture component name")).await?;
             assert_eq!(results.snapshot.len(), 2);
             let mut initial: Vec<_> = results.snapshot.to_vec().into_iter().map(|row| row["value"].as_i64().expect("snapshot value")).collect();
             initial.sort();
             assert_eq!(initial, [10, 20]);
             reqwest::Client::new()
-                .post(format!("http://127.0.0.1:{port}/sources/source/events"))
+                .post(format!("http://127.0.0.1:{port}/sources/{source_id}/events"))
                 .json(
                     &json!({"operation":"update","timestamp":1700000000000000000u64,"element":{
                         "type":"node","id":"r1","labels":["Room"],"properties":{"value":99}
@@ -523,7 +548,7 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
             tokio::time::timeout(DEADLINE, async {
                 loop {
                     let delivered = server.state.arrived.notified();
-                    let rows = core.get_query_results("q").await?;
+                    let rows = core.get_query_results_by_name(&drasi_core_types::ComponentName::try_new("q").expect("fixture component name")).await?;
                     let effect = server.state.requests.lock().unwrap().iter()
                         .any(|(_,path,_,body)| path == "/reaction" && body["operation"] == "REPLACE"
                             && body["before"]["value"] == 10 && body["after"]["value"] == 99);
@@ -539,10 +564,10 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
             })
             .await??;
             assert_eq!(
-                core.computation_component("source")?.observed()?.lifecycle,
+                core.component_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name"))?.observed()?.lifecycle,
                 ComponentLifecycle::Running
             );
-            assert!(core.computation_component("sink")?.observed()?.failure.is_none());
+            assert!(core.component_by_name(&drasi_core_types::ComponentName::try_new("sink").expect("fixture component name"))?.observed()?.failure.is_none());
             Ok::<_, anyhow::Error>(())
         }
         .await;
@@ -582,7 +607,7 @@ async fn native_http_bootstrap_bounds_and_cancelled_streams_never_report_partial
                 config[option] = json!(8);
             }
             let provider = native.bootstrap_factories()[0].create_provider(
-                ComponentId::try_new("q")?,
+                ComponentId::try_new(RESULT_QUERY_ID)?,
                 config,
                 Some(Scope {
                     instance_id: "limits".into(),
@@ -602,7 +627,7 @@ async fn native_http_bootstrap_bounds_and_cancelled_streams_never_report_partial
             provider.stop().await?;
         }
         let provider = native.bootstrap_factories()[0].create_provider(
-            ComponentId::try_new("q")?,
+            ComponentId::try_new(RESULT_QUERY_ID)?,
             snapshot_config(server.address),
             Some(Scope {
                 instance_id: "cancel".into(),
@@ -633,7 +658,7 @@ async fn native_http_bootstrap_bounds_and_cancelled_streams_never_report_partial
                 "template":{"id":"{{item.id}}-link","labels":["Linked"]}
             }));
         let provider = native.bootstrap_factories()[0].create_provider(
-            ComponentId::try_new("q")?,
+            ComponentId::try_new(RESULT_QUERY_ID)?,
             config,
             Some(Scope {
                 instance_id: "labels".into(),

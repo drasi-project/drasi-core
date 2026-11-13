@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureDrasiLibBuilderExt as _;
+
 mod mock_source;
 
 use std::{io::Write, num::NonZeroUsize, sync::Arc, time::Instant};
@@ -51,7 +55,11 @@ async fn submit(
     query.delivery_completed(&output).await
 }
 
-async fn measure(name: &str, provider: Arc<dyn ComputationIndexProvider>) -> anyhow::Result<Value> {
+async fn measure(
+    id: ComponentId,
+    name: &str,
+    provider: Arc<dyn ComputationIndexProvider>,
+) -> anyhow::Result<Value> {
     assert!(
         provider.is_volatile(),
         "the demo's query-state comparison must be in memory"
@@ -59,7 +67,7 @@ async fn measure(name: &str, provider: Arc<dyn ComputationIndexProvider>) -> any
     let mut query = ContinuousQueryTransformer::new_with_options(
         ContinuousQueryDefinition {
             graph_id: "memory-provider-isolation".into(),
-            id: ComponentId::try_new(name)?,
+            id,
             query: TEXT.into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new(format!("{name}/out"))?,
@@ -144,7 +152,14 @@ async fn measure(name: &str, provider: Arc<dyn ComputationIndexProvider>) -> any
 
 #[tokio::test]
 async fn bare_memory_provider_processes_validated_context_updates() -> anyhow::Result<()> {
-    write_report(&measure("bare-memory", Arc::new(InMemoryComputationProvider)).await?)
+    write_report(
+        &measure(
+            fixture_support::component_id(1),
+            "bare-memory",
+            Arc::new(InMemoryComputationProvider),
+        )
+        .await?,
+    )
 }
 
 fn write_report(report: &Value) -> anyhow::Result<()> {
@@ -159,6 +174,7 @@ async fn default_pipeline_memory_provider_processes_the_same_context_updates() -
 {
     let (source, _handle) = mock_source::MockSource::new("source")?;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -171,21 +187,31 @@ async fn default_pipeline_memory_provider_processes_the_same_context_updates() -
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source)
+        .with_fixture_source(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            source,
+        )
         .build()
         .await?;
+    let source_id = core
+        .component_by_name(&drasi_core_types::ComponentName::try_new("source")?)?
+        .id()
+        .clone();
     let batch = core
         .computation_pipeline()?
         .source(
-            core.borrow_computation_source("source").await?,
+            core.borrow_computation_source_by_id(&source_id).await?,
             SourceSubscriptionOptions::default(),
         )?
         .query(
-            drasi_lib::Query::cypher("probe")
-                .query(TEXT)
-                .from_input("source")
-                .enable_bootstrap(false)
-                .build(),
+            drasi_lib::Query::cypher(
+                drasi_core_types::ComponentName::try_new("probe").expect("fixture component name"),
+            )
+            .query(TEXT)
+            .from_input_by_id(source_id.clone())
+            .enable_bootstrap(false)
+            .build()?
+            .with_assigned_id(fixture_support::component_id(744)),
         )
         .build()?;
     let provider = batch
@@ -198,7 +224,11 @@ async fn default_pipeline_memory_provider_processes_the_same_context_updates() -
         .0
         .clone();
     let indexes = provider
-        .create_indexes("memory-provider-isolation", "capabilities")
+        .create_indexes(
+            "memory-provider-isolation",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a4")
+                .expect("fixture UUID"),
+        )
         .await?;
     assert!(
         indexes.cleanup().is_none(),
@@ -212,27 +242,44 @@ async fn default_pipeline_memory_provider_processes_the_same_context_updates() -
         .checkpoint_store()
         .expect("ordinary memory queries expose actual volatile input progress");
     assert!(!checkpoints.is_persistent());
-    checkpoints.stage_checkpoint("source", 7, None).await?;
+    checkpoints
+        .stage_checkpoint(
+            &drasi_core_types::CheckpointKey::Source(source_id.clone()),
+            7,
+            None,
+        )
+        .await?;
     assert_eq!(
         checkpoints
-            .read_checkpoint("source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id.clone()))
             .await?
             .expect("stored volatile checkpoint")
             .sequence,
         7
     );
     let fresh = provider
-        .create_indexes("memory-provider-isolation", "capabilities")
+        .create_indexes(
+            "memory-provider-isolation",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a4")
+                .expect("fixture UUID"),
+        )
         .await?;
     assert!(fresh
         .checkpoint_store()
         .expect("fresh volatile checkpoint store")
-        .read_checkpoint("source")
+        .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id))
         .await?
         .is_none());
     assert!(indexes.outbox_writer().is_none());
     drop(indexes);
-    write_report(&measure("pipeline-memory", provider).await?)?;
+    write_report(
+        &measure(
+            fixture_support::component_id(2),
+            "pipeline-memory",
+            provider,
+        )
+        .await?,
+    )?;
     drop(batch);
     core.shutdown().await?;
     Ok(())

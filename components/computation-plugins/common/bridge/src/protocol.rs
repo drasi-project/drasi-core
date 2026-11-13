@@ -13,7 +13,7 @@ use crate::{
     IngressDrainStatus, Profile, Result,
 };
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const CONTROL_BYTES: usize = 16 * 1024;
 const MAGIC: &[u8; 4] = b"DRBG";
 

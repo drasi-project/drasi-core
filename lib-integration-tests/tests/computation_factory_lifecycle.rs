@@ -28,6 +28,7 @@ use std::{
 };
 
 const DEADLINE: Duration = Duration::from_secs(15);
+const QUERY_ID: &str = "91cac0b0-2a36-5999-9de4-99597dc9ab6e";
 
 fn effect_sequences(root: &Path, instance: &str) -> Result<Vec<u64>> {
     let records = std::fs::read_to_string(root.join(format!("{instance}.jsonl")))?;
@@ -105,18 +106,21 @@ impl Resources {
             .context("query catalog")
     }
     async fn append(&self, instance: &str, id: u64) -> Result<()> {
-        let partition = format!("{instance}-input");
+        let namespace = format!("{instance}-input");
+        let scope =
+            drasi_lib::StorageScope::new(instance).nested(&drasi_lib::StorageScope::new("input"));
+        let owner = source_descriptor()?.id().clone();
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(&partition, &id.to_string()),
+                    reference: ElementReference::new(&namespace, &id.to_string()),
                     labels: Arc::from([Arc::from("Item")]),
                     effective_from: id,
                 },
                 properties: ElementPropertyMap::from(json!({"value":1})),
             },
         };
-        assert_eq!(self.wal.append(&partition, &change).await?, id);
+        assert_eq!(self.wal.append(&scope, &owner, &change).await?, id);
         Ok(())
     }
 }
@@ -142,15 +146,18 @@ impl ManagementResourceResolver for Resources {
     ) -> Result<ResourceHandle> {
         let handle = match config["kind"].as_str().context("resource kind")? {
             "wal" => {
-                let partition = format!("{instance}-input");
+                let scope = drasi_lib::StorageScope::new(instance)
+                    .nested(&drasi_lib::StorageScope::new("input"));
+                let source_id = source_descriptor()?.id().clone();
                 self.wal
-                    .register(&partition, WriteAheadLogConfig::default())
+                    .register(&scope, &source_id, WriteAheadLogConfig::default())
                     .await?;
                 ResourceHandle::new(
                     ResourceRole::Wal,
                     Arc::new(WalSourceResource {
                         provider: self.wal.clone(),
-                        partition,
+                        scope,
+                        source_id,
                     }),
                 )
             }
@@ -161,7 +168,7 @@ impl ManagementResourceResolver for Resources {
             "progress" => ResourceHandle::new(
                 ResourceRole::Checkpoint,
                 Arc::new(QuerySourceProgressResource(Arc::new(
-                    QuerySourceProgress::new(graph_id, ComponentId::try_new("query")?)?,
+                    QuerySourceProgress::new(graph_id, ComponentId::try_new(QUERY_ID)?)?,
                 ))),
             ),
             "catalog" => {
@@ -175,7 +182,12 @@ impl ManagementResourceResolver for Resources {
             "consumer" => ResourceHandle::new(
                 ResourceRole::Checkpoint,
                 Arc::new(ConsumerProgressResource(Arc::new(
-                    StateStoreConsumerProgress::new(instance, "reaction", self.state.clone())?,
+                    StateStoreConsumerProgress::new(
+                        instance,
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                            .expect("fixture UUID"),
+                        self.state.clone(),
+                    )?,
                 ))),
             ),
             kind @ ("output" | "incoming") => {
@@ -186,7 +198,14 @@ impl ManagementResourceResolver for Resources {
                         incoming_definition()
                     },
                     self.indexes[instance]
-                        .create_indexes(graph_id, kind)
+                        .create_indexes(
+                            graph_id,
+                            &ComponentId::try_new(if kind == "output" {
+                                "00000000-0000-0000-0000-000000000501"
+                            } else {
+                                "00000000-0000-0000-0000-000000000502"
+                            })?,
+                        )
                         .await?,
                     FactoryRegistry::standard()
                         .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
@@ -260,6 +279,7 @@ impl ReactionFactory {
                 fields: BTreeMap::from([(
                     Arc::from("path"),
                     ConfigurationField {
+                        constraint: None,
                         value_type: ConfigurationType::String,
                         required: true,
                         secret: false,
@@ -313,15 +333,12 @@ impl ComponentFactory for ReactionFactory {
 fn resource(id: &str) -> ResourceId {
     ResourceId::try_new(id).expect("resource ID")
 }
-fn endpoint(id: &str, port: &str) -> Result<Endpoint> {
-    Ok(Endpoint::new(
-        ComponentId::try_new(id)?,
-        PortId::try_new(port)?,
-    ))
+fn endpoint(id: &ComponentId, port: &str) -> Result<Endpoint> {
+    Ok(Endpoint::new(id.clone(), PortId::try_new(port)?))
 }
 fn source_descriptor() -> Result<ComponentDescriptor> {
     Ok(ComponentDescriptor::try_new(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("6019851a-ca7e-56a2-8f51-b608b0bcdeef")?,
         vec![PortDescriptor::new(
             PortId::try_new("out")?,
             PortDirection::Output,
@@ -394,7 +411,7 @@ fn desired(root: &Path, instance: &str, durable_input: bool) -> Result<DesiredIn
     };
     let definition = ContinuousQueryDefinition {
         graph_id: topology.graph_id.clone(),
-        id: ComponentId::try_new("query")?,
+        id: ComponentId::try_new(QUERY_ID)?,
         query: "MATCH (n:Item) RETURN sum(n.value) AS total".into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("query/out")?,
@@ -431,7 +448,7 @@ fn desired(root: &Path, instance: &str, durable_input: bool) -> Result<DesiredIn
     };
     let reaction = ComponentSpecification {
         descriptor: ComponentDescriptor::try_new(
-            ComponentId::try_new("reaction")?,
+            ComponentId::try_new("dcead356-cd75-56ec-974a-fbc4d5aa7325")?,
             vec![PortDescriptor::new(
                 PortId::try_new("in")?,
                 PortDirection::Input,
@@ -449,13 +466,17 @@ fn desired(root: &Path, instance: &str, durable_input: bool) -> Result<DesiredIn
         )]),
         dependencies: BTreeMap::from([(Arc::from("progress"), vec![resource("consumer")])]),
     };
-    for (spec, stream) in [
-        (source, Some("source/out")),
-        (query, Some("query/out")),
-        (reaction, None),
+    let source_id = source.descriptor.id().clone();
+    let query_id = query.descriptor.id().clone();
+    let reaction_id = reaction.descriptor.id().clone();
+    for (name, spec, stream) in [
+        ("source", source, Some("source/out")),
+        ("query", query, Some("query/out")),
+        ("reaction", reaction, None),
     ] {
         topology.components.push(DesiredComponent {
             descriptor: spec.descriptor.clone(),
+            name: ComponentName::try_new(name)?,
             role: spec.role,
             completion: spec.completion,
             streams: match stream {
@@ -471,7 +492,10 @@ fn desired(root: &Path, instance: &str, durable_input: bool) -> Result<DesiredIn
     }
     topology.relationships = vec![
         DesiredRelationship {
-            definition: EdgeDefinition::new(endpoint("source", "out")?, endpoint("query", "in")?),
+            definition: EdgeDefinition::new(
+                endpoint(&source_id, "out")?,
+                endpoint(&query_id, "in")?,
+            ),
             policy: RelationshipPolicy::default(),
             pipe: if durable_input {
                 DesiredPipe::Qos(incoming_definition().pipe(resource("incoming"), "query"))
@@ -480,7 +504,10 @@ fn desired(root: &Path, instance: &str, durable_input: bool) -> Result<DesiredIn
             },
         },
         DesiredRelationship {
-            definition: EdgeDefinition::new(endpoint("query", "out")?, endpoint("reaction", "in")?),
+            definition: EdgeDefinition::new(
+                endpoint(&query_id, "out")?,
+                endpoint(&reaction_id, "in")?,
+            ),
             policy: RelationshipPolicy::default(),
             pipe: DesiredPipe::Qos(channel_definition().pipe(resource("output"), "reaction")),
         },
@@ -517,7 +544,9 @@ async fn wait_query(resources: &Resources, instance: &str, sequence: u64) -> Res
     let catalog = resources.catalog(instance)?;
     tokio::time::timeout(DEADLINE, async {
         loop {
-            let snapshot = catalog.snapshot("query", DEADLINE).await?;
+            let snapshot = catalog
+                .snapshot(&ComponentId::try_new(QUERY_ID)?, DEADLINE)
+                .await?;
             anyhow::ensure!(
                 snapshot.as_of_sequence <= sequence,
                 "query recomputed committed input"
@@ -553,9 +582,13 @@ async fn wait_delivery(resources: &Resources, instance: &str, sequence: u64) -> 
     .await?
 }
 
-async fn stage(core: &DrasiLib, component: &str, start: bool) -> Result<()> {
+async fn stage(core: &DrasiLib, name: &str, start: bool) -> Result<()> {
     let control = core.computation_control()?;
-    let selected = GraphSelection::Exact(vec![ComponentId::try_new(component)?]);
+    let id = core
+        .component_by_name(&ComponentName::try_new(name)?)?
+        .id()
+        .clone();
+    let selected = GraphSelection::Exact(vec![id]);
     if start {
         let report = tokio::time::timeout(
             DEADLINE,
@@ -598,8 +631,9 @@ async fn factory_lifecycle(durable_input: bool) -> Result<()> {
         assert!(!pending.converged());
         assert!(pending.resource_errors.is_empty(), "{pending:?}");
         let observed = core.computation_control()?.observed();
-        assert_eq!(observed.components.len(), 4);
-        let reaction = &observed.components[&ComponentId::try_new("reaction")?];
+        assert_eq!(observed.components.len(), 3);
+        let reaction =
+            &observed.components[&ComponentId::try_new("dcead356-cd75-56ec-974a-fbc4d5aa7325")?];
         assert!(reaction.failure.is_none(), "{reaction:?}");
         assert_eq!(reaction.realization, RealizationState::Blocked);
         assert!(
@@ -632,7 +666,7 @@ async fn factory_lifecycle(durable_input: bool) -> Result<()> {
     assert_eq!(
         resources
             .catalog("left")?
-            .snapshot("query", DEADLINE)
+            .snapshot(&ComponentId::try_new(QUERY_ID)?, DEADLINE)
             .await?
             .as_of_sequence,
         1
@@ -748,31 +782,49 @@ async fn factory_query_apis_restore_committed_results_without_a_second_evaluator
     core.apply_desired_state(0, "configuration", desired(directory.path(), "left", true)?)
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
+    let queries = core.list_queries().await?;
+    assert_eq!(queries.len(), 1);
     assert_eq!(
-        core.list_queries().await?,
-        vec![("query".into(), drasi_lib::ComponentStatus::Added)]
+        queries[0].name,
+        drasi_core::ComponentName::try_new("query")?
     );
+    assert_eq!(queries[0].status, drasi_lib::ComponentStatus::Added);
     assert_eq!(
-        core.get_query_config("query").await?.query,
+        core.get_query_config_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .await?
+        .query,
         "MATCH (n:Item) RETURN sum(n.value) AS total"
     );
     core.start().await?;
     resources.append("left", 1).await?;
     wait_delivery(&resources, "left", 1).await?;
     assert_eq!(
-        core.get_query_results("query").await?,
+        core.get_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .await?,
         vec![json!({"total":1.0})]
     );
     let reader = core
         .query_manager()
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let first = reader.fetch_snapshot().await?;
     assert_eq!(first.as_of_sequence, 1);
     assert!(!reader.is_volatile());
     assert!(
-        reader.subscribe("not-wired".into()).await.is_err(),
+        reader
+            .subscribe(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003de")
+                    .expect("fixture UUID")
+            )
+            .await
+            .is_err(),
         "a result catalogue alone is not a subscription outlet"
     );
     core.shutdown().await?;
@@ -782,7 +834,9 @@ async fn factory_query_apis_restore_committed_results_without_a_second_evaluator
     core.start().await?;
     let reader = core
         .query_manager()
-        .get_query_instance("query")
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let restored = reader.fetch_snapshot().await?;
@@ -793,7 +847,10 @@ async fn factory_query_apis_restore_committed_results_without_a_second_evaluator
     resources.append("left", 2).await?;
     wait_delivery(&resources, "left", 2).await?;
     assert_eq!(
-        core.get_query_results("query").await?,
+        core.get_query_results_by_name(
+            &drasi_core::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .await?,
         vec![json!({"total":2.0})]
     );
     assert_eq!(reader.fetch_outbox(0).await?.latest_sequence, 2);

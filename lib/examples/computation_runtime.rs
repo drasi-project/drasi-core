@@ -21,11 +21,19 @@ use drasi_reaction_application::NativeApplicationReaction;
 use drasi_source_application::{NativeApplicationSource, PropertyMapBuilder};
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 #[tokio::main]
 #[allow(clippy::print_stdout)]
 async fn main() -> anyhow::Result<()> {
     const INSTANCE: &str = "native-runtime-example";
-    let drasi = DrasiLib::builder().with_id(INSTANCE).build().await?;
+    let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
+        .with_id(INSTANCE)
+        .build()
+        .await?;
     let result = async {
         drasi.start().await?;
         let control = drasi.computation_control()?;
@@ -36,12 +44,12 @@ async fn main() -> anyhow::Result<()> {
         let (source, input) = NativeApplicationSource::channel(
             INSTANCE,
             graph_id.clone(),
-            "orders",
+            component_id(227).clone(),
             source_stream.clone(),
             capacity,
         )?;
         let source_output = source.output();
-        let query_id = ComponentId::try_new("orders-query")?;
+        let query_id = component_id(764);
         let query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id,
@@ -56,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .with_recovery_scope(INSTANCE)?;
         let (reaction, mut receiver) = NativeApplicationReaction::channel(
-            "output",
+            component_id(311).clone(),
             QueryChangeCodec::schema().descriptor().clone(),
             capacity,
         )?;
@@ -65,11 +73,20 @@ async fn main() -> anyhow::Result<()> {
         let query_output = Endpoint::new(query_id, PortId::try_new("out")?);
         let mut members = Vec::new();
         for addition in [
-            ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
-                .bind_stream(PortId::try_new("out")?, source_stream),
-            ComponentAddition::new(ConstructedComponent::transformer(Box::new(query)))
-                .bind_stream(PortId::try_new("out")?, query_stream),
-            ComponentAddition::new(ConstructedComponent::sink(Box::new(reaction))),
+            ComponentAddition::new(
+                ComponentName::try_new("orders")?,
+                ConstructedComponent::source(Box::new(source)),
+            )
+            .bind_stream(PortId::try_new("out")?, source_stream),
+            ComponentAddition::new(
+                ComponentName::try_new("orders-query")?,
+                ConstructedComponent::transformer(Box::new(query)),
+            )
+            .bind_stream(PortId::try_new("out")?, query_stream),
+            ComponentAddition::new(
+                ComponentName::try_new("output")?,
+                ConstructedComponent::sink(Box::new(reaction)),
+            ),
         ] {
             members.push(addition.definition.descriptor.id().clone());
             control.add_component(addition.defer_activation()).await?;
@@ -112,11 +129,21 @@ async fn main() -> anyhow::Result<()> {
         );
         println!(
             "Current rows: {:?}",
-            drasi.get_query_results("orders-query").await?
+            drasi
+                .get_query_results_by_name(
+                    &drasi_core_types::ComponentName::try_new("orders-query")
+                        .expect("fixture component name")
+                )
+                .await?
         );
         println!(
             "Query metrics: {:?}",
-            drasi.get_query_output_metrics("orders-query").await?
+            drasi
+                .get_query_output_metrics_by_name(
+                    &drasi_core_types::ComponentName::try_new("orders-query")
+                        .expect("fixture component name")
+                )
+                .await?
         );
         Ok::<_, anyhow::Error>(())
     }

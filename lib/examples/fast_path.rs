@@ -22,7 +22,7 @@ use anyhow::{ensure, Context, Result};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
-use drasi_lib::{channels::ResultDiff, DrasiLib, Query};
+use drasi_lib::{channels::ResultDiff, config::ComponentId, DrasiLib, Query};
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig};
 
@@ -30,6 +30,10 @@ struct MeasuredSystem;
 static MEASURING: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
 static ALLOCATION_SIZES: OnceLock<Vec<AtomicU64>> = OnceLock::new();
 
 fn record(size: usize) {
@@ -108,28 +112,45 @@ async fn main() -> Result<()> {
         "expected event count 1..10000000 and window 1..64"
     );
     let (source, input) = ApplicationSource::new(
-        "input",
+        component_id(113).clone(),
         ApplicationSourceConfig {
             properties: Default::default(),
             durability: None,
         },
     )?;
-    let (reaction, output) = ApplicationReaction::new("output", vec!["projection".into()]);
+    let (reaction, output) = ApplicationReaction::new(
+        component_id(311).clone(),
+        vec![drasi_computation_contracts::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("projection").expect("fixture component name"),
+        )],
+    );
     let mut receiver = output.take_receiver().await.context("output receiver")?;
     let core = DrasiLib::builder()
         .with_query_factory(std::sync::Arc::new(
             drasi_lib::computation::v1::ContinuousQueryFactory::default(),
         ))
+        .with_allow_external_component_ids(true)
         .with_id("fast-path")
-        .with_source(source)
-        .with_query(
-            Query::cypher("projection")
-                .query("MATCH (n:Bench) RETURN n.value AS value")
-                .from_input("input")
-                .enable_bootstrap(false)
-                .build(),
+        .with_source(
+            drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+            source,
         )
-        .with_reaction(reaction)
+        .with_query(
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("projection")
+                    .expect("fixture component name"),
+            )
+            .query("MATCH (n:Bench) RETURN n.value AS value")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("input").expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .build()?,
+        )
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("output").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
     core.start().await?;

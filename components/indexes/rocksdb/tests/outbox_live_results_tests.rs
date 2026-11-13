@@ -32,9 +32,18 @@ use drasi_index_rocksdb::{
 use tempfile::TempDir;
 
 /// Helper: open a RocksDB database at the given path with a test query ID.
-fn open_db(path: &str, query_id: &str) -> Arc<drasi_index_rocksdb::IndexDb> {
+fn open_db(
+    path: &str,
+    query_id: &drasi_core_types::ComponentId,
+) -> Arc<drasi_index_rocksdb::IndexDb> {
     let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
-    open_unified_db(path, query_id, &options).expect("Failed to open RocksDB")
+    open_unified_db(
+        path,
+        &drasi_core_types::StorageScope::default(),
+        query_id,
+        &options,
+    )
+    .expect("Failed to open RocksDB")
 }
 
 fn outbox_writer(db: Arc<drasi_index_rocksdb::IndexDb>) -> RocksDbOutboxWriter {
@@ -52,17 +61,46 @@ async fn scoped_checkpoint_clear_rolls_back_and_preserves_output_identity() {
     let tmp = TempDir::new().unwrap();
     let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
     let indexes = provider
-        .create_scoped_indexes("storage", "query")
+        .create_scoped_indexes(
+            &drasi_core_types::StorageScope::new(("storage").to_owned()),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
+        )
         .await
         .unwrap();
     let store = indexes.checkpoint_store.as_ref().unwrap();
     let control = &indexes.set.session_control;
     store.write_config_hash(123).await.unwrap();
-    store.write_result_sequence("query", 7).await.unwrap();
-    store.write_output_generation("query", 2).await.unwrap();
+    store
+        .write_result_sequence(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            ),
+            7,
+        )
+        .await
+        .unwrap();
+    store
+        .write_output_generation(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            ),
+            2,
+        )
+        .await
+        .unwrap();
     control.begin().await.unwrap();
     store
-        .stage_checkpoint("source", 5, Some(&bytes::Bytes::from_static(b"position")))
+        .stage_checkpoint(
+            &drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
+            5,
+            Some(&bytes::Bytes::from_static(b"position")),
+        )
         .await
         .unwrap();
     control.commit().await.unwrap();
@@ -72,7 +110,10 @@ async fn scoped_checkpoint_clear_rolls_back_and_preserves_output_identity() {
     control.rollback().unwrap();
     assert_eq!(
         store
-            .read_checkpoint("source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            ))
             .await
             .unwrap()
             .unwrap()
@@ -85,9 +126,24 @@ async fn scoped_checkpoint_clear_rolls_back_and_preserves_output_identity() {
     control.commit().await.unwrap();
     assert!(store.read_all_checkpoints().await.unwrap().is_empty());
     assert_eq!(store.read_config_hash().await.unwrap(), None);
-    assert_eq!(store.read_result_sequence("query").await.unwrap(), Some(7));
     assert_eq!(
-        store.read_output_generation("query").await.unwrap(),
+        store
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap(),
+        Some(7)
+    );
+    assert_eq!(
+        store
+            .read_output_generation(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap(),
         Some(2)
     );
 }
@@ -95,7 +151,11 @@ async fn scoped_checkpoint_clear_rolls_back_and_preserves_output_identity() {
 #[tokio::test]
 async fn live_row_pages_include_zero_and_bound_bytes_without_crossing_namespaces() {
     let tmp = TempDir::new().unwrap();
-    let writer = live_writer(open_db(tmp.path().to_str().unwrap(), "q1"));
+    let writer = live_writer(open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    ));
     let limits = OutboxPageLimits {
         max_records: std::num::NonZeroUsize::new(2).unwrap(),
         max_bytes: std::num::NonZeroUsize::new(4).unwrap(),
@@ -114,10 +174,18 @@ async fn live_row_pages_include_zero_and_bound_bytes_without_crossing_namespaces
             data: Some(*data),
         })
         .collect();
-    writer.apply_mutations("q1", &mutations).await.unwrap();
     writer
         .apply_mutations(
-            "q10",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            &mutations,
+        )
+        .await
+        .unwrap();
+    writer
+        .apply_mutations(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000eb")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 0,
                 data: Some(b"other query"),
@@ -131,7 +199,15 @@ async fn live_row_pages_include_zero_and_bound_bytes_without_crossing_namespaces
         (Some(2), vec![3, u64::MAX]),
         (Some(u64::MAX), vec![]),
     ] {
-        let page = writer.read_page("q1", after, limits).await.unwrap();
+        let page = writer
+            .read_page(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                after,
+                limits,
+            )
+            .await
+            .unwrap();
         limits.validate_page(&page).unwrap();
         assert_eq!(
             page.iter()
@@ -145,11 +221,16 @@ async fn live_row_pages_include_zero_and_bound_bytes_without_crossing_namespaces
 #[tokio::test]
 async fn live_row_paging_rejects_malformed_keys_at_resume_boundaries() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = live_writer(db.clone());
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[
                 RowMutation {
                     row_signature: 0,
@@ -167,19 +248,34 @@ async fn live_row_paging_rejects_malformed_keys_at_resume_boundaries() {
         max_records: std::num::NonZeroUsize::new(1).unwrap(),
         max_bytes: std::num::NonZeroUsize::new(1).unwrap(),
     };
-    let mut key = b"q1\0".to_vec();
+    let mut key = b"00000000-0000-0000-0000-00000000002b\0".to_vec();
     key.extend_from_slice(&0u64.to_be_bytes());
     key.push(0);
     db.put_cf(&db.cf_handle("live_results").unwrap(), &key, b"corrupt")
         .unwrap();
     assert!(matches!(
-        writer.read_page("q1", Some(0), limits).await,
+        writer
+            .read_page(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                Some(0),
+                limits
+            )
+            .await,
         Err(IndexError::CorruptedData)
     ));
     db.delete_cf(&db.cf_handle("live_results").unwrap(), &key)
         .unwrap();
     assert_eq!(
-        writer.read_page("q1", Some(0), limits).await.unwrap(),
+        writer
+            .read_page(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                Some(0),
+                limits
+            )
+            .await
+            .unwrap(),
         vec![(2, b"next".to_vec())]
     );
 }
@@ -189,7 +285,11 @@ async fn live_row_paging_rejects_malformed_keys_at_resume_boundaries() {
 #[tokio::test]
 async fn outbox_pages_bound_stored_bytes_and_keep_namespace_boundaries() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
     let limits = OutboxPageLimits {
         max_records: std::num::NonZeroUsize::new(2).unwrap(),
@@ -202,16 +302,46 @@ async fn outbox_pages_bound_stored_bytes_and_keep_namespace_boundaries() {
         (4, b""),
         (u64::MAX, b"z"),
     ] {
-        writer.append("q1", position, value).await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                position,
+                value,
+            )
+            .await
+            .unwrap();
     }
-    writer.append("q10", 1, b"another namespace").await.unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000eb")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"another namespace",
+        )
+        .await
+        .unwrap();
     for (after, expected) in [
         (0, vec![1, 2]),
         (2, vec![3]),
         (3, vec![4, u64::MAX]),
         (u64::MAX, vec![]),
     ] {
-        let page = writer.read_page("q1", after, limits).await.unwrap();
+        let page = writer
+            .read_page(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                after,
+                limits,
+            )
+            .await
+            .unwrap();
         limits.validate_page(&page).unwrap();
         assert_eq!(
             page.iter()
@@ -225,27 +355,70 @@ async fn outbox_pages_bound_stored_bytes_and_keep_namespace_boundaries() {
 #[tokio::test]
 async fn outbox_paging_rejects_malformed_keys_even_at_resume_boundaries() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db.clone());
-    writer.append("q1", 1, b"first").await.unwrap();
-    writer.append("q1", 2, b"next").await.unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"first",
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            2,
+            b"next",
+        )
+        .await
+        .unwrap();
     let limits = OutboxPageLimits {
         max_records: std::num::NonZeroUsize::new(1).unwrap(),
         max_bytes: std::num::NonZeroUsize::new(1).unwrap(),
     };
-    let mut key = b"q1\0".to_vec();
+    let mut key = b"00000000-0000-0000-0000-00000000002b\0".to_vec();
     key.extend_from_slice(&1u64.to_be_bytes());
     key.push(0);
     db.put_cf(&db.cf_handle("outbox").unwrap(), &key, b"corrupt")
         .unwrap();
     assert!(matches!(
-        writer.read_page("q1", 1, limits).await,
+        writer
+            .read_page(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ),
+                1,
+                limits
+            )
+            .await,
         Err(IndexError::CorruptedData)
     ));
     db.delete_cf(&db.cf_handle("outbox").unwrap(), &key)
         .unwrap();
     assert_eq!(
-        writer.read_page("q1", 1, limits).await.unwrap(),
+        writer
+            .read_page(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ),
+                1,
+                limits
+            )
+            .await
+            .unwrap(),
         vec![(2, b"next".to_vec())]
     );
 }
@@ -253,57 +426,212 @@ async fn outbox_paging_rejects_malformed_keys_even_at_resume_boundaries() {
 #[tokio::test]
 async fn test_outbox_append_and_read() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
 
-    writer.append("q1", 1, b"hello").await.unwrap();
-    writer.append("q1", 2, b"world").await.unwrap();
-    writer.append("q1", 5, b"skip").await.unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"hello",
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            2,
+            b"world",
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            5,
+            b"skip",
+        )
+        .await
+        .unwrap();
 
-    let entries = writer.read_from("q1", 0).await.unwrap();
+    let entries = writer
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0], (1, b"hello".to_vec()));
     assert_eq!(entries[1], (2, b"world".to_vec()));
     assert_eq!(entries[2], (5, b"skip".to_vec()));
 
     // Read from middle
-    let entries = writer.read_from("q1", 2).await.unwrap();
+    let entries = writer
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            2,
+        )
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0], (5, b"skip".to_vec()));
 
     // Read from end
-    let entries = writer.read_from("q1", 5).await.unwrap();
+    let entries = writer
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            5,
+        )
+        .await
+        .unwrap();
     assert!(entries.is_empty());
 }
 
 #[tokio::test]
 async fn test_outbox_read_latest_sequence() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
 
-    assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), None);
+    assert_eq!(
+        writer
+            .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap(),
+        None
+    );
 
-    writer.append("q1", 10, b"data").await.unwrap();
-    writer.append("q1", 20, b"data").await.unwrap();
-    assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), Some(20));
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            10,
+            b"data",
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            20,
+            b"data",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        writer
+            .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap(),
+        Some(20)
+    );
 
-    writer.append("q1", 15, b"data").await.unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            15,
+            b"data",
+        )
+        .await
+        .unwrap();
     // Latest should still be 20 (ordered by key)
-    assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), Some(20));
+    assert_eq!(
+        writer
+            .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap(),
+        Some(20)
+    );
 }
 
 #[tokio::test]
 async fn test_outbox_read_after_maximum_sequence_is_empty() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
-    writer.append("q1", u64::MAX, b"last").await.unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            u64::MAX,
+            b"last",
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        writer.read_from("q1", u64::MAX - 1).await.unwrap(),
+        writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ),
+                u64::MAX - 1
+            )
+            .await
+            .unwrap(),
         [(u64::MAX, b"last".to_vec())]
     );
-    assert!(writer.read_from("q1", u64::MAX).await.unwrap().is_empty());
+    assert!(writer
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ),
+            u64::MAX
+        )
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -311,7 +639,13 @@ async fn test_provider_atomic_output_and_clear_share_the_index_session() {
     let tmp = TempDir::new().unwrap();
     let provider = RocksDbIndexProvider::new(tmp.path(), false, false);
     assert!(provider.supports_atomic_query_output());
-    let resources = provider.create_indexes("q1").await.unwrap();
+    let resources = provider
+        .create_indexes(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     let checkpoint = resources.checkpoint_store.as_ref().unwrap();
     let outbox = resources.outbox_writer.as_ref().unwrap();
     let live = resources.live_results_writer.as_ref().unwrap();
@@ -320,13 +654,41 @@ async fn test_provider_atomic_output_and_clear_share_the_index_session() {
             .await
             .unwrap();
         checkpoint
-            .stage_checkpoint("source", 1, None)
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                None,
+            )
             .await
             .unwrap();
-        checkpoint.stage_result_sequence("q1", 1).await.unwrap();
-        outbox.append_and_trim("q1", 1, b"one", 1).await.unwrap();
+        checkpoint
+            .stage_result_sequence(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+            )
+            .await
+            .unwrap();
+        outbox
+            .append_and_trim(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"one",
+                1,
+            )
+            .await
+            .unwrap();
         live.apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 1,
                 data: Some(b"row"),
@@ -334,29 +696,112 @@ async fn test_provider_atomic_output_and_clear_share_the_index_session() {
         )
         .await
         .unwrap();
-        assert_eq!(checkpoint.read_result_sequence("q1").await.unwrap(), None);
-        assert!(outbox.read_from("q1", 0).await.unwrap().is_empty());
-        assert!(live.read_snapshot("q1").await.unwrap().is_empty());
+        assert_eq!(
+            checkpoint
+                .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ))
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(outbox
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(live
+            .read_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_empty());
     }
     assert!(checkpoint
-        .read_checkpoint("source")
+        .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")
+        ))
         .await
         .unwrap()
         .is_none());
-    assert_eq!(checkpoint.read_result_sequence("q1").await.unwrap(), None);
-    assert!(outbox.read_from("q1", 0).await.unwrap().is_empty());
-    assert!(live.read_snapshot("q1").await.unwrap().is_empty());
+    assert_eq!(
+        checkpoint
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(outbox
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(live
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        )
+        .await
+        .unwrap()
+        .is_empty());
     let guard = SessionGuard::begin(resources.set.session_control.clone())
         .await
         .unwrap();
     checkpoint
-        .stage_checkpoint("source", 2, None)
+        .stage_checkpoint(
+            &drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
+            2,
+            None,
+        )
         .await
         .unwrap();
-    checkpoint.stage_result_sequence("q1", 2).await.unwrap();
-    outbox.append_and_trim("q1", 2, b"two", 2).await.unwrap();
+    checkpoint
+        .stage_result_sequence(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            2,
+        )
+        .await
+        .unwrap();
+    outbox
+        .append_and_trim(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            2,
+            b"two",
+            2,
+        )
+        .await
+        .unwrap();
     live.apply_mutations(
-        "q1",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         &[RowMutation {
             row_signature: 2,
             data: Some(b"row"),
@@ -369,60 +814,199 @@ async fn test_provider_atomic_output_and_clear_share_the_index_session() {
         let _guard = SessionGuard::begin(resources.set.session_control.clone())
             .await
             .unwrap();
-        outbox.clear("q1").await.unwrap();
-        live.clear("q1").await.unwrap();
+        outbox
+            .clear(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
+        live.clear(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     }
     assert_eq!(
-        checkpoint.read_result_sequence("q1").await.unwrap(),
+        checkpoint
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap(),
         Some(2)
     );
     assert_eq!(
-        outbox.read_from("q1", 0).await.unwrap(),
+        outbox
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await
+            .unwrap(),
         [(2, b"two".to_vec())]
     );
     assert_eq!(
-        live.read_snapshot("q1").await.unwrap(),
+        live.read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        )
+        .await
+        .unwrap(),
         [(2, b"row".to_vec())]
     );
     let guard = SessionGuard::begin(resources.set.session_control.clone())
         .await
         .unwrap();
-    outbox.clear("q1").await.unwrap();
-    live.clear("q1").await.unwrap();
+    outbox
+        .clear(&drasi_core_types::OutputPartition::Component(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        ))
+        .await
+        .unwrap();
+    live.clear(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    )
+    .await
+    .unwrap();
     guard.commit().await.unwrap();
-    assert!(outbox.read_from("q1", 0).await.unwrap().is_empty());
-    assert!(live.read_snapshot("q1").await.unwrap().is_empty());
+    assert!(outbox
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(live
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        )
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
 async fn test_outbox_clear() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
 
-    writer.append("q1", 1, b"data1").await.unwrap();
-    writer.append("q1", 2, b"data2").await.unwrap();
-    writer.clear("q1").await.unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"data1",
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            2,
+            b"data2",
+        )
+        .await
+        .unwrap();
+    writer
+        .clear(&drasi_core_types::OutputPartition::Component(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        ))
+        .await
+        .unwrap();
 
-    let entries = writer.read_from("q1", 0).await.unwrap();
+    let entries = writer
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
+        .await
+        .unwrap();
     assert!(entries.is_empty());
-    assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), None);
+    assert_eq!(
+        writer
+            .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 #[tokio::test]
 async fn test_outbox_trim_to_capacity() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
 
     for i in 1..=10 {
-        writer.append("q1", i, b"data").await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                i,
+                b"data",
+            )
+            .await
+            .unwrap();
     }
 
-    let removed = writer.trim_to_capacity("q1", 3).await.unwrap();
+    let removed = writer
+        .trim_to_capacity(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            3,
+        )
+        .await
+        .unwrap();
     assert_eq!(removed, 7);
 
-    let entries = writer.read_from("q1", 0).await.unwrap();
+    let entries = writer
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 3);
     // Should keep the latest 3: 8, 9, 10
     assert_eq!(entries[0].0, 8);
@@ -433,26 +1017,102 @@ async fn test_outbox_trim_to_capacity() {
 #[tokio::test]
 async fn test_outbox_trim_no_op() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
 
-    writer.append("q1", 1, b"data").await.unwrap();
-    let removed = writer.trim_to_capacity("q1", 5).await.unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"data",
+        )
+        .await
+        .unwrap();
+    let removed = writer
+        .trim_to_capacity(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            5,
+        )
+        .await
+        .unwrap();
     assert_eq!(removed, 0);
 }
 
 #[tokio::test]
 async fn test_outbox_isolation_between_queries() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
 
-    writer.append("q1", 1, b"q1-data").await.unwrap();
-    writer.append("q2", 1, b"q2-data").await.unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"q1-data",
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"q2-data",
+        )
+        .await
+        .unwrap();
 
-    writer.clear("q1").await.unwrap();
-    assert!(writer.read_from("q1", 0).await.unwrap().is_empty());
-    assert_eq!(writer.read_from("q2", 0).await.unwrap().len(), 1);
+    writer
+        .clear(&drasi_core_types::OutputPartition::Component(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        ))
+        .await
+        .unwrap();
+    assert!(writer
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -462,21 +1122,67 @@ async fn test_outbox_persistence_across_reopen() {
 
     // Write data
     {
-        let db = open_db(&path, "q1");
+        let db = open_db(
+            &path,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
         let writer = outbox_writer(db);
-        writer.append("q1", 1, b"persisted").await.unwrap();
-        writer.append("q1", 2, b"data").await.unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"persisted",
+            )
+            .await
+            .unwrap();
+        writer
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                2,
+                b"data",
+            )
+            .await
+            .unwrap();
     }
 
     // Re-open and verify
     {
-        let db = open_db(&path, "q1");
+        let db = open_db(
+            &path,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
         let writer = outbox_writer(db);
-        let entries = writer.read_from("q1", 0).await.unwrap();
+        let entries = writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0], (1, b"persisted".to_vec()));
         assert_eq!(entries[1], (2, b"data".to_vec()));
-        assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), Some(2));
+        assert_eq!(
+            writer
+                .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ))
+                .await
+                .unwrap(),
+            Some(2)
+        );
     }
 }
 
@@ -485,7 +1191,11 @@ async fn test_outbox_persistence_across_reopen() {
 #[tokio::test]
 async fn test_live_results_apply_upserts() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = live_writer(db);
 
     let mutations = vec![
@@ -498,22 +1208,49 @@ async fn test_live_results_apply_upserts() {
             data: Some(b"row2"),
         },
     ];
-    writer.apply_mutations("q1", &mutations).await.unwrap();
+    writer
+        .apply_mutations(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            &mutations,
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(writer.row_count("q1").await.unwrap(), 2);
-    let snapshot = writer.read_snapshot("q1").await.unwrap();
+    assert_eq!(
+        writer
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        2
+    );
+    let snapshot = writer
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(snapshot.len(), 2);
 }
 
 #[tokio::test]
 async fn test_live_results_apply_delete() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = live_writer(db);
 
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 1,
                 data: Some(b"row1"),
@@ -524,7 +1261,8 @@ async fn test_live_results_apply_delete() {
 
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 1,
                 data: None,
@@ -533,18 +1271,32 @@ async fn test_live_results_apply_delete() {
         .await
         .unwrap();
 
-    assert_eq!(writer.row_count("q1").await.unwrap(), 0);
+    assert_eq!(
+        writer
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
 async fn test_live_results_upsert_overwrites() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = live_writer(db);
 
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 1,
                 data: Some(b"v1"),
@@ -554,7 +1306,8 @@ async fn test_live_results_upsert_overwrites() {
         .unwrap();
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 1,
                 data: Some(b"v2"),
@@ -563,20 +1316,40 @@ async fn test_live_results_upsert_overwrites() {
         .await
         .unwrap();
 
-    assert_eq!(writer.row_count("q1").await.unwrap(), 1);
-    let snapshot = writer.read_snapshot("q1").await.unwrap();
+    assert_eq!(
+        writer
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let snapshot = writer
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(snapshot[0].1, b"v2");
 }
 
 #[tokio::test]
 async fn test_live_results_clear() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = live_writer(db);
 
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 1,
                 data: Some(b"data"),
@@ -584,20 +1357,47 @@ async fn test_live_results_clear() {
         )
         .await
         .unwrap();
-    writer.clear("q1").await.unwrap();
-    assert_eq!(writer.row_count("q1").await.unwrap(), 0);
-    assert!(writer.read_snapshot("q1").await.unwrap().is_empty());
+    writer
+        .clear(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        writer
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(writer
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        )
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
 async fn test_live_results_isolation_between_queries() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = live_writer(db);
 
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 1,
                 data: Some(b"a"),
@@ -607,7 +1407,8 @@ async fn test_live_results_isolation_between_queries() {
         .unwrap();
     writer
         .apply_mutations(
-            "q2",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 1,
                 data: Some(b"b"),
@@ -616,9 +1417,33 @@ async fn test_live_results_isolation_between_queries() {
         .await
         .unwrap();
 
-    writer.clear("q1").await.unwrap();
-    assert_eq!(writer.row_count("q1").await.unwrap(), 0);
-    assert_eq!(writer.row_count("q2").await.unwrap(), 1);
+    writer
+        .clear(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        writer
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        writer
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -628,11 +1453,16 @@ async fn test_live_results_persistence_across_reopen() {
 
     // Write data
     {
-        let db = open_db(&path, "q1");
+        let db = open_db(
+            &path,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
         let writer = live_writer(db);
         writer
             .apply_mutations(
-                "q1",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
                 &[
                     RowMutation {
                         row_signature: 100,
@@ -650,10 +1480,29 @@ async fn test_live_results_persistence_across_reopen() {
 
     // Re-open and verify
     {
-        let db = open_db(&path, "q1");
+        let db = open_db(
+            &path,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
         let writer = live_writer(db);
-        assert_eq!(writer.row_count("q1").await.unwrap(), 2);
-        let snapshot = writer.read_snapshot("q1").await.unwrap();
+        assert_eq!(
+            writer
+                .row_count(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
+                .await
+                .unwrap(),
+            2
+        );
+        let snapshot = writer
+            .read_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
         assert_eq!(snapshot.len(), 2);
         // Verify data content (rows returned in key order)
         let mut snapshot_sorted = snapshot.clone();
@@ -667,13 +1516,18 @@ async fn test_live_results_persistence_across_reopen() {
 async fn test_live_results_atomic_batch() {
     // Verify that apply_mutations applies all mutations atomically
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = live_writer(db);
 
     // Insert 3 rows, delete 1, update 1 in a single batch
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[
                 RowMutation {
                     row_signature: 1,
@@ -694,7 +1548,8 @@ async fn test_live_results_atomic_batch() {
 
     writer
         .apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[
                 RowMutation {
                     row_signature: 1,
@@ -709,8 +1564,23 @@ async fn test_live_results_atomic_batch() {
         .await
         .unwrap();
 
-    assert_eq!(writer.row_count("q1").await.unwrap(), 2);
-    let snapshot = writer.read_snapshot("q1").await.unwrap();
+    assert_eq!(
+        writer
+            .row_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap(),
+        2
+    );
+    let snapshot = writer
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     let mut snapshot_sorted = snapshot;
     snapshot_sorted.sort_by_key(|(sig, _)| *sig);
     assert_eq!(snapshot_sorted[0], (1, b"updated".to_vec()));
@@ -720,7 +1590,11 @@ async fn test_live_results_atomic_batch() {
 #[tokio::test]
 async fn test_outbox_and_live_results_roll_back_with_session() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
     let session_control: Arc<dyn SessionControl> =
         Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -731,9 +1605,20 @@ async fn test_outbox_and_live_results_roll_back_with_session() {
         let guard = SessionGuard::begin(session_control.clone())
             .await
             .expect("begin");
-        outbox.append("q1", 1, b"staged").await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"staged",
+            )
+            .await
+            .unwrap();
         live.apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 7,
                 data: Some(b"row"),
@@ -744,16 +1629,45 @@ async fn test_outbox_and_live_results_roll_back_with_session() {
         drop(guard);
     }
 
-    assert!(outbox.read_from("q1", 0).await.unwrap().is_empty());
-    assert_eq!(live.row_count("q1").await.unwrap(), 0);
+    assert!(outbox
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        live.row_count(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        )
+        .await
+        .unwrap(),
+        0
+    );
 
     {
         let guard = SessionGuard::begin(session_control.clone())
             .await
             .expect("begin");
-        outbox.append("q1", 1, b"committed").await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"committed",
+            )
+            .await
+            .unwrap();
         live.apply_mutations(
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: 7,
                 data: Some(b"row"),
@@ -764,35 +1678,91 @@ async fn test_outbox_and_live_results_roll_back_with_session() {
         guard.commit().await.expect("commit");
     }
 
-    let entries = outbox.read_from("q1", 0).await.unwrap();
+    let entries = outbox
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
+        .await
+        .unwrap();
     assert_eq!(entries, vec![(1, b"committed".to_vec())]);
-    assert_eq!(live.row_count("q1").await.unwrap(), 1);
+    assert_eq!(
+        live.row_count(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        )
+        .await
+        .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn test_outbox_trim_before_rolls_back_with_session() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
     let session_control: Arc<dyn SessionControl> =
         Arc::new(RocksDbSessionControl::new(session_state.clone()));
     let outbox = RocksDbOutboxWriter::new(db, session_state);
 
     for seq in 1..=4 {
-        outbox.append("q1", seq, b"data").await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                seq,
+                b"data",
+            )
+            .await
+            .unwrap();
     }
 
     {
         let guard = SessionGuard::begin(session_control.clone())
             .await
             .expect("begin");
-        outbox.append("q1", 5, b"five").await.unwrap();
-        outbox.trim_before("q1", 4).await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                b"five",
+            )
+            .await
+            .unwrap();
+        outbox
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                4,
+            )
+            .await
+            .unwrap();
         drop(guard);
     }
 
     let rolled_back: Vec<u64> = outbox
-        .read_from("q1", 0)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
         .await
         .unwrap()
         .into_iter()
@@ -804,14 +1774,39 @@ async fn test_outbox_trim_before_rolls_back_with_session() {
         let guard = SessionGuard::begin(session_control.clone())
             .await
             .expect("begin");
-        outbox.append("q1", 5, b"five").await.unwrap();
-        let removed = outbox.trim_before("q1", 4).await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                b"five",
+            )
+            .await
+            .unwrap();
+        let removed = outbox
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                4,
+            )
+            .await
+            .unwrap();
         assert_eq!(removed, 3);
         guard.commit().await.expect("commit");
     }
 
     let committed: Vec<u64> = outbox
-        .read_from("q1", 0)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            0,
+        )
         .await
         .unwrap()
         .into_iter()
@@ -826,27 +1821,72 @@ async fn test_outbox_trim_before_survives_reopen() {
     let path = tmp.path().to_str().unwrap().to_string();
 
     {
-        let db = open_db(&path, "q1");
+        let db = open_db(
+            &path,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control: Arc<dyn SessionControl> =
             Arc::new(RocksDbSessionControl::new(session_state.clone()));
         let outbox = RocksDbOutboxWriter::new(db, session_state);
 
         for seq in 1..=3 {
-            outbox.append("q1", seq, b"data").await.unwrap();
+            outbox
+                .append(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    seq,
+                    b"data",
+                )
+                .await
+                .unwrap();
         }
 
         let guard = SessionGuard::begin(session_control).await.expect("begin");
-        outbox.append("q1", 4, b"four").await.unwrap();
-        outbox.trim_before("q1", 3).await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                4,
+                b"four",
+            )
+            .await
+            .unwrap();
+        outbox
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                3,
+            )
+            .await
+            .unwrap();
         guard.commit().await.expect("commit");
     }
 
     {
-        let db = open_db(&path, "q1");
+        let db = open_db(
+            &path,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
         let writer = outbox_writer(db);
         let sequences: Vec<u64> = writer
-            .read_from("q1", 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
             .await
             .unwrap()
             .into_iter()
@@ -868,7 +1908,11 @@ async fn battle_trim_before_ring_holds_across_many_sessions() {
     const LAST: u64 = 40;
 
     {
-        let db = open_db(&path, "q1");
+        let db = open_db(
+            &path,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control: Arc<dyn SessionControl> =
             Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -878,12 +1922,48 @@ async fn battle_trim_before_ring_holds_across_many_sessions() {
             let guard = SessionGuard::begin(session_control.clone())
                 .await
                 .expect("begin");
-            outbox.append("q1", seq, b"data").await.unwrap();
+            outbox
+                .append(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    seq,
+                    b"data",
+                )
+                .await
+                .unwrap();
             let retain_from = seq.saturating_sub(CAPACITY).saturating_add(1);
-            outbox.trim_before("q1", retain_from).await.unwrap();
+            outbox
+                .trim_before(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    retain_from,
+                )
+                .await
+                .unwrap();
             guard.commit().await.expect("commit");
 
-            let sequences = outbox_sequences(&outbox.read_from("q1", 0).await.unwrap());
+            let sequences = outbox_sequences(
+                &outbox
+                    .read_from(
+                        &drasi_core_types::OutputPartition::Component(
+                            drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000002b",
+                            )
+                            .expect("fixture UUID"),
+                        ),
+                        0,
+                    )
+                    .await
+                    .unwrap(),
+            );
             assert!(
                 sequences.len() as u64 <= CAPACITY,
                 "seq={seq} left {sequences:?}"
@@ -893,16 +1973,35 @@ async fn battle_trim_before_ring_holds_across_many_sessions() {
         }
     }
 
-    let db = open_db(&path, "q1");
+    let db = open_db(
+        &path,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
-    let sequences = outbox_sequences(&writer.read_from("q1", 0).await.unwrap());
+    let sequences = outbox_sequences(
+        &writer
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap(),
+    );
     assert_eq!(sequences, vec![LAST - 2, LAST - 1, LAST]);
 }
 
 #[tokio::test]
 async fn battle_trim_before_capacity_one() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
     let session_control: Arc<dyn SessionControl> =
         Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -912,10 +2011,42 @@ async fn battle_trim_before_capacity_one() {
         let guard = SessionGuard::begin(session_control.clone())
             .await
             .expect("begin");
-        outbox.append("q1", seq, &[seq as u8]).await.unwrap();
-        outbox.trim_before("q1", seq).await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                seq,
+                &[seq as u8],
+            )
+            .await
+            .unwrap();
+        outbox
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                seq,
+            )
+            .await
+            .unwrap();
         guard.commit().await.expect("commit");
-        let sequences = outbox_sequences(&outbox.read_from("q1", 0).await.unwrap());
+        let sequences = outbox_sequences(
+            &outbox
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    0,
+                )
+                .await
+                .unwrap(),
+        );
         assert_eq!(sequences, vec![seq], "capacity 1 must keep only the latest");
     }
 }
@@ -923,7 +2054,11 @@ async fn battle_trim_before_capacity_one() {
 #[tokio::test]
 async fn battle_batched_appends_then_trim_in_one_session() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
     let session_control: Arc<dyn SessionControl> =
         Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -931,12 +2066,42 @@ async fn battle_batched_appends_then_trim_in_one_session() {
 
     let guard = SessionGuard::begin(session_control).await.expect("begin");
     for seq in 1..=5 {
-        outbox.append("q1", seq, b"data").await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                seq,
+                b"data",
+            )
+            .await
+            .unwrap();
     }
-    outbox.trim_before("q1", 4).await.unwrap();
+    outbox
+        .trim_before(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            4,
+        )
+        .await
+        .unwrap();
     guard.commit().await.expect("commit");
 
-    let sequences = outbox_sequences(&outbox.read_from("q1", 0).await.unwrap());
+    let sequences = outbox_sequences(
+        &outbox
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         sequences,
         vec![4, 5],
@@ -947,7 +2112,11 @@ async fn battle_batched_appends_then_trim_in_one_session() {
 #[tokio::test]
 async fn battle_trim_to_capacity_sees_uncommitted_appends() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
     let session_control: Arc<dyn SessionControl> =
         Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -955,49 +2124,141 @@ async fn battle_trim_to_capacity_sees_uncommitted_appends() {
 
     let guard = SessionGuard::begin(session_control).await.expect("begin");
     for seq in 1..=5 {
-        outbox.append("q1", seq, b"data").await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                seq,
+                b"data",
+            )
+            .await
+            .unwrap();
     }
-    let removed = outbox.trim_to_capacity("q1", 2).await.unwrap();
+    let removed = outbox
+        .trim_to_capacity(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            2,
+        )
+        .await
+        .unwrap();
     assert_eq!(removed, 3);
     guard.commit().await.expect("commit");
 
-    let sequences = outbox_sequences(&outbox.read_from("q1", 0).await.unwrap());
+    let sequences = outbox_sequences(
+        &outbox
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                0,
+            )
+            .await
+            .unwrap(),
+    );
     assert_eq!(sequences, vec![4, 5]);
 }
 
 #[tokio::test]
 async fn battle_append_and_trim_rolls_back_with_session() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
     let session_control: Arc<dyn SessionControl> =
         Arc::new(RocksDbSessionControl::new(session_state.clone()));
     let outbox = RocksDbOutboxWriter::new(db, session_state);
 
     for seq in 1..=3 {
-        outbox.append("q1", seq, b"old").await.unwrap();
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                seq,
+                b"old",
+            )
+            .await
+            .unwrap();
     }
 
     {
         let guard = SessionGuard::begin(session_control.clone())
             .await
             .expect("begin");
-        outbox.append_and_trim("q1", 4, b"four", 3).await.unwrap();
+        outbox
+            .append_and_trim(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                4,
+                b"four",
+                3,
+            )
+            .await
+            .unwrap();
         drop(guard);
     }
     assert_eq!(
-        outbox_sequences(&outbox.read_from("q1", 0).await.unwrap()),
+        outbox_sequences(
+            &outbox
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap()
+        ),
         vec![1, 2, 3],
         "rolled-back append_and_trim must not evict committed keys"
     );
 
     {
         let guard = SessionGuard::begin(session_control).await.expect("begin");
-        outbox.append_and_trim("q1", 4, b"four", 3).await.unwrap();
+        outbox
+            .append_and_trim(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+                4,
+                b"four",
+                3,
+            )
+            .await
+            .unwrap();
         guard.commit().await.expect("commit");
     }
     assert_eq!(
-        outbox_sequences(&outbox.read_from("q1", 0).await.unwrap()),
+        outbox_sequences(
+            &outbox
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap()
+        ),
         vec![3, 4]
     );
 }
@@ -1005,12 +2266,51 @@ async fn battle_append_and_trim_rolls_back_with_session() {
 #[tokio::test]
 async fn battle_trim_before_zero_is_noop() {
     let tmp = TempDir::new().unwrap();
-    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let db = open_db(
+        tmp.path().to_str().unwrap(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    );
     let writer = outbox_writer(db);
-    writer.append("q1", 1, b"data").await.unwrap();
-    assert_eq!(writer.trim_before("q1", 0).await.unwrap(), 0);
+    writer
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"data",
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        outbox_sequences(&writer.read_from("q1", 0).await.unwrap()),
+        writer
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        outbox_sequences(
+            &writer
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap()
+        ),
         vec![1]
     );
 }

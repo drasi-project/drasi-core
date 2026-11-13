@@ -9,9 +9,11 @@ use drasi_reaction_application::NativeApplicationReaction;
 use shared_tests::{mock_source::MockSource, recovery_test_helpers::insert_person};
 use tokio::sync::{Mutex, Notify};
 
+const REACTION_ID: &str = "32606929-f479-52cb-a21c-afcd2651a9bd";
+
 fn query_output() -> Endpoint {
     Endpoint::new(
-        ComponentId::try_new("q1").expect("query ID"),
+        ComponentId::try_new("0b5a3a20-3de2-5515-97d6-e1a809ad423b").expect("query ID"),
         PortId::try_new("out").expect("output port"),
     )
 }
@@ -27,9 +29,12 @@ async fn instance(
 async fn build_instance(
     reaction: NativeApplicationReaction,
 ) -> (DrasiLib, shared_tests::mock_source::MockSourceHandle) {
-    let (source, source_handle) = MockSource::new("source").expect("mock source");
+    let source_id =
+        ComponentId::try_new("6bdd092c-a72d-57ed-b567-7023f22e60ad").expect("source ID");
+    let (source, source_handle) = MockSource::new(source_id.clone()).expect("mock source");
     let input = reaction.input();
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -43,11 +48,14 @@ async fn build_instance(
                 .clone(),
         )
         .with_id("native-application-query")
-        .with_source(source)
+        .with_source(
+            drasi_lib::ComponentName::try_new("source").expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("library");
-    core.computation_component("source")
+    core.component_by_id(&source_id)
         .expect("source handle")
         .wait_created()
         .await
@@ -56,48 +64,53 @@ async fn build_instance(
         .computation_pipeline()
         .expect("pipeline builder")
         .source(
-            core.borrow_computation_source("source")
+            core.borrow_computation_source_by_id(&source_id)
                 .await
                 .expect("source host"),
             SourceSubscriptionOptions::default(),
         )
         .expect("source binding")
-        .query(
-            Query::cypher("q1")
-                .query("MATCH (p:Person) RETURN p.name AS name")
-                .from_input("source")
-                .enable_bootstrap(false)
-                .build(),
-        )
+        .query({
+            let mut config = Query::cypher(
+                drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+            )
+            .query("MATCH (p:Person) RETURN p.name AS name")
+            .from_input_by_name(
+                drasi_lib::ComponentName::try_new("source").expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .build()
+            .expect("query configuration");
+            config.inputs[0].component = drasi_lib::config::ComponentReference::by_id(source_id);
+            config.with_assigned_id(query_output().component)
+        })
         .build()
         .expect("native query batch");
-    assert!(
-        core.add_components(pipeline)
-            .await
-            .expect("query addition")
-            .committed
-    );
-    let component = core
-        .add_computation_component(ComponentAddition::new(ConstructedComponent::sink(
+    core.add_components(pipeline).await.expect("query addition");
+    let addition = ComponentBatch::builder()
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-addition-1")
+                .expect("fixture component name"),
             Box::new(reaction),
-        )))
-        .await
-        .expect("sink addition");
-    let connected = core
-        .computation_control()
-        .expect("graph control")
+        )
         .connect(
             EdgeDefinition::new(query_output(), input),
             Box::new(BoundedPipeConfig { capacity: 1 }),
-            RelationshipPolicy::default(),
         )
+        .build()
+        .expect("managed reaction batch");
+    core.add_components(addition).await.expect("sink addition");
+    let status = core
+        .reconcile_desired_state()
         .await
-        .expect("declared port connection");
-    assert_eq!(
-        connected.summary,
-        OperationSummary::Completed,
-        "{connected:?}"
-    );
+        .expect("managed reaction reconciliation");
+    assert!(status.converged(), "{status:?}");
+    let component = core
+        .component_by_name(
+            &drasi_lib::ComponentName::try_new("fixture-addition-1")
+                .expect("fixture component name"),
+        )
+        .expect("managed reaction");
     component.wait_created().await.expect("sink creation");
     core.start().await.expect("start instance");
     component.wait_started().await.expect("sink readiness");
@@ -109,7 +122,7 @@ fn assert_result(envelope: &ChangeEnvelope, name: &str) {
         QueryChangeCodec::metadata(envelope)
             .expect("query metadata")
             .query_id,
-        "q1"
+        query_output().component.clone()
     );
     assert_eq!(envelope.changes().operations().len(), 1);
     let ChangeOperation::Added { after, .. } = &envelope.changes().operations()[0] else {
@@ -125,13 +138,19 @@ fn assert_result(envelope: &ChangeEnvelope, name: &str) {
 #[tokio::test(flavor = "current_thread")]
 async fn native_query_delivers_envelopes_without_legacy_reaction_adapter() {
     let (reaction, mut receiver) = NativeApplicationReaction::channel(
-        "native-app",
+        drasi_lib::ComponentId::try_new("32606929-f479-52cb-a21c-afcd2651a9bd")
+            .expect("fixture UUID"),
         QueryChangeCodec::schema().descriptor().clone(),
         NonZeroUsize::new(1).unwrap(),
     )
     .unwrap();
     let (core, source) = instance(reaction).await;
-    let component = core.computation_component("native-app").unwrap();
+    let component = core
+        .component_by_name(
+            &drasi_lib::ComponentName::try_new("fixture-addition-1")
+                .expect("fixture component name"),
+        )
+        .unwrap();
     for (id, name) in [("p1", "Alice"), ("p2", "Bob"), ("p3", "Carol")] {
         insert_person(&source, id, name, 30).await.unwrap();
         let input = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
@@ -163,7 +182,8 @@ async fn native_query_awaits_application_callback_completion() {
     let callback_release = release.clone();
     let callback_results = results.clone();
     let reaction = NativeApplicationReaction::callback(
-        "native-app",
+        drasi_lib::ComponentId::try_new("32606929-f479-52cb-a21c-afcd2651a9bd")
+            .expect("fixture UUID"),
         QueryChangeCodec::schema().descriptor().clone(),
         move |input| {
             let entered = callback_entered.clone();

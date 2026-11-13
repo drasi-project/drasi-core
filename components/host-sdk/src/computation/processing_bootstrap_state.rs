@@ -9,6 +9,7 @@ use drasi_computation_contracts::{
     BootstrapState, BOOTSTRAP_STATE_CHECKPOINT, MAX_BOOTSTRAP_STATE_BYTES,
 };
 use drasi_core::{computation::ComputationTransaction, interface::StorageDurability};
+use drasi_core_types::CheckpointKey;
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
 
@@ -97,7 +98,7 @@ impl BootstrapState for ProcessingBootstrapState {
         let saved = tokio::select! {
             biased;
             _ = cancel.cancelled() => anyhow::bail!("bootstrap state read was cancelled"),
-            result = owner.run(async { Ok(store.read_checkpoint(BOOTSTRAP_STATE_CHECKPOINT).await?) }) => result?,
+            result = owner.run(async { Ok(store.read_checkpoint(&CheckpointKey::Metadata(BOOTSTRAP_STATE_CHECKPOINT.into())).await?) }) => result?,
         };
         saved
             .map(|saved| {
@@ -119,7 +120,7 @@ impl BootstrapState for ProcessingBootstrapState {
             biased;
             _ = cancel.cancelled() => anyhow::bail!("bootstrap state write was cancelled"),
             result = owner.run(async {
-                store.stage_checkpoint(BOOTSTRAP_STATE_CHECKPOINT, 1, Some(&bytes)).await?;
+                store.stage_checkpoint(&CheckpointKey::Metadata(BOOTSTRAP_STATE_CHECKPOINT.into()), 1, Some(&bytes)).await?;
                 Ok(())
             }) => result?,
         };

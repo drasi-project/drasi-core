@@ -63,7 +63,22 @@ impl EnvelopeReceiver for GateReceiver {
 }
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("id")
+    numeric_id(match value {
+        "source" => 77,
+        "procedures" => 792,
+        "fast" => 1,
+        "slow" => 2,
+        "fast-sink" => 3,
+        "slow-sink" => 4,
+        "left" => 5,
+        "right" => 6,
+        "left-sink" => 7,
+        "right-sink" => 8,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
+fn numeric_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
 }
 fn procedure_inputs(outputs: &[&str]) -> Vec<drasi_lib::computation::v1::InputBinding> {
     outputs
@@ -150,7 +165,7 @@ fn values(results: &QueryResults) -> Result<Vec<Value>> {
 }
 
 async fn memory_rows() -> Result<()> {
-    let container = Mysql::default()
+    let request = Mysql::default()
         .with_env_var("MYSQL_DATABASE", "test")
         .with_env_var("MYSQL_ROOT_PASSWORD", "root")
         .with_cmd([
@@ -159,9 +174,9 @@ async fn memory_rows() -> Result<()> {
             "--binlog-row-image=FULL",
             "--binlog-row-metadata=FULL",
             "--server-id=1",
-        ])
-        .start()
-        .await?;
+        ]);
+    let container =
+        start_mysql_fixture(request, "components/sources/mysql/src/native/tests/rows.rs").await?;
     let mut settings = config(
         container.get_host_port_ipv4(3306).await?,
         MySqlOutput::Changes,
@@ -201,20 +216,24 @@ async fn memory_rows() -> Result<()> {
     });
     let consumers = Arc::new(ConsumerProgressSet::new(
         ComponentBatch::GRAPH_ID,
-        id("source"),
+        numeric_id(77),
         owners.iter().cloned(),
     )?);
     let source = MySqlSource::shared_rows(
-        id("source"),
+        numeric_id(77),
         stream("changes"),
         settings.clone(),
         consumers.clone(),
         false,
     )?;
     let mut builder = ComponentBatch::builder()
-        .source(Box::new(source))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("source")
+                .expect("fixture component name"),
+            Box::new(source),
+        )
         .bind_stream(endpoint("source", "out"), stream("changes"));
-    builder = builder.sink(Box::new(Procedures(
+    builder = builder.sink(drasi_lib::computation::v1::ComponentName::try_new("procedures").expect("fixture component name"), Box::new(Procedures(
         drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink::new(id("procedures"),
             serde_json::from_value(json!({
                 "hostname":"127.0.0.1","port":settings.connection.port,
@@ -230,10 +249,12 @@ async fn memory_rows() -> Result<()> {
     let mut results = Vec::new();
     let mut outputs = Vec::new();
     let right_gate = Arc::new(Semaphore::new(1));
-    for owner in &owners {
-        let name = owner.component_id().as_str();
+    for (owner, (name, sink)) in owners
+        .iter()
+        .zip([("left", "left-sink"), ("right", "right-sink")])
+    {
         let snapshot = Arc::new(MySqlSnapshot::for_row_consumer(
-            id("source"),
+            numeric_id(77),
             stream("changes"),
             settings.clone(),
             &consumers,
@@ -259,21 +280,28 @@ async fn memory_rows() -> Result<()> {
         results.push(query.results());
         let (sender, receiver) = mpsc::channel(64);
         outputs.push(receiver);
-        let sink = format!("{name}-sink");
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Sink {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&sink),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                outputs: sender,
-            }))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new(name)
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new(sink)
+                    .expect("fixture component name"),
+                Box::new(Sink {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(sink),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    outputs: sender,
+                }),
+            )
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -284,7 +312,7 @@ async fn memory_rows() -> Result<()> {
                 },
             )
             .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink, "in")),
+                EdgeDefinition::new(endpoint(name, "out"), endpoint(sink, "in")),
                 Box::new(BoundedPipeConfig { capacity: 4 }),
             )
             .connect(
@@ -293,6 +321,7 @@ async fn memory_rows() -> Result<()> {
             );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -333,7 +362,7 @@ async fn memory_rows() -> Result<()> {
         tokio::time::timeout(Duration::from_secs(10), outputs[1].recv())
             .await?
             .context("right first output")?;
-        let key = SourceProgressKey::Source("source".into());
+        let key = SourceProgressKey::Source(drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"));
         let partial = drasi_mysql_common::native::rows::RowPosition::decode(
             owners[1].snapshot().checkpoints[&key]
                 .source_position
@@ -345,12 +374,12 @@ async fn memory_rows() -> Result<()> {
         let previous = owners[0].snapshot().checkpoints[&key].sequence;
         tokio::time::timeout(
             Duration::from_secs(10),
-            core.computation_component("source")?.stop(),
+            core.component_by_name(&drasi_core::ComponentName::try_new("source").expect("fixture component name"))?.stop(),
         )
         .await??;
         tokio::time::timeout(
             Duration::from_secs(10),
-            core.computation_component("source")?.start(),
+            core.component_by_name(&drasi_core::ComponentName::try_new("source").expect("fixture component name"))?.start(),
         )
         .await??;
         right_gate.add_permits(128);
@@ -382,7 +411,7 @@ async fn memory_rows() -> Result<()> {
             let state = owner.snapshot();
             assert!(state.bootstrap_complete && !state.persistent);
             let position = drasi_mysql_common::native::rows::RowPosition::decode(
-                state.checkpoints[&SourceProgressKey::Source("source".into())]
+                state.checkpoints[&SourceProgressKey::Source(drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"))]
                     .source_position
                     .as_deref()
                     .context("row cursor")?,
@@ -447,7 +476,7 @@ async fn memory_rows() -> Result<()> {
                 }
             }));
             let input = || InputEnvelope { port:PortId::try_new("in").unwrap(), envelope:envelope.clone() };
-            let mut sink = MySqlStoredProcSink::new(id("owned-call"),config("CALL wait_effect({{param output.alias}})",50)?,&procedure_inputs(&["left","right"]))?;
+            let mut sink = MySqlStoredProcSink::new(numeric_id(793),config("CALL wait_effect({{param output.alias}})",50)?,&procedure_inputs(&["left","right"]))?;
             sink.start().await?;
             let mut handle = Box::pin(sink.handle(input()));
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -469,7 +498,7 @@ async fn memory_rows() -> Result<()> {
             sink.stop().await?;
             let count = admin.query("SELECT COUNT(*) FROM audit WHERE operation='wait'").await?;
             assert_eq!(catalog::field(&count.values[0],0)?,"1");
-            let mut failing = MySqlStoredProcSink::new(id("failed-call"),config("CALL fail_effect({{param output.alias}})",5000)?,&procedure_inputs(&["left","right"]))?;
+            let mut failing = MySqlStoredProcSink::new(numeric_id(794),config("CALL fail_effect({{param output.alias}})",5000)?,&procedure_inputs(&["left","right"]))?;
             failing.start().await?;
             assert!(failing.handle(input()).await.is_err());
             assert!(failing.handle(input()).await.is_err(), "failed submitted calls are not retried automatically");
@@ -526,7 +555,7 @@ async fn native_rows_preserve_logged_myisam_changes_multi_thread() -> Result<()>
 }
 
 async fn myisam_rows(tracked: bool) -> Result<()> {
-    let container = Mysql::default()
+    let request = Mysql::default()
         .with_env_var("MYSQL_DATABASE", "test")
         .with_env_var("MYSQL_ROOT_PASSWORD", "root")
         .with_cmd([
@@ -535,9 +564,9 @@ async fn myisam_rows(tracked: bool) -> Result<()> {
             "--binlog-row-image=FULL",
             "--binlog-row-metadata=FULL",
             "--server-id=1",
-        ])
-        .start()
-        .await?;
+        ]);
+    let container =
+        start_mysql_fixture(request, "components/sources/mysql/src/native/tests/rows.rs").await?;
     let mut settings = config(
         container.get_host_port_ipv4(3306).await?,
         MySqlOutput::Changes,
@@ -561,21 +590,33 @@ async fn myisam_rows(tracked: bool) -> Result<()> {
     });
     let consumers = Arc::new(ConsumerProgressSet::new(
         ComponentBatch::GRAPH_ID,
-        id("source"),
+        numeric_id(77),
         owners.iter().cloned(),
     )?);
     let source = if tracked {
-        MySqlSource::shared_rows(id("source"), stream("changes"), settings, consumers, false)?
+        MySqlSource::shared_rows(
+            numeric_id(77),
+            stream("changes"),
+            settings,
+            consumers,
+            false,
+        )?
     } else {
-        MySqlSource::new(id("source"), stream("changes"), settings, None)?
+        MySqlSource::new(numeric_id(77), stream("changes"), settings, None)?
     };
     let mut builder = ComponentBatch::builder()
-        .source(Box::new(source))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-2")
+                .expect("fixture component name"),
+            Box::new(source),
+        )
         .bind_stream(endpoint("source", "out"), stream("changes"));
     let mut results = Vec::new();
     let mut outputs = Vec::new();
-    for owner in &owners {
-        let name = owner.component_id().as_str();
+    for (owner, (name, sink)) in owners
+        .iter()
+        .zip([("left", "left-sink"), ("right", "right-sink")])
+    {
         let query = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: ComponentBatch::GRAPH_ID.into(),
@@ -595,32 +636,40 @@ async fn myisam_rows(tracked: bool) -> Result<()> {
         results.push(query.results());
         let (sender, receiver) = mpsc::channel(32);
         outputs.push(receiver);
-        let sink = format!("{name}-sink");
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Sink {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&sink),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                outputs: sender,
-            }))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new(name)
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new(sink)
+                    .expect("fixture component name"),
+                Box::new(Sink {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(sink),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    outputs: sender,
+                }),
+            )
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
                 Box::new(BoundedPipeConfig { capacity: 4 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink, "in")),
+                EdgeDefinition::new(endpoint(name, "out"), endpoint(sink, "in")),
                 Box::new(BoundedPipeConfig { capacity: 4 }),
             );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(

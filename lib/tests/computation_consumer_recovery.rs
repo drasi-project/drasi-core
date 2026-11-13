@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureDrasiLibBuilderExt as _;
+
 use async_trait::async_trait;
 use drasi_core::{
     computation::InMemoryComputationProvider,
@@ -40,8 +44,13 @@ fn memory_backed_progress_does_not_become_durable_through_a_state_store_wrapper(
     use drasi_core::interface::{FailureMode, StorageDurability};
 
     let provider = Arc::new(MemoryStateStoreProvider::new());
-    let wrapped =
-        StateStoreConsumerProgress::new("graph", "consumer", provider.clone()).expect("progress");
+    let wrapped = StateStoreConsumerProgress::new(
+        "graph",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a7")
+            .expect("fixture UUID"),
+        provider.clone(),
+    )
+    .expect("progress");
     let memory = MemoryConsumerProgress::default();
     assert_eq!(provider.durability(), StorageDurability::VOLATILE);
     for progress in [&wrapped as &dyn ConsumerProgressStore, &memory] {
@@ -54,7 +63,18 @@ fn memory_backed_progress_does_not_become_durable_through_a_state_store_wrapper(
 }
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).unwrap()
+    fixture_support::component_id(match value {
+        "query" => 1,
+        "replay" => 2,
+        "sink" => 3,
+        "invalid" => 4,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
+
+fn progress_partition() -> drasi_lib::StorePartition {
+    drasi_lib::StorePartition::component(fixture_support::component_id(424))
+        .in_scope(&drasi_lib::StorageScope::new("computation-consumer:67"))
 }
 
 fn input(envelope: ChangeEnvelope) -> InputEnvelope {
@@ -125,7 +145,7 @@ fn replay(
 ) -> QueryReplayTransformer {
     QueryReplayTransformer::new(
         id("replay"),
-        "query".into(),
+        id("query"),
         StreamId::try_new("replay/out").unwrap(),
         results,
         progress,
@@ -306,7 +326,7 @@ async fn recreated_volatile_producers_require_explicit_recovery_even_at_identica
             let mut sink = sink(progress.clone(), handled.clone(), true);
             let mut first = replay(old.results(), progress.clone(), policy);
             let old_snapshot = initial(&mut first, &mut sink).await;
-            let old_checkpoint = progress.load("query").await.unwrap().unwrap();
+            let old_checkpoint = progress.load(&id("query")).await.unwrap().unwrap();
             old.stop().await.unwrap();
 
             let mut new = query(4).await;
@@ -323,7 +343,10 @@ async fn recreated_volatile_producers_require_explicit_recovery_even_at_identica
                     .unwrap_err()
                     .downcast_ref::<QueryIdentityError>()
                     .is_some());
-                assert_eq!(progress.load("query").await.unwrap(), Some(old_checkpoint));
+                assert_eq!(
+                    progress.load(&id("query")).await.unwrap(),
+                    Some(old_checkpoint)
+                );
                 assert_eq!(handled.names(), ["Alice"]);
             } else {
                 let output = output.unwrap();
@@ -340,7 +363,7 @@ async fn recreated_volatile_producers_require_explicit_recovery_even_at_identica
                     assert!(QueryChangeCodec::is_snapshot(&output[0].envelope));
                 }
                 deliver(&mut sink, output).await;
-                let saved = progress.load("query").await.unwrap().unwrap();
+                let saved = progress.load(&id("query")).await.unwrap().unwrap();
                 assert_eq!(saved.identity, identity);
                 assert_eq!(saved.sequence, if empty { 0 } else { 1 });
                 if policy == ConsumerRecoveryPolicy::AutoReset {
@@ -358,7 +381,7 @@ async fn recreated_volatile_producers_require_explicit_recovery_even_at_identica
                 assert!(sink.handle(input(alice.clone())).await.is_err());
                 assert!(sink.handle(input(old_snapshot)).await.is_err());
                 assert!(restored.transform(input(alice)).await.is_err());
-                assert_eq!(progress.load("query").await.unwrap(), Some(saved));
+                assert_eq!(progress.load(&id("query")).await.unwrap(), Some(saved));
             }
             new.stop().await.unwrap();
         }
@@ -392,12 +415,15 @@ async fn a_dropped_live_event_is_replayed_before_the_later_event_and_duplicates_
             .collect::<Vec<_>>(),
         [2, 3]
     );
-    assert_eq!(progress.load("query").await.unwrap().unwrap().sequence, 1);
+    assert_eq!(
+        progress.load(&id("query")).await.unwrap().unwrap().sequence,
+        1
+    );
     deliver(&mut sink, output).await;
     assert_eq!(handled.names(), ["Charlie"]);
     assert_eq!(*handled.sequences.lock().unwrap(), [2, 3]);
     assert_eq!(
-        progress.load("query").await.unwrap(),
+        progress.load(&id("query")).await.unwrap(),
         Some(checkpoint(&query.results(), 3))
     );
     assert!(replay.transform(input(second)).await.unwrap().is_empty());
@@ -422,7 +448,7 @@ async fn checkpointed_sink_independently_rejects_unexplained_gaps_and_acceptance
             Some(ConsumerRecoveryError::Gap { .. })
         ));
         assert_eq!(
-            progress.load("query").await.unwrap(),
+            progress.load(&id("query")).await.unwrap(),
             Some(checkpoint(&query.results(), 1))
         );
         assert_eq!(handled.names(), ["Alice"]);
@@ -464,7 +490,10 @@ async fn live_retention_gaps_fail_reset_or_emit_an_explicit_skip_before_retained
                 .downcast_ref::<QueryHistoryError>()
                 .is_some());
             assert!(replay.transform(input(third)).await.is_err());
-            assert_eq!(progress.load("query").await.unwrap().unwrap().sequence, 1);
+            assert_eq!(
+                progress.load(&id("query")).await.unwrap().unwrap().sequence,
+                1
+            );
             assert_eq!(handled.names(), ["Alice"]);
         } else {
             let output = output.unwrap();
@@ -492,7 +521,10 @@ async fn live_retention_gaps_fail_reset_or_emit_an_explicit_skip_before_retained
             }
             deliver(&mut sink, output).await;
             assert_eq!(handled.names(), ["Charlie"]);
-            assert_eq!(progress.load("query").await.unwrap().unwrap().sequence, 3);
+            assert_eq!(
+                progress.load(&id("query")).await.unwrap().unwrap().sequence,
+                3
+            );
         }
         query.stop().await.unwrap();
     }
@@ -522,7 +554,10 @@ async fn partial_handling_failure_restarts_from_the_last_successfully_handled_de
         .handle(input(output[1].envelope.clone()))
         .await
         .is_err());
-    assert_eq!(progress.load("query").await.unwrap().unwrap().sequence, 2);
+    assert_eq!(
+        progress.load(&id("query")).await.unwrap().unwrap().sequence,
+        2
+    );
     replay.stop().await.unwrap();
     replay.start().await.unwrap();
     let retry = replay.on_wakeup().await.unwrap();
@@ -551,7 +586,7 @@ async fn failed_or_cancelled_replacement_never_adopts_the_new_producer_checkpoin
             ConsumerRecoveryPolicy::AutoReset,
         );
         initial(&mut first, &mut sink).await;
-        let saved = progress.load("query").await.unwrap();
+        let saved = progress.load(&id("query")).await.unwrap();
         let mut replacement = query(2).await;
         emit(&mut replacement, 1, "Bob").await;
         let mut restored = replay(
@@ -575,13 +610,13 @@ async fn failed_or_cancelled_replacement_never_adopts_the_new_producer_checkpoin
             handled.fail_snapshot.store(true, Ordering::Release);
             assert!(sink.handle(input(reset)).await.is_err());
         }
-        assert_eq!(progress.load("query").await.unwrap(), saved);
+        assert_eq!(progress.load(&id("query")).await.unwrap(), saved);
         restored.stop().await.unwrap();
         restored.start().await.unwrap();
         deliver(&mut sink, restored.on_wakeup().await.unwrap()).await;
         assert_eq!(handled.names(), ["Bob"]);
         assert_eq!(
-            progress.load("query").await.unwrap(),
+            progress.load(&id("query")).await.unwrap(),
             Some(checkpoint(&replacement.results(), 1))
         );
         old.stop().await.unwrap();
@@ -650,12 +685,12 @@ async fn untrusted_missing_malformed_wrong_scope_and_stale_identity_are_not_inve
         );
         replay.start().await.unwrap();
         assert!(replay.transform(input(invalid.clone())).await.is_err());
-        assert_eq!(progress.load("query").await.unwrap(), None);
+        assert_eq!(progress.load(&id("query")).await.unwrap(), None);
         let mut sink = sink_without_skips(progress.clone());
         sink.handle(input(valid.clone())).await.unwrap();
         assert!(sink.handle(input(invalid)).await.is_err());
         assert_eq!(
-            progress.load("query").await.unwrap(),
+            progress.load(&id("query")).await.unwrap(),
             Some(checkpoint(&query.results(), 1))
         );
     }
@@ -698,14 +733,25 @@ async fn unidentified_unknown_or_malformed_persisted_progress_is_rejected_withou
     ] {
         let provider = Arc::new(MemoryStateStoreProvider::new());
         provider
-            .set("computation-consumer:67:63", "handled:query", bytes.clone())
+            .set(
+                &progress_partition(),
+                &format!("handled:{}", id("query")),
+                bytes.clone(),
+            )
             .await
             .unwrap();
-        let progress =
-            Arc::new(StateStoreConsumerProgress::new("g", "c", provider.clone()).unwrap());
-        assert!(progress.load("query").await.is_err());
+        let progress = Arc::new(
+            StateStoreConsumerProgress::new(
+                "g",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a8")
+                    .expect("fixture UUID"),
+                provider.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(progress.load(&id("query")).await.is_err());
         assert!(progress
-            .commit_handled("query", checkpoint.clone())
+            .commit_handled(&id("query"), checkpoint.clone())
             .await
             .is_err());
         let mut replay = replay(query.results(), progress, ConsumerRecoveryPolicy::AutoReset);
@@ -713,7 +759,7 @@ async fn unidentified_unknown_or_malformed_persisted_progress_is_rejected_withou
         assert!(replay.on_wakeup().await.is_err());
         assert_eq!(
             provider
-                .get("computation-consumer:67:63", "handled:query")
+                .get(&progress_partition(), &format!("handled:{}", id("query")))
                 .await
                 .unwrap(),
             Some(bytes)
@@ -726,15 +772,19 @@ async fn unidentified_unknown_or_malformed_persisted_progress_is_rejected_withou
 #[cfg(feature = "computation-rocksdb-tests")]
 mod construction_scopes {
     use super::*;
-    use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, OutboxWriter};
+    use drasi_core::interface::{
+        CreatedIndexes, IndexBackendPlugin, IndexError, OutboxWriter, OutputPartition,
+    };
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::{ComponentStatus, DrasiLib, Query, StorageBackendRef};
+    use drasi_lib::{
+        ComponentName, ComponentStatus, DrasiLib, Query, StorageBackendRef, StorageScope,
+    };
     use drasi_source_application::{
         ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder,
     };
     use std::{collections::HashMap, path::Path, result::Result};
 
-    type Captured = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+    type Captured = Arc<Mutex<Vec<(StorageScope, Vec<u8>)>>>;
 
     struct CaptureProvider {
         inner: RocksDbIndexProvider,
@@ -743,20 +793,21 @@ mod construction_scopes {
 
     #[async_trait]
     impl IndexBackendPlugin for CaptureProvider {
-        async fn create_indexes(&self, query: &str) -> Result<CreatedIndexes, IndexError> {
-            self.create_scoped_indexes(query, query).await
+        async fn create_indexes(&self, query: &ComponentId) -> Result<CreatedIndexes, IndexError> {
+            self.create_scoped_indexes(&StorageScope::default(), query)
+                .await
         }
 
         async fn create_scoped_indexes(
             &self,
-            scope: &str,
-            query: &str,
+            scope: &StorageScope,
+            query: &ComponentId,
         ) -> Result<CreatedIndexes, IndexError> {
             let mut indexes = self.inner.create_scoped_indexes(scope, query).await?;
             indexes.outbox_writer = indexes.outbox_writer.map(|inner| {
                 Arc::new(CaptureOutbox {
                     inner,
-                    scope: scope.to_owned(),
+                    scope: scope.clone(),
                     captured: self.captured.clone(),
                 }) as Arc<dyn OutboxWriter>
             });
@@ -774,13 +825,13 @@ mod construction_scopes {
 
     struct CaptureOutbox {
         inner: Arc<dyn OutboxWriter>,
-        scope: String,
+        scope: StorageScope,
         captured: Captured,
     }
 
     impl CaptureOutbox {
-        fn record(&self, query: &str, data: &[u8]) {
-            if query == "query" {
+        fn record(&self, query: &OutputPartition, data: &[u8]) {
+            if query == &OutputPartition::Component(id("query")) {
                 self.captured
                     .lock()
                     .unwrap()
@@ -791,7 +842,12 @@ mod construction_scopes {
 
     #[async_trait]
     impl OutboxWriter for CaptureOutbox {
-        async fn append(&self, query: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+        async fn append(
+            &self,
+            query: &OutputPartition,
+            sequence: u64,
+            data: &[u8],
+        ) -> Result<(), IndexError> {
             self.inner.append(query, sequence, data).await?;
             self.record(query, data);
             Ok(())
@@ -799,7 +855,7 @@ mod construction_scopes {
 
         async fn append_and_trim(
             &self,
-            query: &str,
+            query: &OutputPartition,
             sequence: u64,
             data: &[u8],
             retain_from: u64,
@@ -814,27 +870,34 @@ mod construction_scopes {
 
         async fn read_from(
             &self,
-            query: &str,
+            query: &OutputPartition,
             after: u64,
         ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
             self.inner.read_from(query, after).await
         }
 
-        async fn read_latest_sequence(&self, query: &str) -> Result<Option<u64>, IndexError> {
+        async fn read_latest_sequence(
+            &self,
+            query: &OutputPartition,
+        ) -> Result<Option<u64>, IndexError> {
             self.inner.read_latest_sequence(query).await
         }
 
-        async fn clear(&self, query: &str) -> Result<(), IndexError> {
+        async fn clear(&self, query: &OutputPartition) -> Result<(), IndexError> {
             self.inner.clear(query).await
         }
 
-        async fn trim_before(&self, query: &str, sequence: u64) -> Result<usize, IndexError> {
+        async fn trim_before(
+            &self,
+            query: &OutputPartition,
+            sequence: u64,
+        ) -> Result<usize, IndexError> {
             self.inner.trim_before(query, sequence).await
         }
 
         async fn trim_to_capacity(
             &self,
-            query: &str,
+            query: &OutputPartition,
             capacity: usize,
         ) -> Result<usize, IndexError> {
             self.inner.trim_to_capacity(query, capacity).await
@@ -847,9 +910,9 @@ mod construction_scopes {
         name: &str,
         head: u64,
         provider: Arc<CaptureProvider>,
-    ) -> anyhow::Result<(String, ChangeEnvelope)> {
+    ) -> anyhow::Result<(StorageScope, ChangeEnvelope)> {
         let (source, handle) = ApplicationSource::new(
-            "people",
+            fixture_support::component_id(5),
             ApplicationSourceConfig {
                 properties: HashMap::new(),
                 durability: Some(drasi_lib::DurabilityConfig {
@@ -860,6 +923,8 @@ mod construction_scopes {
         )?;
         let before = provider.captured.lock().unwrap().len();
         let core = DrasiLib::builder()
+            // Scope isolation and reopen deliberately reuse these fixture UUIDs.
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -877,20 +942,21 @@ mod construction_scopes {
             .with_wal_provider(Arc::new(drasi_wal_redb::RedbWalProvider::new(
                 root.join(format!("wal-{instance}")),
             )))
-            .with_source(source)
+            .with_fixture_source(ComponentName::try_new("people")?, source)
             .with_query(
-                Query::cypher("query")
+                Query::cypher(ComponentName::try_new("query")?)
+                    .with_id(id("query"))
                     .query(TEXT)
-                    .from_input("people")
+                    .from_input_by_name(ComponentName::try_new("people")?)
                     .enable_bootstrap(false)
                     .with_storage_backend(StorageBackendRef::Named("rocks".into()))
-                    .build(),
+                    .build()?,
             )
             .build()
             .await?;
         core.start().await?;
         tokio::time::timeout(Duration::from_secs(15), async {
-            while core.get_query_status("query").await? != ComponentStatus::Running {
+            while core.get_query_status_by_id(&id("query")).await? != ComponentStatus::Running {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Ok::<_, anyhow::Error>(())
@@ -904,13 +970,11 @@ mod construction_scopes {
             )
             .await?;
         tokio::time::timeout(Duration::from_secs(15), async {
-            let query = core
-                .query_manager()
-                .get_query_instance("query")
-                .await
-                .map_err(anyhow::Error::msg)?;
             loop {
-                let snapshot = query.fetch_snapshot().await?;
+                let snapshot = core
+                    .subscribe_query_results_by_id(&id("query"))
+                    .await?
+                    .snapshot;
                 if snapshot.as_of_sequence == head {
                     break;
                 }
@@ -980,7 +1044,10 @@ mod construction_scopes {
         sink.handle(input(alice)).await.unwrap();
         assert!(sink.handle(input(bob)).await.is_err());
         assert_eq!(handled.names(), ["Alice"]);
-        assert_eq!(progress.load("query").await.unwrap().unwrap().identity, a);
+        assert_eq!(
+            progress.load(&id("query")).await.unwrap().unwrap().identity,
+            a
+        );
 
         let (reopened_scope, reopened) =
             ordinary_output(directory.path(), "alpha", "Alicia", 2, provider)
@@ -989,7 +1056,10 @@ mod construction_scopes {
         assert_eq!(reopened_scope, scope_a);
         assert_eq!(QueryRecoveryIdentity::from_envelope(&reopened).unwrap(), a);
         sink.handle(input(reopened)).await.unwrap();
-        assert_eq!(progress.load("query").await.unwrap().unwrap().sequence, 2);
+        assert_eq!(
+            progress.load(&id("query")).await.unwrap().unwrap().sequence,
+            2
+        );
     }
 }
 
@@ -1003,36 +1073,53 @@ async fn authorized_new_incarnations_can_reset_lower_but_stale_commits_and_decis
     let provider = Arc::new(MemoryStateStoreProvider::new());
     let stores: Vec<Arc<dyn ConsumerProgressStore>> = vec![
         Arc::new(MemoryConsumerProgress::default()),
-        Arc::new(StateStoreConsumerProgress::new("g", "c", provider.clone()).unwrap()),
+        Arc::new(
+            StateStoreConsumerProgress::new(
+                "g",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a8")
+                    .expect("fixture UUID"),
+                provider.clone(),
+            )
+            .unwrap(),
+        ),
     ];
     for progress in stores {
         progress
-            .commit_handled("query", previous.clone())
+            .commit_handled(&id("query"), previous.clone())
             .await
             .unwrap();
         assert!(progress
-            .commit_handled("query", target.clone())
+            .commit_handled(&id("query"), target.clone())
             .await
             .is_err());
         progress
-            .commit_recovery("query", Some(previous.clone()), target.clone())
+            .commit_recovery(&id("query"), Some(previous.clone()), target.clone())
             .await
             .unwrap();
         assert!(progress
-            .commit_handled("query", previous.clone())
+            .commit_handled(&id("query"), previous.clone())
             .await
             .is_err());
         assert!(progress
-            .commit_recovery("query", Some(previous.clone()), previous.clone())
+            .commit_recovery(&id("query"), Some(previous.clone()), previous.clone())
             .await
             .is_err());
-        assert_eq!(progress.load("query").await.unwrap(), Some(target.clone()));
+        assert_eq!(
+            progress.load(&id("query")).await.unwrap(),
+            Some(target.clone())
+        );
     }
-    let reopened = StateStoreConsumerProgress::new("g", "c", provider.clone()).unwrap();
-    assert_eq!(reopened.load("query").await.unwrap(), Some(target));
+    let reopened = StateStoreConsumerProgress::new(
+        "g",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a8")
+            .expect("fixture UUID"),
+        provider.clone(),
+    )
+    .unwrap();
+    assert_eq!(reopened.load(&id("query")).await.unwrap(), Some(target));
     provider
         .set(
-            "computation-consumer:67:63",
+            &progress_partition(),
             "producer:replay/out",
             u64::MAX.to_be_bytes().to_vec(),
         )
@@ -1060,9 +1147,15 @@ async fn consumer_identity_and_producer_sequence_survive_an_actual_state_store_r
     {
         let provider =
             Arc::new(drasi_state_store_redb::RedbStateStoreProvider::new(&path).unwrap());
-        let progress = StateStoreConsumerProgress::new("graph", "consumer", provider).unwrap();
+        let progress = StateStoreConsumerProgress::new(
+            "graph",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a7")
+                .expect("fixture UUID"),
+            provider,
+        )
+        .unwrap();
         progress
-            .commit_handled("query", saved.clone())
+            .commit_handled(&id("query"), saved.clone())
             .await
             .unwrap();
         assert_eq!(progress.allocate_sequence(&stream).await.unwrap(), 1);
@@ -1070,8 +1163,14 @@ async fn consumer_identity_and_producer_sequence_survive_an_actual_state_store_r
     {
         let provider =
             Arc::new(drasi_state_store_redb::RedbStateStoreProvider::new(&path).unwrap());
-        let progress = StateStoreConsumerProgress::new("graph", "consumer", provider).unwrap();
-        assert_eq!(progress.load("query").await.unwrap(), Some(saved));
+        let progress = StateStoreConsumerProgress::new(
+            "graph",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a7")
+                .expect("fixture UUID"),
+            provider,
+        )
+        .unwrap();
+        assert_eq!(progress.load(&id("query")).await.unwrap(), Some(saved));
         assert_eq!(progress.allocate_sequence(&stream).await.unwrap(), 2);
     }
     query.stop().await.unwrap();
@@ -1120,7 +1219,7 @@ async fn live_query_reset_wakes_recovery_and_replaces_with_an_empty_snapshot() {
         replay.transform(input(old.clone())).await.unwrap(),
     )
     .await;
-    let previous = progress.load("query").await.unwrap().unwrap();
+    let previous = progress.load(&id("query")).await.unwrap().unwrap();
     rows.lock().unwrap().clear();
     assert!(query.transform(input(initial)).await.is_err());
     query.stop().await.unwrap();
@@ -1136,7 +1235,7 @@ async fn live_query_reset_wakes_recovery_and_replaces_with_an_empty_snapshot() {
     assert!(QueryChangeCodec::is_snapshot(&output[0].envelope));
     assert!(output[0].envelope.changes().operations().is_empty());
     deliver(&mut sink, output).await;
-    let recovered = progress.load("query").await.unwrap().unwrap();
+    let recovered = progress.load(&id("query")).await.unwrap().unwrap();
     assert_eq!(recovered.identity, previous.identity);
     assert!(recovered.generation > previous.generation);
     assert_eq!(recovered.sequence, previous.sequence);
@@ -1198,15 +1297,25 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
     drop(reopened);
     {
         let resources = provider
-            .create_indexes("persistent", "query")
+            .create_indexes("persistent", &id("query"))
             .await
             .unwrap();
         let outbox = resources.outbox_writer().unwrap();
-        let stored = outbox.read_from("query", 0).await.unwrap();
+        let stored = outbox
+            .read_from(
+                &drasi_core::interface::OutputPartition::Component(id("query")),
+                0,
+            )
+            .await
+            .unwrap();
         let unidentified = without_identity(&codec.decode(&stored[0].1).unwrap());
         resources.indexes().session_control.begin().await.unwrap();
         outbox
-            .append("query", 1, &codec.encode(&unidentified).unwrap())
+            .append(
+                &drasi_core::interface::OutputPartition::Component(id("query")),
+                1,
+                &codec.encode(&unidentified).unwrap(),
+            )
             .await
             .unwrap();
         resources.indexes().session_control.commit().await.unwrap();
@@ -1226,13 +1335,16 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
     }
     {
         let resources = provider
-            .create_indexes("persistent", "query")
+            .create_indexes("persistent", &id("query"))
             .await
             .unwrap();
         let stored = resources
             .outbox_writer()
             .unwrap()
-            .read_from("query", 0)
+            .read_from(
+                &drasi_core::interface::OutputPartition::Component(id("query")),
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -1242,7 +1354,13 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
         resources.indexes().session_control.begin().await.unwrap();
         let checkpoints = resources.checkpoint_store().unwrap();
         checkpoints.clear_checkpoints().await.unwrap();
-        checkpoints.stage_result_sequence("query", 1).await.unwrap();
+        checkpoints
+            .stage_result_sequence(
+                &drasi_core::interface::OutputPartition::Component(id("query")),
+                1,
+            )
+            .await
+            .unwrap();
         resources.indexes().session_control.commit().await.unwrap();
         resources.cleanup().unwrap().shutdown().await.unwrap();
     }
@@ -1259,7 +1377,7 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
         unverified.stop().await.unwrap();
     }
     let resources = provider
-        .create_indexes("persistent", "query")
+        .create_indexes("persistent", &id("query"))
         .await
         .unwrap();
     assert!(resources
@@ -1321,7 +1439,7 @@ async fn snapshot_support_is_absent_by_default_and_a_wrapped_unsupported_snapsho
     let snapshot = replay.on_wakeup().await.unwrap().pop().unwrap().envelope;
     assert!(QueryChangeCodec::is_snapshot(&snapshot));
     assert!(sink.handle(input(snapshot)).await.is_err());
-    assert_eq!(progress.load("query").await.unwrap(), None);
+    assert_eq!(progress.load(&id("query")).await.unwrap(), None);
     query.stop().await.unwrap();
 }
 
@@ -1352,7 +1470,7 @@ async fn checkpointed_snapshot_handler_is_port_scoped_and_keeps_the_checkpointed
         .await
         .is_err());
     assert_eq!(handled.replacements.load(Ordering::Acquire), 0);
-    assert_eq!(progress.load("query").await.unwrap(), None);
+    assert_eq!(progress.load(&id("query")).await.unwrap(), None);
 
     sink.snapshot_consumer(&port)
         .expect("the inner sink handles snapshots on in")
@@ -1362,7 +1480,7 @@ async fn checkpointed_snapshot_handler_is_port_scoped_and_keeps_the_checkpointed
     assert_eq!(handled.replacements.load(Ordering::Acquire), 1);
     assert_eq!(handled.names(), ["Alice"]);
     assert_eq!(
-        progress.load("query").await.unwrap(),
+        progress.load(&id("query")).await.unwrap(),
         Some(checkpoint(&query.results(), 1))
     );
     query.stop().await.unwrap();

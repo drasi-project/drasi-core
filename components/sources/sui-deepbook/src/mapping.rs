@@ -62,7 +62,7 @@ pub fn should_include_event(event: &SuiEvent, event_filters: &[String], pools: &
 
 /// Maps a Sui event to a SourceChange using operation classification (insert/update/delete).
 /// Used by the streaming source.
-pub fn map_event_to_change(source_id: &str, event: &SuiEvent) -> SourceChange {
+pub fn map_event_to_change(source_id: &drasi_lib::ComponentId, event: &SuiEvent) -> SourceChange {
     let effective_from = event
         .timestamp_ms
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
@@ -85,7 +85,7 @@ pub fn map_event_to_change(source_id: &str, event: &SuiEvent) -> SourceChange {
         vec![Arc::from("DeepBookEvent"), Arc::from(label.as_str())].into();
 
     let metadata = ElementMetadata {
-        reference: ElementReference::new(source_id, &entity_id),
+        reference: ElementReference::new(source_id.as_str(), &entity_id),
         labels,
         effective_from,
     };
@@ -107,7 +107,10 @@ pub fn map_event_to_change(source_id: &str, event: &SuiEvent) -> SourceChange {
 
 /// Maps a Sui event to an Insert-only SourceChange.  Used by the bootstrap
 /// provider where every historical event is treated as an insert.
-pub fn map_event_to_insert_change(source_id: &str, event: &SuiEvent) -> SourceChange {
+pub fn map_event_to_insert_change(
+    source_id: &drasi_lib::ComponentId,
+    event: &SuiEvent,
+) -> SourceChange {
     let effective_from = event
         .timestamp_ms
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
@@ -124,7 +127,7 @@ pub fn map_event_to_insert_change(source_id: &str, event: &SuiEvent) -> SourceCh
     SourceChange::Insert {
         element: Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, &entity_id),
+                reference: ElementReference::new(source_id.as_str(), &entity_id),
                 labels,
                 effective_from,
             },
@@ -139,7 +142,7 @@ pub fn map_event_to_insert_change(source_id: &str, event: &SuiEvent) -> SourceCh
 
 /// Build a `:Pool` node from `sui_getObject` data.
 pub fn build_pool_node(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     pool_id: &str,
     object_data: Option<&SuiObjectData>,
     effective_from: u64,
@@ -186,7 +189,7 @@ pub fn build_pool_node(
     SourceChange::Insert {
         element: Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, &entity_id),
+                reference: ElementReference::new(source_id.as_str(), &entity_id),
                 labels: Arc::new([Arc::from("Pool")]),
                 effective_from,
             },
@@ -196,7 +199,11 @@ pub fn build_pool_node(
 }
 
 /// Build a `:Trader` node from a sender address.
-pub fn build_trader_node(source_id: &str, address: &str, effective_from: u64) -> SourceChange {
+pub fn build_trader_node(
+    source_id: &drasi_lib::ComponentId,
+    address: &str,
+    effective_from: u64,
+) -> SourceChange {
     let entity_id = format!("trader:{address}");
     let mut properties = ElementPropertyMap::new();
     properties.insert("address", ElementValue::String(Arc::from(address)));
@@ -208,7 +215,7 @@ pub fn build_trader_node(source_id: &str, address: &str, effective_from: u64) ->
     SourceChange::Insert {
         element: Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, &entity_id),
+                reference: ElementReference::new(source_id.as_str(), &entity_id),
                 labels: Arc::new([Arc::from("Trader")]),
                 effective_from,
             },
@@ -219,7 +226,7 @@ pub fn build_trader_node(source_id: &str, address: &str, effective_from: u64) ->
 
 /// Build an `:Order` node from an order_id.
 pub fn build_order_node(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     order_id: &str,
     pool_id: Option<&str>,
     effective_from: u64,
@@ -238,7 +245,7 @@ pub fn build_order_node(
     SourceChange::Insert {
         element: Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, &entity_id),
+                reference: ElementReference::new(source_id.as_str(), &entity_id),
                 labels: Arc::new([Arc::from("Order")]),
                 effective_from,
             },
@@ -249,7 +256,7 @@ pub fn build_order_node(
 
 /// Build a relationship edge between two nodes.
 pub fn build_relationship(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     label: &str,
     rel_entity_id: &str,
     in_node_id: &str,
@@ -259,13 +266,13 @@ pub fn build_relationship(
     SourceChange::Insert {
         element: Element::Relation {
             metadata: ElementMetadata {
-                reference: ElementReference::new(source_id, rel_entity_id),
+                reference: ElementReference::new(source_id.as_str(), rel_entity_id),
                 labels: Arc::new([Arc::from(label)]),
                 effective_from,
             },
             properties: ElementPropertyMap::new(),
-            in_node: ElementReference::new(source_id, in_node_id),
-            out_node: ElementReference::new(source_id, out_node_id),
+            in_node: ElementReference::new(source_id.as_str(), in_node_id),
+            out_node: ElementReference::new(source_id.as_str(), out_node_id),
         },
     }
 }
@@ -501,7 +508,11 @@ mod tests {
             "0x1::events::OrderCancelled",
             serde_json::json!({"order_id": "42"}),
         );
-        let change = map_event_to_change("source-a", &event);
+        let change = map_event_to_change(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b5")
+                .expect("fixture UUID"),
+            &event,
+        );
         assert!(matches!(change, SourceChange::Delete { .. }));
     }
 
@@ -511,7 +522,11 @@ mod tests {
             "0x1::events::OrderPlaced",
             serde_json::json!({"order_id": "42", "price": "12.34"}),
         );
-        let change = map_event_to_change("source-a", &event);
+        let change = map_event_to_change(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b5")
+                .expect("fixture UUID"),
+            &event,
+        );
         match change {
             SourceChange::Insert {
                 element:
@@ -570,7 +585,13 @@ mod tests {
             }),
         };
 
-        let change = build_pool_node("src-1", "0xpool_abc", Some(&object_data), 100);
+        let change = build_pool_node(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID"),
+            "0xpool_abc",
+            Some(&object_data),
+            100,
+        );
         match change {
             SourceChange::Insert {
                 element:
@@ -603,7 +624,13 @@ mod tests {
 
     #[test]
     fn test_build_pool_node_without_object_data() {
-        let change = build_pool_node("src-1", "0xpool_abc", None, 100);
+        let change = build_pool_node(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID"),
+            "0xpool_abc",
+            None,
+            100,
+        );
         match change {
             SourceChange::Insert {
                 element:
@@ -628,7 +655,12 @@ mod tests {
 
     #[test]
     fn test_build_trader_node() {
-        let change = build_trader_node("src-1", "0xtrader_123456789abcdef", 200);
+        let change = build_trader_node(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID"),
+            "0xtrader_123456789abcdef",
+            200,
+        );
         match change {
             SourceChange::Insert {
                 element:
@@ -653,7 +685,13 @@ mod tests {
 
     #[test]
     fn test_build_order_node() {
-        let change = build_order_node("src-1", "42", Some("0xpool_abc"), 300);
+        let change = build_order_node(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID"),
+            "42",
+            Some("0xpool_abc"),
+            300,
+        );
         match change {
             SourceChange::Insert {
                 element:
@@ -680,7 +718,8 @@ mod tests {
     #[test]
     fn test_build_relationship() {
         let change = build_relationship(
-            "src-1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                .expect("fixture UUID"),
             "IN_POOL",
             "rel:in_pool:order:42",
             "order:42",
@@ -733,7 +772,11 @@ mod tests {
             "0xdee9::clob_v2::OrderPlaced<0x2::sui::SUI, 0x5d4b::coin::COIN>",
             serde_json::json!({"order_id": "99", "pool_id": "0xpool", "price": "1.5"}),
         );
-        let change = map_event_to_change("src", &event);
+        let change = map_event_to_change(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b6")
+                .expect("fixture UUID"),
+            &event,
+        );
         match change {
             SourceChange::Insert {
                 element: Element::Node { properties, .. },

@@ -14,6 +14,7 @@
 
 //! Error types for the Write-Ahead Log plugin contract.
 
+use crate::ComponentId;
 use thiserror::Error;
 
 /// Errors that can occur during WAL operations.
@@ -25,31 +26,31 @@ pub enum WalError {
     /// The WAL for the given source has reached its configured maximum event capacity
     /// and the policy is [`CapacityPolicy::RejectIncoming`](super::CapacityPolicy::RejectIncoming).
     #[error("WAL capacity exhausted for source '{0}'")]
-    CapacityExhausted(String),
+    CapacityExhausted(ComponentId),
 
     /// The requested replay position has been pruned and is older than the
     /// oldest retained sequence. Reading from a sequence greater than `head`
     /// is not an error — it returns an empty result (the caller is caught up).
     #[error("Position {requested} unavailable for source '{source_id}' (oldest available: {oldest_available:?})")]
     PositionUnavailable {
-        source_id: String,
+        source_id: ComponentId,
         requested: u64,
         oldest_available: Option<u64>,
     },
 
     /// Called a WAL operation for a source that was never registered.
     #[error("Source '{0}' is not registered with the WAL provider")]
-    SourceNotRegistered(String),
+    SourceNotRegistered(ComponentId),
 
     /// Attempted to register a source that is already registered with a different config.
     #[error("Source '{0}' is already registered with a different config")]
-    SourceAlreadyRegistered(String),
+    SourceAlreadyRegistered(ComponentId),
 
     /// The supplied source_id is not acceptable to this provider (e.g., contains
     /// path separators, `..`, or other characters a file-backed provider cannot
     /// safely map to disk).
     #[error("Invalid source_id '{0}': {1}")]
-    InvalidSourceId(String, String),
+    InvalidSourceId(ComponentId, String),
 
     /// The event is not valid for WAL storage (e.g., `SourceChange::Future`).
     #[error("Invalid event: {0}")]

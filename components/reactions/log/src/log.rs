@@ -16,7 +16,7 @@ use super::config::LogReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use log::debug;
+use log::{debug, error};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::observability::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::common::CheckpointState;
 use drasi_lib::Reaction;
 
 pub struct LogReaction {
@@ -54,14 +55,17 @@ impl LogReaction {
     /// - Returns error if any template has invalid Handlebars syntax
     /// - Returns error if a route query ID doesn't match any subscribed query
     pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: LogReactionConfig,
     ) -> anyhow::Result<Self> {
-        let id = id.into();
+        let id = id.clone();
 
         // Validate templates and routes
-        Self::validate_config(&queries, &config)?;
+        Self::validate_config(
+            &drasi_lib::reactions::common::input_aliases(&queries),
+            &config,
+        )?;
 
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
@@ -93,15 +97,18 @@ impl LogReaction {
     /// - Returns error if any template has invalid Handlebars syntax
     /// - Returns error if a route query ID doesn't match any subscribed query
     pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: LogReactionConfig,
         priority_queue_capacity: usize,
     ) -> anyhow::Result<Self> {
-        let id = id.into();
+        let id = id.clone();
 
         // Validate templates and routes
-        Self::validate_config(&queries, &config)?;
+        Self::validate_config(
+            &drasi_lib::reactions::common::input_aliases(&queries),
+            &config,
+        )?;
 
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
@@ -176,15 +183,15 @@ impl LogReaction {
     }
 
     /// Create a builder for LogReaction
-    pub fn builder(id: impl Into<String>) -> LogReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> LogReactionBuilder {
         LogReactionBuilder::new(id)
     }
 }
 
 /// Builder for LogReaction
 pub struct LogReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     config: LogReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
@@ -192,9 +199,9 @@ pub struct LogReactionBuilder {
 
 impl LogReactionBuilder {
     /// Create a new builder with the given reaction ID
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             config: LogReactionConfig::default(),
             priority_queue_capacity: None,
@@ -202,21 +209,56 @@ impl LogReactionBuilder {
         }
     }
 
-    /// Set the query IDs to subscribe to
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
         self
     }
 
-    /// Add a query ID to subscribe to
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
+    }
+
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
         self
     }
 
-    /// Connect this reaction to receive results from a query (alias for with_query)
-    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
+        self
+    }
+
+    /// Add a query input by its current name.
+    pub fn from_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
+        self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn from_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
     }
 
@@ -307,7 +349,10 @@ impl LogReactionBuilder {
     /// - Returns error if a route query ID doesn't match any subscribed query
     pub fn build(self) -> anyhow::Result<LogReaction> {
         // Validate templates and routes
-        LogReaction::validate_config(&self.queries, &self.config)?;
+        LogReaction::validate_config(
+            &drasi_lib::reactions::common::input_aliases(&self.queries),
+            &self.config,
+        )?;
 
         let mut params =
             ReactionBaseParams::new(self.id, self.queries).with_auto_start(self.auto_start);
@@ -324,7 +369,7 @@ impl LogReactionBuilder {
 
 #[async_trait]
 impl Reaction for LogReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -362,7 +407,7 @@ impl Reaction for LogReaction {
         self.base.properties_or_serialize(&dto)
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -370,8 +415,8 @@ impl Reaction for LogReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -399,11 +444,16 @@ impl Reaction for LogReaction {
         let priority_queue = self.base.priority_queue.clone();
         let reaction_name = self.base.id.clone();
         let config = self.config.clone();
+        let base = self.base.clone_shared();
+        let policy = self
+            .base
+            .resolved_recovery_policy(self.default_recovery_policy());
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            let mut checkpoints = CheckpointState::load(&base).await;
             // Set up Handlebars with json helper
             let mut handlebars = Handlebars::new();
             handlebars.register_helper(
@@ -447,13 +497,13 @@ impl Reaction for LogReaction {
                     profiling.reaction_receive_ns = Some(drasi_lib::profiling::timestamp_ns());
                 }
 
-                if query_result.results.is_empty() {
+                let has_results = !query_result.results.is_empty();
+                if !has_results {
                     debug!("[{reaction_name}] Received empty result set from query");
-                    continue;
                 }
 
                 #[allow(clippy::print_stdout)]
-                {
+                if has_results {
                     println!(
                         "[{}] Query '{}' ({} items):",
                         reaction_name,
@@ -467,13 +517,17 @@ impl Reaction for LogReaction {
                     let mut context = Map::new();
                     context.insert(
                         "query_name".to_string(),
-                        Value::String(query_result.query_id.clone()),
+                        serde_json::json!(query_result.query_name),
                     );
+                    context.insert("query_id".to_string(), serde_json::json!(query_result.query_id));
+                    context.insert("input_alias".to_string(), serde_json::json!(query_result.input_alias));
 
                     // Get query-specific config if available, otherwise use default
-                    let query_config = config
-                        .routes
-                        .get(&query_result.query_id)
+                    let query_config = drasi_lib::reactions::common::input_alias(
+                        query_result.input_alias.as_deref(),
+                        query_result.query_name.as_ref(),
+                    )
+                        .and_then(|alias| config.routes.get(alias))
                         .or(config.default_template.as_ref());
 
                     match result {
@@ -596,7 +650,7 @@ impl Reaction for LogReaction {
                 }
 
                 // Capture reaction_complete_ns timestamp
-                if let Some(ref mut profiling) = query_result.profiling {
+                if let Some(profiling) = query_result.profiling.as_mut().filter(|_| has_results) {
                     profiling.reaction_complete_ns = Some(drasi_lib::profiling::timestamp_ns());
 
                     // Log profiling summary if available
@@ -610,6 +664,18 @@ impl Reaction for LogReaction {
                             total_latency_ns as f64 / 1_000_000.0
                         );
                     }
+                }
+                if let Err(error) = checkpoints
+                    .advance_with_policy(&base, &query_result.query_id, query_result.sequence, policy)
+                    .await
+                {
+                    error!("[{reaction_name}] Log checkpoint write failed: {error:#}");
+                    base.set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Log checkpoint failed for query '{}' (seq {}): {error:#}",
+                            query_result.query_id, query_result.sequence)),
+                    ).await;
+                    break;
                 }
             }
         }).await?;
@@ -659,5 +725,373 @@ impl Reaction for LogReaction {
 
     fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
         drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use drasi_lib::{
+        channels::QueryResult,
+        context::{workers::WorkerAlreadyOwned, ReactionRuntimeContext},
+        state_store::{
+            MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
+        },
+        ComponentId, ReactionCheckpoint, ReactionRecoveryPolicy, StorePartition,
+    };
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use tokio::sync::{Notify, Semaphore};
+
+    struct ControlledStore {
+        inner: MemoryStateStoreProvider,
+        fail: AtomicBool,
+        block: AtomicBool,
+        failures: AtomicUsize,
+        entered: Notify,
+        release: Semaphore,
+    }
+
+    impl ControlledStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStateStoreProvider::new(),
+                fail: AtomicBool::new(false),
+                block: AtomicBool::new(false),
+                failures: AtomicUsize::new(0),
+                entered: Notify::new(),
+                release: Semaphore::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl StateStoreProvider for ControlledStore {
+        async fn get(
+            &self,
+            partition: &StorePartition,
+            key: &str,
+        ) -> StateStoreResult<Option<Vec<u8>>> {
+            self.inner.get(partition, key).await
+        }
+        async fn set(
+            &self,
+            partition: &StorePartition,
+            key: &str,
+            value: Vec<u8>,
+        ) -> StateStoreResult<()> {
+            if self.block.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release
+                    .acquire()
+                    .await
+                    .map_err(|error| StateStoreError::Other(error.to_string()))?
+                    .forget();
+            }
+            if self.fail.load(Ordering::SeqCst) {
+                self.failures.fetch_add(1, Ordering::SeqCst);
+                return Err(StateStoreError::StorageError(
+                    "injected checkpoint write failure".into(),
+                ));
+            }
+            self.inner.set(partition, key, value).await
+        }
+        async fn delete(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool> {
+            self.inner.delete(partition, key).await
+        }
+        async fn contains_key(
+            &self,
+            partition: &StorePartition,
+            key: &str,
+        ) -> StateStoreResult<bool> {
+            self.inner.contains_key(partition, key).await
+        }
+        async fn get_many(
+            &self,
+            partition: &StorePartition,
+            keys: &[&str],
+        ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
+            self.inner.get_many(partition, keys).await
+        }
+        async fn set_many(
+            &self,
+            partition: &StorePartition,
+            entries: &[(&str, &[u8])],
+        ) -> StateStoreResult<()> {
+            self.inner.set_many(partition, entries).await
+        }
+        async fn delete_many(
+            &self,
+            partition: &StorePartition,
+            keys: &[&str],
+        ) -> StateStoreResult<usize> {
+            self.inner.delete_many(partition, keys).await
+        }
+        async fn clear_store(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+            self.inner.clear_store(partition).await
+        }
+        async fn list_keys(&self, partition: &StorePartition) -> StateStoreResult<Vec<String>> {
+            self.inner.list_keys(partition).await
+        }
+        async fn store_exists(&self, partition: &StorePartition) -> StateStoreResult<bool> {
+            self.inner.store_exists(partition).await
+        }
+        async fn key_count(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+            self.inner.key_count(partition).await
+        }
+    }
+
+    async fn fixture(
+        policy: ReactionRecoveryPolicy,
+    ) -> Result<(LogReaction, Arc<ControlledStore>, ComponentId, ComponentId)> {
+        let first = ComponentId::generate();
+        let second = ComponentId::generate();
+        let mut reaction = LogReaction::new(
+            ComponentId::generate(),
+            vec![
+                drasi_lib::config::ComponentReference::by_id(first.clone()),
+                drasi_lib::config::ComponentReference::by_id(second.clone()),
+            ],
+            LogReactionConfig::default(),
+        )?;
+        reaction.base.recovery_policy = Some(policy);
+        let store = Arc::new(ControlledStore::new());
+        let (updates, _rx) = tokio::sync::mpsc::channel(32);
+        reaction
+            .bind_runtime_context(ReactionRuntimeContext::new(
+                "log-checkpoints",
+                reaction.id().clone(),
+                vec![first.clone(), second.clone()],
+                Some(store.clone()),
+                updates,
+                None,
+            ))
+            .await;
+        Ok((reaction, store, first, second))
+    }
+
+    fn result(query: &ComponentId, sequence: u64) -> QueryResult {
+        QueryResult::new(
+            query.clone(),
+            sequence,
+            chrono::Utc::now(),
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"name": "Alice"}),
+                row_signature: sequence,
+            }],
+            HashMap::new(),
+        )
+    }
+
+    async fn wait_checkpoint(
+        reaction: &LogReaction,
+        query: &ComponentId,
+        expected: &ReactionCheckpoint,
+    ) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if reaction.base.read_checkpoint(query).await?.as_ref() == Some(expected) {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn checkpoints_are_lazy_per_query_and_never_written_on_enqueue() -> Result<()> {
+        let (reaction, _store, first, second) =
+            fixture(ReactionRecoveryPolicy::AutoSkipGap).await?;
+        reaction.start().await?;
+        tokio::task::yield_now().await;
+        let first_seed = ReactionCheckpoint {
+            sequence: 0,
+            config_hash: 43,
+        };
+        let second_seed = ReactionCheckpoint {
+            sequence: 5,
+            config_hash: 86,
+        };
+        reaction.base.write_checkpoint(&first, &first_seed).await?;
+        reaction
+            .base
+            .write_checkpoint(&second, &second_seed)
+            .await?;
+        reaction.enqueue_query_result(result(&first, 1)).await?;
+        wait_checkpoint(
+            &reaction,
+            &first,
+            &ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 43,
+            },
+        )
+        .await?;
+        assert_eq!(
+            reaction.base.read_checkpoint(&second).await?,
+            Some(second_seed)
+        );
+        reaction.enqueue_query_result(result(&second, 6)).await?;
+        wait_checkpoint(
+            &reaction,
+            &second,
+            &ReactionCheckpoint {
+                sequence: 6,
+                config_hash: 86,
+            },
+        )
+        .await?;
+        reaction.stop().await?;
+        reaction.enqueue_query_result(result(&first, 2)).await?;
+        assert_eq!(
+            reaction.base.read_checkpoint(&first).await?,
+            Some(ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 43
+            })
+        );
+        reaction.start().await?;
+        wait_checkpoint(
+            &reaction,
+            &first,
+            &ReactionCheckpoint {
+                sequence: 2,
+                config_hash: 43,
+            },
+        )
+        .await?;
+        let mut empty = result(&first, 3);
+        empty.results.clear();
+        reaction.enqueue_query_result(empty).await?;
+        wait_checkpoint(
+            &reaction,
+            &first,
+            &ReactionCheckpoint {
+                sequence: 3,
+                config_hash: 43,
+            },
+        )
+        .await?;
+        reaction.stop().await?;
+        assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn checkpoint_write_failures_apply_the_resolved_policy_without_false_progress(
+    ) -> Result<()> {
+        for policy in [
+            ReactionRecoveryPolicy::Strict,
+            ReactionRecoveryPolicy::AutoReset,
+            ReactionRecoveryPolicy::AutoSkipGap,
+        ] {
+            let (reaction, store, query, _other) = fixture(policy).await?;
+            let seed = ReactionCheckpoint {
+                sequence: 0,
+                config_hash: 43,
+            };
+            reaction.base.write_checkpoint(&query, &seed).await?;
+            reaction.start().await?;
+            store.fail.store(true, Ordering::SeqCst);
+            reaction.enqueue_query_result(result(&query, 1)).await?;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let settled = if policy == ReactionRecoveryPolicy::AutoSkipGap {
+                        store.failures.load(Ordering::SeqCst) == 1
+                    } else {
+                        reaction.status().await == ComponentStatus::Error
+                    };
+                    if settled {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            assert_eq!(
+                reaction.base.read_checkpoint(&query).await?,
+                Some(seed.clone())
+            );
+            let attempts = if policy == ReactionRecoveryPolicy::AutoReset {
+                4
+            } else {
+                1
+            };
+            assert_eq!(store.failures.load(Ordering::SeqCst), attempts);
+            if policy == ReactionRecoveryPolicy::AutoSkipGap {
+                assert_eq!(reaction.status().await, ComponentStatus::Running);
+                store.fail.store(false, Ordering::SeqCst);
+                reaction.enqueue_query_result(result(&query, 2)).await?;
+                wait_checkpoint(
+                    &reaction,
+                    &query,
+                    &ReactionCheckpoint {
+                        sequence: 2,
+                        config_hash: 43,
+                    },
+                )
+                .await?;
+            } else {
+                assert!(reaction.base.processing_task.read().await.is_some());
+                assert!(reaction
+                    .start()
+                    .await
+                    .unwrap_err()
+                    .is::<WorkerAlreadyOwned>());
+                reaction.enqueue_query_result(result(&query, 2)).await?;
+                tokio::task::yield_now().await;
+                assert_eq!(reaction.base.read_checkpoint(&query).await?, Some(seed));
+            }
+            reaction.stop().await?;
+            assert!(reaction.base.processing_task.read().await.is_none());
+            assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_stop_retains_an_in_progress_checkpoint_write_until_joined() -> Result<()> {
+        let (reaction, store, query, _other) = fixture(ReactionRecoveryPolicy::AutoSkipGap).await?;
+        let seed = ReactionCheckpoint {
+            sequence: 0,
+            config_hash: 43,
+        };
+        reaction.base.write_checkpoint(&query, &seed).await?;
+        reaction.start().await?;
+        store.block.store(true, Ordering::SeqCst);
+        reaction.enqueue_query_result(result(&query, 1)).await?;
+        tokio::time::timeout(Duration::from_secs(1), store.entered.notified()).await?;
+        assert_eq!(reaction.base.read_checkpoint(&query).await?, Some(seed));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reaction.stop())
+                .await
+                .is_err()
+        );
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .is::<WorkerAlreadyOwned>());
+        assert!(reaction.base.processing_task.read().await.is_some());
+        store.block.store(false, Ordering::SeqCst);
+        store.release.add_permits(1);
+        reaction.stop().await?;
+        assert_eq!(
+            reaction.base.read_checkpoint(&query).await?,
+            Some(ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 43
+            })
+        );
+        assert!(reaction.base.processing_task.read().await.is_none());
+        assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+        Ok(())
     }
 }

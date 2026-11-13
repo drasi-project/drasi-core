@@ -135,19 +135,27 @@ impl Harness {
             results.push(query.results());
             let drain = format!("{name}-drain");
             builder = builder
-                .transformer(Box::new(query))
-                .sink(Box::new(Drain {
-                    descriptor: ComponentDescriptor::try_new(
-                        id(&drain),
-                        vec![PortDescriptor::new(
-                            PortId::try_new("in")?,
-                            PortDirection::Input,
-                            QueryChangeCodec::schema().descriptor().clone(),
-                            PipeRequirements::default(),
-                        )],
-                    )?,
-                    gate: (name == "a").then(|| gate.clone()),
-                }))
+                .transformer(
+                    drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                        .expect("fixture component name"),
+                    Box::new(query),
+                )
+                .sink(
+                    drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                        .expect("fixture component name"),
+                    Box::new(Drain {
+                        descriptor: ComponentDescriptor::try_new(
+                            id(&drain),
+                            vec![PortDescriptor::new(
+                                PortId::try_new("in")?,
+                                PortDirection::Input,
+                                QueryChangeCodec::schema().descriptor().clone(),
+                                PipeRequirements::default(),
+                            )],
+                        )?,
+                        gate: (name == "a").then(|| gate.clone()),
+                    }),
+                )
                 .bind_stream(endpoint(name, "out"), stream(name))
                 .connect(
                     EdgeDefinition::new(endpoint("items", "out"), endpoint(name, "in")),
@@ -221,7 +229,12 @@ impl Harness {
             .with_id("mssql-coverage")
             .with_components(
                 builder
-                    .component(specification, factory)
+                    .component(
+                        drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                            .expect("fixture component name"),
+                        specification,
+                        factory,
+                    )
                     .bind_stream(endpoint("items", "out"), stream("items"))
                     .build()?,
             )
@@ -237,9 +250,10 @@ impl Harness {
     async fn start(&self) -> Result<()> {
         self.core.start().await?;
         for name in ["a", "b"] {
+            let name = drasi_core_types::ComponentName::try_new(name)?;
             tokio::time::timeout(
                 Duration::from_secs(30),
-                self.core.computation_component(name)?.wait_started(),
+                self.core.component_by_name(&name)?.wait_started(),
             )
             .await??;
         }
@@ -253,7 +267,13 @@ impl Harness {
     async fn failure(&self, expected: &[&str]) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(25), async {
             loop {
-                let state = self.core.computation_component("items")?.observed()?;
+                let state = self
+                    .core
+                    .component_by_name(
+                        &drasi_core_types::ComponentName::try_new("items")
+                            .expect("fixture component name"),
+                    )?
+                    .observed()?;
                 if state.lifecycle == ComponentLifecycle::Failed {
                     let failure = format!("{:?}", state.failure);
                     ensure!(
@@ -285,18 +305,22 @@ async fn suite(dynamic: bool) -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly configured isolated SQL Server fixture"]
 async fn static_current_thread_real_contract_matrix() -> Result<()> {
     suite(false).await
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an explicitly configured isolated SQL Server fixture"]
 async fn static_multi_thread_real_contract_matrix() -> Result<()> {
     suite(false).await
 }
 #[tokio::test]
+#[ignore = "requires an explicitly configured isolated SQL Server fixture"]
 async fn dynamic_current_thread_real_contract_matrix() -> Result<()> {
     suite(true).await
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an explicitly configured isolated SQL Server fixture"]
 async fn dynamic_multi_thread_real_contract_matrix() -> Result<()> {
     suite(true).await
 }

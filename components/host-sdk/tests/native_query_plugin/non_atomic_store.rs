@@ -69,7 +69,9 @@ impl SplitOutputProvider {
             .and_then(Weak::upgrade)
             .context("live checkpoint owner")?;
         checkpoints
-            .read_checkpoint(drasi_query_common::PENDING_QUERY_OUTPUT)
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                drasi_query_common::PENDING_QUERY_OUTPUT.to_owned(),
+            ))
             .await?
             .context("publication marker")
     }
@@ -86,7 +88,7 @@ impl SplitOutputProvider {
             .resources()
             .outbox_writer()
             .context("independent output")?
-            .read_latest_sequence(COMPONENT)
+            .read_latest_sequence(&output_partition()?)
             .await?)
     }
 }
@@ -100,7 +102,7 @@ impl ComputationIndexProvider for SplitOutputProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> std::result::Result<ComputationIndexes, IndexError> {
         let primary = self.indexes.create_indexes(graph, component).await?;
         let output = Arc::new(
@@ -116,7 +118,7 @@ impl ComputationIndexProvider for SplitOutputProvider {
             owner: output.clone(),
             failure: self.failure.clone(),
             exit: self.exit.clone(),
-            component: component.to_owned(),
+            component: drasi_core_types::OutputPartition::Component(component.clone()),
         });
         let checkpoint = primary
             .checkpoint_store()
@@ -201,12 +203,15 @@ struct IndependentOutbox {
     writer: Arc<dyn OutboxWriter>,
     failure: Arc<AtomicBool>,
     exit: Arc<AtomicU8>,
-    component: String,
+    component: drasi_core_types::OutputPartition,
 }
 
 impl IndependentOutbox {
-    fn after_commit(&self, component: &str) -> std::result::Result<(), IndexError> {
-        if component == self.component
+    fn after_commit(
+        &self,
+        component: &drasi_core_types::OutputPartition,
+    ) -> std::result::Result<(), IndexError> {
+        if component == &self.component
             && self
                 .exit
                 .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -214,7 +219,7 @@ impl IndependentOutbox {
         {
             std::process::exit(86);
         }
-        if component == self.component && self.failure.swap(false, Ordering::AcqRel) {
+        if component == &self.component && self.failure.swap(false, Ordering::AcqRel) {
             return Err(index_error(anyhow::anyhow!(
                 "injected failure after independent output commit"
             )));
@@ -227,7 +232,7 @@ impl IndependentOutbox {
 impl OutboxWriter for IndependentOutbox {
     async fn append(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         sequence: u64,
         data: &[u8],
     ) -> std::result::Result<(), IndexError> {
@@ -244,7 +249,7 @@ impl OutboxWriter for IndependentOutbox {
     }
     async fn append_and_trim(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         sequence: u64,
         data: &[u8],
         retain_from: u64,
@@ -264,14 +269,14 @@ impl OutboxWriter for IndependentOutbox {
     }
     async fn read_from(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         after: u64,
     ) -> std::result::Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.writer.read_from(query, after).await
     }
     async fn read_page(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         after: u64,
         limits: OutboxPageLimits,
     ) -> std::result::Result<Vec<(u64, Vec<u8>)>, IndexError> {
@@ -279,16 +284,19 @@ impl OutboxWriter for IndependentOutbox {
     }
     async fn read_latest_sequence(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
     ) -> std::result::Result<Option<u64>, IndexError> {
         self.writer.read_latest_sequence(query).await
     }
-    async fn clear(&self, query: &str) -> std::result::Result<(), IndexError> {
+    async fn clear(
+        &self,
+        query: &drasi_core_types::OutputPartition,
+    ) -> std::result::Result<(), IndexError> {
         self.owner
             .run(async { self.writer.clear(query).await.map_err(Into::into) })
             .await
             .map_err(index_error)?;
-        if query == self.component
+        if query == &self.component
             && self
                 .exit
                 .compare_exchange(2, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -300,7 +308,7 @@ impl OutboxWriter for IndependentOutbox {
     }
     async fn trim_before(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         retain: u64,
     ) -> std::result::Result<usize, IndexError> {
         self.owner
@@ -315,7 +323,7 @@ impl OutboxWriter for IndependentOutbox {
     }
     async fn trim_to_capacity(
         &self,
-        query: &str,
+        query: &drasi_core_types::OutputPartition,
         capacity: usize,
     ) -> std::result::Result<usize, IndexError> {
         self.owner

@@ -28,18 +28,28 @@ jobs:
   test:
     uses: drasi-project/.github/.github/workflows/rust-unit-test.yaml@main
     with:
+      runner: ubuntu-24.04
       test-command: |
         .github/scripts/package-visibility.test.sh
         .github/scripts/release-with-retry.test.sh
-        node --test xtask/src/runtime_architecture/report.test.cjs
-        cargo run -p xtask -- check-publish-dependency-cycles
-        cargo run -p xtask --bin runtime-architecture -- --check
-        python3 lib/tests/runtime_parity/test_requirements.py
-        bash lib/tests/runtime_parity/check-runner.sh
-        make build-native-network-plugins
-        make build-test-plugins
-        cargo test --workspace --exclude drasi-host-sdk --exclude drasi-lib --exclude lib-integration-tests -- --test-threads=1
-        bash lib/tests/run-runtime-parity.sh
-        cargo test -p drasi-lib --doc
+        python3 .github/scripts/build-test-plugins.test.py
+        cargo run --locked -p xtask -- check-publish-dependency-cycles
+        make test
         python3 lib/docs/developer-guide/check_book.py --test --network
-        cargo test -p drasi-core --features parallel_solver
+
+  features:
+    name: Additional feature configurations
+    strategy:
+      fail-fast: false
+      matrix:
+        command:
+          - >-
+            cargo test --locked -p drasi-lib -p lib-integration-tests --no-default-features
+            --features drasi-lib/computation-rocksdb-tests,drasi-lib/middleware-decoder,drasi-lib/middleware-map,drasi-lib/middleware-parse-json,drasi-lib/middleware-promote,drasi-lib/middleware-relabel,drasi-lib/middleware-unwind,lib-integration-tests/computation-middleware-tests,lib-integration-tests/garnet-tests
+            --lib --tests
+          - cargo test --locked -p drasi-core --features parallel_solver
+    uses: drasi-project/.github/.github/workflows/rust-unit-test.yaml@main
+    with:
+      runner: ubuntu-24.04
+      test-command: |
+        ${{ matrix.command }} -- --test-threads=1

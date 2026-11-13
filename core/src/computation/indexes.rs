@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use crate::ComponentId;
 use async_trait::async_trait;
 
 use crate::interface::{CheckpointStore, IndexError, IndexSet, LiveResultsWriter, OutboxWriter};
@@ -208,12 +209,11 @@ impl ComputationIndexes {
 #[async_trait]
 pub trait ComputationIndexProvider: Send + Sync {
     /// Construct isolated resources for one component in the supplied graph scope.
-    /// `query_id` is the historical parameter name; non-query stateful components
-    /// also use their component ID here and exclusively own the returned bundle.
+    /// The component exclusively owns the returned bundle.
     async fn create_indexes(
         &self,
         graph_id: &str,
-        query_id: &str,
+        component_id: &ComponentId,
     ) -> std::result::Result<ComputationIndexes, IndexError>;
 
     fn is_volatile(&self) -> bool;
@@ -260,7 +260,7 @@ impl ComputationIndexProvider for InMemoryComputationProvider {
     async fn create_indexes(
         &self,
         _graph_id: &str,
-        _query_id: &str,
+        _component_id: &ComponentId,
     ) -> std::result::Result<ComputationIndexes, IndexError> {
         use crate::in_memory_index::{
             in_memory_element_index::InMemoryElementIndex,

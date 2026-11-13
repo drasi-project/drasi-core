@@ -28,7 +28,7 @@ pub struct RankedInputPipeConfig {
     pub capacity: usize,
     pub source_rank: usize,
     /// Some identifies a SourceEvent stream; None explicitly uses native producer sequence.
-    pub source_id: Option<String>,
+    pub source_id: Option<super::ComponentId>,
     /// Resolve dispatch once when a previously unavailable source is bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_dispatch: Option<ResourceId>,
@@ -506,23 +506,33 @@ mod tests {
     use futures::{stream::FuturesUnordered, StreamExt};
     use std::time::Duration;
 
-    fn event(source: &str, sequence: u64, time: i64) -> Arc<SourceEventWrapper> {
-        let change = if source == crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID {
-            SourceEvent::Control(SourceControl::FuturesDue)
-        } else {
-            SourceEvent::Change(SourceChange::Insert {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new(source, &sequence.to_string()),
-                        labels: Arc::from([Arc::from("Item")]),
-                        effective_from: 99_000 - sequence,
-                    },
-                    properties: ElementPropertyMap::default(),
-                },
-            })
+    fn source_id(source: &str) -> ComponentId {
+        let value = match source {
+            "z-source" => 1,
+            "a-source" => 2,
+            "earlier" => 3,
+            "a" => 4,
+            "b" => 5,
+            "source" => 6,
+            "scheduled" => 7,
+            other => panic!("missing explicit fixture component ID for {other}"),
         };
+        crate::test_helpers::component_id(value)
+    }
+
+    fn event(source: &str, sequence: u64, time: i64) -> Arc<SourceEventWrapper> {
+        let change = SourceEvent::Change(SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(source, &sequence.to_string()),
+                    labels: Arc::from([Arc::from("Item")]),
+                    effective_from: 99_000 - sequence,
+                },
+                properties: ElementPropertyMap::default(),
+            },
+        });
         let mut event = SourceEventWrapper::with_sequence(
-            source.into(),
+            source_id(source),
             change,
             chrono::DateTime::from_timestamp_millis(time).unwrap(),
             sequence,
@@ -536,6 +546,16 @@ mod tests {
         Arc::new(event)
     }
 
+    fn scheduled_event(sequence: u64, time: i64) -> Arc<SourceEventWrapper> {
+        Arc::new(SourceEventWrapper::with_sequence(
+            source_id("scheduled"),
+            SourceEvent::Control(SourceControl::FuturesDue),
+            chrono::DateTime::from_timestamp_millis(time).unwrap(),
+            sequence,
+            None,
+        ))
+    }
+
     fn config(
         queue: &ResourceId,
         rank: usize,
@@ -546,7 +566,7 @@ mod tests {
             queue: queue.clone(),
             capacity,
             source_rank: rank,
-            source_id: Some(source.into()),
+            source_id: Some(source_id(source)),
             source_dispatch: None,
             drop_when_full: false,
         }
@@ -554,7 +574,7 @@ mod tests {
     fn encode(event: Arc<SourceEventWrapper>, sequence: u64) -> ChangeEnvelope {
         GraphChangeCodec::encode_source_event(
             event.clone(),
-            &ComponentId::try_new("adapter").unwrap(),
+            &crate::test_helpers::component_id(721),
             StreamId::try_new(format!("native/{}", event.source_id)).unwrap(),
             sequence,
             None,
@@ -726,13 +746,13 @@ mod tests {
 
     #[tokio::test]
     async fn ranked_queues_match_time_declaration_rank_and_raw_sequence_with_all_metadata() {
-        let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
+        let scheduled = "scheduled";
         for sources in [["z-source", "a-source", "earlier"], ["a-source", "z-source", "earlier"]] {
-            let legacy = QueryEventQueue::new(16, sources).unwrap();
+            let legacy = QueryEventQueue::new(16, sources.into_iter().map(source_id)).unwrap();
             let queue_id = ResourceId::try_new("inbox").unwrap();
             let queue = RankedInputQueue::new(16).unwrap();
             let bindings = BTreeMap::from([(queue_id.clone(), queue.resource())]);
-            let names: Vec<_> = sources.into_iter().chain([future]).collect();
+            let names: Vec<_> = sources.into_iter().chain([scheduled]).collect();
             let mut pipes: Vec<_> = names
                 .iter()
                 .enumerate()
@@ -748,13 +768,13 @@ mod tests {
                 event("z-source", 1, 2_000),
                 event("a-source", 1, 2_000),
                 event("earlier", 1, 1_000),
-                event(future, 1, 2_000),
+                scheduled_event(1, 2_000),
             ];
             for (ordinal, frame) in frames.iter().enumerate() {
                 legacy.enqueue_wait(frame.clone()).await.unwrap();
                 let rank = names
                     .iter()
-                    .position(|source| *source == frame.source_id)
+                    .position(|source| source_id(source) == frame.source_id)
                     .unwrap();
                 pipes[rank]
                     .pipe
@@ -813,12 +833,12 @@ mod tests {
             assert_eq!(
                 trace,
                 vec![
-                    ("earlier".into(), 1),
-                    (sources[0].into(), 1),
-                    (sources[0].into(), 2),
-                    (sources[1].into(), 1),
-                    (sources[1].into(), 2),
-                    (future.into(), 1),
+                    (source_id("earlier"), 1),
+                    (source_id(sources[0]), 1),
+                    (source_id(sources[0]), 2),
+                    (source_id(sources[1]), 1),
+                    (source_id(sources[1]), 2),
+                    (source_id("scheduled"), 1),
                 ]
             );
         }
@@ -873,14 +893,14 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .source_id,
-            "b"
+            source_id("b")
         );
         assert!(queue.state.lock().unwrap().heap.is_empty());
     }
 
     #[tokio::test]
     async fn lossy_admission_and_missing_source_sequence_are_explicit() {
-        use crate::computation::v1::{ChangeEnvelope, ComponentId, ContextEntry, ContextValue};
+        use crate::computation::v1::{ChangeEnvelope, ContextEntry, ContextValue};
 
         let id = ResourceId::try_new("inbox").unwrap();
         let queue = RankedInputQueue::new(1).unwrap();
@@ -912,7 +932,7 @@ mod tests {
         missing
             .append_annotation(
                 ContextEntry::try_new(
-                    ComponentId::try_new("source").unwrap(),
+                    crate::test_helpers::component_id(77),
                     "drasi.legacy-source.v1",
                     ContextValue::Bytes(serde_json::to_vec(&metadata).unwrap().into()),
                 )
@@ -925,21 +945,28 @@ mod tests {
 
     #[tokio::test]
     async fn native_and_compatibility_queues_distinguish_colliding_source_from_scheduled_work() {
-        let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
-        let config = crate::Query::cypher("query")
-            .query("MATCH (n) RETURN n")
-            .from_input(future)
-            .build();
-        let settings = QueryExecutionSettings::from_legacy_config(&config);
+        let colliding_name = drasi_core_types::ComponentName::try_new("__future_queue__").unwrap();
+        let data_source_id = crate::test_helpers::component_id(8);
+        let scheduled_source_id = source_id("scheduled");
+        let config = crate::Query::cypher(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_id(data_source_id.clone())
+        .build()
+        .unwrap()
+        .with_assigned_id(ComponentId::generate());
+        let settings =
+            QueryExecutionSettings::from_configuration(&config).expect("fixture settings");
         settings.validate(None).unwrap();
 
         let timestamp = chrono::DateTime::from_timestamp_millis(2000).unwrap();
         let data = Arc::new(SourceEventWrapper::with_sequence(
-            future.into(),
+            data_source_id.clone(),
             SourceEvent::Change(SourceChange::Insert {
                 element: Element::Node {
                     metadata: ElementMetadata {
-                        reference: ElementReference::new(future, "data"),
+                        reference: ElementReference::new(colliding_name.as_str(), "data"),
                         labels: vec!["Item".into()].into(),
                         effective_from: 1,
                     },
@@ -951,13 +978,13 @@ mod tests {
             None,
         ));
         let scheduled = Arc::new(SourceEventWrapper::with_sequence(
-            future.into(),
+            scheduled_source_id,
             SourceEvent::Control(SourceControl::FuturesDue),
             timestamp,
             1,
             None,
         ));
-        let compatibility = QueryEventQueue::new(2, [future]).unwrap();
+        let compatibility = QueryEventQueue::new(2, [data_source_id.clone()]).unwrap();
         compatibility.enqueue_wait(scheduled.clone()).await.unwrap();
         compatibility.enqueue_wait(data.clone()).await.unwrap();
         assert!(Arc::ptr_eq(&compatibility.dequeue().await, &data));
@@ -970,7 +997,7 @@ mod tests {
             queue: queue_id.clone(),
             capacity: 2,
             source_rank: 0,
-            source_id: Some(future.into()),
+            source_id: Some(data_source_id),
             source_dispatch: None,
             drop_when_full: false,
         }

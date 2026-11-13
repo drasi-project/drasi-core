@@ -21,6 +21,8 @@ mod input_progress;
 #[path = "processing_non_atomic_tests.rs"]
 mod non_atomic;
 
+const PROCESSOR: &str = "284677c6-f7b2-5605-85ac-6843dce04152";
+
 fn element(id: &str) -> Element {
     Element::Node {
         metadata: ElementMetadata {
@@ -42,8 +44,12 @@ fn state_page() -> OutboxPageLimits {
 async fn transaction_case() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = super::consumer_tests::provider(directory.path())?;
-    let mut binding =
-        ProcessingBinding::new(provider, "native-consumer".into(), "processor".into());
+    let mut binding = ProcessingBinding::new(
+        provider,
+        "native-consumer".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
+    );
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
     assert!(service.run(|_| async { Ok(()) }).await.is_err());
     binding.open().await?;
@@ -218,7 +224,8 @@ async fn native_indexed_processing_trims_large_output_after_projection_without_i
     let mut binding = ProcessingBinding::new(
         super::consumer_tests::provider(directory.path())?,
         "native-consumer".into(),
-        "processor".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
     );
     binding.open().await?;
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
@@ -281,7 +288,8 @@ async fn native_indexed_processing_rejects_atomic_state_on_an_unqualified_bundle
     let mut binding = ProcessingBinding::new(
         Arc::new(InMemoryComputationProvider),
         "graph".into(),
-        "processor".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
     );
     binding.open().await?;
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
@@ -302,7 +310,8 @@ async fn native_indexed_processing_rejects_atomic_state_pages_over_budget() -> a
     let mut binding = ProcessingBinding::new(
         super::consumer_tests::provider(directory.path())?,
         "native-consumer".into(),
-        "processor".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
     );
     binding.open().await?;
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
@@ -367,8 +376,12 @@ async fn native_indexed_processing_exposes_slots_joins_archive_and_future_queue(
 ) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = super::consumer_tests::provider(directory.path())?;
-    let mut binding =
-        ProcessingBinding::new(provider, "native-consumer".into(), "processor".into());
+    let mut binding = ProcessingBinding::new(
+        provider,
+        "native-consumer".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
+    );
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
     binding.open().await?;
     service
@@ -453,8 +466,12 @@ async fn native_indexed_processing_exposes_slots_joins_archive_and_future_queue(
 async fn native_indexed_processing_failed_join_configuration_fences_owner() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = super::consumer_tests::provider(directory.path())?;
-    let mut binding =
-        ProcessingBinding::new(provider, "native-consumer".into(), "processor".into());
+    let mut binding = ProcessingBinding::new(
+        provider,
+        "native-consumer".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
+    );
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
     binding.open().await?;
     let result: anyhow::Result<()> = service
@@ -476,13 +493,28 @@ async fn native_indexed_processing_failed_join_configuration_fences_owner() -> a
 async fn native_indexed_processing_uses_and_fences_the_actual_shared_group() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = super::consumer_tests::provider(directory.path())?;
-    let indexes = provider.create_indexes("graph", "processor").await?;
-    let group = SharedStorageGroup::new("graph", ComponentId::try_new("processor")?, indexes)?;
+    let indexes = provider
+        .create_indexes(
+            "graph",
+            &drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+                .expect("fixture UUID"),
+        )
+        .await?;
+    let group = SharedStorageGroup::new(
+        "graph",
+        ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")?,
+        indexes,
+    )?;
     let journal = group
         .transaction_group()
         .expect("shared transaction group")
         .journal_transaction("output")?;
-    let mut binding = ProcessingBinding::new(group.clone(), "graph".into(), "processor".into());
+    let mut binding = ProcessingBinding::new(
+        group.clone(),
+        "graph".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
+    );
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
     binding.open().await?;
     service
@@ -524,8 +556,12 @@ async fn native_indexed_processing_uses_and_fences_the_actual_shared_group() -> 
 async fn native_indexed_processing_cancelled_work_fences_its_owner() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = super::consumer_tests::provider(directory.path())?;
-    let mut binding =
-        ProcessingBinding::new(provider, "native-consumer".into(), "processor".into());
+    let mut binding = ProcessingBinding::new(
+        provider,
+        "native-consumer".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
+    );
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
     binding.open().await?;
     let entered = Arc::new(Notify::new());
@@ -587,7 +623,8 @@ async fn native_indexed_processing_closes_with_an_unpolled_foreign_operation() -
     let mut binding = ProcessingBinding::new(
         Arc::new(InMemoryComputationProvider),
         "graph".into(),
-        "processor".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
     );
     binding.open().await?;
     let work = Arc::new(UnpolledWork(AtomicUsize::new(0)));
@@ -618,8 +655,12 @@ async fn native_indexed_processing_closes_with_an_unpolled_foreign_operation() -
 async fn native_indexed_processing_close_cancels_started_work() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = super::consumer_tests::provider(directory.path())?;
-    let mut binding =
-        ProcessingBinding::new(provider, "native-consumer".into(), "processor".into());
+    let mut binding = ProcessingBinding::new(
+        provider,
+        "native-consumer".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
+    );
     let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
     binding.open().await?;
     let entered = Arc::new(Notify::new());
@@ -702,7 +743,7 @@ impl ComputationIndexProvider for UnsupportedProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> IndexResult<ComputationIndexes> {
         let indexes = InMemoryComputationProvider
             .create_indexes(graph, component)
@@ -729,7 +770,8 @@ async fn native_indexed_processing_preserves_index_errors_and_rejects_ignored_er
         let mut binding = ProcessingBinding::new(
             Arc::new(UnsupportedProvider),
             "graph".into(),
-            "processor".into(),
+            drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+                .expect("fixture UUID"),
         );
         let service = unsafe { sdk::NativeProcessing::from_borrowed(&binding.table())? };
         binding.open().await?;
@@ -787,7 +829,7 @@ impl ComputationIndexProvider for Delayed {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> std::result::Result<ComputationIndexes, IndexError> {
         self.opened.notify_one();
         self.release.notified().await;
@@ -808,7 +850,7 @@ impl ComputationIndexProvider for DelayedProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> std::result::Result<ComputationIndexes, IndexError> {
         let indexes = self.0.create_indexes(graph, component).await?;
         Ok(indexes.with_cleanup(self.0.clone()))
@@ -822,7 +864,12 @@ impl ComputationIndexProvider for DelayedProvider {
 async fn native_indexed_processing_cancelled_open_is_owned_until_stop() -> anyhow::Result<()> {
     let delayed = Arc::new(Delayed::default());
     let provider = Arc::new(DelayedProvider(delayed.clone()));
-    let mut binding = ProcessingBinding::new(provider, "graph".into(), "processor".into());
+    let mut binding = ProcessingBinding::new(
+        provider,
+        "graph".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
+    );
     let mut opening = Box::pin(binding.open());
     assert!(futures_util::poll!(opening.as_mut()).is_pending());
     delayed.opened.notified().await;
@@ -840,7 +887,12 @@ async fn native_indexed_processing_cancelled_open_is_owned_until_stop() -> anyho
 async fn native_indexed_processing_dropped_open_keeps_cleanup_ownership() -> anyhow::Result<()> {
     let delayed = Arc::new(Delayed::default());
     let provider = Arc::new(DelayedProvider(delayed.clone()));
-    let mut binding = ProcessingBinding::new(provider, "graph".into(), "processor".into());
+    let mut binding = ProcessingBinding::new(
+        provider,
+        "graph".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
+    );
     let mut opening = Box::pin(binding.open());
     assert!(futures_util::poll!(opening.as_mut()).is_pending());
     delayed.opened.notified().await;
@@ -862,7 +914,8 @@ fn native_indexed_processing_drop_uses_its_host_runtime_outside_a_runtime() -> a
     let mut binding = ProcessingBinding::new(
         Arc::new(DelayedProvider(delayed.clone())),
         "graph".into(),
-        "processor".into(),
+        drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+            .expect("fixture UUID"),
     );
     runtime.block_on(binding.open())?;
     drop(binding);
@@ -884,19 +937,26 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = super::consumer_tests::provider(directory.path())?;
     assert!(factory
-        .create_component(ComponentId::try_new("processor")?, json!({"fail":false}))
+        .create_component(
+            ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")?,
+            json!({"fail":false})
+        )
         .is_err());
     for (sequence, fail) in [(1, false), (2, true)] {
         let mut component = factory.create_component_with_processing(
-            ComponentId::try_new("processor")?,
+            ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")?,
             json!({"fail":fail}),
             super::consumer_tests::scope(),
             provider.clone(),
         )?;
+        component.initialize().await?;
         component.start().await?;
         let input = InputEnvelope {
             port: PortId::try_new("in")?,
-            envelope: super::envelope(&ComponentId::try_new("source")?, sequence),
+            envelope: super::envelope(
+                &ComponentId::try_new("794abcc2-d807-5d24-9408-573e63650685")?,
+                sequence,
+            ),
         };
         let result = component.transform(input).await;
         assert_eq!(result.is_err(), fail);
@@ -904,7 +964,11 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
     }
     let owner = ComputationTransaction::try_new(
         provider
-            .create_indexes("native-consumer", "processor")
+            .create_indexes(
+                "native-consumer",
+                &drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+                    .expect("fixture UUID"),
+            )
             .await?,
     )?;
     let (first, failed) = owner
@@ -925,19 +989,24 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
     owner.shutdown().await?;
     drop(owner);
     let mut component = factory.create_component_with_processing(
-        ComponentId::try_new("processor")?,
+        ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")?,
         json!({"fail":false}),
         super::consumer_tests::scope(),
         provider.clone(),
     )?;
+    component.initialize().await?;
     component.start().await?;
     component.stop().await?;
-    component.deprovision().await?;
-    component.deprovision().await?;
+    component.delete_owned_resources().await?;
+    component.delete_owned_resources().await?;
     assert!(component.start().await.is_err());
     let owner = ComputationTransaction::try_new(
         provider
-            .create_indexes("native-consumer", "processor")
+            .create_indexes(
+                "native-consumer",
+                &drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+                    .expect("fixture UUID"),
+            )
             .await?,
     )?;
     let deleted = owner
@@ -1042,9 +1111,11 @@ async fn graph_case() -> anyhow::Result<()> {
         .clone();
     let directory = tempfile::tempdir()?;
     let provider = super::consumer_tests::provider(directory.path())?;
-    let processor = ComponentId::try_new("processor")?;
-    let source = ComponentId::try_new("source")?;
-    let sink = ComponentId::try_new("sink")?;
+    let processor = ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")?;
+    let source = ComponentId::try_new("794abcc2-d807-5d24-9408-573e63650685")?;
+    let sink = ComponentId::try_new("54094b72-69c2-5fa5-8b44-b52294adf7b5")?;
+    let source_stream = StreamId::try_new(format!("{source}/out"))?;
+    let processor_stream = StreamId::try_new(format!("{processor}/out"))?;
     let mut specification = factory.specification(processor.clone(), json!({"fail":false}))?;
     assert!(factory.validate(&specification).is_err());
     let resource = ResourceId::try_new("indexes")?;
@@ -1067,21 +1138,27 @@ async fn graph_case() -> anyhow::Result<()> {
                 Arc::new(NativeProcessingResource::new(provider.clone())),
             ),
         )?
-        .source(Box::new(OneSource {
-            descriptor: ComponentDescriptor::try_new(
-                source.clone(),
-                vec![port(PortDirection::Output)],
-            )?,
-            envelope: Some(envelope(&source, 1)),
-        }))
-        .component(specification, factory)
-        .sink(Box::new(OneSink {
-            descriptor: ComponentDescriptor::try_new(
-                sink.clone(),
-                vec![port(PortDirection::Input)],
-            )?,
-            received: received.clone(),
-        }))
+        .source(
+            ComponentName::try_new("source")?,
+            Box::new(OneSource {
+                descriptor: ComponentDescriptor::try_new(
+                    source.clone(),
+                    vec![port(PortDirection::Output)],
+                )?,
+                envelope: Some(envelope(&source, 1)),
+            }),
+        )
+        .component(ComponentName::try_new("processor")?, specification, factory)
+        .sink(
+            ComponentName::try_new("sink")?,
+            Box::new(OneSink {
+                descriptor: ComponentDescriptor::try_new(
+                    sink.clone(),
+                    vec![port(PortDirection::Input)],
+                )?,
+                received: received.clone(),
+            }),
+        )
         .connect(
             EdgeDefinition::new(
                 Endpoint::new(source.clone(), PortId::try_new("out")?),
@@ -1098,11 +1175,11 @@ async fn graph_case() -> anyhow::Result<()> {
         )
         .bind_stream(
             Endpoint::new(source, PortId::try_new("out")?),
-            StreamId::try_new("source/out")?,
+            source_stream,
         )
         .bind_stream(
             Endpoint::new(processor, PortId::try_new("out")?),
-            StreamId::try_new("processor/out")?,
+            processor_stream,
         )
         .build()?;
     let run_result = tokio::time::timeout(Duration::from_secs(10), graph.start()?).await;
@@ -1116,7 +1193,11 @@ async fn graph_case() -> anyhow::Result<()> {
     graph.shutdown().await?;
     let owner = ComputationTransaction::try_new(
         provider
-            .create_indexes("native-consumer", "processor")
+            .create_indexes(
+                "native-consumer",
+                &drasi_core_types::ComponentId::try_new("284677c6-f7b2-5605-85ac-6843dce04152")
+                    .expect("fixture UUID"),
+            )
             .await?,
     )?;
     let stored = owner

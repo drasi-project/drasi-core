@@ -150,8 +150,8 @@ impl<'a> PayloadGuard<'a> {
     }
 
     fn graph_reference(&mut self, reference: &ElementReference) -> Result<()> {
-        self.text(&reference.source_id, 256)?;
-        self.namespace.source(&reference.source_id)?;
+        self.text(&reference.namespace, 256)?;
+        self.namespace.validate_namespace(&reference.namespace)?;
         self.text(&reference.element_id, 256)?;
         crate::config::identifier(&reference.element_id)
     }

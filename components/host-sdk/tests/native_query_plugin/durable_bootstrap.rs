@@ -49,7 +49,7 @@ pub(super) fn file_provider(
         })
         .context("missing SQLite file bootstrap")?;
     bootstrap.create_query_provider(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         sqlite::provider_configuration(database),
         scope(generation),
         None,
@@ -59,7 +59,7 @@ pub(super) fn file_provider(
 fn file_query(database: &Path, indexes: &Path, generation: u64) -> Result<NativeComponentProxy> {
     let provider = file_provider(database, generation)?;
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": TEXT, "bootstrap": true}),
         scope(generation),
         super::provider(indexes)?,
@@ -74,6 +74,7 @@ async fn file_bootstrap() -> Result<()> {
     let indexes = directory.path().join("indexes");
     sqlite::create_database(&database)?;
     let mut query = file_query(&database, &indexes, 1)?;
+    query.initialize().await?;
     let progress = query
         .processing_progress_owner()
         .context("missing actual progress owner")?;
@@ -100,6 +101,7 @@ async fn file_bootstrap() -> Result<()> {
 
     rusqlite::Connection::open(&database)?.execute("INSERT INTO items VALUES (3, 30)", [])?;
     let mut query = file_query(&database, &indexes, 2)?;
+    query.initialize().await?;
     query.start().await?;
     let reopened = reader(&query)?.snapshot().await?;
     assert_eq!(
@@ -132,11 +134,12 @@ async fn volatile_file_bootstrap() -> Result<()> {
     let database = directory.path().join("source.sqlite");
     sqlite::create_database(&database)?;
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": TEXT, "bootstrap": true, "volatile": true}),
         scope(1),
         Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
+    query.initialize().await?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(file_provider(
         &database, 1,
     )?)))?;
@@ -158,7 +161,7 @@ async fn volatile_file_bootstrap() -> Result<()> {
     assert_eq!(total(&retained)?, 30.0);
     assert_eq!(retained.cursor().producer(), original.cursor().producer());
     query.stop().await?;
-    query.deprovision().await?;
+    query.delete_owned_resources().await?;
     assert_eq!(
         rusqlite::Connection::open(&database)?.query_row(
             "SELECT count(*) FROM items",
@@ -207,11 +210,12 @@ async fn volatile_bootstrap_recovery() -> Result<()> {
         std::sync::atomic::AtomicBool::new(true),
     ));
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": QUERY, "bootstrap": true, "volatile": true, "recovery": "auto_reset"}),
         scope(1),
         Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
+    query.initialize().await?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(provider.clone())))?;
     assert!(query.start().await.is_err());
     assert!(reader(&query)?.snapshot().await.is_err());

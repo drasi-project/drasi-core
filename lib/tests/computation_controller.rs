@@ -14,13 +14,17 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::{
     collections::VecDeque,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -29,6 +33,8 @@ use async_trait::async_trait;
 use computation_support::*;
 use drasi_lib::computation::v1::*;
 use tokio::sync::mpsc;
+use tracing::{instrument::WithSubscriber, Instrument};
+use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan, Layer};
 
 #[derive(Default)]
 struct Calls {
@@ -113,7 +119,7 @@ impl EnvelopeSink for ControlledSink {
     async fn handle(&mut self, mut input: InputEnvelope) -> anyhow::Result<()> {
         input
             .envelope
-            .append_annotation(annotation(self.descriptor.id().as_str()))?;
+            .append_annotation(annotation(self.descriptor.id(), "controlled-sink"))?;
         self.received
             .send(input.envelope)
             .await
@@ -121,7 +127,11 @@ impl EnvelopeSink for ControlledSink {
     }
 }
 
-fn source(id: &str, calls: Arc<Calls>, events: Vec<OutputEnvelope>) -> Box<dyn EnvelopeSource> {
+fn source(
+    id: &drasi_core_types::ComponentId,
+    calls: Arc<Calls>,
+    events: Vec<OutputEnvelope>,
+) -> Box<dyn EnvelopeSource> {
     Box::new(ControlledSource {
         descriptor: descriptor(id, &[], &["out"]),
         calls,
@@ -130,7 +140,7 @@ fn source(id: &str, calls: Arc<Calls>, events: Vec<OutputEnvelope>) -> Box<dyn E
 }
 
 fn sink(
-    id: &str,
+    id: &drasi_core_types::ComponentId,
     calls: Arc<Calls>,
     received: mpsc::Sender<ChangeEnvelope>,
 ) -> Box<dyn EnvelopeSink> {
@@ -160,6 +170,141 @@ macro_rules! both_tokio_flavors {
     };
 }
 
+#[derive(Clone)]
+struct ProducerPollObserver {
+    component_id: String,
+    sends: Arc<AtomicUsize>,
+    polls: Arc<Mutex<Vec<usize>>>,
+}
+
+#[derive(Default)]
+struct ProducerPoll {
+    // The controller's instrumented future enters once per poll; nested entries
+    // must not split that poll, and span-local state follows worker migration.
+    depth: usize,
+    start: usize,
+}
+
+#[derive(Default)]
+struct ProducerFields {
+    component_id: String,
+}
+
+impl tracing::field::Visit for ProducerFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "component_id" {
+            self.component_id = format!("{value:?}");
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "component_id" {
+            self.component_id = value.to_owned();
+        }
+    }
+}
+
+impl ProducerPollObserver {
+    fn new(component_id: &drasi_core_types::ComponentId, sends: Arc<AtomicUsize>) -> Self {
+        Self {
+            component_id: component_id.to_string(),
+            sends,
+            polls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn assert_budget(&self, expected: usize) {
+        let polls = self.polls.lock().expect("producer poll observations");
+        assert!(!polls.is_empty(), "no nonempty producer polls observed");
+        assert_eq!(self.sends.load(Ordering::SeqCst), expected);
+        assert_eq!(polls.iter().sum::<usize>(), expected);
+        assert!(
+            polls.iter().all(|work| *work <= 64),
+            "producer exceeded its per-poll work budget: {polls:?}"
+        );
+    }
+}
+
+impl<S> Layer<S> for ProducerPollObserver
+where
+    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        context: Context<'_, S>,
+    ) {
+        if attributes.metadata().name() != "computation_component" {
+            return;
+        }
+        let mut fields = ProducerFields::default();
+        attributes.record(&mut fields);
+        if fields.component_id == self.component_id {
+            context
+                .span(id)
+                .expect("producer span")
+                .extensions_mut()
+                .insert(ProducerPoll::default());
+        }
+    }
+
+    fn on_enter(&self, id: &tracing::span::Id, context: Context<'_, S>) {
+        let span = context.span(id).expect("entered span");
+        let mut extensions = span.extensions_mut();
+        if let Some(poll) = extensions.get_mut::<ProducerPoll>() {
+            if poll.depth == 0 {
+                poll.start = self.sends.load(Ordering::SeqCst);
+            }
+            poll.depth += 1;
+        }
+    }
+
+    fn on_exit(&self, id: &tracing::span::Id, context: Context<'_, S>) {
+        let span = context.span(id).expect("exited span");
+        let mut extensions = span.extensions_mut();
+        if let Some(poll) = extensions.get_mut::<ProducerPoll>() {
+            poll.depth = poll.depth.checked_sub(1).expect("balanced producer span");
+            if poll.depth == 0 {
+                let work = self.sends.load(Ordering::SeqCst) - poll.start;
+                if work > 0 {
+                    self.polls
+                        .lock()
+                        .expect("producer poll observations")
+                        .push(work);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "producer exceeded its per-poll work budget")]
+fn producer_poll_observer_rejects_unbudgeted_work_with_nested_span_entries() {
+    let id = component(429);
+    let sends = Arc::new(AtomicUsize::new(0));
+    let observer = ProducerPollObserver::new(&id, sends.clone());
+    let subscriber = tracing_subscriber::registry().with(observer.clone());
+    futures::executor::block_on(
+        async {
+            let span = tracing::info_span!("computation_component", component_id = %id);
+            async {
+                for _ in 0..65 {
+                    span.in_scope(|| sends.fetch_add(1, Ordering::SeqCst));
+                }
+            }
+            .instrument(span.clone())
+            .await;
+        }
+        .with_subscriber(subscriber),
+    );
+    assert_eq!(
+        *observer.polls.lock().expect("producer poll observations"),
+        [65]
+    );
+    observer.assert_budget(65);
+}
+
 struct ReadySource {
     descriptor: ComponentDescriptor,
     produced: Arc<AtomicUsize>,
@@ -187,14 +332,18 @@ impl EnvelopeSource for ReadySource {
             return Ok(None);
         }
         self.produced.fetch_add(1, Ordering::SeqCst);
-        Ok(Some(output(root("source", sequence as u64, &[1]))))
+        Ok(Some(output(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            sequence as u64,
+            &[1],
+        ))))
     }
 }
 
 struct ProgressSink {
     descriptor: ComponentDescriptor,
-    produced: Arc<AtomicUsize>,
-    first_seen: Arc<AtomicUsize>,
     received: Arc<AtomicUsize>,
 }
 
@@ -217,10 +366,7 @@ impl EnvelopeSink for ProgressSink {
         SinkCompletion::Handled
     }
     async fn handle(&mut self, _: InputEnvelope) -> anyhow::Result<()> {
-        if self.received.fetch_add(1, Ordering::SeqCst) == 0 {
-            self.first_seen
-                .store(self.produced.load(Ordering::SeqCst), Ordering::SeqCst);
-        }
+        self.received.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -228,91 +374,213 @@ impl EnvelopeSink for ProgressSink {
 async fn ready_source_fairness() {
     const EVENTS: usize = 4096;
     let produced = Arc::new(AtomicUsize::new(0));
-    let first_seen = Arc::new(AtomicUsize::new(0));
+    let sends = Arc::new(AtomicUsize::new(0));
+    let observer = ProducerPollObserver::new(&component(77), sends.clone());
+    let subscriber = tracing_subscriber::registry().with(observer.clone());
     let received = Arc::new(AtomicUsize::new(0));
     let mut graph = ComputationGraph::builder("ready-source-fairness")
-        .source(Box::new(ReadySource {
-            descriptor: descriptor("source", &[], &["out"]),
+        .fixture_source(Box::new(ReadySource {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             produced: produced.clone(),
             limit: EVENTS,
         }))
-        .sink(Box::new(ProgressSink {
-            descriptor: descriptor("sink", &["in"], &[]),
-            produced,
-            first_seen: first_seen.clone(),
+        .fixture_sink(Box::new(ProgressSink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+                &[],
+            ),
             received: received.clone(),
         }))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
-            Box::new(BroadcastPipeConfig {
-                capacity: EVENTS,
-                lag_policy: BroadcastLagPolicy::Report,
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
+            Box::new(PollAuditedPipe {
+                provider: Box::new(BroadcastPipeConfig {
+                    capacity: EVENTS,
+                    lag_policy: BroadcastLagPolicy::Report,
+                }),
+                sends,
             }),
         )
         .build()
         .unwrap();
-    graph.start().unwrap().await.unwrap();
+    async { graph.start().unwrap().await.unwrap() }
+        .with_subscriber(subscriber)
+        .await;
+    assert_eq!(produced.load(Ordering::SeqCst), EVENTS);
     assert_eq!(received.load(Ordering::SeqCst), EVENTS);
-    assert!(
-        (1..=64).contains(&first_seen.load(Ordering::SeqCst)),
-        "a synchronously ready source must yield within one work budget"
-    );
+    observer.assert_budget(EVENTS);
 }
 
 both_tokio_flavors!(ready_source_work_budget, ready_source_fairness);
 
-struct BurstPipe(AuditedBoundedPipe);
+struct PollAuditedPipe {
+    provider: Box<dyn PipeProvider>,
+    sends: Arc<AtomicUsize>,
+}
 
-impl PipeProvider for BurstPipe {
+impl PipeProvider for PollAuditedPipe {
     fn capabilities(&self) -> std::result::Result<PipeCapabilities, PipeError> {
-        BoundedPipeConfig { capacity: 4096 }.capabilities()
+        self.provider.capabilities()
     }
 
     fn create(&self) -> std::result::Result<ProvidedPipe, PipeError> {
-        self.0.create_with_capacity(4096)
+        let provided = self.provider.create()?;
+        Ok(ProvidedPipe {
+            pipe: Box::new(PollAuditedTransport {
+                inner: provided.pipe,
+                sends: self.sends.clone(),
+            }),
+            control: provided.control,
+        })
+    }
+}
+
+struct PollAuditedTransport {
+    inner: Box<dyn Pipe>,
+    sends: Arc<AtomicUsize>,
+}
+
+impl Pipe for PollAuditedTransport {
+    fn capabilities(&self) -> &PipeCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn sender(&self) -> Arc<dyn EnvelopeSender> {
+        Arc::new(PollAuditedSender {
+            inner: self.inner.sender(),
+            sends: self.sends.clone(),
+        })
+    }
+
+    fn take_receiver(&mut self) -> std::result::Result<Box<dyn EnvelopeReceiver>, PipeError> {
+        self.inner.take_receiver()
+    }
+}
+
+struct PollAuditedSender {
+    inner: Arc<dyn EnvelopeSender>,
+    sends: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EnvelopeSender for PollAuditedSender {
+    async fn send(&self, envelope: Envelope) -> std::result::Result<EnqueueReceipt, SendFailure> {
+        self.sends.fetch_add(1, Ordering::SeqCst);
+        // Tokio's transport budget must not substitute for the graph's work budget.
+        tokio::task::unconstrained(self.inner.send(envelope)).await
     }
 }
 
 async fn ready_output_burst_fairness() {
     const EVENTS: usize = 4096;
     let sends = Arc::new(AtomicUsize::new(0));
-    let first_seen = Arc::new(AtomicUsize::new(0));
+    let observer = ProducerPollObserver::new(&component(429), sends.clone());
+    let subscriber = tracing_subscriber::registry().with(observer.clone());
     let received = Arc::new(AtomicUsize::new(0));
     let mut graph = ComputationGraph::builder("ready-output-burst")
-        .source(Box::new(FiniteSource::new(
-            "source",
-            vec![output(root("source", 1, &[1]))],
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[1],
+            ))],
         )))
-        .transformer(Box::new(NativeTransform::new("transform", |_| {
-            Ok((1..=EVENTS)
-                .map(|sequence| output(root("transform", sequence as u64, &[1])))
-                .collect())
-        })))
-        .sink(Box::new(ProgressSink {
-            descriptor: descriptor("sink", &["in"], &[]),
-            produced: sends.clone(),
-            first_seen: first_seen.clone(),
+        .fixture_transformer(Box::new(NativeTransform::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                .expect("fixture UUID"),
+            |_| {
+                Ok((1..=EVENTS)
+                    .map(|sequence| {
+                        output(root(
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-0000000001ad",
+                            )
+                            .expect("fixture UUID"),
+                            "transform",
+                            sequence as u64,
+                            &[1],
+                        ))
+                    })
+                    .collect())
+            },
+        )))
+        .fixture_sink(Box::new(ProgressSink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+                &[],
+            ),
             received: received.clone(),
         }))
-        .bind_stream(endpoint("source", "out"), stream("source"))
-        .bind_stream(endpoint("transform", "out"), stream("transform"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("transform"),
+        )
         .connect(
-            edge("source", "transform"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("transform", "sink"),
-            Box::new(BurstPipe(AuditedBoundedPipe { sends })),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
+            Box::new(PollAuditedPipe {
+                provider: Box::new(BoundedPipeConfig { capacity: EVENTS }),
+                sends,
+            }),
         )
         .build()
         .unwrap();
-    graph.start().unwrap().await.unwrap();
+    async { graph.start().unwrap().await.unwrap() }
+        .with_subscriber(subscriber)
+        .await;
     assert_eq!(received.load(Ordering::SeqCst), EVENTS);
-    assert!(
-        (1..=64).contains(&first_seen.load(Ordering::SeqCst)),
-        "a large output batch must yield within one work budget"
-    );
+    observer.assert_budget(EVENTS);
 }
 
 both_tokio_flavors!(ready_output_burst_work_budget, ready_output_burst_fairness);
@@ -321,20 +589,40 @@ async fn stop_ready_source() {
     const EVENTS: usize = 4096;
     let produced = Arc::new(AtomicUsize::new(0));
     let mut graph = ComputationGraph::builder("stop-ready-source")
-        .source(Box::new(ReadySource {
-            descriptor: descriptor("source", &[], &["out"]),
+        .fixture_source(Box::new(ReadySource {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             produced: produced.clone(),
             limit: EVENTS,
         }))
-        .sink(Box::new(ProgressSink {
-            descriptor: descriptor("sink", &["in"], &[]),
-            produced: produced.clone(),
-            first_seen: Arc::new(AtomicUsize::new(0)),
+        .fixture_sink(Box::new(ProgressSink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+                &[],
+            ),
             received: Arc::new(AtomicUsize::new(0)),
         }))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BroadcastPipeConfig {
                 capacity: EVENTS,
                 lag_policy: BroadcastLagPolicy::Report,
@@ -407,28 +695,66 @@ impl Transformer for ContinuingTransformer {
 async fn stop_ready_continuation() {
     let progressed = Arc::new(AtomicUsize::new(0));
     let mut graph = ComputationGraph::builder("stop-ready-continuation")
-        .source(Box::new(FiniteSource::new(
-            "source",
-            vec![output(root("source", 1, &[1]))],
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[1],
+            ))],
         )))
-        .transformer(Box::new(ContinuingTransformer {
-            descriptor: descriptor("transform", &["in"], &["out"]),
+        .fixture_transformer(Box::new(ContinuingTransformer {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                &["in"],
+                &["out"],
+            ),
             remaining: 0,
             progressed: progressed.clone(),
         }))
-        .sink(Box::new(CollectSink::new(
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             Default::default(),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
-        .bind_stream(endpoint("transform", "out"), stream("transform"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("transform"),
+        )
         .connect(
-            edge("source", "transform"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("transform", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -469,30 +795,72 @@ async fn independent_activation() {
     source_calls.failures.store(1, Ordering::SeqCst);
     let sink_calls = Arc::new(Calls::default());
     let (received_tx, mut received) = mpsc::channel(4);
-    let transform = NativeTransform::new("transform", |input| {
-        Ok(vec![output(derived(
-            &input.envelope,
-            "transform",
-            1,
-            input.envelope.changes().clone(),
-        ))])
-    });
+    let transform = NativeTransform::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+            .expect("fixture UUID"),
+        |input| {
+            Ok(vec![output(derived(
+                &input.envelope,
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                "transform",
+                1,
+                input.envelope.changes().clone(),
+            ))])
+        },
+    );
     let mut graph = ComputationGraph::builder("independent-activation")
-        .source(source(
-            "source",
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             source_calls.clone(),
-            vec![output(root("source", 1, &[7]))],
+            vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[7],
+            ))],
         ))
-        .transformer(Box::new(transform))
-        .sink(sink("sink", sink_calls.clone(), received_tx))
-        .bind_stream(endpoint("source", "out"), stream("source"))
-        .bind_stream(endpoint("transform", "out"), stream("transform"))
+        .fixture_transformer(Box::new(transform))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+            sink_calls.clone(),
+            received_tx,
+        ))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("transform"),
+        )
         .connect(
-            edge("source", "transform"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("transform", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -503,61 +871,67 @@ async fn independent_activation() {
         let report = control.startup_report().await.expect("startup report");
         assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
         assert!(matches!(
-            report.components[&component("source")],
+            report.components[&component(77)],
             StartOutcome::StartFailed(_)
         ));
         assert!(matches!(
-            report.components[&component("transform")],
+            report.components[&component(429)],
             StartOutcome::Started
         ));
         assert!(matches!(
-            report.components[&component("sink")],
+            report.components[&component(101)],
             StartOutcome::Started
         ));
         let observed = control.observed();
         assert_eq!(
-            observed.components[&component("source")].realization,
+            observed.components[&component(77)].realization,
             RealizationState::Created
         );
         assert_eq!(
-            observed.components[&component("transform")].lifecycle,
+            observed.components[&component(429)].lifecycle,
             ComponentLifecycle::Running
         );
         assert_eq!(
-            observed.components[&component("sink")].lifecycle,
+            observed.components[&component(101)].lifecycle,
             ComponentLifecycle::Running
         );
         assert_eq!(
-            observed.relationships[&edge("source", "transform")].binding,
+            observed.relationships[&edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID")
+            )]
+                .binding,
             BindingState::Bound
         );
         assert_eq!(
-            observed.relationships[&edge("source", "transform")].availability,
+            observed.relationships[&edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID")
+            )]
+                .availability,
             DataAvailability::Unavailable
         );
         assert_eq!(sink_calls.stop.load(Ordering::SeqCst), 0);
         assert!(received.try_recv().is_err(), "failure is not data or EOF");
 
         let stopped = control
-            .stop_components(
-                GraphRevision(1),
-                GraphSelection::Exact(vec![component("source")]),
-            )
+            .stop_components(GraphRevision(1), GraphSelection::Exact(vec![component(77)]))
             .await
             .expect("stop failed source before explicit retry");
         assert!(matches!(
-            stopped.components[&component("source")],
+            stopped.components[&component(77)],
             StopOutcome::Stopped
         ));
         let restarted = control
-            .start_components(
-                GraphRevision(1),
-                GraphSelection::Exact(vec![component("source")]),
-            )
+            .start_components(GraphRevision(1), GraphSelection::Exact(vec![component(77)]))
             .await
             .expect("explicit retry");
         assert!(matches!(
-            restarted.components[&component("source")],
+            restarted.components[&component(77)],
             StartOutcome::Started
         ));
         let result = received
@@ -586,11 +960,33 @@ async fn revision_and_generation() {
     let sink_calls = Arc::new(Calls::default());
     let (received, _receiver) = mpsc::channel(4);
     let mut graph = ComputationGraph::builder("revision-and-generation")
-        .source(source("source", source_calls.clone(), vec![]))
-        .sink(sink("sink", sink_calls.clone(), received))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            source_calls.clone(),
+            vec![],
+        ))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+            sink_calls.clone(),
+            received,
+        ))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -608,7 +1004,7 @@ async fn revision_and_generation() {
         let revision = control
             .set_lifecycle_policy(
                 GraphRevision(1),
-                component("sink"),
+                component(101),
                 LifecyclePolicy { auto_start: false },
             )
             .await
@@ -626,21 +1022,21 @@ async fn revision_and_generation() {
             .await
             .expect("start at current revision");
         assert!(matches!(
-            report.components[&component("source")],
+            report.components[&component(77)],
             StartOutcome::Started
         ));
         assert!(matches!(
-            report.components[&component("sink")],
+            report.components[&component(101)],
             StartOutcome::NotRequested
         ));
         let observed = control.observed();
-        let node = observed.components[&component("source")].clone();
+        let node = observed.components[&component(77)].clone();
         assert!(matches!(
             control
                 .report_health(
                     revision,
                     HealthObservation {
-                        component: component("source"),
+                        component: component(77),
                         generation: ComponentGeneration(node.generation.0 + 1),
                         operation: node.operation,
                         health: ComponentHealth::Unavailable,
@@ -653,7 +1049,7 @@ async fn revision_and_generation() {
             .report_health(
                 revision,
                 HealthObservation {
-                    component: component("source"),
+                    component: component(77),
                     generation: node.generation,
                     operation: node.operation,
                     health: ComponentHealth::Degraded,
@@ -662,7 +1058,7 @@ async fn revision_and_generation() {
             .await
             .expect("generation-bound health");
         assert_eq!(
-            control.observed().components[&component("source")].health,
+            control.observed().components[&component(77)].health,
             ComponentHealth::Degraded
         );
         let stopped = control
@@ -670,7 +1066,7 @@ async fn revision_and_generation() {
             .await
             .expect("stop selection");
         assert!(matches!(
-            stopped.components[&component("sink")],
+            stopped.components[&component(101)],
             StopOutcome::AlreadyStopped
         ));
         assert!(matches!(
@@ -678,7 +1074,7 @@ async fn revision_and_generation() {
                 .report_health(
                     revision,
                     HealthObservation {
-                        component: component("source"),
+                        component: component(77),
                         generation: node.generation,
                         operation: node.operation,
                         health: ComponentHealth::Healthy,
@@ -724,19 +1120,68 @@ async fn independent_branch_survives_partial_binding_creation_failure() {
     let good_sink = Arc::new(Calls::default());
     let (received_tx, mut received_rx) = mpsc::channel(4);
     let mut graph = ComputationGraph::builder("partial-binding")
-        .source(source("bad-source", failed_source.clone(), vec![]))
-        .sink(sink("bad-sink", failed_sink.clone(), received_tx.clone()))
-        .source(source(
-            "good-source",
-            good_source.clone(),
-            vec![output(root("good-source", 1, &[9]))],
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ba")
+                .expect("fixture UUID"),
+            failed_source.clone(),
+            vec![],
         ))
-        .sink(sink("good-sink", good_sink.clone(), received_tx))
-        .bind_stream(endpoint("bad-source", "out"), stream("bad-source"))
-        .bind_stream(endpoint("good-source", "out"), stream("good-source"))
-        .connect(edge("bad-source", "bad-sink"), Box::new(FailingPipe))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f3")
+                .expect("fixture UUID"),
+            failed_sink.clone(),
+            received_tx.clone(),
+        ))
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bb")
+                .expect("fixture UUID"),
+            good_source.clone(),
+            vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001bb")
+                    .expect("fixture UUID"),
+                "good-source",
+                1,
+                &[9],
+            ))],
+        ))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002d7")
+                .expect("fixture UUID"),
+            good_sink.clone(),
+            received_tx,
+        ))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ba")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("bad-source"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bb")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("good-source"),
+        )
         .connect(
-            edge("good-source", "good-sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ba")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f3")
+                    .expect("fixture UUID"),
+            ),
+            Box::new(FailingPipe),
+        )
+        .connect(
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bb")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002d7")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -750,11 +1195,11 @@ async fn independent_branch_survives_partial_binding_creation_failure() {
             .expect("per-item creation results");
         assert_eq!(deployment.components.len(), 4);
         assert!(matches!(
-            deployment.components[&component("bad-source")],
+            deployment.components[&component(442)],
             CreationOutcome::Blocked { .. }
         ));
         assert!(matches!(
-            deployment.components[&component("good-source")],
+            deployment.components[&component(443)],
             CreationOutcome::Created
         ));
         let startup = control
@@ -762,11 +1207,11 @@ async fn independent_branch_survives_partial_binding_creation_failure() {
             .await
             .expect("all eligible starts attempted");
         assert!(matches!(
-            startup.components[&component("bad-source")],
+            startup.components[&component(442)],
             StartOutcome::NotCreated
         ));
         assert!(matches!(
-            startup.components[&component("good-sink")],
+            startup.components[&component(727)],
             StartOutcome::Started
         ));
         assert_eq!(
@@ -792,11 +1237,33 @@ async fn explicit_activation_coupling_blocks_only_the_declared_dependency() {
     source_calls.failures.store(1, Ordering::SeqCst);
     let sink_calls = Arc::new(Calls::default());
     let (received, _receiver) = mpsc::channel(1);
-    let connection = edge("source", "sink");
+    let connection = edge(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
+    );
     let mut graph = ComputationGraph::builder("explicit-coupling")
-        .source(source("source", source_calls, vec![]))
-        .sink(sink("sink", sink_calls.clone(), received))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            source_calls,
+            vec![],
+        ))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+            sink_calls.clone(),
+            received,
+        ))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
             connection.clone(),
             Box::new(BoundedPipeConfig { capacity: 1 }),
@@ -819,7 +1286,7 @@ async fn explicit_activation_coupling_blocks_only_the_declared_dependency() {
             .await
             .expect("partial report");
         assert!(matches!(
-            report.components[&component("sink")],
+            report.components[&component(101)],
             StartOutcome::Blocked { .. }
         ));
         assert_eq!(sink_calls.start.load(Ordering::SeqCst), 0);
@@ -865,15 +1332,37 @@ async fn a_live_stop_command_cancels_pending_start_without_waiting_for_its_compo
     let sink_calls = Arc::new(Calls::default());
     let (received, _receiver) = mpsc::channel(1);
     let mut graph = ComputationGraph::builder("interrupt-start")
-        .source(Box::new(PendingStartSource {
-            descriptor: descriptor("source", &[], &["out"]),
+        .fixture_source(Box::new(PendingStartSource {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             entered: entered.clone(),
             stops: source_stops.clone(),
         }))
-        .sink(sink("sink", sink_calls.clone(), received))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+            sink_calls.clone(),
+            received,
+        ))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -887,29 +1376,32 @@ async fn a_live_stop_command_cancels_pending_start_without_waiting_for_its_compo
             async {
                 entered.notified().await;
                 control
-                    .stop_components(
-                        GraphRevision(1),
-                        GraphSelection::Exact(vec![component("source")]),
-                    )
+                    .stop_components(GraphRevision(1), GraphSelection::Exact(vec![component(77)]))
                     .await
             }
         );
         assert!(matches!(
-            started.expect("complete all start outcomes").components[&component("source")],
+            started.expect("complete all start outcomes").components[&component(77)],
             StartOutcome::StartFailed(_)
         ));
         assert!(matches!(
-            stopped.expect("stop interrupted source").components[&component("source")],
+            stopped.expect("stop interrupted source").components[&component(77)],
             StopOutcome::Stopped
         ));
         assert_eq!(source_stops.load(Ordering::SeqCst), 1);
         assert_eq!(sink_calls.stop.load(Ordering::SeqCst), 0);
         assert_eq!(
-            control.observed().components[&component("sink")].lifecycle,
+            control.observed().components[&component(101)].lifecycle,
             ComponentLifecycle::Running
         );
         assert_eq!(
-            control.observed().relationships[&edge("source", "sink")].binding,
+            control.observed().relationships[&edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID")
+            )]
+                .binding,
             BindingState::Bound
         );
         control.cancel();
@@ -927,26 +1419,77 @@ async fn explicit_failure_propagation_stops_only_its_dependent_closure() {
     let independent = Arc::new(Calls::default());
     let (received, mut receiver) = mpsc::channel(4);
     let mut graph = ComputationGraph::builder("propagation")
-        .source(source("failed", failed, vec![]))
-        .sink(sink("dependent", dependent.clone(), received.clone()))
-        .source(source(
-            "independent",
-            Arc::new(Calls::default()),
-            vec![output(root("independent", 1, &[11]))],
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                .expect("fixture UUID"),
+            failed,
+            vec![],
         ))
-        .sink(sink("independent-sink", independent.clone(), received))
-        .bind_stream(endpoint("failed", "out"), stream("failed"))
-        .bind_stream(endpoint("independent", "out"), stream("independent"))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f4")
+                .expect("fixture UUID"),
+            dependent.clone(),
+            received.clone(),
+        ))
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b4")
+                .expect("fixture UUID"),
+            Arc::new(Calls::default()),
+            vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001b4")
+                    .expect("fixture UUID"),
+                "independent",
+                1,
+                &[11],
+            ))],
+        ))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f5")
+                .expect("fixture UUID"),
+            independent.clone(),
+            received,
+        ))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("failed"),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b4")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("independent"),
+        )
         .connect(
-            edge("failed", "dependent"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f4")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("independent", "independent-sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b4")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f5")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .relationship_policy(
-            edge("failed", "dependent"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f4")
+                    .expect("fixture UUID"),
+            ),
             RelationshipPolicy {
                 propagate_failure: true,
                 ..Default::default()
@@ -961,7 +1504,7 @@ async fn explicit_failure_propagation_stops_only_its_dependent_closure() {
         let mut observed = control.subscribe_observed();
         observed
             .wait_for(|state| {
-                state.components[&component("dependent")].lifecycle == ComponentLifecycle::Failed
+                state.components[&component(1012)].lifecycle == ComponentLifecycle::Failed
             })
             .await
             .expect("dependent cleanup completed");
@@ -990,21 +1533,57 @@ async fn explicit_failure_propagation_stops_only_its_dependent_closure() {
 async fn explicit_creation_dependency_blocks_when_its_required_instance_is_unrealized() {
     let (received, _receiver) = mpsc::channel(1);
     let mut graph = ComputationGraph::builder("creation-dependency")
-        .source(source("source", Arc::new(Calls::default()), vec![]))
-        .sink(sink(
-            "failed-binding",
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            Arc::new(Calls::default()),
+            vec![],
+        ))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f6")
+                .expect("fixture UUID"),
             Arc::new(Calls::default()),
             received.clone(),
         ))
-        .sink(sink("dependent", Arc::new(Calls::default()), received))
-        .bind_stream(endpoint("source", "out"), stream("source"))
-        .connect(edge("source", "failed-binding"), Box::new(FailingPipe))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f4")
+                .expect("fixture UUID"),
+            Arc::new(Calls::default()),
+            received,
+        ))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "dependent"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f6")
+                    .expect("fixture UUID"),
+            ),
+            Box::new(FailingPipe),
+        )
+        .connect(
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f4")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .relationship_policy(
-            edge("source", "dependent"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f4")
+                    .expect("fixture UUID"),
+            ),
             RelationshipPolicy {
                 required_for_creation: true,
                 ..Default::default()
@@ -1019,23 +1598,41 @@ async fn explicit_creation_dependency_blocks_when_its_required_instance_is_unrea
         let CreationOutcome::Blocked {
             dependencies,
             resources,
-        } = &deployment.components[&component("dependent")]
+        } = &deployment.components[&component(1012)]
         else {
             panic!("dependent was constructed without its required source");
         };
-        assert!(dependencies.contains(&component("source")));
+        assert!(dependencies.contains(&component(77)));
         assert!(resources.is_empty());
         let observed = control.observed();
         assert_eq!(
-            observed.relationships[&edge("source", "failed-binding")].binding,
+            observed.relationships[&edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f6")
+                    .expect("fixture UUID")
+            )]
+                .binding,
             BindingState::Failed
         );
         assert_eq!(
-            observed.relationships[&edge("source", "dependent")].binding,
+            observed.relationships[&edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f4")
+                    .expect("fixture UUID")
+            )]
+                .binding,
             BindingState::Declared
         );
         assert_eq!(
-            observed.relationships[&edge("source", "dependent")].availability,
+            observed.relationships[&edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003f4")
+                    .expect("fixture UUID")
+            )]
+                .availability,
             DataAvailability::Unavailable
         );
         control.cancel();
@@ -1049,24 +1646,71 @@ async fn failed_optional_binding_never_becomes_available_idle_or_exhausted() {
         let (received, _receiver) = mpsc::channel(2);
         let source: Box<dyn EnvelopeSource> = if finite {
             Box::new(FiniteSource::new(
-                "source",
-                vec![output(root("source", 1, &[1]))],
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                vec![output(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[1],
+                ))],
             ))
         } else {
-            source("source", Arc::new(Calls::default()), vec![])
+            source(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                Arc::new(Calls::default()),
+                vec![],
+            )
         };
         let mut graph = ComputationGraph::builder("optional-binding")
-            .source(source)
-            .sink(sink("good", Arc::new(Calls::default()), received.clone()))
-            .sink(sink("bad", Arc::new(Calls::default()), received))
-            .bind_stream(endpoint("source", "out"), stream("source"))
+            .fixture_source(source)
+            .fixture_sink(sink(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                    .expect("fixture UUID"),
+                Arc::new(Calls::default()),
+                received.clone(),
+            ))
+            .fixture_sink(sink(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                    .expect("fixture UUID"),
+                Arc::new(Calls::default()),
+                received,
+            ))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            )
             .connect(
-                edge("source", "good"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cf")
+                        .expect("fixture UUID"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
-            .connect(edge("source", "bad"), Box::new(FailingPipe))
+            .connect(
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                        .expect("fixture UUID"),
+                ),
+                Box::new(FailingPipe),
+            )
             .relationship_policy(
-                edge("source", "bad"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                        .expect("fixture UUID"),
+                ),
                 RelationshipPolicy {
                     required_for_binding: false,
                     ..Default::default()
@@ -1086,18 +1730,28 @@ async fn failed_optional_binding_never_becomes_available_idle_or_exhausted() {
                 let mut observed = control.subscribe_observed();
                 observed
                     .wait_for(|state| {
-                        state.relationships[&edge("source", "good")].availability
+                        state.relationships[&edge(
+                            &drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            &drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-0000000001cf",
+                            )
+                            .expect("fixture UUID"),
+                        )]
+                            .availability
                             == DataAvailability::Exhausted
                     })
                     .await
                     .expect("real finite EOF");
             }
-            let node = control.observed().components[&component("source")].clone();
+            let node = control.observed().components[&component(77)].clone();
             control
                 .report_health(
                     GraphRevision(1),
                     HealthObservation {
-                        component: component("source"),
+                        component: component(77),
                         generation: node.generation,
                         operation: node.operation,
                         health: ComponentHealth::Healthy,
@@ -1106,22 +1760,37 @@ async fn failed_optional_binding_never_becomes_available_idle_or_exhausted() {
                 .await
                 .expect("valid health observation");
             assert_eq!(
-                control.observed().relationships[&edge("source", "bad")].binding,
+                control.observed().relationships[&edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                        .expect("fixture UUID")
+                )]
+                    .binding,
                 BindingState::Failed
             );
             assert_eq!(
-                control.observed().relationships[&edge("source", "bad")].availability,
+                control.observed().relationships[&edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                        .expect("fixture UUID")
+                )]
+                    .availability,
                 DataAvailability::Unavailable
             );
             control
-                .stop_components(
-                    GraphRevision(1),
-                    GraphSelection::Exact(vec![component("source")]),
-                )
+                .stop_components(GraphRevision(1), GraphSelection::Exact(vec![component(77)]))
                 .await
                 .expect("stop source");
             assert_eq!(
-                control.observed().relationships[&edge("source", "bad")].availability,
+                control.observed().relationships[&edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+                        .expect("fixture UUID")
+                )]
+                    .availability,
                 DataAvailability::Unavailable
             );
             control.cancel();

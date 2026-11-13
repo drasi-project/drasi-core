@@ -279,40 +279,65 @@ async fn test_change_detection_through_collector() {
     let _ = env_logger::try_init();
 
     let source_port = find_available_port().await;
-    let source = OtelSource::builder("test-source")
-        .with_grpc_bind(format!("0.0.0.0:{source_port}"))
-        .with_metric_allowlist(["latency_p99_ms"])
-        .with_dependency_ttl_secs(2)
-        .with_log_event_ttl_secs(30)
-        .with_auto_start(true)
-        .build()
-        .unwrap();
+    let source = OtelSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    )
+    .with_grpc_bind(format!("0.0.0.0:{source_port}"))
+    .with_metric_allowlist(["latency_p99_ms"])
+    .with_dependency_ttl_secs(2)
+    .with_log_event_ttl_secs(30)
+    .with_auto_start(true)
+    .build()
+    .unwrap();
 
-    let metric_query = Query::cypher("metric-query")
-        .query("MATCH (s:Service)-[:REPORTS]->(m:Metric) RETURN s.name AS service, m.value AS latencyMs")
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
-    let dep_query = Query::cypher("dep-query")
+    let metric_query = Query::cypher(
+        drasi_core::ComponentName::try_new("metric-query").expect("fixture component name"),
+    )
+    .query(
+        "MATCH (s:Service)-[:REPORTS]->(m:Metric) RETURN s.name AS service, m.value AS latencyMs",
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
+    let dep_query = Query::cypher(drasi_core::ComponentName::try_new("dep-query").expect("fixture component name"))
         .query("MATCH (a:Service)-[:DEPENDS_ON]->(b:Service) RETURN a.name AS fromService, b.name AS toService")
-        .from_input("test-source")
+        .from_input_by_name(drasi_core::ComponentName::try_new("test-source").expect("fixture component name"))
         .auto_start(true)
-        .build();
-    let log_query = Query::cypher("log-query")
+        .build().expect("valid query configuration");
+    let log_query = Query::cypher(drasi_core::ComponentName::try_new("log-query").expect("fixture component name"))
         .query("MATCH (s:Service)-[:EMITS]->(e:LogEvent) RETURN s.name AS service, e.body AS body, e.eventName AS eventName")
-        .from_input("test-source")
+        .from_input_by_name(drasi_core::ComponentName::try_new("test-source").expect("fixture component name"))
         .auto_start(true)
-        .build();
+        .build().expect("valid query configuration");
 
-    let (metric_reaction, metric_handle) = ApplicationReactionBuilder::new("metric-reaction")
-        .with_query("metric-query")
-        .build();
-    let (dep_reaction, dep_handle) = ApplicationReactionBuilder::new("dep-reaction")
-        .with_query("dep-query")
-        .build();
-    let (log_reaction, log_handle) = ApplicationReactionBuilder::new("log-reaction")
-        .with_query("log-query")
-        .build();
+    let (metric_reaction, metric_handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001e")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("metric-query").expect("fixture component name"),
+    )
+    .build();
+    let (dep_reaction, dep_handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001f")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("dep-query").expect("fixture component name"),
+    )
+    .build();
+    let (log_reaction, log_handle) = ApplicationReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000020")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("log-query").expect("fixture component name"),
+    )
+    .build();
 
     let drasi = Arc::new(
         DrasiLib::builder()
@@ -329,13 +354,25 @@ async fn test_change_detection_through_collector() {
                     .clone(),
             )
             .with_id("otel-e2e")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+                source,
+            )
             .with_query(metric_query)
             .with_query(dep_query)
             .with_query(log_query)
-            .with_reaction(metric_reaction)
-            .with_reaction(dep_reaction)
-            .with_reaction(log_reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("metric-capture").unwrap(),
+                metric_reaction,
+            )
+            .with_reaction(
+                drasi_core::ComponentName::try_new("dependency-capture").unwrap(),
+                dep_reaction,
+            )
+            .with_reaction(
+                drasi_core::ComponentName::try_new("log-capture").unwrap(),
+                log_reaction,
+            )
             .build()
             .await
             .unwrap(),

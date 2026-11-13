@@ -138,7 +138,7 @@ struct Run {
     streams: Mutex<VecDeque<SnapshotStream>>,
     waker: AtomicWaker,
     record: AsyncMutex<StateRecord>,
-    initial_keys: Mutex<BTreeSet<String>>,
+    initial_keys: Mutex<BTreeSet<drasi_core::interface::CheckpointKey>>,
     completion: Mutex<Option<Bytes>>,
     pending: Mutex<bool>,
 }
@@ -500,7 +500,7 @@ fn combine(left: BootstrapPreparation, right: BootstrapPreparation) -> Bootstrap
 fn append_watermarks(
     output: &mut Vec<BootstrapWatermark>,
     added: Vec<BootstrapWatermark>,
-    keys: &mut BTreeSet<String>,
+    keys: &mut BTreeSet<drasi_core::interface::CheckpointKey>,
 ) -> Result<()> {
     anyhow::ensure!(
         keys.len().saturating_add(added.len()) <= MAX_COMPOSITE_BOOTSTRAP_WATERMARKS,
@@ -508,9 +508,6 @@ fn append_watermarks(
     );
     for watermark in added {
         watermark.validate()?;
-        if let Some(source) = &watermark.source_id {
-            ComponentId::try_new(source.as_str())?;
-        }
         anyhow::ensure!(
             watermark
                 .position
@@ -521,8 +518,8 @@ fn append_watermarks(
         );
         anyhow::ensure!(
             keys.insert(super::query::progress_key(
-                watermark.stream.as_str(),
-                watermark.source_id.as_deref()
+                &watermark.stream,
+                watermark.source_id.as_ref()
             )),
             "composite bootstrap children supplied duplicate source watermarks"
         );

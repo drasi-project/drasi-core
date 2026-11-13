@@ -26,8 +26,6 @@ fn batch_events() -> Option<usize> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpSourceConfig {
     pub stream: StreamId,
-    #[serde(default = "shared::source_id")]
-    pub source_id: String,
     #[serde(default = "shared::host")]
     pub host: String,
     #[serde(default = "port")]
@@ -68,7 +66,6 @@ impl HttpSourceConfig {
         use serde_json::json;
         ConfigDefinition::try_new([
             Field::new("stream", String, true, "Nonempty output stream identifier."),
-            Field::new("sourceId", String, false, "Source identifier and one URL path segment.").default(shared::source_id()),
             Field::new("host", String, false, "IP address on which to listen.").default(shared::host()),
             Field::new("port", Integer, false, "TCP port; zero requests an available local port.").default(port()).minimum(0).maximum(u16::MAX as u64),
             Field::new("timeoutMs", Integer, false, "Request and admission timeout in milliseconds; must be representable by the system clock.").default(shared::timeout_ms()).minimum(1),
@@ -106,17 +103,9 @@ impl HttpSourceConfig {
         Ok(config)
     }
 
-    /// Compatibility entry point; HTTP settings no longer select a protocol.
-    #[deprecated(note = "use HttpSourceConfig::from_value without a protocol flag")]
-    pub fn parse(value: Value, grpc: bool) -> Result<Self> {
-        ensure!(!grpc, "HTTP source configuration cannot select gRPC");
-        Self::from_value(value)
-    }
-
     pub(crate) fn ingress(&self) -> IngressConfig {
         IngressConfig {
             stream: self.stream.clone(),
-            source_id: self.source_id.clone(),
             host: self.host.clone(),
             port: self.port,
             timeout_ms: self.timeout_ms,
@@ -184,7 +173,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(config)?,
             json!({
-                "stream":"events/out", "sourceId":"facilities-db", "host":"0.0.0.0",
+                "stream":"events/out", "host":"0.0.0.0",
                 "port":9000, "timeoutMs":60000, "ingressCapacity":1024,
                 "maxMessageBytes":2097152, "maxBatchEvents":1024, "adaptiveEnabled":false
             })
@@ -214,16 +203,5 @@ mod tests {
                 "{value}"
             );
         }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn compatibility_parser_does_not_switch_component_protocol() -> Result<()> {
-        assert_eq!(
-            HttpSourceConfig::parse(json!({"stream":"s"}), false)?.port,
-            9000
-        );
-        assert!(HttpSourceConfig::parse(json!({"stream":"s"}), true).is_err());
-        Ok(())
     }
 }

@@ -3,6 +3,9 @@
 
 #![allow(clippy::print_stdout)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_core::{
@@ -20,9 +23,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn component_id(name: &str) -> ComponentId {
+    let value = match name {
+        "timers" => 1,
+        "live" => 2,
+        "clock" => 3,
+        "live-sink" => 4,
+        "timers-sink" => 5,
+        name if name.starts_with("source-") => {
+            name["source-".len()..]
+                .parse::<u128>()
+                .expect("fixture source index")
+                + 100
+        }
+        name if name.starts_with("sink-") => {
+            name["sink-".len()..]
+                .parse::<u128>()
+                .expect("fixture sink index")
+                + 1_000
+        }
+        other => panic!("missing explicit fixture component ID for {other}"),
+    };
+    fixture_support::component_id(value)
+}
+
 fn descriptor(id: &str, output: bool) -> Result<ComponentDescriptor> {
     Ok(ComponentDescriptor::try_new(
-        ComponentId::try_new(id)?,
+        component_id(id),
         vec![PortDescriptor::new(
             PortId::try_new(if output { "out" } else { "in" })?,
             if output {
@@ -43,10 +70,7 @@ fn descriptor(id: &str, output: bool) -> Result<ComponentDescriptor> {
 }
 
 fn endpoint(id: &str, port: &str) -> Result<Endpoint> {
-    Ok(Endpoint::new(
-        ComponentId::try_new(id)?,
-        PortId::try_new(port)?,
-    ))
+    Ok(Endpoint::new(component_id(id), PortId::try_new(port)?))
 }
 
 fn event(source: &str, key: &str, sequence: u64, timer: bool) -> Result<ChangeEnvelope> {
@@ -74,6 +98,7 @@ fn event(source: &str, key: &str, sequence: u64, timer: bool) -> Result<ChangeEn
 
 struct ReadySource {
     descriptor: ComponentDescriptor,
+    namespace: String,
     produced: Arc<AtomicU64>,
 }
 #[async_trait]
@@ -94,7 +119,7 @@ impl EnvelopeSource for ReadySource {
         let sequence = self.produced.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(Some(OutputEnvelope {
             port: PortId::try_new("out")?,
-            envelope: event(self.descriptor.id().as_str(), "live", sequence, false)?,
+            envelope: event(&self.namespace, "live", sequence, false)?,
         }))
     }
 }
@@ -146,7 +171,7 @@ async fn query(id: &str, timer: bool) -> Result<ContinuousQueryTransformer> {
     ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "responsiveness".into(),
-            id: ComponentId::try_new(id)?,
+            id: component_id(id),
             query: if timer {
                 "MATCH (n:Item) WHERE drasi.trueLater(true, 2000) RETURN n.value AS value"
             } else {
@@ -186,13 +211,19 @@ async fn responsiveness(runtime: &str) -> Result<()> {
         let timer_count = Arc::new(AtomicU64::new(0));
         let processed = Arc::new(Mutex::new(BTreeMap::<String, u64>::new()));
         let mut builder = ComputationGraph::builder("responsiveness")
-            .transformer(Box::new(query("live", false).await?))
-            .transformer(Box::new(timers))
-            .source(Box::new(QueryScheduledSource::new(
-                ComponentId::try_new("clock")?,
-                StreamId::try_new("clock/out")?,
-                scheduling,
-            )?))
+            .transformer(
+                ComponentName::try_new("live")?,
+                Box::new(query("live", false).await?),
+            )
+            .transformer(ComponentName::try_new("timers")?, Box::new(timers))
+            .source(
+                ComponentName::try_new("clock")?,
+                Box::new(QueryScheduledSource::new(
+                    component_id("clock"),
+                    StreamId::try_new("clock/out")?,
+                    scheduling,
+                )?),
+            )
             .bind_stream(endpoint("clock", "out")?, StreamId::try_new("clock/out")?)
             .connect(
                 EdgeDefinition::new(endpoint("clock", "out")?, endpoint("timers", "in")?),
@@ -203,10 +234,14 @@ async fn responsiveness(runtime: &str) -> Result<()> {
             let id = format!("source-{index}");
             let count = Arc::new(AtomicU64::new(0));
             builder = builder
-                .source(Box::new(ReadySource {
-                    descriptor: descriptor(&id, true)?,
-                    produced: count.clone(),
-                }))
+                .source(
+                    ComponentName::try_new(id.as_str())?,
+                    Box::new(ReadySource {
+                        descriptor: descriptor(&id, true)?,
+                        namespace: id.clone(),
+                        produced: count.clone(),
+                    }),
+                )
                 .bind_stream(
                     endpoint(&id, "out")?,
                     StreamId::try_new(format!("{id}/out"))?,
@@ -220,11 +255,14 @@ async fn responsiveness(runtime: &str) -> Result<()> {
         for (id, count) in [("live", live_count.clone()), ("timers", timer_count.clone())] {
             let sink = format!("{id}-sink");
             builder = builder
-                .sink(Box::new(Counter {
-                    descriptor: descriptor(&sink, false)?,
-                    count,
-                    producers: (id == "live").then(|| processed.clone()),
-                }))
+                .sink(
+                    ComponentName::try_new(sink.as_str())?,
+                    Box::new(Counter {
+                        descriptor: descriptor(&sink, false)?,
+                        count,
+                        producers: (id == "live").then(|| processed.clone()),
+                    }),
+                )
                 .bind_stream(
                     endpoint(id, "out")?,
                     StreamId::try_new(format!("{id}/out"))?,

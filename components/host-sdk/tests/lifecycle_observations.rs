@@ -22,7 +22,7 @@ struct CallbackReaction {
 
 #[async_trait]
 impl Reaction for CallbackReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.base.id
     }
     fn type_name(&self) -> &str {
@@ -31,13 +31,13 @@ impl Reaction for CallbackReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()
     }
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
         self.base.queries.clone()
     }
     fn auto_start(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         *self.callback.lock().expect("callback ownership") =
             Some(Arc::new(InstanceCallbackContext {
                 instance_id: context.instance_id.clone(),
@@ -45,7 +45,7 @@ impl Reaction for CallbackReaction {
                 log_registry: get_or_init_global_registry(),
                 update_tx: context.update_tx.clone(),
             }));
-        self.base.initialize(context).await;
+        self.base.bind_runtime_context(context).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
         {
@@ -60,7 +60,7 @@ impl Reaction for CallbackReaction {
                 instance_lifecycle_callback(
                     context,
                     &FfiLifecycleEvent {
-                        component_id: FfiStr::from_str(self.id()),
+                        component_id: FfiStr::from_str(self.id().as_str()),
                         component_type: FfiStr::from_str("reaction"),
                         event_type,
                         message: FfiStr::from_str("failure after saturated FFI callback"),
@@ -91,6 +91,7 @@ impl Reaction for CallbackReaction {
 
 async fn callback_flood(instance: &str) {
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -105,22 +106,41 @@ async fn callback_flood(instance: &str) {
         )
         .with_id(instance)
         .with_query(
-            Query::cypher("query")
-                .query("MATCH (n:Person) RETURN n.name AS name")
-                .auto_start(false)
-                .enable_bootstrap(false)
-                .build(),
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .query("MATCH (n:Person) RETURN n.name AS name")
+            .auto_start(false)
+            .enable_bootstrap(false)
+            .build()
+            .expect("query configuration"),
         )
-        .with_reaction(CallbackReaction {
-            base: ReactionBase::new(ReactionBaseParams::new("callback", vec!["query".into()])),
-            callback: Mutex::new(None),
-        })
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("callback").expect("fixture component name"),
+            CallbackReaction {
+                base: ReactionBase::new(ReactionBaseParams::new(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000122")
+                        .expect("fixture UUID"),
+                    vec![drasi_computation_contracts::ComponentReference::by_name(
+                        drasi_core_types::ComponentName::try_new("query")
+                            .expect("fixture component name"),
+                    )],
+                )),
+                callback: Mutex::new(None),
+            },
+        )
         .build()
         .await
         .expect("instance");
-    core.start_query("query").await.expect("start query");
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .expect("start query");
     let error = core
-        .start_reaction("callback")
+        .start_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("callback").expect("fixture component name"),
+        )
         .await
         .expect_err("the callback failure must prevent successful activation");
     assert!(

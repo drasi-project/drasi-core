@@ -109,8 +109,10 @@ Create a normal native component specification with:
 
 ```rust,ignore
 let child = HostConfig::empty("child", "/private/instances/child");
+let application = ComponentId::try_new("831cb937-d2e7-4b9e-88fc-1b923bc77272")?;
+let owner = ComponentId::derive_owned(&application, "child-owner")?;
 let specification = SupervisorFactory::specification(
-    ComponentId::try_new("child-owner")?,
+    owner,
     &child,
 )?;
 ```
@@ -383,9 +385,10 @@ CARGO_BUILD_JOBS=3 cargo test --locked --offline -p drasi-instance-host \
 `DRASI_NETWORK_CONTAINER` names the prepared, init-enabled Podman container.
 The address variables distinguish the caller-visible published ports from
 the peer's bind addresses. Selecting the network case without those prerequisites
-fails; it does not silently pass or downgrade to loopback. The runtime-parity
-runner includes it when the peer is explicitly configured. Its unprepared-peer
-exception has an owner and expiry in `lib/tests/runtime_parity/allowed-ignored.tsv`.
+fails; it does not silently pass or downgrade to loopback. Run the command above
+only after preparing that peer. The default workspace and automatically
+provisioned container jobs leave this explicitly configured cross-OS test
+ignored; their success does not establish network acceptance.
 
 This is actual macOS-to-Linux-VM networking through the normal mutual-TLS bridge,
 with real receipt loss/delay, version/authentication rejection, exact outputs,

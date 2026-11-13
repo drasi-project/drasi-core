@@ -3,11 +3,16 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use computation_support::*;
+use drasi_core_types::ComponentName;
 use drasi_lib::computation::v1::*;
 use futures::poll;
 use std::{
@@ -67,7 +72,13 @@ async fn retained_cancelled_collection_retains_identity_and_contiguous_prefix() 
     let sender = pipe.sender();
     let control = pipe.control();
     let mut receiver = pipe.take_receiver()?;
-    let first = root("source", 1, &[1]);
+    let first = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        1,
+        &[1],
+    );
     sender.send(first.clone()).await?;
     assert!(tokio::time::timeout(
         Duration::from_millis(10),
@@ -81,7 +92,13 @@ async fn retained_cancelled_collection_retains_identity_and_contiguous_prefix() 
     );
     for sequence in 2..=3 {
         sender
-            .send(root("source", sequence, &[sequence as u16]))
+            .send(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                sequence,
+                &[sequence as u16],
+            ))
             .await?;
     }
     let mut batch = receiver.receive_batch(limits(3), &port("in")).await?;
@@ -117,7 +134,15 @@ async fn qos_cancelled_collection_partial_ack_and_dropped_suffix_preserve_obliga
     let channel = QosChannel::volatile(qos_definition(false))?;
     let mut pipe = subscribe(&channel)?;
     let mut receiver = pipe.pipe.take_receiver()?;
-    channel.publish(&root("source", 1, &[1])).await?;
+    channel
+        .publish(&root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ))
+        .await?;
     assert!(tokio::time::timeout(
         Duration::from_millis(10),
         receiver.receive_batch(limits(3), &port("in"))
@@ -127,7 +152,13 @@ async fn qos_cancelled_collection_partial_ack_and_dropped_suffix_preserve_obliga
     assert!(!pipe.control.is_idle().await?);
     for sequence in 2..=3 {
         channel
-            .publish(&root("source", sequence, &[sequence as u16]))
+            .publish(&root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                sequence,
+                &[sequence as u16],
+            ))
             .await?;
     }
     let mut batch = receiver.receive_batch(limits(3), &port("in")).await?;
@@ -180,14 +211,32 @@ async fn lease_collection_flushes_on_bytes_deadline_and_control_barriers() -> Re
             let pipe = &mut provided.as_mut().unwrap().pipe;
             (pipe.sender(), pipe.take_receiver()?)
         };
-        let a = root("source", 1, &[1]);
-        let original = root("source", 2, &[2]);
+        let a = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        );
+        let original = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            2,
+            &[2],
+        );
         let barrier = ChangeEnvelope::new(
             original.id().clone(),
             ChangeSet::try_new(original.changes().id().clone(), schema_descriptor(), vec![])?,
             original.system().as_ref().clone(),
         );
-        let c = root("source", 3, &[3]);
+        let c = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            3,
+            &[3],
+        );
         for event in [a, barrier, c] {
             sender.send(event).await?;
         }
@@ -198,8 +247,20 @@ async fn lease_collection_flushes_on_bytes_deadline_and_control_barriers() -> Re
                 acknowledge(delivery).await?;
             }
         }
-        let a = root("source", 4, &[4]);
-        let b = root("source", 5, &[5]);
+        let a = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            4,
+            &[4],
+        );
+        let b = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            5,
+            &[5],
+        );
         let mut bound = limits(3);
         bound.max_bytes = SinkBatching::input_size(&InputEnvelope {
             port: port("in"),
@@ -234,7 +295,15 @@ async fn cancelled_receiver_cannot_release_prefetched_events_after_its_binding_i
         RetentionPolicy::Backpressure,
     ));
     let mut old = RetainedPipe::new(store.clone(), ReplayGapPolicy::Strict)?;
-    old.sender().send(root("source", 1, &[1])).await?;
+    old.sender()
+        .send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ))
+        .await?;
     let mut receiver = old.take_receiver()?;
     assert!(tokio::time::timeout(
         Duration::from_millis(10),
@@ -263,7 +332,15 @@ async fn cancelled_receiver_cannot_release_prefetched_events_after_its_binding_i
 
     let channel = QosChannel::volatile(qos_definition(false))?;
     let mut old = subscribe(&channel)?;
-    channel.publish(&root("source", 1, &[1])).await?;
+    channel
+        .publish(&root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ))
+        .await?;
     let mut receiver = old.pipe.take_receiver()?;
     assert!(tokio::time::timeout(
         Duration::from_millis(10),
@@ -343,18 +420,41 @@ async fn graph_batches() -> Result<()> {
     for retained in [false, true] {
         let calls = Calls::default();
         let mut builder = ComputationGraph::builder("sink-batches")
-            .source(Box::new(FiniteSource::new(
-                "source",
+            .fixture_source(Box::new(FiniteSource::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
                 (1..=5)
-                    .map(|sequence| output(root("source", sequence, &[sequence as u16])))
+                    .map(|sequence| {
+                        output(root(
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            "source",
+                            sequence,
+                            &[sequence as u16],
+                        ))
+                    })
                     .collect(),
             )))
-            .sink(Box::new(BatchSink {
-                descriptor: descriptor("sink", &["in"], &[]),
+            .fixture_sink(Box::new(BatchSink {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                    &["in"],
+                    &[],
+                ),
                 policy: limits(2),
                 calls: calls.clone(),
             }))
-            .bind_stream(endpoint("source", "out"), stream("source"));
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            );
         let store = Arc::new(MemoryEnvelopeStore::new(
             NonZeroUsize::new(8).unwrap(),
             RetentionPolicy::Backpressure,
@@ -376,7 +476,16 @@ async fn graph_batches() -> Result<()> {
                     ),
                 )?
                 .connect(
-                    edge("source", "sink"),
+                    edge(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000065",
+                        )
+                        .expect("fixture UUID"),
+                    ),
                     Box::new(RetainedPipeConfig {
                         resource,
                         capacity: NonZeroUsize::new(8).unwrap(),
@@ -387,7 +496,12 @@ async fn graph_batches() -> Result<()> {
                 );
         } else {
             builder = builder.connect(
-                edge("source", "sink"),
+                edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             );
         }
@@ -491,21 +605,50 @@ async fn graceful_stop_flushes_a_partial_batch_waits_for_effects_and_restarts() 
     let (sender, receiver) = tokio::sync::mpsc::channel(4);
     let gate = Arc::new(Gate::default());
     let batch = ComponentBatch::builder()
-        .source(Box::new(ManualSource {
-            descriptor: descriptor("source", &[], &["out"]),
-            receiver,
-        }))
-        .sink(Box::new(GatedSink {
-            descriptor: descriptor("sink", &["in"], &[]),
-            gate: gate.clone(),
-        }))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .source(
+            ComponentName::try_new("source")?,
+            Box::new(ManualSource {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &[],
+                    &["out"],
+                ),
+                receiver,
+            }),
+        )
+        .sink(
+            ComponentName::try_new("sink")?,
+            Box::new(GatedSink {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                    &["in"],
+                    &[],
+                ),
+                gate: gate.clone(),
+            }),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 4 }),
         )
         .build()?;
     let core = drasi_lib::DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -522,10 +665,20 @@ async fn graceful_stop_flushes_a_partial_batch_waits_for_effects_and_restarts() 
         .build()
         .await?;
     core.start().await?;
-    sender.send(output(root("source", 1, &[1]))).await?;
+    sender
+        .send(output(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        )))
+        .await?;
     // The source must dispatch before requesting a sink-only stop.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let sink = core.computation_component("sink")?;
+    let sink = core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("sink").expect("fixture component name"),
+    )?;
     {
         let stopping = sink.stop();
         tokio::pin!(stopping);
@@ -541,7 +694,13 @@ async fn graceful_stop_flushes_a_partial_batch_waits_for_effects_and_restarts() 
     sink.start().await?;
     for sequence in 2..=4 {
         sender
-            .send(output(root("source", sequence, &[sequence as u16])))
+            .send(output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                sequence,
+                &[sequence as u16],
+            )))
             .await?;
     }
     tokio::time::timeout(Duration::from_secs(2), gate.entered.notified()).await?;
@@ -570,7 +729,7 @@ mod persistent {
                 RocksDbMemoryBudget::from_total_budget_bytes(32 << 20)?,
             ),
         )
-        .create_indexes("sink-batches", "journal")
+        .create_indexes("sink-batches", &fixture_support::component_id(201))
         .await?)
     }
     fn codec() -> Result<EnvelopeCodec> {
@@ -601,7 +760,13 @@ mod persistent {
         let mut receiver = pipe.take_receiver()?;
         for sequence in 1..=3 {
             sender
-                .send(root("source", sequence, &[sequence as u16]))
+                .send(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    sequence,
+                    &[sequence as u16],
+                ))
                 .await?;
         }
         let mut batch = receiver.receive_batch(limits(3), &port("in")).await?;
@@ -657,7 +822,13 @@ mod persistent {
         let mut receiver = pipe.pipe.take_receiver()?;
         for sequence in 1..=5 {
             original
-                .publish(&root("source", sequence, &[sequence as u16]))
+                .publish(&root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    sequence,
+                    &[sequence as u16],
+                ))
                 .await?;
         }
         let mut batch = receiver.receive_batch(limits(5), &port("in")).await?;

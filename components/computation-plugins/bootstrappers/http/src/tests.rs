@@ -5,9 +5,11 @@ use super::*;
 use drasi_computation_plugin_sdk::{ExportedPlugin, Scope};
 use serde_json::{json, Value};
 
+const SOURCE_ID: &str = "4a4b64d8-9d8b-5ddd-867d-2f925822946c";
+
 fn configuration() -> Value {
     json!({
-        "source":"events","stream":"events/out","settings":{"endpoints":[{
+        "source":SOURCE_ID,"stream":"events/out","settings":{"endpoints":[{
             "url":"https://example.invalid/snapshot",
             "response":{"mappings":[{"elementType":"node","template":{"id":"{{item.id}}","labels":["Item"]}}]}
         }]}
@@ -17,7 +19,8 @@ fn request() -> Result<CreateRequest> {
     Ok(CreateRequest {
         inputs: Vec::new(),
         activation_credentials_bound: false,
-        id: ComponentId::try_new("query")?,
+        update_directive: None,
+        id: ComponentId::try_new("00edb855-e19a-5466-8575-631427e5d10d")?,
         implementation: HttpBootstrapFactory.metadata().implementation,
         configuration_version: 1,
         configuration: configuration(),
@@ -42,7 +45,11 @@ fn construction_is_query_scoped_and_does_not_resolve_or_fetch_credentials() -> R
         .validate_query_scope("different", "graph", &request.id)
         .is_err());
     assert!(provider
-        .validate_query_scope("instance", "graph", &ComponentId::try_new("other")?)
+        .validate_query_scope(
+            "instance",
+            "graph",
+            &ComponentId::try_new("023b840b-e18b-5133-912e-33de6190a3ca")?
+        )
         .is_err());
     request.scope = None;
     assert!(HttpBootstrapFactory.create(&request, None).is_err());

@@ -45,14 +45,14 @@ impl ProgressIdentity {
             self.version == VERSION,
             "unsupported source progress version"
         );
-        ComponentId::try_new(self.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("graph", &self.graph_id)?;
         Ok(())
     }
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Key {
-    Source(String),
+    Source(ComponentId),
     Stream(StreamId),
 }
 
@@ -68,10 +68,7 @@ impl From<&SourceProgressKey> for Key {
 impl Key {
     pub(crate) fn into_key(self) -> anyhow::Result<SourceProgressKey> {
         Ok(match self {
-            Self::Source(source) => {
-                ComponentId::try_new(source.as_str())?;
-                SourceProgressKey::Source(source)
-            }
+            Self::Source(source) => SourceProgressKey::Source(source),
             Self::Stream(stream) => SourceProgressKey::Stream(stream),
         })
     }
@@ -345,7 +342,12 @@ mod tests {
             reset_generation: u64::MAX,
             checkpoints: BTreeMap::from([
                 (
-                    SourceProgressKey::Source("source".into()),
+                    SourceProgressKey::Source(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                    ),
                     SourceCheckpoint::new(0, Some(vec![0, 255, 128].into())),
                 ),
                 (
@@ -384,12 +386,13 @@ mod tests {
         assert!(decode_snapshot(&encode(&snapshot)?).is_err());
         snapshot.version = VERSION;
         snapshot.checkpoints.push(Checkpoint {
-            key: Key::Source("source".into()),
+            key: Key::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             sequence: 1,
             position: None,
         });
-        assert!(decode_snapshot(&encode(&snapshot)?).is_err());
-        snapshot.checkpoints.last_mut().unwrap().key = Key::Source("invalid source".into());
         assert!(decode_snapshot(&encode(&snapshot)?).is_err());
         snapshot.checkpoints.pop();
         snapshot
@@ -403,7 +406,7 @@ mod tests {
         let mut identity = ProgressIdentity {
             version: VERSION,
             graph_id: "graph".into(),
-            component_id: ComponentId::try_new("query")?,
+            component_id: ComponentId::try_new("bf812052-a31d-4c76-83a4-4d6f7133bbee")?,
         };
         identity.validate()?;
         identity.graph_id.clear();
@@ -458,7 +461,10 @@ mod tests {
         assert!(encode_snapshot(&snapshot).is_err());
         snapshot.failure = None;
         snapshot.checkpoints.insert(
-            SourceProgressKey::Source("large".into()),
+            SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000037f")
+                    .expect("fixture UUID"),
+            ),
             SourceCheckpoint::new(0, Some(vec![0; MAX_PROGRESS_BYTES].into())),
         );
         assert!(encode_snapshot(&snapshot).is_err());
@@ -493,7 +499,7 @@ mod tests {
             encode(&ProgressIdentity {
                 version: VERSION,
                 graph_id: "graph".into(),
-                component_id: ComponentId::try_new("query").unwrap(),
+                component_id: ComponentId::try_new("bf812052-a31d-4c76-83a4-4d6f7133bbee").unwrap(),
             })
             .map_err(Failure::from)
         })

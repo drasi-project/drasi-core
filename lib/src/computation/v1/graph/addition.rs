@@ -263,10 +263,11 @@ pub struct ComponentAddition {
 }
 
 impl ComponentAddition {
-    pub fn new(instance: ConstructedComponent) -> Self {
+    pub fn new(name: ComponentName, instance: ConstructedComponent) -> Self {
         let descriptor = instance.0.descriptor().clone();
-        let binding = descriptor.id().as_str().to_owned();
+        let binding = super::BindingToken::generate();
         let definition = DesiredComponent {
+            name,
             descriptor,
             role: instance.0.role(),
             completion: instance.0.completion(),
@@ -287,10 +288,11 @@ impl ComponentAddition {
     }
 
     pub fn from_specification(
+        name: ComponentName,
         specification: ComponentSpecification,
         factory: Arc<dyn ComponentFactory>,
     ) -> Self {
-        let mut addition = Self::declaration(specification);
+        let mut addition = Self::declaration(name, specification);
         addition
             .bindings
             .factories
@@ -303,8 +305,9 @@ impl ComponentAddition {
     /// to be registered yet. The graph retains missing factories as dependency
     /// waits; register one later through [`GraphControl::register_factory`] or
     /// [`crate::DrasiLib::register_component_factory`].
-    pub fn declaration(specification: ComponentSpecification) -> Self {
+    pub fn declaration(name: ComponentName, specification: ComponentSpecification) -> Self {
         let definition = DesiredComponent {
+            name,
             descriptor: specification.descriptor.clone(),
             role: specification.role,
             completion: specification.completion,
@@ -370,6 +373,11 @@ pub struct ComponentHandle {
 }
 
 impl ComponentHandle {
+    pub(crate) fn with_control(mut self, control: GraphControl) -> Self {
+        self.control = control;
+        self
+    }
+
     pub(crate) fn with_lifecycle_members(
         mut self,
         members: BTreeMap<ComponentId, ComponentGeneration>,
@@ -387,6 +395,29 @@ impl ComponentHandle {
 
     pub fn generation(&self) -> ComponentGeneration {
         self.generation
+    }
+
+    /// Rename this generation without invoking plugin or lifecycle callbacks.
+    pub async fn rename(&self, name: ComponentName) -> GraphResult<()> {
+        self.observed()?;
+        if let Some(editor) = &self.control.name_editor {
+            return editor(self.id.clone(), self.generation, name).await;
+        }
+        self.control.require_configuration_write()?;
+        let (reply, result) = oneshot::channel();
+        self.control
+            .commands
+            .send(controller::Command::Rename {
+                component: self.id.clone(),
+                generation: self.generation,
+                name,
+                management_access: self.control.management_access,
+                reply,
+            })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        result.await.map_err(|_| GraphError::ControllerClosed)??;
+        self.control.refresh_dependencies().await
     }
 
     /// Set readiness-gated activation before starting this component.
@@ -507,11 +538,6 @@ impl ComponentHandle {
                 _ = self.control.commands.closed() => return Err(GraphError::ControllerClosed),
             }
         }
-    }
-
-    pub(crate) async fn start_requested(&self) -> GraphResult<super::super::StartReport> {
-        let deadline = self.lifecycle_deadline("start", self.control.startup_timeout)?;
-        self.start_requested_until(&deadline).await
     }
 
     fn lifecycle_deadline(
@@ -675,20 +701,7 @@ impl GraphControl {
             edge: desired.edges.len(),
             source,
         })?;
-        let binding = format!(
-            "{}:{}:{}:{}",
-            edge.from.component.as_str().len(),
-            edge.from.component,
-            edge.from.port.as_str().len(),
-            edge.from.port,
-        );
-        let binding = format!(
-            "{binding}:{}:{}:{}:{}",
-            edge.to.component.as_str().len(),
-            edge.to.component,
-            edge.to.port.as_str().len(),
-            edge.to.port
-        );
+        let binding = super::BindingToken::generate();
         let pipe = provider
             .specification()
             .unwrap_or_else(|| super::DesiredPipe::External {
@@ -728,6 +741,14 @@ impl GraphControl {
     /// Only rejection of the graph addition is a method error. Later failures
     /// belong to the returned generation-specific handle.
     pub async fn add_component(&self, addition: ComponentAddition) -> GraphResult<ComponentHandle> {
+        self.add_component_with_authority(addition, false).await
+    }
+
+    async fn add_component_with_authority(
+        &self,
+        addition: ComponentAddition,
+        created: bool,
+    ) -> GraphResult<ComponentHandle> {
         if let Err(cause) = self.require_configuration_write() {
             let addition = RejectedAddition::new(addition);
             self.rejected_additions
@@ -744,6 +765,7 @@ impl GraphControl {
             .commands
             .send(controller::Command::Add {
                 addition,
+                created,
                 management_access: self.management_access,
                 reply,
             })
@@ -767,6 +789,7 @@ impl GraphControl {
             });
         }
         let (id, generation) = result.await.map_err(|_| GraphError::ControllerClosed)??;
+        self.refresh_dependencies().await?;
         Ok(ComponentHandle {
             control: self.clone(),
             id,
@@ -775,7 +798,7 @@ impl GraphControl {
         })
     }
 
-    pub fn component_handle(&self, id: &ComponentId) -> GraphResult<ComponentHandle> {
+    pub fn component_handle_by_id(&self, id: &ComponentId) -> GraphResult<ComponentHandle> {
         let generation = self
             .observed()
             .components
@@ -788,6 +811,34 @@ impl GraphControl {
             generation,
             lifecycle_members: None,
         })
+    }
+
+    /// Resolve a current name to a generation-fenced component handle.
+    /// Later renames or reuse of the old name cannot retarget this handle.
+    pub fn component_handle_by_name(&self, name: &ComponentName) -> GraphResult<ComponentHandle> {
+        let publication = self.registry_snapshot();
+        let node = publication
+            .desired
+            .component_by_name(name)
+            .ok_or_else(|| topology(format!("unknown component name {name}")))?;
+        let id = node.descriptor.id();
+        let generation = publication
+            .observed
+            .components
+            .get(id)
+            .ok_or(GraphError::StaleGeneration)?
+            .generation;
+        Ok(ComponentHandle {
+            control: self.clone(),
+            id: id.clone(),
+            generation,
+            lifecycle_members: None,
+        })
+    }
+
+    /// Change only graph-owned name metadata, addressed by immutable UUID.
+    pub async fn rename_component(&self, id: &ComponentId, name: ComponentName) -> GraphResult<()> {
+        self.component_handle_by_id(id)?.rename(name).await
     }
 
     /// Host wiring for control-only component connections.
@@ -803,6 +854,7 @@ impl GraphControl {
             .send(controller::Command::ControlConnections {
                 connections,
                 subscriptions: false,
+                consumer: None,
                 management_access: self.management_access,
                 reply,
             })
@@ -822,6 +874,7 @@ impl GraphControl {
             .send(controller::Command::ControlConnections {
                 connections,
                 subscriptions: true,
+                consumer: None,
                 management_access: self.management_access,
                 reply,
             })
@@ -837,15 +890,7 @@ pub(super) fn insert(
 ) -> GraphResult<(usize, ComponentId, ComponentGeneration)> {
     let addition = pending.as_ref().expect("unprocessed addition");
     let id = addition.definition.descriptor.id().clone();
-    validate_identifier("component", id.as_str())?;
-    if graph.reserved_components.contains(id.as_str()) {
-        return Err(topology(format!(
-            "component ID {id} is reserved by the host"
-        )));
-    }
-    if graph.ids.contains_key(&id) {
-        return Err(topology(format!("duplicate component {id}")));
-    }
+    graph.check_component_identity(&id, &addition.definition.name)?;
     let revision = GraphRevision(
         graph
             .snapshot
@@ -1042,6 +1087,7 @@ pub(super) fn insert(
     }
     .unwrap_or_else(|| Component::Unresolved(Arc::new(addition.definition.clone())));
     let node = NodeSnapshot {
+        name: addition.definition.name.clone(),
         descriptor: addition.definition.descriptor.clone(),
         role: addition.definition.role,
         completion: addition.definition.completion,
@@ -1079,10 +1125,7 @@ pub(super) fn insert(
                 .insert(id.clone(), specification);
         }
         ComponentConstruction::External { binding } => {
-            graph
-                .snapshot
-                .external_bindings
-                .insert(id.clone(), Arc::from(binding));
+            graph.snapshot.external_bindings.insert(id.clone(), binding);
         }
     }
     for specification in addition.resources {

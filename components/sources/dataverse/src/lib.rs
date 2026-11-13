@@ -124,9 +124,9 @@ impl DataverseSource {
     /// # Returns
     ///
     /// A new `DataverseSource` instance, or an error if construction fails.
-    pub fn new(id: impl Into<String>, config: DataverseSourceConfig) -> Result<Self> {
+    pub fn new(id: drasi_lib::ComponentId, config: DataverseSourceConfig) -> Result<Self> {
         config.validate().map_err(|e| anyhow::anyhow!(e))?;
-        let params = SourceBaseParams::new(id.into());
+        let params = SourceBaseParams::new(id.clone());
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
@@ -139,7 +139,7 @@ impl DataverseSource {
     /// # Arguments
     ///
     /// * `id` - Unique identifier for this source instance
-    pub fn builder(id: impl Into<String>) -> DataverseSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> DataverseSourceBuilder {
         DataverseSourceBuilder::new(id)
     }
 
@@ -201,11 +201,17 @@ impl DataverseSource {
     /// `None` when the key is missing, the value is malformed, or the store errors.
     pub(crate) async fn load_delta_token(
         store: &Arc<dyn drasi_lib::StateStoreProvider>,
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         entity_name: &str,
     ) -> Option<String> {
         let key = Self::delta_token_key(entity_name);
-        match store.get(source_id, &key).await {
+        match store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                &key,
+            )
+            .await
+        {
             Ok(Some(bytes)) => String::from_utf8(bytes).ok(),
             Ok(None) => None,
             Err(e) => {
@@ -218,12 +224,19 @@ impl DataverseSource {
     /// Persist the latest delta token to the state store.
     pub(crate) async fn save_delta_token(
         store: &Arc<dyn drasi_lib::StateStoreProvider>,
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         entity_name: &str,
         token: &str,
     ) {
         let key = Self::delta_token_key(entity_name);
-        if let Err(e) = store.set(source_id, &key, token.as_bytes().to_vec()).await {
+        if let Err(e) = store
+            .set(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                &key,
+                token.as_bytes().to_vec(),
+            )
+            .await
+        {
             log::warn!("[{source_id}] Failed to persist delta token for {entity_name}: {e}");
         }
     }
@@ -238,7 +251,7 @@ impl DataverseSource {
     /// - Resets to minimum on any detected changes
     #[allow(clippy::too_many_arguments)]
     async fn run_entity_worker(
-        source_id: String,
+        source_id: drasi_lib::ComponentId,
         entity_name: String,
         entity_set_name: String,
         select: Option<String>,
@@ -407,7 +420,7 @@ impl DataverseSource {
     /// Returns the new delta link and the number of changes processed.
     /// Mirrors the platform's `GetChanges(deltaToken)` method.
     async fn poll_for_changes(
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         entity_name: &str,
         client: &DataverseClient,
         delta_link: Option<&str>,
@@ -450,7 +463,7 @@ impl DataverseSource {
     /// `SourceBase` to allocate a monotonic `sequence` for each event
     /// (issue #828).
     async fn dispatch_changes(
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         entity_name: &str,
         base: &SourceBase,
         changes: &[DataverseChange],
@@ -469,7 +482,10 @@ impl DataverseSource {
     /// Maps the platform's `IChangedItem` classification:
     /// - `NewOrUpdated` → `SourceChange::Update` (like platform's `ChangeOp.UPDATE`)
     /// - `Deleted` → `SourceChange::Delete` (like platform's `ChangeOp.DELETE`)
-    fn convert_to_source_change(source_id: &str, change: &DataverseChange) -> SourceChange {
+    fn convert_to_source_change(
+        source_id: &drasi_lib::ComponentId,
+        change: &DataverseChange,
+    ) -> SourceChange {
         match change {
             DataverseChange::NewOrUpdated {
                 id,
@@ -495,7 +511,7 @@ impl DataverseSource {
 
                 let element_id = format!("{entity_name}:{id}");
                 let metadata = ElementMetadata {
-                    reference: ElementReference::new(source_id, &element_id),
+                    reference: ElementReference::new(source_id.as_str(), &element_id),
                     labels: Arc::from(vec![Arc::from(entity_name.as_str())]),
                     effective_from,
                 };
@@ -508,7 +524,7 @@ impl DataverseSource {
             DataverseChange::Deleted { id, entity_name } => {
                 let element_id = format!("{entity_name}:{id}");
                 let metadata = ElementMetadata {
-                    reference: ElementReference::new(source_id, &element_id),
+                    reference: ElementReference::new(source_id.as_str(), &element_id),
                     labels: Arc::from(vec![Arc::from(entity_name.as_str())]),
                     // Deleted records don't carry attributes, so use current time.
                     effective_from: chrono::Utc::now().timestamp_millis().max(0) as u64,
@@ -579,7 +595,7 @@ impl DataverseSource {
 
 #[async_trait]
 impl Source for DataverseSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -838,8 +854,8 @@ impl Source for DataverseSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -868,7 +884,7 @@ impl Source for DataverseSource {
 ///     .build()?;
 /// ```
 pub struct DataverseSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     environment_url: String,
     tenant_id: String,
     client_id: String,
@@ -888,9 +904,9 @@ pub struct DataverseSourceBuilder {
 
 impl DataverseSourceBuilder {
     /// Create a new builder with the given source ID.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             environment_url: String::new(),
             tenant_id: String::new(),
             client_id: String::new(),
@@ -1073,7 +1089,7 @@ impl DataverseSourceBuilder {
             config.validate().map_err(|e| anyhow::anyhow!(e))?;
         }
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -1101,35 +1117,44 @@ mod tests {
 
         #[test]
         fn test_builder_creates_source() {
-            let source = DataverseSource::builder("dv-source")
-                .with_environment_url("https://myorg.crm.dynamics.com")
-                .with_tenant_id("tenant-1")
-                .with_client_id("client-1")
-                .with_client_secret("secret-1")
-                .with_entities(vec!["account".to_string()])
-                .build();
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b2")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://myorg.crm.dynamics.com")
+            .with_tenant_id("tenant-1")
+            .with_client_id("client-1")
+            .with_client_secret("secret-1")
+            .with_entities(vec!["account".to_string()])
+            .build();
             assert!(source.is_ok());
         }
 
         #[test]
         fn test_builder_fails_without_entities() {
-            let source = DataverseSource::builder("dv-source")
-                .with_environment_url("https://myorg.crm.dynamics.com")
-                .with_tenant_id("tenant-1")
-                .with_client_id("client-1")
-                .with_client_secret("secret-1")
-                .build();
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b2")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://myorg.crm.dynamics.com")
+            .with_tenant_id("tenant-1")
+            .with_client_id("client-1")
+            .with_client_secret("secret-1")
+            .build();
             assert!(source.is_err());
         }
 
         #[test]
         fn test_builder_fails_without_url() {
-            let source = DataverseSource::builder("dv-source")
-                .with_tenant_id("tenant-1")
-                .with_client_id("client-1")
-                .with_client_secret("secret-1")
-                .with_entities(vec!["account".to_string()])
-                .build();
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b2")
+                    .expect("fixture UUID"),
+            )
+            .with_tenant_id("tenant-1")
+            .with_client_id("client-1")
+            .with_client_secret("secret-1")
+            .with_entities(vec!["account".to_string()])
+            .build();
             assert!(source.is_err());
         }
 
@@ -1147,7 +1172,11 @@ mod tests {
                 max_interval_seconds: 30,
                 api_version: "v9.2".to_string(),
             };
-            let source = DataverseSource::new("test-source", config);
+            let source = DataverseSource::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+                config,
+            );
             assert!(source.is_ok());
         }
     }
@@ -1157,40 +1186,53 @@ mod tests {
 
         #[test]
         fn test_id_returns_correct_value() {
-            let source = DataverseSource::builder("my-dv-source")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_tenant_id("t")
-                .with_client_id("c")
-                .with_client_secret("s")
-                .with_entities(vec!["account".to_string()])
-                .build()
-                .expect("should build");
-            assert_eq!(source.id(), "my-dv-source");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b3")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_tenant_id("t")
+            .with_client_id("c")
+            .with_client_secret("s")
+            .with_entities(vec!["account".to_string()])
+            .build()
+            .expect("should build");
+            assert_eq!(
+                source.id(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b3")
+                    .expect("fixture UUID")
+            );
         }
 
         #[test]
         fn test_type_name_returns_dataverse() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_tenant_id("t")
-                .with_client_id("c")
-                .with_client_secret("s")
-                .with_entities(vec!["account".to_string()])
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_tenant_id("t")
+            .with_client_id("c")
+            .with_client_secret("s")
+            .with_entities(vec!["account".to_string()])
+            .build()
+            .expect("should build");
             assert_eq!(source.type_name(), "dataverse");
         }
 
         #[test]
         fn test_properties_does_not_expose_secret() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_tenant_id("t")
-                .with_client_id("c")
-                .with_client_secret("super-secret-value")
-                .with_entities(vec!["account".to_string()])
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_tenant_id("t")
+            .with_client_id("c")
+            .with_client_secret("super-secret-value")
+            .with_entities(vec!["account".to_string()])
+            .build()
+            .expect("should build");
             let props = source.properties();
 
             assert!(props.contains_key("environment_url"));
@@ -1202,14 +1244,17 @@ mod tests {
 
         #[test]
         fn test_properties_contains_correct_values() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://myorg.crm.dynamics.com")
-                .with_tenant_id("tenant-123")
-                .with_client_id("client-456")
-                .with_client_secret("s")
-                .with_entities(vec!["account".to_string(), "contact".to_string()])
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://myorg.crm.dynamics.com")
+            .with_tenant_id("tenant-123")
+            .with_client_id("client-456")
+            .with_client_secret("s")
+            .with_entities(vec!["account".to_string(), "contact".to_string()])
+            .build()
+            .expect("should build");
             let props = source.properties();
 
             assert_eq!(
@@ -1230,14 +1275,17 @@ mod tests {
 
         #[tokio::test]
         async fn test_initial_status_is_stopped() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_tenant_id("t")
-                .with_client_id("c")
-                .with_client_secret("s")
-                .with_entities(vec!["account".to_string()])
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_tenant_id("t")
+            .with_client_id("c")
+            .with_client_secret("s")
+            .with_entities(vec!["account".to_string()])
+            .build()
+            .expect("should build");
             assert_eq!(source.status().await, ComponentStatus::Stopped);
         }
     }
@@ -1247,14 +1295,17 @@ mod tests {
 
         #[test]
         fn test_builder_defaults() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_tenant_id("t")
-                .with_client_id("c")
-                .with_client_secret("s")
-                .with_entities(vec!["account".to_string()])
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_tenant_id("t")
+            .with_client_id("c")
+            .with_client_secret("s")
+            .with_entities(vec!["account".to_string()])
+            .build()
+            .expect("should build");
 
             assert_eq!(source.config.min_interval_ms, 500);
             assert_eq!(source.config.max_interval_seconds, 30);
@@ -1264,17 +1315,20 @@ mod tests {
 
         #[test]
         fn test_builder_custom_values() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://custom.crm.dynamics.com")
-                .with_tenant_id("custom-tenant")
-                .with_client_id("custom-client")
-                .with_client_secret("custom-secret")
-                .with_entities(vec!["account".to_string()])
-                .with_min_interval_ms(200)
-                .with_max_interval_seconds(60)
-                .with_api_version("v9.1")
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://custom.crm.dynamics.com")
+            .with_tenant_id("custom-tenant")
+            .with_client_id("custom-client")
+            .with_client_secret("custom-secret")
+            .with_entities(vec!["account".to_string()])
+            .with_min_interval_ms(200)
+            .with_max_interval_seconds(60)
+            .with_api_version("v9.1")
+            .build()
+            .expect("should build");
 
             assert_eq!(
                 source.config.environment_url,
@@ -1287,30 +1341,36 @@ mod tests {
 
         #[test]
         fn test_builder_with_entity() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_tenant_id("t")
-                .with_client_id("c")
-                .with_client_secret("s")
-                .with_entity("account")
-                .with_entity("contact")
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_tenant_id("t")
+            .with_client_id("c")
+            .with_client_secret("s")
+            .with_entity("account")
+            .with_entity("contact")
+            .build()
+            .expect("should build");
 
             assert_eq!(source.config.entities, vec!["account", "contact"]);
         }
 
         #[test]
         fn test_builder_with_entity_set_override() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_tenant_id("t")
-                .with_client_id("c")
-                .with_client_secret("s")
-                .with_entity("activityparty")
-                .with_entity_set_override("activityparty", "activityparties")
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_tenant_id("t")
+            .with_client_id("c")
+            .with_client_secret("s")
+            .with_entity("activityparty")
+            .with_entity_set_override("activityparty", "activityparties")
+            .build()
+            .expect("should build");
 
             assert_eq!(
                 source.config.entity_set_name("activityparty"),
@@ -1320,15 +1380,18 @@ mod tests {
 
         #[test]
         fn test_builder_with_entity_columns() {
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_tenant_id("t")
-                .with_client_id("c")
-                .with_client_secret("s")
-                .with_entity("account")
-                .with_entity_columns("account", vec!["name".to_string(), "revenue".to_string()])
-                .build()
-                .expect("should build");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_tenant_id("t")
+            .with_client_id("c")
+            .with_client_secret("s")
+            .with_entity("account")
+            .with_entity_columns("account", vec!["name".to_string(), "revenue".to_string()])
+            .build()
+            .expect("should build");
 
             assert_eq!(
                 source.config.select_columns("account"),
@@ -1340,12 +1403,15 @@ mod tests {
         fn test_builder_with_identity_provider() {
             // When an identity provider is set, client credentials are not required
             let provider = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
-            let source = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_entities(vec!["account".to_string()])
-                .with_identity_provider(provider)
-                .build()
-                .expect("should build with identity provider and no client credentials");
+            let source = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_entities(vec!["account".to_string()])
+            .with_identity_provider(provider)
+            .build()
+            .expect("should build with identity provider and no client credentials");
 
             assert!(source.identity_provider.is_some());
         }
@@ -1353,20 +1419,26 @@ mod tests {
         #[test]
         fn test_builder_with_identity_provider_still_needs_url() {
             let provider = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
-            let result = DataverseSource::builder("test")
-                .with_entities(vec!["account".to_string()])
-                .with_identity_provider(provider)
-                .build();
+            let result = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_entities(vec!["account".to_string()])
+            .with_identity_provider(provider)
+            .build();
             assert!(result.is_err(), "should fail without environment_url");
         }
 
         #[test]
         fn test_builder_with_identity_provider_still_needs_entities() {
             let provider = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
-            let result = DataverseSource::builder("test")
-                .with_environment_url("https://test.crm.dynamics.com")
-                .with_identity_provider(provider)
-                .build();
+            let result = DataverseSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                    .expect("fixture UUID"),
+            )
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_identity_provider(provider)
+            .build();
             assert!(result.is_err(), "should fail without entities");
         }
     }
@@ -1393,7 +1465,10 @@ mod tests {
                 attributes,
             };
 
-            let source_change = DataverseSource::convert_to_source_change("test-source", &change);
+            let source_id =
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID");
+            let source_change = DataverseSource::convert_to_source_change(&source_id, &change);
             match source_change {
                 SourceChange::Update { element, .. } => match element {
                     Element::Node {
@@ -1401,7 +1476,7 @@ mod tests {
                         properties,
                     } => {
                         assert_eq!(metadata.reference.element_id.as_ref(), "account:abc-123");
-                        assert_eq!(metadata.reference.source_id.as_ref(), "test-source");
+                        assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                         assert_eq!(metadata.labels.len(), 1);
                         assert_eq!(metadata.labels[0].as_ref(), "account");
                         assert!(properties.get("name").is_some());
@@ -1419,11 +1494,14 @@ mod tests {
                 entity_name: "contact".to_string(),
             };
 
-            let source_change = DataverseSource::convert_to_source_change("test-source", &change);
+            let source_id =
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID");
+            let source_change = DataverseSource::convert_to_source_change(&source_id, &change);
             match source_change {
                 SourceChange::Delete { metadata } => {
                     assert_eq!(metadata.reference.element_id.as_ref(), "contact:def-456");
-                    assert_eq!(metadata.reference.source_id.as_ref(), "test-source");
+                    assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                     assert_eq!(metadata.labels[0].as_ref(), "contact");
                 }
                 _ => panic!("Expected Delete change"),
@@ -1492,7 +1570,11 @@ mod tests {
             use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 
             let source_id = "dataverse-seq-source";
-            let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+            let base = SourceBase::new(SourceBaseParams::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c7")
+                    .expect("fixture UUID"),
+            ))
+            .unwrap();
             let mut rx = base.test_subscribe().await;
 
             // A realistic delta batch: two upserts and one delete.
@@ -1514,7 +1596,14 @@ mod tests {
             ];
             let expected = changes.len() as u64;
 
-            DataverseSource::dispatch_changes(source_id, "account", &base, &changes).await;
+            DataverseSource::dispatch_changes(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c7")
+                    .expect("fixture UUID"),
+                "account",
+                &base,
+                &changes,
+            )
+            .await;
 
             let mut sequences = Vec::new();
             for _ in 0..expected {
@@ -1538,7 +1627,11 @@ mod tests {
         use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 
         let source_id = "concurrent-entities";
-        let base = SourceBase::new(SourceBaseParams::new(source_id)).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c8")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let mut receiver = base.test_subscribe().await;
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let mut workers = tokio::task::JoinSet::new();
@@ -1549,7 +1642,8 @@ mod tests {
                 for index in 0..250 {
                     barrier.wait().await;
                     DataverseSource::dispatch_changes(
-                        source_id,
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c8")
+                            .expect("fixture UUID"),
                         entity,
                         &base,
                         &[DataverseChange::NewOrUpdated {
@@ -1568,7 +1662,11 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(event.sequence, expected);
-            assert_eq!(event.source_id, source_id);
+            assert_eq!(
+                event.source_id,
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c8")
+                    .expect("fixture UUID")
+            );
             assert!(event.profiling.as_ref().unwrap().source_send_ns.is_some());
         }
         while let Some(result) = workers.join_next().await {
@@ -1678,7 +1776,13 @@ mod tests {
         #[tokio::test]
         async fn load_returns_none_on_empty_store() {
             let s = store();
-            let result = DataverseSource::load_delta_token(&s, "src-1", "account").await;
+            let result = DataverseSource::load_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "account",
+            )
+            .await;
             assert!(
                 result.is_none(),
                 "no checkpoint should be present initially"
@@ -1688,28 +1792,65 @@ mod tests {
         #[tokio::test]
         async fn save_then_load_round_trip() {
             let s = store();
-            DataverseSource::save_delta_token(&s, "src-1", "account", "delta-token-123").await;
+            DataverseSource::save_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "account",
+                "delta-token-123",
+            )
+            .await;
 
-            let loaded = DataverseSource::load_delta_token(&s, "src-1", "account").await;
+            let loaded = DataverseSource::load_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "account",
+            )
+            .await;
             assert_eq!(loaded.as_deref(), Some("delta-token-123"));
         }
 
         #[tokio::test]
         async fn checkpoints_are_isolated_per_entity() {
             let s = store();
-            DataverseSource::save_delta_token(&s, "src-1", "account", "token-A").await;
-            DataverseSource::save_delta_token(&s, "src-1", "contact", "token-B").await;
+            DataverseSource::save_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "account",
+                "token-A",
+            )
+            .await;
+            DataverseSource::save_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "contact",
+                "token-B",
+            )
+            .await;
 
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-1", "account")
-                    .await
-                    .as_deref(),
+                DataverseSource::load_delta_token(
+                    &s,
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                        .expect("fixture UUID"),
+                    "account"
+                )
+                .await
+                .as_deref(),
                 Some("token-A")
             );
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-1", "contact")
-                    .await
-                    .as_deref(),
+                DataverseSource::load_delta_token(
+                    &s,
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                        .expect("fixture UUID"),
+                    "contact"
+                )
+                .await
+                .as_deref(),
                 Some("token-B")
             );
         }
@@ -1717,19 +1858,43 @@ mod tests {
         #[tokio::test]
         async fn checkpoints_are_isolated_per_source() {
             let s = store();
-            DataverseSource::save_delta_token(&s, "src-1", "account", "token-A").await;
-            DataverseSource::save_delta_token(&s, "src-2", "account", "token-B").await;
+            DataverseSource::save_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "account",
+                "token-A",
+            )
+            .await;
+            DataverseSource::save_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b4")
+                    .expect("fixture UUID"),
+                "account",
+                "token-B",
+            )
+            .await;
 
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-1", "account")
-                    .await
-                    .as_deref(),
+                DataverseSource::load_delta_token(
+                    &s,
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                        .expect("fixture UUID"),
+                    "account"
+                )
+                .await
+                .as_deref(),
                 Some("token-A")
             );
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-2", "account")
-                    .await
-                    .as_deref(),
+                DataverseSource::load_delta_token(
+                    &s,
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b4")
+                        .expect("fixture UUID"),
+                    "account"
+                )
+                .await
+                .as_deref(),
                 Some("token-B")
             );
         }
@@ -1737,13 +1902,32 @@ mod tests {
         #[tokio::test]
         async fn save_overwrites_previous_value() {
             let s = store();
-            DataverseSource::save_delta_token(&s, "src-1", "account", "token-old").await;
-            DataverseSource::save_delta_token(&s, "src-1", "account", "token-new").await;
+            DataverseSource::save_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "account",
+                "token-old",
+            )
+            .await;
+            DataverseSource::save_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "account",
+                "token-new",
+            )
+            .await;
 
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-1", "account")
-                    .await
-                    .as_deref(),
+                DataverseSource::load_delta_token(
+                    &s,
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                        .expect("fixture UUID"),
+                    "account"
+                )
+                .await
+                .as_deref(),
                 Some("token-new")
             );
         }
@@ -1753,11 +1937,24 @@ mod tests {
             let s = store();
             let key = DataverseSource::delta_token_key("account");
             // Write deliberately invalid UTF-8 directly.
-            s.set("src-1", &key, vec![0xff, 0xfe, 0xfd])
-                .await
-                .expect("set should succeed");
+            s.set(
+                &drasi_core::interface::StorePartition::component(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                        .expect("fixture UUID"),
+                ),
+                &key,
+                vec![0xff, 0xfe, 0xfd],
+            )
+            .await
+            .expect("set should succeed");
 
-            let loaded = DataverseSource::load_delta_token(&s, "src-1", "account").await;
+            let loaded = DataverseSource::load_delta_token(
+                &s,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+                "account",
+            )
+            .await;
             assert!(loaded.is_none(), "non-UTF8 stored value should be ignored");
         }
     }

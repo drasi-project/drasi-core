@@ -13,13 +13,16 @@ use drasi_core::models::{
 use drasi_lib::{
     channels::ResultDiff,
     computation::v1::*,
-    config::{QueryConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage},
+    config::{
+        AssignedQueryConfig, QueryConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage,
+    },
     Query,
 };
 use serde_json::{json, Value};
 use std::{num::NonZeroUsize, sync::Arc};
 
 pub struct Case {
+    id: ComponentId,
     pub config: QueryConfig,
     steps: Vec<Step>,
 }
@@ -65,12 +68,17 @@ impl Step {
 }
 
 impl Case {
+    fn assigned_config(&self) -> AssignedQueryConfig {
+        self.config.clone().with_assigned_id(self.id.clone())
+    }
+
     pub fn definition(&self) -> Result<ContinuousQueryDefinition> {
+        let config = self.assigned_config();
         Ok(ContinuousQueryDefinition {
             graph_id: "configured".into(),
-            id: ComponentId::try_new(self.config.id.as_str())?,
-            query: self.config.query.clone(),
-            language: match self.config.query_language {
+            id: config.id,
+            query: config.query.clone(),
+            language: match config.query_language {
                 QueryLanguage::Cypher => ComputationQueryLanguage::Cypher,
                 QueryLanguage::GQL => ComputationQueryLanguage::Gql,
             },
@@ -80,7 +88,8 @@ impl Case {
     }
 
     pub fn execution(&self) -> QueryExecutionSettings {
-        QueryExecutionSettings::from_legacy_config(&self.config)
+        QueryExecutionSettings::from_configuration(&self.assigned_config())
+            .expect("fixture execution settings")
     }
 
     pub async fn exercise(
@@ -111,7 +120,7 @@ impl Case {
                         anyhow::ensure!(
                             actual == expected,
                             "{} step {index}: expected {expected:?}, got {actual:?}",
-                            self.config.id
+                            self.config.name
                         );
                     }
                     Rows::NumericCount(count, equal) => {
@@ -146,7 +155,7 @@ impl Case {
                     anyhow::ensure!(
                         &actual == expected,
                         "{} step {index}: result changes differ: {actual:?}",
-                        self.config.id
+                        self.config.name
                     );
                 }
             }
@@ -154,7 +163,7 @@ impl Case {
         }
         .await;
         let cleanup = query.stop().await;
-        outcome.with_context(|| format!("query semantics case {}", self.config.id))?;
+        outcome.with_context(|| format!("query semantics case {}", self.config.name))?;
         cleanup
     }
 }
@@ -205,14 +214,15 @@ fn delete(source: &str, sequence: u64) -> Result<InputEnvelope> {
 }
 
 pub fn disconnected(language: ComputationQueryLanguage) -> Result<Case> {
-    let mut config = Query::cypher("inventory-context")
+    let mut config = Query::cypher(drasi_core_types::ComponentName::try_new("inventory-context").expect("fixture component name"))
         .query("MATCH (w:workload_requirements) OPTIONAL MATCH (a:AppliedPlan) RETURN w.workload_id AS workload_id, a.fleet_id AS fleet_id")
-        .build();
+        .build()?;
     config.query_language = match language {
         ComputationQueryLanguage::Cypher => QueryLanguage::Cypher,
         ComputationQueryLanguage::Gql => QueryLanguage::GQL,
     };
     Ok(Case {
+        id: ComponentId::generate(),
         config,
         steps: vec![
             Step::rows(
@@ -251,8 +261,9 @@ pub fn disconnected(language: ComputationQueryLanguage) -> Result<Case> {
 
 pub fn optional_list() -> Result<Case> {
     Ok(Case {
-        config: Query::cypher("optional-list")
-            .query("MATCH (w:Workload) OPTIONAL MATCH (p:Plan) RETURN w.id AS id, [d IN p.assignments WHERE d = 'gpu'] AS matches, size([d IN p.assignments WHERE d = 'gpu']) AS matched").build(),
+        id: ComponentId::generate(),
+        config: Query::cypher(drasi_core_types::ComponentName::try_new("optional-list").expect("fixture component name"))
+            .query("MATCH (w:Workload) OPTIONAL MATCH (p:Plan) RETURN w.id AS id, [d IN p.assignments WHERE d = 'gpu'] AS matches, size([d IN p.assignments WHERE d = 'gpu']) AS matched").build()?,
         steps: vec![
             Step::rows(insert("workload", "Workload", json!({"id":"workload"}))?,
                 vec![json!({"id":"workload","matches":null,"matched":null})]),
@@ -268,8 +279,9 @@ pub fn optional_list() -> Result<Case> {
 pub fn assignment_maps() -> Result<Case> {
     let assignment = json!({"gpu_id":"gpu-1","workload_revision":"1","memory_mib":4096});
     Ok(Case {
-        config: Query::cypher("assignment-maps")
-            .query("MATCH (w:workload_requirements) OPTIONAL MATCH (p:gpu_placements) RETURN w.workload_id AS workload_id, [d IN p.assignments WHERE d = w.assignment] AS matching").build(),
+        id: ComponentId::generate(),
+        config: Query::cypher(drasi_core_types::ComponentName::try_new("assignment-maps").expect("fixture component name"))
+            .query("MATCH (w:workload_requirements) OPTIONAL MATCH (p:gpu_placements) RETURN w.workload_id AS workload_id, [d IN p.assignments WHERE d = w.assignment] AS matching").build()?,
         steps: vec![
             Step::rows(insert("workload", "workload_requirements",
                 json!({"workload_id":"workload","assignment":assignment.clone()}))?,
@@ -301,22 +313,24 @@ pub fn numeric_count() -> Result<Case> {
         });
     }
     Ok(Case {
-        config: Query::cypher("numeric-count")
-            .query("MATCH (w:workload_requirements) WITH sum(w.replicas) AS count RETURN count, size([1,2]) AS expected, count = size([1,2]) AS equal, count <> size([1,2]) AS unequal").build(),
+        id: ComponentId::generate(),
+        config: Query::cypher(drasi_core_types::ComponentName::try_new("numeric-count").expect("fixture component name"))
+            .query("MATCH (w:workload_requirements) WITH sum(w.replicas) AS count RETURN count, size([1,2]) AS expected, count = size([1,2]) AS equal, count <> size([1,2]) AS unequal").build()?,
         steps,
     })
 }
 
 pub fn optional_join() -> Result<Case> {
     Ok(Case {
-        config: Query::cypher("decision")
+        id: ComponentId::generate(),
+        config: Query::cypher(drasi_core_types::ComponentName::try_new("decision").expect("fixture component name"))
             .query("MATCH (d:DecisionExplanation) OPTIONAL MATCH (d)-[:DECISION_WRITE]->(w:PlanWriteOutcome) RETURN d.decision_id AS decision_id, w.outcome AS outcome")
-            .from_input("decisions").from_input("writes")
+            .from_input_by_id(ComponentId::generate()).from_input_by_id(ComponentId::generate())
             .with_joins(vec![QueryJoinConfig {
                 id: "DECISION_WRITE".into(),
                 keys: ["DecisionExplanation", "PlanWriteOutcome"].into_iter()
                     .map(|label| QueryJoinKeyConfig { label: label.into(), property: "decision_id".into() }).collect(),
-            }]).build(),
+            }]).build()?,
         steps: vec![
             Step::rows(insert("decisions", "DecisionExplanation", json!({"decision_id":"decision"}))?,
                 vec![json!({"decision_id":"decision","outcome":null})]),
@@ -353,9 +367,13 @@ pub fn canonical_replacement() -> Result<Case> {
         ),
     };
     Ok(Case {
-        config: Query::cypher("replacement")
-            .query("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra")
-            .build(),
+        id: ComponentId::generate(),
+        config: Query::cypher(
+            drasi_core_types::ComponentName::try_new("replacement")
+                .expect("fixture component name"),
+        )
+        .query("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra")
+        .build()?,
         steps: vec![
             Step::rows(
                 insert("people", "Person", before.clone())?,
@@ -412,9 +430,13 @@ pub fn ordered_batch() -> Result<Case> {
     ];
     let stream = StreamId::try_new("people/out")?;
     Ok(Case {
-        config: Query::cypher("ordered-batch")
-            .query("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra")
-            .build(),
+        id: ComponentId::generate(),
+        config: Query::cypher(
+            drasi_core_types::ComponentName::try_new("ordered-batch")
+                .expect("fixture component name"),
+        )
+        .query("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra")
+        .build()?,
         steps: vec![Step {
             input: InputEnvelope {
                 port: PortId::try_new("in")?,

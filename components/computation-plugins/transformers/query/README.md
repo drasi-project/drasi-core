@@ -1,5 +1,8 @@
 # Native query transformer
 
+Run the Cargo commands below from the Core repository root. Before testing
+loaded plugins, run `make build-test-plugins` to prepare matching staged libraries.
+
 This plugin runs ordinary Cypher and GQL queries using the existing Drasi Core
 evaluator and shared query implementation. Register its indexed factory to use
 it through `DrasiLib`, computation pipelines and Server query APIs. There is no
@@ -90,6 +93,28 @@ retention defaults to one output. Result datasets use the existing
 instance/graph/component/output identity calculation. Retention capacity is an
 operational setting and does not change the query's semantic fingerprint.
 
+## Managed semantic updates
+
+The registered ordinary-query adapter assesses query semantics, not just output
+columns. Changed semantics use `Recreate/Rebootstrap` with configured bootstrap,
+or `Recreate/Reset` for streaming-only startup. Reset discards incompatible
+query-owned state; it does not promise replay of data unavailable from the source.
+Neither plan permits changing live inputs, output stream, storage or recovery policy.
+
+Core rebuilds the replacement through coordinated startup, holding live
+processing until the configuration owner confirms the accepted operation.
+For previously stopped queries it also awaits stop before confirmation. The logical
+UUID remains stable, the object generation changes, and explicit stopped intent
+is retained. Accepted durable operation identity participates in both atomic and
+non-atomic reset recovery. Non-atomic providers retain their reset markers and
+never advertise atomic publication. A failed rebuild remains an incomplete,
+visible accepted operation rather than successfully preserved state.
+
+Ordinary reactions retain Strict/AutoSkipGap recovery semantics. Native arbitrary
+graph resets and downstream query resynchronization are not enabled by this path.
+The additive `reset` plan spelling is execution data; older SDKs reject it as an
+unknown variant. Rebuild matching Host and plugin libraries for development.
+
 ## Output metrics and retained recovery
 
 The plugin supplies metadata-only observations of its actual row count, retained
@@ -113,8 +138,10 @@ stopped. Restart cancels earlier transfers, and replacement or deletion retires
 old readers. Waiting consumers use publication/lifecycle notifications, not a
 polling task or a Host-side row mirror.
 
-Use `bash lib/tests/run-query-plugin.sh retained-recovery` for these native
-boundaries and the existing consumer-policy preservation baseline.
+Use `cargo test --locked -p drasi-host-sdk --test native_query_plugin retained_recovery::`
+for these native boundaries, and
+`cargo test --locked -p drasi-lib --test computation_consumer_recovery` for the
+consumer-policy preservation baseline.
 
 ## Evaluator lifetime
 
@@ -137,7 +164,7 @@ activation reuses the evaluator and clears Core's shadow future queue with the
 owned storage reset.
 Scheduled work uses the same Core evaluator and the same scoped indexes.
 
-From the Core checkout, `bash lib/tests/run-query-plugin.sh evaluator` exercises
+From the Core checkout, `cargo test --locked -p drasi-host-sdk --test native_query_plugin retained_evaluator` exercises
 scoped access, actual loaded Core setup counts, SQLite bootstrap, live changes,
 restart, prepared refresh and setup/processing failures.
 
@@ -192,7 +219,7 @@ are retained rather than recreated per input. Host-process Rust registry entries
 are not automatically transferred across a dynamically loaded library boundary.
 Unknown kinds fail construction before indexes are opened.
 
-`bash lib/tests/run-query-plugin.sh middleware` compares loaded and linked query
+`cargo test --locked -p drasi-host-sdk --test native_query_plugin shared_query_middleware_` compares loaded and linked query
 behavior and covers aliases, derived query input, bootstrap origins and an actual
 custom query cdylib whose middleware reads the query's scoped indexes.
 
@@ -235,7 +262,7 @@ rebuilds through it and starts a new output epoch. The currently integrated
 coordinated SQLite profile requires explicit retirement of a completed handover;
 AutoReset does not bypass that ownership requirement.
 
-`bash lib/tests/run-query-plugin.sh joins` covers the shared settings, comparison
+`cargo test --locked -p drasi-host-sdk --test native_query_plugin synthetic_join` covers the shared settings, comparison
 with the built-in query, real SQLite bootstrap/live transactions, restart,
 equivalent reordered settings and incompatible configuration changes.
 
@@ -365,7 +392,7 @@ query epoch; replacement, reset or shutdown invalidates stale readers.
 The coordinated SQLite source and its sole query-progress owner still need their
 existing paired lifecycle; the result adapter does not take over source ownership.
 
-`bash lib/tests/run-query-plugin.sh subscriptions` exercises the existing ordinary
+`cargo test --locked -p lib-integration-tests --test query_result_subscriptions` exercises the existing ordinary
 contracts and actual loaded-query channel/broadcast, bootstrap waits, restart, snapshot/live races
 and HTTP-reaction delivery on both Tokio runtimes. It also checks cancellation,
 read deadlines and malformed native replies. No renewing follow lease,
@@ -389,10 +416,11 @@ group membership, not matching database paths. Separate persistent journals use
 retained output and replay receipts instead. Both paths preserve pending fanout
 across process exit; neither promises exactly-once external effects.
 
-Explicit deprovision after stop removes owned indexes, results, checkpoints,
+Explicit `delete_owned_resources` after stop removes owned indexes, results, checkpoints,
 outbox and provider handover state. Durable destinations must first be drained
 and unbound. Failed deletion retains cleanup and can be retried; a deleted
-instance cannot reactivate. A recreated instance receives a new producer epoch.
+instance cannot reactivate. Disposal alone does not delete persistent state.
+A recreated instance receives a new producer epoch.
 Scheduled-work processing remains separate work.
 
 ### Explicit non-atomic publication
@@ -425,7 +453,7 @@ state and scheduling behavior. Non-atomic publication cannot bind shared
 transaction-group destinations or claim complete source-transaction atomicity.
 Provider-specific bootstrap/retirement requirements still apply.
 
-`bash lib/tests/run-query-plugin.sh non-atomic` covers ordinary APIs, declared
+`cargo test --locked -p drasi-host-sdk --lib --test native_query_plugin non_atomic` covers ordinary APIs, declared
 resources, independent persistent writers, partial publication, actual process
 exit, provider-backed reset, numeric generation, timers, replay and deletion.
 
@@ -659,45 +687,47 @@ loading, expiry of the provider's cleanup deadline, or other provider types.
 
 ## Development
 
-From the Core checkout, run `bash lib/tests/run-query-plugin.sh smoke` to rebuild
-the actual query, SQLite source and SQLite bootstrap libraries and run the
-loaded-plugin cases.
-Use `bash lib/tests/run-query-plugin.sh provider` for only the real file-provider
+From the Core checkout, prepare the libraries and run the loaded-plugin suite:
+
+```sh
+make build-test-plugins
+cargo test --locked -p drasi-host-sdk --features test-support --test native_query_plugin -- --test-threads=1
+```
+
+Use the `bootstrap::provider::` Cargo test filter for only the real file-provider
 integration, live capture and unsupported-handover guards. Use
-`bash lib/tests/run-query-plugin.sh sqlite-live` for the four real-source cases:
+the `bootstrap::provider::sqlite_live::` filter for the four real-source cases:
 ordinary bootstrap/mutations and interrupted-startup restart on both runtimes.
 The ignored `sqlite_read_lock_holder` entry is a subprocess fixture launched by
-the interruption cases, not a skipped regression case. Use
-`bash lib/tests/run-query-plugin.sh bootstrap` for snapshot initialization,
+the interruption cases, not a skipped regression case. Use the `bootstrap::` filter for snapshot initialization,
 result-snapshot behavior, query chaining and running-upstream handover. During
 focused development, use the `bootstrap::live_handover::` or
 `bootstrap::two_inputs::` test filter after rebuilding the actual query library:
 
 ```sh
-cargo test -p drasi-host-sdk --test native_query_plugin bootstrap::two_inputs:: -- --test-threads=1
+cargo test --locked -p drasi-host-sdk --test native_query_plugin bootstrap::two_inputs:: -- --test-threads=1
 ```
 
 For only the interrupted-startup scenario after building the three libraries:
 
 ```sh
-cargo test -p drasi-host-sdk --test native_query_plugin interrupted_sqlite_bootstrap -- --test-threads=1
+cargo test --locked -p drasi-host-sdk --test native_query_plugin interrupted_sqlite_bootstrap -- --test-threads=1
 ```
 
-Use `bash lib/tests/run-query-plugin.sh durability` for the indexed restart,
+Use the `durable::` filter for the indexed restart,
 process-exit, persistent snapshot and atomic state-boundary cases. Its process
 children are ignored drivers launched by their parent cases, not skipped
 regressions. After rebuilding the libraries, select only the snapshot cases with:
 
 ```sh
-cargo test -p drasi-host-sdk --test native_query_plugin durable::snapshots:: -- --test-threads=1
+cargo test --locked -p drasi-host-sdk --test native_query_plugin durable::snapshots:: -- --test-threads=1
 ```
 
-Use `bash lib/tests/run-query-plugin.sh progress` for only the loaded committed
+Use the `durable::progress::` filter for only the loaded committed
 progress and its storage/publication lifecycle cases.
 
-The runner also offers separate boundary, semantics, recovery, timer and API
-groups; use `--help` to choose the relevant one. Existing built-in query
-regression groups do not prove plugin parity.
+Use Cargo's normal package, target and substring filters for focused work.
+Existing built-in query regression groups do not prove plugin parity.
 
 The [library/plugin completion plan](../../../../lib/docs/computation-graph-query-transformer-design.md)
 records the concrete gaps, implementation order and required preservation gates.

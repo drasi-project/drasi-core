@@ -112,10 +112,12 @@ impl SharedFixture {
         flow: Option<Arc<FlowGate>>,
     ) -> Result<Self> {
         let indexes = held_indexes(
-            provider(root)?.create_indexes(GRAPH, COMPONENT).await?,
+            provider(root)?
+                .create_indexes(GRAPH, &component_id()?)
+                .await?,
             gate,
         )?;
-        let group = SharedStorageGroup::new(GRAPH, ComponentId::try_new(COMPONENT)?, indexes)?;
+        let group = SharedStorageGroup::new(GRAPH, component_id()?, indexes)?;
         let definition = QosChannelDefinition {
             stream: StreamId::try_new(format!("{COMPONENT}/out"))?,
             capacity: NonZeroUsize::new(if flow.is_some() { 1 } else { 4 })
@@ -135,8 +137,8 @@ impl SharedFixture {
             group.channel(definition, "right", codec()?, replay).await?,
         ];
         let query = factory()?.create_component_with_processing(
-            ComponentId::try_new(COMPONENT)?,
-            json!({"query":QUERY}),
+            component_id()?,
+            json!({"query":QUERY, "stream":format!("{COMPONENT}/out")}),
             scope(1),
             group.clone(),
         )?;
@@ -153,51 +155,65 @@ impl SharedFixture {
                 binding: "shared".into(),
             })?
             .provide_resource(storage.clone(), group.resource())?
-            .source(Box::new(ReleasedSource {
-                source: Source {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new("source")?,
-                        vec![port("out", PortDirection::Output)?],
-                    )?,
-                    envelope: Some(
-                        input(
-                            SourceChange::Insert {
-                                element: item(10, sequence),
+            .source(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                    .expect("fixture component name"),
+                Box::new(ReleasedSource {
+                    source: Source {
+                        descriptor: ComponentDescriptor::try_new(
+                            ComponentId::try_new("a3b1f1e3-d04c-56d4-be7f-cba6b8b9e186")?,
+                            vec![port("out", PortDirection::Output)?],
+                        )?,
+                        envelope: Some(
+                            input(
+                                SourceChange::Insert {
+                                    element: item(10, sequence),
+                                },
+                                sequence,
+                            )?
+                            .envelope,
+                        ),
+                    },
+                    release,
+                    finish: Some(finish.clone()),
+                    extra: if flow.is_some() {
+                        [input(
+                            SourceChange::Replace {
+                                element: item(11, 2),
                             },
-                            sequence,
+                            2,
                         )?
-                        .envelope,
-                    ),
-                },
-                release,
-                finish: Some(finish.clone()),
-                extra: if flow.is_some() {
-                    [input(
-                        SourceChange::Replace {
-                            element: item(11, 2),
-                        },
-                        2,
-                    )?
-                    .envelope]
-                    .into()
-                } else {
-                    Default::default()
-                },
-            }))
-            .transformer(Box::new(query))
+                        .envelope]
+                        .into()
+                    } else {
+                        Default::default()
+                    },
+                }),
+            )
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
             .connect(
                 EdgeDefinition::new(
-                    Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?),
-                    Endpoint::new(ComponentId::try_new(COMPONENT)?, PortId::try_new("in")?),
+                    Endpoint::new(
+                        ComponentId::try_new("a3b1f1e3-d04c-56d4-be7f-cba6b8b9e186")?,
+                        PortId::try_new("out")?,
+                    ),
+                    Endpoint::new(component_id()?, PortId::try_new("in")?),
                 ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .bind_stream(
-                Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?),
+                Endpoint::new(
+                    ComponentId::try_new("a3b1f1e3-d04c-56d4-be7f-cba6b8b9e186")?,
+                    PortId::try_new("out")?,
+                ),
                 StreamId::try_new("source/out")?,
             )
             .bind_stream(
-                Endpoint::new(ComponentId::try_new(COMPONENT)?, PortId::try_new("out")?),
+                Endpoint::new(component_id()?, PortId::try_new("out")?),
                 StreamId::try_new(format!("{COMPONENT}/out"))?,
             );
         let seen = [
@@ -206,9 +222,15 @@ impl SharedFixture {
         ];
         for (index, name) in ["left", "right"].iter().enumerate() {
             let resource = ResourceId::try_new(*name)?;
+            let owner = ComponentId::try_new(
+                [
+                    "00000000-0000-0000-0000-0000000002e7",
+                    "00000000-0000-0000-0000-0000000001d1",
+                ][index],
+            )?;
             let sink = Sink {
                 descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new(*name)?,
+                    owner.clone(),
                     vec![port("in", PortDirection::Input)?],
                 )?,
                 received: seen[index].clone(),
@@ -230,11 +252,11 @@ impl SharedFixture {
                     binding: (*name).into(),
                 })?
                 .provide_resource(resource.clone(), channels[index].resource())?
-                .sink(sink)
+                .sink(ComponentName::try_new(*name)?, sink)
                 .connect(
                     EdgeDefinition::new(
-                        Endpoint::new(ComponentId::try_new(COMPONENT)?, PortId::try_new("out")?),
-                        Endpoint::new(ComponentId::try_new(*name)?, PortId::try_new("in")?),
+                        Endpoint::new(component_id()?, PortId::try_new("out")?),
+                        Endpoint::new(owner, PortId::try_new("in")?),
                     ),
                     Box::new(
                         channels[index]
@@ -290,7 +312,7 @@ async fn backpressure() -> Result<()> {
                 );
                 let snapshot = OutputCatalogue::new(control.clone())
                     .resolve(&OutputEndpoint::new(
-                        ComponentId::try_new(COMPONENT)?,
+                        component_id()?,
                         PortId::try_new("out")?,
                     ))?
                     .snapshot()

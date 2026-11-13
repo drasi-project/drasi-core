@@ -52,7 +52,7 @@ fn namespace_and_wire_versions_do_not_load_or_substitute_a_validator() -> Result
         PortableEnvelopeCodec::new(PortableDelivery::Events, namespace(), Limits::default())?;
     let other_namespace = Namespace {
         version: 1,
-        source_prefixes: vec!["elsewhere/".into()],
+        source_prefixes: vec![OTHER_SOURCE_ID.into()],
     };
     let other =
         PortableEnvelopeCodec::new(PortableDelivery::Events, other_namespace, Limits::default())?;
@@ -139,8 +139,12 @@ struct RawEnvelope<'a> {
 }
 
 fn short_str(out: &mut Vec<u8>, value: &str) {
-    assert!(value.len() < 32);
-    out.push(0xa0 | value.len() as u8);
+    if value.len() < 32 {
+        out.push(0xa0 | value.len() as u8);
+    } else {
+        assert!(u8::try_from(value.len()).is_ok());
+        out.extend_from_slice(&[0xd9, value.len() as u8]);
+    }
     out.extend_from_slice(value.as_bytes());
 }
 
@@ -155,8 +159,8 @@ fn canonical_deep_node(depth: usize) -> Vec<u8> {
     out.push(0x83);
     short_str(&mut out, "reference");
     out.push(0x82);
-    short_str(&mut out, "source_id");
-    short_str(&mut out, "plant/db");
+    short_str(&mut out, "namespace");
+    short_str(&mut out, SOURCE_ID);
     short_str(&mut out, "element_id");
     short_str(&mut out, "deep");
     short_str(&mut out, "labels");
@@ -177,7 +181,7 @@ fn canonical_deep_node(depth: usize) -> Vec<u8> {
 
 pub(super) fn hostile_envelope(depth: usize, lineage: usize) -> Result<Vec<u8>> {
     let payload = canonical_deep_node(depth);
-    let key = GraphChangeCodec::element_reference(&ElementReference::new("plant/db", "deep"))?;
+    let key = GraphChangeCodec::element_reference(&ElementReference::new(SOURCE_ID, "deep"))?;
     let reference: &[u8] = key.identity().value();
     let schema = GraphChangeCodec::schema();
     let schema = schema.descriptor();
@@ -190,7 +194,7 @@ pub(super) fn hostile_envelope(depth: usize, lineage: usize) -> Result<Vec<u8>> 
         control: None,
     };
     let frame = RawEnvelope {
-        format: 1,
+        format: BinaryEnvelopeCodec::VERSION,
         id: Id {
             namespace: "sender/out",
             value: b"id",
@@ -201,7 +205,7 @@ pub(super) fn hostile_envelope(depth: usize, lineage: usize) -> Result<Vec<u8>> 
         },
         schema: Descriptor {
             id: schema.id().as_str(),
-            version: 1,
+            version: schema.version().value(),
             encoding: schema.encoding(),
             definition: schema.definition(),
         },
@@ -239,8 +243,8 @@ fn opaque_messagepack_depth_and_lineage_are_checked_before_recursive_constructio
 ) -> Result<()> {
     let codec =
         PortableEnvelopeCodec::new(PortableDelivery::Events, namespace(), Limits::default())?;
-    assert!(codec.decode(&hostile_envelope(0, 0)?).is_ok());
-    assert!(codec.decode(&hostile_envelope(8, 3)?).is_ok());
+    codec.decode(&hostile_envelope(0, 0)?)?;
+    codec.decode(&hostile_envelope(8, 3)?)?;
     assert!(codec.decode(&hostile_envelope(20_000, 0)?).is_err());
     assert!(codec.decode(&hostile_envelope(0, 2_000)?).is_err());
     Ok(())
@@ -257,7 +261,7 @@ fn hostile_fixture_is_the_canonical_node_encoding_and_depth_limits_are_semantic(
     let change = SourceChange::Insert {
         element: Element::Node {
             metadata: ElementMetadata {
-                reference: ElementReference::new("plant/db", "deep"),
+                reference: ElementReference::new(SOURCE_ID, "deep"),
                 labels: Arc::from([]),
                 effective_from: 1,
             },
@@ -276,7 +280,7 @@ fn hostile_fixture_is_the_canonical_node_encoding_and_depth_limits_are_semantic(
     let limits = Limits::default();
     let codec = PortableEnvelopeCodec::new(PortableDelivery::Events, namespace(), limits.clone())?;
     let levels = limits.max_depth;
-    assert!(codec.decode(&hostile_envelope(levels - 1, 0)?).is_ok());
+    codec.decode(&hostile_envelope(levels - 1, 0)?)?;
     assert!(codec.decode(&hostile_envelope(levels, 0)?).is_err());
     Ok(())
 }
@@ -287,7 +291,7 @@ fn exact_envelope_byte_limit_and_annotation_limits_reject_next_unit() -> Result<
         PortableEnvelopeCodec::new(PortableDelivery::Events, namespace(), Limits::default())?;
     let mut envelope = graph_input(1, 1)?;
     envelope.append_annotation(ContextEntry::try_new(
-        ComponentId::try_new("test")?,
+        ComponentId::try_new("ab9c31bd-a723-59e6-a5e2-31f93c3c1455")?,
         "bytes",
         ContextValue::Bytes(Arc::from(vec![1u8; 2048])),
     )?)?;
@@ -333,7 +337,7 @@ fn typed(value: drasi_core::evaluation::variable_value::VariableValue) -> Result
 
 fn metadata_of(id: &str) -> ElementMetadata {
     ElementMetadata {
-        reference: ElementReference::new("plant/db", id),
+        reference: ElementReference::new(SOURCE_ID, id),
         labels: Arc::from([Arc::from("Item")]),
         effective_from: 1_700_000_000_000,
     }
@@ -362,7 +366,7 @@ fn rich_properties() -> Result<ElementPropertyMap> {
     properties.insert(
         "reference",
         typed(VariableValue::ElementReference(ElementReference::new(
-            "plant/db", "other",
+            SOURCE_ID, "other",
         )))?,
     );
     properties.insert(
@@ -460,8 +464,8 @@ fn rich_canonical_patch_partial_and_removal_records_cross_exactly() -> Result<()
     let relation = change_record(SourceChange::Insert {
         element: Element::Relation {
             metadata: metadata_of("link"),
-            in_node: ElementReference::new("plant/db", "a"),
-            out_node: ElementReference::new("plant/db", "b"),
+            in_node: ElementReference::new(SOURCE_ID, "a"),
+            out_node: ElementReference::new(SOURCE_ID, "b"),
             properties: rich_properties()?,
         },
     })?;
@@ -542,7 +546,7 @@ fn rich_graph_values_keep_namespaces_and_value_limits() -> Result<()> {
         .encode(&insert_property("deeper", nested_lists(40))?)
         .is_err());
 
-    let outside = ElementReference::new("elsewhere/db", "x");
+    let outside = ElementReference::new(OTHER_SOURCE_ID, "x");
     let outside_metadata = ElementMetadata {
         reference: outside.clone(),
         labels: Arc::from([]),
@@ -557,7 +561,7 @@ fn rich_graph_values_keep_namespaces_and_value_limits() -> Result<()> {
         })),
         VariableValue::Element(Arc::new(Element::Relation {
             metadata: metadata_of("inner"),
-            in_node: ElementReference::new("plant/db", "a"),
+            in_node: ElementReference::new(SOURCE_ID, "a"),
             out_node: outside.clone(),
             properties: ElementPropertyMap::new(),
         })),
@@ -569,7 +573,7 @@ fn rich_graph_values_keep_namespaces_and_value_limits() -> Result<()> {
         SourceChange::Insert {
             element: Element::Relation {
                 metadata: metadata_of("link"),
-                in_node: ElementReference::new("plant/db", "a"),
+                in_node: ElementReference::new(SOURCE_ID, "a"),
                 out_node: outside,
                 properties: ElementPropertyMap::new(),
             },
@@ -652,7 +656,7 @@ fn expressions_and_awaiting_values_are_inert_graph_data_with_limits() -> Result<
 
 fn future(id: &str) -> drasi_core::interface::FutureElementRef {
     drasi_core::interface::FutureElementRef {
-        element_ref: ElementReference::new("plant/db", id),
+        element_ref: ElementReference::new(SOURCE_ID, id),
         original_time: 1,
         due_time: 2,
         group_signature: 3,
@@ -711,7 +715,7 @@ fn historical_controls_are_provenance_bounded_only_by_the_frame_budget() -> Resu
     let mut source =
         GraphChangeCodec::encode_futures_due(StreamId::try_new("sender/out")?, 1, timestamp)?;
     source.append_annotation(ContextEntry::try_new(
-        ComponentId::try_new("clock")?,
+        ComponentId::try_new("c47630ea-3995-597c-ac99-fde2ca363b8b")?,
         "drasi.query.futures-due",
         ContextValue::Bool(true),
     )?)?;
@@ -782,7 +786,8 @@ fn rich_source_transaction_values_keep_validation_and_namespaces() -> Result<()>
             max_bytes: NonZeroUsize::new(65_536).expect("nonzero byte limit"),
             max_duration_ms: std::num::NonZeroU64::new(10_000).expect("nonzero duration limit"),
         };
-        let mut builder = SourceTransactionBuilder::new("plant/db", limits)?;
+        let source_id = ComponentId::try_new(SOURCE_ID)?;
+        let mut builder = SourceTransactionBuilder::new(&source_id, limits)?;
         builder.push(SourceChange::Insert {
             element: node("subject", properties),
         })?;
@@ -805,7 +810,7 @@ fn rich_source_transaction_values_keep_validation_and_namespaces() -> Result<()>
     properties.insert(
         "reference",
         typed(VariableValue::ElementReference(ElementReference::new(
-            "elsewhere/db",
+            OTHER_SOURCE_ID,
             "x",
         )))?,
     );
@@ -826,7 +831,8 @@ fn source_transaction_updates_with_removals_and_replacements_cross_the_bridge() 
         max_duration_ms: std::num::NonZeroU64::new(10_000).expect("nonzero duration limit"),
     };
     let build = |removed: &[&str]| -> Result<ChangeEnvelope> {
-        let mut builder = SourceTransactionBuilder::new("plant/db", limits)?;
+        let source_id = ComponentId::try_new(SOURCE_ID)?;
+        let mut builder = SourceTransactionBuilder::new(&source_id, limits)?;
         builder.push(SourceChange::Insert {
             element: node("subject", ElementPropertyMap::new()),
         })?;
@@ -906,7 +912,7 @@ fn complete_transaction_markers_are_scoped_to_their_own_change_set() -> Result<(
     let ordinary = graph_input(5, 1)?;
     let mut forged = ordinary.clone();
     forged.append_annotation(ContextEntry::try_new(
-        ComponentId::try_new("plant/db")?,
+        ComponentId::try_new("5a41e1f6-32d5-5861-9661-900440feb84c")?,
         "drasi.source-transaction.v1",
         ContextValue::Bytes(Arc::from(serde_json::to_vec(&serde_json::json!({
             "version": 1,
@@ -918,7 +924,7 @@ fn complete_transaction_markers_are_scoped_to_their_own_change_set() -> Result<(
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>(),
-            "source_id": "plant/db",
+            "source_id": SOURCE_ID,
             "transaction_id": "00",
             "position": "00",
             "operations": 99,
@@ -982,7 +988,7 @@ fn source_and_query_records_traverse_the_same_bridge_schema() -> Result<()> {
     assert_eq!(after.image(), RecordImage::Full);
     let image = ElementImage::decode(after.payload(), after.payload().len())?;
     assert_eq!(
-        &*image.metadata().reference.source_id,
+        &*image.metadata().reference.namespace,
         query_dataset().as_str()
     );
     assert!(query_dataset().starts_with("drasi.output/"));
@@ -1121,10 +1127,10 @@ fn query_output_namespaces_are_exact_and_embedded_references_are_still_checked()
     let query = query_input(5)?;
 
     // Physical source authority does not authorize a derived output.
-    assert!(graph_codec(only(&["plant/"]))?.encode(&query).is_err());
-    let allowed = graph_codec(only(&["plant/", dataset.as_str()]))?;
+    assert!(graph_codec(only(&[SOURCE_ID]))?.encode(&query).is_err());
+    let allowed = graph_codec(only(&[SOURCE_ID, dataset.as_str()]))?;
     let bytes = allowed.encode(&query)?;
-    assert!(graph_codec(only(&["plant/"]))?.decode(&bytes).is_err());
+    assert!(graph_codec(only(&[SOURCE_ID]))?.decode(&bytes).is_err());
     // The reverse is also precise: the dataset alone does not authorize sources.
     assert!(graph_codec(only(&[dataset.as_str()]))?
         .encode(&graph_input(1, 1)?)
@@ -1134,7 +1140,7 @@ fn query_output_namespaces_are_exact_and_embedded_references_are_still_checked()
     let other = drasi_computation_contracts::output_identity::dataset_namespace(
         "left",
         GRAPH,
-        &ComponentId::try_new("plant/other")?,
+        &ComponentId::try_new("88626ae8-e5e5-5551-a556-cd0f02753f2d")?,
         &PortId::try_new("out")?,
     )?;
     assert_ne!(other, dataset);
@@ -1181,10 +1187,10 @@ fn query_output_namespaces_are_exact_and_embedded_references_are_still_checked()
             None,
         )
     };
-    assert!(allowed.encode(&embedded("plant/db")?).is_ok());
-    assert!(allowed.encode(&embedded("elsewhere/db")?).is_err());
-    let bytes = graph_codec(only(&["plant/", "elsewhere/", dataset.as_str()]))?
-        .encode(&embedded("elsewhere/db")?)?;
+    assert!(allowed.encode(&embedded(SOURCE_ID)?).is_ok());
+    assert!(allowed.encode(&embedded(OTHER_SOURCE_ID)?).is_err());
+    let bytes = graph_codec(only(&[SOURCE_ID, OTHER_SOURCE_ID, dataset.as_str()]))?
+        .encode(&embedded(OTHER_SOURCE_ID)?)?;
     assert!(allowed.decode(&bytes).is_err());
 
     // A prefix needs at least one more character.
@@ -1192,7 +1198,7 @@ fn query_output_namespaces_are_exact_and_embedded_references_are_still_checked()
         SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("plant/", "x"),
+                    reference: ElementReference::new("drasi.output/", "x"),
                     labels: Arc::from([]),
                     effective_from: 1,
                 },
@@ -1211,7 +1217,7 @@ fn query_output_namespaces_are_exact_and_embedded_references_are_still_checked()
 fn query_snapshot_and_progress_frames_are_recovery_controls_not_bridge_data() -> Result<()> {
     let codec = graph_codec(namespace())?;
     let projector = query_projector();
-    let component = ComponentId::try_new("plant/query")?;
+    let component = ComponentId::try_new("0101e9c2-bf16-5431-8360-5db06d8d53f4")?;
     let system = |sequence| -> Result<SystemMetadata> {
         Ok(SystemMetadata::new(
             StreamId::try_new("sender/out")?,
@@ -1228,14 +1234,16 @@ fn query_snapshot_and_progress_frames_are_recovery_controls_not_bridge_data() ->
     };
     let snapshot = QueryChangeCodec::snapshot_envelope(
         &projector,
-        "plant/query",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b8")
+            .expect("fixture UUID"),
         &snapshot,
         &component,
         system(4)?,
     )?;
     let progress = QueryChangeCodec::progress_envelope(
         &projector,
-        "plant/query",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b8")
+            .expect("fixture UUID"),
         5,
         1,
         &component,

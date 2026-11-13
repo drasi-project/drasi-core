@@ -310,7 +310,7 @@ impl ResourceCleanup for MemoryEnvelopeStore {
 pub struct IndexedEnvelopeStore {
     indexes: ComputationIndexes,
     codec: Arc<EnvelopeCodec>,
-    key: String,
+    key: drasi_core::interface::OutputPartition,
     capacity: NonZeroUsize,
     max_bytes: Option<NonZeroUsize>,
     page_limits: Option<OutboxPageLimits>,
@@ -413,7 +413,7 @@ impl IndexedEnvelopeStore {
         Ok(Self {
             indexes,
             codec,
-            key,
+            key: drasi_core::interface::OutputPartition::Journal(key),
             capacity,
             max_bytes,
             page_limits,
@@ -436,8 +436,11 @@ impl IndexedEnvelopeStore {
         }
     }
 
-    fn consumer_key(&self) -> String {
-        format!("computation-pipe-consumer:{}", self.key)
+    fn consumer_key(&self) -> drasi_core::interface::CheckpointKey {
+        drasi_core::interface::CheckpointKey::Journal {
+            journal: self.key.clone(),
+            key: "computation-pipe-consumer".into(),
+        }
     }
 
     async fn load(&self) -> Result<IndexedState, PipeError> {

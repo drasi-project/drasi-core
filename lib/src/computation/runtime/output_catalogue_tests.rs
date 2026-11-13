@@ -11,6 +11,33 @@ use std::num::NonZeroUsize;
 
 type ReadResult<T> = std::result::Result<T, OutputReadError>;
 
+fn fixture_id(name: &str) -> ComponentId {
+    let value = match name {
+        "inventory-source" => 1,
+        "inventory-transformer" => 2,
+        "source" => 3,
+        "transformer" => 4,
+        "snapshot-only" => 5,
+        "replay-only" => 6,
+        "plain" => 7,
+        "liar" => 8,
+        "another-component" => 9,
+        "bad" => 10,
+        "native" => 11,
+        "flaky" => 12,
+        "mismatch" => 13,
+        "inventory" => 14,
+        "query" => 15,
+        "normalized" => 16,
+        "derived" => 17,
+        "missing" => 18,
+        "feed-inventory-transformer" => 1_002,
+        "feed-transformer" => 1_004,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    };
+    crate::test_helpers::component_id(value)
+}
+
 struct MarkInputFactory;
 struct MarkInput;
 
@@ -115,7 +142,7 @@ impl Shared {
         Arc::get_mut(&mut shared).unwrap().producer = GraphProducerIdentity::for_epoch(
             "output-tests".into(),
             "output-tests".into(),
-            ComponentId::try_new(component).unwrap(),
+            fixture_id(component),
             StreamId::try_new(format!("{component}/out")).unwrap(),
             uuid::Uuid::from_u128(epoch),
             true,
@@ -131,7 +158,7 @@ impl Shared {
             producer: GraphProducerIdentity::for_epoch(
                 "output-tests".into(),
                 "output-tests".into(),
-                ComponentId::try_new(reported).unwrap(),
+                fixture_id(reported),
                 StreamId::try_new(format!("{component}/out")).unwrap(),
                 uuid::Uuid::from_u128(epoch),
                 false,
@@ -364,6 +391,7 @@ fn port(id: &str, direction: PortDirection) -> PortDescriptor {
 }
 
 struct FixtureSource {
+    name: ComponentName,
     descriptor: ComponentDescriptor,
     readers: OutputReaders,
 }
@@ -391,8 +419,9 @@ fn fixture_source_with_schema(
     schema: SchemaDescriptor,
 ) -> FixtureSource {
     FixtureSource {
+        name: ComponentName::try_new(id).unwrap(),
         descriptor: ComponentDescriptor::try_new(
-            ComponentId::try_new(id).unwrap(),
+            fixture_id(id),
             vec![PortDescriptor::new(
                 PortId::try_new("out").unwrap(),
                 PortDirection::Output,
@@ -482,8 +511,12 @@ impl EnvelopeSink for FixtureSink {
 }
 
 fn endpoint(component: &str, port: &str) -> OutputEndpoint {
+    OutputEndpoint::new(fixture_id(component), PortId::try_new(port).unwrap())
+}
+
+fn endpoint_by_name(core: &DrasiLib, name: &str, port: &str) -> OutputEndpoint {
     OutputEndpoint::new(
-        ComponentId::try_new(component).unwrap(),
+        component_id_by_name(core, name),
         PortId::try_new(port).unwrap(),
     )
 }
@@ -495,17 +528,22 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 async fn sink(core: &DrasiLib) -> ComponentHandle {
-    if let Ok(existing) = core.computation_component("sink") {
+    if let Ok(existing) = core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("sink").expect("fixture component name"),
+    ) {
         return existing;
     }
     core.add_computation_component(
-        ComponentAddition::new(ConstructedComponent::sink(Box::new(FixtureSink(
-            ComponentDescriptor::try_new(
-                ComponentId::try_new("sink").unwrap(),
-                vec![port("in", PortDirection::Input)],
-            )
-            .unwrap(),
-        ))))
+        ComponentAddition::new(
+            ComponentName::try_new("sink").unwrap(),
+            ConstructedComponent::sink(Box::new(FixtureSink(
+                ComponentDescriptor::try_new(
+                    crate::test_helpers::component_id(101),
+                    vec![port("in", PortDirection::Input)],
+                )
+                .unwrap(),
+            ))),
+        )
         .auto_start(false),
     )
     .await
@@ -513,15 +551,13 @@ async fn sink(core: &DrasiLib) -> ComponentHandle {
 }
 
 async fn add_source(core: &DrasiLib, source: FixtureSource) -> ComponentHandle {
-    let id = source.descriptor.id().to_string();
+    let name = source.name.clone();
+    let stream = StreamId::try_new(format!("{name}/out")).unwrap();
     let handle = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
+            ComponentAddition::new(name, ConstructedComponent::source(Box::new(source)))
                 .auto_start(false)
-                .bind_stream(
-                    PortId::try_new("out").unwrap(),
-                    StreamId::try_new(format!("{id}/out")).unwrap(),
-                ),
+                .bind_stream(PortId::try_new("out").unwrap(), stream),
         )
         .await
         .unwrap();
@@ -539,16 +575,17 @@ async fn add_transformer(
 ) -> ComponentHandle {
     let handle = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::transformer(Box::new(
-                FixtureTransformer {
+            ComponentAddition::new(
+                ComponentName::try_new(id).unwrap(),
+                ConstructedComponent::transformer(Box::new(FixtureTransformer {
                     descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new(id).unwrap(),
+                        fixture_id(id),
                         vec![port("in", PortDirection::Input), port("out", PortDirection::Output)],
                     )
                     .unwrap(),
                     readers: readers(shared, "out", registration),
-                },
-            )))
+                })),
+            )
             .auto_start(false)
             .bind_stream(
                 PortId::try_new("out").unwrap(),
@@ -597,7 +634,11 @@ async fn consume(handle: &OutputHandle) -> ReadResult<(usize, u64, usize)> {
 
 #[tokio::test]
 async fn source_and_transformer_outputs_use_the_same_catalogue_and_consumer_path() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let source_state = Shared::new("inventory-source", 1, 16);
     let transformer_state = Shared::new("inventory-transformer", 2, 16);
     add_source(
@@ -634,7 +675,11 @@ async fn source_and_transformer_outputs_use_the_same_catalogue_and_consumer_path
 
 #[tokio::test]
 async fn source_and_transformer_snapshots_use_the_same_bounded_live_handover() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let source = Shared::new("source", 1, 16);
     let transformed = Shared::new("transformer", 2, 16);
     add_source(&core, fixture_source("source", &source, BOTH, "out")).await;
@@ -662,7 +707,7 @@ async fn source_and_transformer_snapshots_use_the_same_bounded_live_handover() {
             let progress = GraphProducerProgress::from_envelope(&envelope)
                 .unwrap()
                 .unwrap();
-            assert_eq!(progress.identity().component_id().as_str(), *id);
+            assert_eq!(progress.identity().component_id(), &fixture_id(id));
             assert_eq!(progress.sequence(), sequence);
         }
     }
@@ -677,7 +722,11 @@ async fn source_and_transformer_snapshots_use_the_same_bounded_live_handover() {
 
 #[tokio::test]
 async fn snapshot_and_replay_are_independent_and_absence_is_explicit() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let state = Shared::new("snapshot-only", 1, 16);
     state.apply("a", 1);
     add_source(
@@ -774,7 +823,11 @@ async fn snapshot_and_replay_are_independent_and_absence_is_explicit() {
 
 #[tokio::test]
 async fn providers_report_typed_not_ready_gap_epoch_and_contract_errors() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let state = Shared::new("source", 1, 2);
     add_source(&core, fixture_source("source", &state, BOTH, "out")).await;
     let liar = Shared::reporting("liar", "another-component", 9, 2);
@@ -824,7 +877,7 @@ async fn providers_report_typed_not_ready_gap_epoch_and_contract_errors() {
         GraphProducerIdentity::for_epoch(
             "output-tests".into(),
             "output-tests".into(),
-            ComponentId::try_new("source").unwrap(),
+            crate::test_helpers::component_id(77),
             StreamId::try_new("source/out").unwrap(),
             uuid::Uuid::from_u128(2),
             false,
@@ -855,20 +908,31 @@ fn bad_source(state: &Arc<Shared>) -> FixtureSource {
 
 #[tokio::test]
 async fn invalid_registrations_are_rejected_at_addition_and_build() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let state = Shared::new("bad", 1, 2);
     let rejected = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::source(Box::new(bad_source(&state))))
-                .auto_start(false)
-                .bind_stream(
-                    PortId::try_new("out").unwrap(),
-                    StreamId::try_new("bad/out").unwrap(),
-                ),
+            ComponentAddition::new(
+                ComponentName::try_new("bad").unwrap(),
+                ConstructedComponent::source(Box::new(bad_source(&state))),
+            )
+            .auto_start(false)
+            .bind_stream(
+                PortId::try_new("out").unwrap(),
+                StreamId::try_new("bad/out").unwrap(),
+            ),
         )
         .await;
     assert!(chain(&rejected.expect_err("addition must be rejected")).contains(UNDECLARED));
-    assert!(core.computation_component("bad").is_err());
+    assert!(core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("bad").expect("fixture component name")
+        )
+        .is_err());
     assert!(matches!(
         core.output_catalogue()
             .unwrap()
@@ -878,13 +942,16 @@ async fn invalid_registrations_are_rejected_at_addition_and_build() {
     core.shutdown().await.unwrap();
 
     let built = ComputationGraph::builder("invalid-readers")
-        .source(Box::new(bad_source(&state)))
+        .source(
+            ComponentName::try_new("bad").unwrap(),
+            Box::new(bad_source(&state)),
+        )
         .build();
     assert!(chain(&built.err().expect("build must be rejected")).contains(UNDECLARED));
 }
 
 #[tokio::test]
-async fn an_invalid_replacement_is_rejected_before_retiring_the_current_output() {
+async fn external_replacement_is_rejected_before_retiring_the_current_output() {
     let fixture = started_fixture(1, 1).await;
     let control = fixture.core.computation_control().unwrap();
     let catalogue = fixture.core.output_catalogue().unwrap();
@@ -896,28 +963,21 @@ async fn an_invalid_replacement_is_rejected_before_retiring_the_current_output()
         .unwrap()
         .components
         .remove(0);
-    let ComponentConstruction::External { binding } = &replacement.construction else {
+    let ComponentConstruction::External { .. } = &replacement.construction else {
         panic!("native external source")
     };
-    let mut bindings = TopologyBindings::default();
-    bindings.components.insert(
-        binding.clone(),
-        ConstructedComponent::source(Box::new(fixture_source(
-            "native",
-            &Shared::new("native", 2, 8),
-            BOTH,
-            "missing",
-        ))),
-    );
-    let plan = control
+    let error = control
         .preview(
             desired.revision,
             vec![DesiredMutation::ReplaceComponent(replacement)],
         )
         .await
-        .unwrap();
-    let error = bounded(control.reconcile(plan, bindings)).await;
-    assert!(chain(&error.expect_err("replacement must fail")).contains(UNDECLARED));
+        .expect_err("opaque objects require explicit removal and admission");
+    assert!(matches!(
+        error,
+        GraphError::Topology { reason }
+            if reason == "external components require explicit removal and addition"
+    ));
     assert_eq!(current.snapshot().await.unwrap().records().len(), 1);
     fixture.core.shutdown().await.unwrap();
 }
@@ -958,17 +1018,22 @@ impl EnvelopeSource for ChangingRegistration {
 
 #[tokio::test]
 async fn a_registration_that_changes_after_validation_fails_creation_explicitly() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let state = Shared::new("flaky", 1, 2);
     let handle = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::source(Box::new(
-                ChangingRegistration {
+            ComponentAddition::new(
+                ComponentName::try_new("flaky").unwrap(),
+                ConstructedComponent::source(Box::new(ChangingRegistration {
                     inner: fixture_source("flaky", &state, BOTH, "out"),
                     calls: AtomicUsize::new(0),
                     changed: fixture_source("flaky", &state, BOTH, "missing"),
-                },
-            )))
+                })),
+            )
             .auto_start(false)
             .bind_stream(
                 PortId::try_new("out").unwrap(),
@@ -982,7 +1047,15 @@ async fn a_registration_that_changes_after_validation_fails_creation_explicitly(
     // touches it: connecting its pipe or creating it.
     let message = match try_connect(&core, (&handle, "out"), (&sink, "in")).await {
         Err(error) => chain(&error),
-        Ok(report) => match bounded(handle.wait_created()).await {
+        Ok(report) if report.error.is_some() => report.error.unwrap(),
+        Ok(report) => match tokio::time::timeout(Duration::from_secs(5), handle.wait_created())
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                "damaged output registration did not settle: {error}; report={report:?}; node={:?}",
+                handle.observed()
+            )
+            }) {
             Err(error) => format!("{report:?} {}", chain(&error)),
             Ok(()) => panic!("a damaged generation must not be created"),
         },
@@ -999,7 +1072,11 @@ async fn a_registration_that_changes_after_validation_fails_creation_explicitly(
 
 #[tokio::test]
 async fn replay_validates_logical_progress_epoch_and_reemission() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let state = Shared::new("source", 1, 8);
     for value in 1..=3 {
         state.apply("a", value);
@@ -1057,7 +1134,11 @@ async fn replay_validates_logical_progress_epoch_and_reemission() {
 
 #[tokio::test]
 async fn snapshot_and_replay_must_use_the_ports_declared_schema() {
-    let core = builder().build().await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
     let state = Shared::new("mismatch", 1, 8);
     state.apply("a", 1);
     let other_schema = SchemaDescriptor::try_new(
@@ -1070,9 +1151,16 @@ async fn snapshot_and_replay_must_use_the_ports_declared_schema() {
     assert_ne!(&other_schema, GraphChangeCodec::schema().descriptor());
     // A genuinely different format, not the query helper's shared graph schema.
     core.add_computation_component(
-        ComponentAddition::new(ConstructedComponent::source(Box::new(
-            fixture_source_with_schema("mismatch", &state, BOTH, "out", other_schema),
-        )))
+        ComponentAddition::new(
+            ComponentName::try_new("mismatch").unwrap(),
+            ConstructedComponent::source(Box::new(fixture_source_with_schema(
+                "mismatch",
+                &state,
+                BOTH,
+                "out",
+                other_schema,
+            ))),
+        )
         .auto_start(false)
         .bind_stream(
             PortId::try_new("out").unwrap(),
@@ -1110,7 +1198,13 @@ async fn started_fixture(epoch: u128, value: i64) -> Fixture {
 }
 
 async fn started_fixture_with(epoch: u128, value: i64, registration: Registration) -> Fixture {
-    let core = Arc::new(builder().build().await.unwrap());
+    let core = Arc::new(
+        builder()
+            .with_allow_external_component_ids(true)
+            .build()
+            .await
+            .unwrap(),
+    );
     let state = Shared::new("native", epoch, 8);
     state.apply("a", value);
     let source = fixture_source("native", &state, registration, "out");
@@ -1137,28 +1231,30 @@ async fn try_connect(
     core: &DrasiLib,
     from: (&ComponentHandle, &str),
     to: (&ComponentHandle, &str),
-) -> GraphResult<ReconciliationReport> {
-    let control = core.computation_control().unwrap();
-    let plan = control
-        .preview(
-            control.desired_snapshot().revision,
-            vec![DesiredMutation::Bind(DesiredRelationship {
-                definition: EdgeDefinition {
-                    from: Endpoint::new(from.0.id().clone(), PortId::try_new(from.1).unwrap()),
-                    to: Endpoint::new(to.0.id().clone(), PortId::try_new(to.1).unwrap()),
-                },
-                policy: Default::default(),
-                pipe: DesiredPipe::Bounded { capacity: 2 },
-            })],
-        )
-        .await?;
-    control.reconcile(plan, TopologyBindings::default()).await
+) -> crate::Result<crate::management::ManagementStatus> {
+    from.0.observed().map_err(anyhow::Error::from)?;
+    to.0.observed().map_err(anyhow::Error::from)?;
+    let relationship = DesiredRelationship {
+        definition: EdgeDefinition {
+            from: Endpoint::new(from.0.id().clone(), PortId::try_new(from.1).unwrap()),
+            to: Endpoint::new(to.0.id().clone(), PortId::try_new(to.1).unwrap()),
+        },
+        policy: Default::default(),
+        pipe: DesiredPipe::Bounded { capacity: 2 },
+    };
+    apply_native_topology(core, |topology| {
+        topology
+            .relationships
+            .retain(|edge| edge.definition != relationship.definition);
+        topology.relationships.push(relationship);
+    })
+    .await
 }
 
 async fn connect(core: &DrasiLib, from: (&ComponentHandle, &str), to: (&ComponentHandle, &str)) {
     let report = try_connect(core, from, to).await.unwrap();
     // A component with several ports is created only once all are connected.
-    assert!(report.failures.is_empty() && report.committed, "{report:?}");
+    assert!(report.error.is_none() && report.applied, "{report:?}");
 }
 
 /// A component's complete error message including every nested cause.
@@ -1227,13 +1323,21 @@ async fn stop_and_restart_retire_existing_handles_and_pending_reads() {
     assert_eq!(old.snapshot().await.unwrap().records().len(), 1);
 
     let pending = pending_snapshot(&fixture, &old).await;
-    bounded(fixture.core.stop_source("native")).await.unwrap();
+    bounded(fixture.core.stop_source_by_name(
+        &drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+    ))
+    .await
+    .unwrap();
     assert_retired(bounded(pending).await.unwrap());
     fixture.state.gate.blocked.store(false, Ordering::Release);
     assert_retired(old.snapshot().await);
     assert_retired(old.committed_head().await);
 
-    bounded(fixture.core.start_source("native")).await.unwrap();
+    bounded(fixture.core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+    ))
+    .await
+    .unwrap();
     assert_retired(old.snapshot().await);
     let current = catalogue.resolve(&endpoint("native", "out")).unwrap();
     assert_eq!(current.snapshot().await.unwrap().records().len(), 1);
@@ -1262,7 +1366,11 @@ async fn absent_capabilities_are_retired_with_their_generation_not_reported_abse
         Err(OutputReadError::Absent { .. })
     ));
 
-    bounded(fixture.core.stop_source("native")).await.unwrap();
+    bounded(fixture.core.stop_source_by_name(
+        &drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+    ))
+    .await
+    .unwrap();
     assert_retired(handle.snapshot().await);
     assert_retired(handle.committed_head().await);
     assert_retired(
@@ -1271,7 +1379,11 @@ async fn absent_capabilities_are_retired_with_their_generation_not_reported_abse
             .await,
     );
     assert_retired(handle.catch_up().await);
-    bounded(fixture.core.start_source("native")).await.unwrap();
+    bounded(fixture.core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("native").expect("fixture component name"),
+    ))
+    .await
+    .unwrap();
     assert_retired(handle.snapshot().await);
     let current = catalogue.resolve(&endpoint("native", "out")).unwrap();
     assert!(matches!(
@@ -1284,42 +1396,27 @@ async fn absent_capabilities_are_retired_with_their_generation_not_reported_abse
 #[tokio::test]
 async fn replacement_never_serves_the_replacements_data_through_an_old_handle() {
     let fixture = started_fixture(1, 1).await;
-    let control = fixture.core.computation_control().unwrap();
     let catalogue = fixture.core.output_catalogue().unwrap();
     let old = catalogue.resolve(&endpoint("native", "out")).unwrap();
     let old_epoch = old.snapshot().await.unwrap().cursor().epoch();
 
-    let desired = control.desired_snapshot();
-    let replacement = desired
-        .select(GraphSelection::Exact(vec![fixture.handle.id().clone()]))
-        .unwrap()
-        .components
-        .remove(0);
-    let ComponentConstruction::External { binding } = &replacement.construction else {
-        panic!("native external source")
-    };
+    let report = bounded(apply_native_topology(&fixture.core, |topology| {
+        remove_native_definition(topology, fixture.handle.id());
+    }))
+    .await
+    .unwrap();
+    assert!(report.applied && report.error.is_none(), "{report:?}");
+    assert_retired(old.snapshot().await);
+    assert!(fixture.snapshot_provider.upgrade().is_none());
     let successor = Shared::new("native", 2, 8);
     successor.apply("a", 1);
     successor.apply("b", 2);
-    let mut bindings = TopologyBindings::default();
-    bindings.components.insert(
-        binding.clone(),
-        ConstructedComponent::source(Box::new(fixture_source("native", &successor, BOTH, "out"))),
-    );
-    let plan = control
-        .preview(
-            desired.revision,
-            vec![DesiredMutation::ReplaceComponent(replacement)],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        bounded(control.reconcile(plan, bindings))
-            .await
-            .unwrap()
-            .summary,
-        OperationSummary::Completed
-    );
+    let replacement = add_source(
+        &fixture.core,
+        fixture_source("native", &successor, BOTH, "out"),
+    )
+    .await;
+    bounded(replacement.start()).await.unwrap();
 
     assert_retired(old.snapshot().await);
     assert_retired(old.replay_after(&old_cursor(&old_epoch)).await);
@@ -1336,7 +1433,7 @@ fn old_cursor(epoch: &uuid::Uuid) -> OutputCursor {
         GraphProducerIdentity::for_epoch(
             "output-tests".into(),
             "output-tests".into(),
-            ComponentId::try_new("native").unwrap(),
+            fixture_id("native"),
             StreamId::try_new("native/out").unwrap(),
             *epoch,
             false,
@@ -1354,24 +1451,12 @@ async fn removal_and_shutdown_retire_handles_and_release_providers() {
     let old = catalogue.resolve(&endpoint("native", "out")).unwrap();
     let pending = pending_snapshot(&fixture, &old).await;
 
-    let control = fixture.core.computation_control().unwrap();
-    let plan = control
-        .preview(
-            control.desired_snapshot().revision,
-            vec![DesiredMutation::RemoveComponents {
-                selection: GraphSelection::Exact(vec![fixture.handle.id().clone()]),
-                policy: RemovalPolicy::Cascade,
-            }],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        bounded(control.reconcile(plan, TopologyBindings::default()))
-            .await
-            .unwrap()
-            .summary,
-        OperationSummary::Completed
-    );
+    let report = bounded(apply_native_topology(&fixture.core, |topology| {
+        remove_native_definition(topology, fixture.handle.id());
+    }))
+    .await
+    .unwrap();
+    assert!(report.applied && report.error.is_none(), "{report:?}");
     assert_retired(bounded(pending).await.unwrap());
     assert_retired(old.snapshot().await);
     assert!(fixture.snapshot_provider.upgrade().is_none());
@@ -1409,20 +1494,62 @@ async fn wait_for_records(handle: &OutputHandle, count: usize) -> OutputSnapshot
     .expect("query output must reach the expected rows")
 }
 
-fn query_config(capacity: usize) -> QueryConfig {
-    crate::Query::cypher("query")
-        .query("MATCH (n:Person) RETURN n.name AS name")
-        .from_input("source")
-        .auto_start(false)
-        .enable_bootstrap(false)
-        .with_outbox_capacity(capacity)
-        .build()
+async fn wait_for_count_rows(
+    core: &DrasiLib,
+    handle: &OutputHandle,
+    expected_counts: &[i64],
+) -> OutputSnapshot {
+    let expected = expected_counts
+        .iter()
+        .map(|count| serde_json::json!({ "count": count }))
+        .collect::<Vec<_>>();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match handle.snapshot().await {
+                Ok(snapshot) if snapshot.records().len() == expected.len() => {
+                    let mut rows = core
+                        .get_query_results_by_name(
+                            &drasi_core_types::ComponentName::try_new("derived")
+                                .expect("fixture component name"),
+                        )
+                        .await
+                        .unwrap();
+                    rows.sort_by_key(|row| row["count"].as_i64());
+                    if rows == expected {
+                        return snapshot;
+                    }
+                }
+                Ok(_) | Err(OutputReadError::NotReady(_)) => {}
+                Err(error) => panic!("unexpected output read error: {error:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("query output must reach the expected count rows")
+}
+
+fn query_config(capacity: usize) -> crate::config::QueryConfig {
+    crate::Query::cypher(
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .query("MATCH (n:Person) RETURN n.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .auto_start(false)
+    .enable_bootstrap(false)
+    .with_outbox_capacity(capacity)
+    .build()
+    .unwrap()
 }
 
 async fn running_query(capacity: usize) -> Arc<DrasiLib> {
-    let (source, _) = ControlledSource::new("source");
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
     let core = Arc::new(builder().build().await.unwrap());
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source).await.unwrap();
     core.add_query(query_config(capacity)).await.unwrap();
     core
 }
@@ -1431,7 +1558,7 @@ async fn running_query(capacity: usize) -> Arc<DrasiLib> {
 async fn query_outputs_use_the_common_providers_over_existing_query_state() {
     let core = running_query(8).await;
     let catalogue = core.output_catalogue().unwrap();
-    let query = endpoint("query", "out");
+    let query = endpoint_by_name(&core, "query", "out");
     let description = catalogue.describe(&query).unwrap();
     assert!(matches!(
         description.snapshot,
@@ -1450,26 +1577,45 @@ async fn query_outputs_use_the_common_providers_over_existing_query_state() {
         ));
     }
 
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
     let handle = catalogue.resolve(&query).unwrap();
     assert!(handle.provides_snapshot() && handle.provides_replay());
     assert_eq!(wait_for_records(&handle, 0).await.records().len(), 0);
 
-    insert_person(&core, "source", "one", "Alice").await;
+    insert_person(
+        &core,
+        &component_id_by_name(&core, "source"),
+        "one",
+        "Alice",
+    )
+    .await;
     let first = wait_for_records(&handle, 1).await;
-    assert_eq!(first.cursor().producer().component_id().as_str(), "query");
+    assert_eq!(
+        first.cursor().producer().component_id(),
+        &component_id_by_name(&core, "query")
+    );
     assert!(first.cursor().sequence() > 0);
     let (_, head_sequence, history) = consume(&handle).await.unwrap();
     assert_eq!(head_sequence, first.cursor().sequence());
     assert_eq!(history as u64, head_sequence);
 
-    insert_person(&core, "source", "two", "Bob").await;
+    insert_person(&core, &component_id_by_name(&core, "source"), "two", "Bob").await;
     let second = wait_for_records(&handle, 2).await;
     let suffix = handle.replay_after(first.cursor()).await.unwrap();
     assert_eq!(
@@ -1481,13 +1627,21 @@ async fn query_outputs_use_the_common_providers_over_existing_query_state() {
         (first.cursor().sequence() + 1..=second.cursor().sequence()).collect::<Vec<_>>()
     );
     // The legacy facade reads the same query state.
-    assert_eq!(core.get_query_results("query").await.unwrap().len(), 2);
+    assert_eq!(
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .await
+        .unwrap()
+        .len(),
+        2
+    );
 
     let other_epoch = OutputCursor::try_new(
         GraphProducerIdentity::for_epoch(
-            "output-tests".into(),
-            "output-tests".into(),
-            ComponentId::try_new("query").unwrap(),
+            first.cursor().producer().construction_scope().into(),
+            first.cursor().producer().graph_id().into(),
+            first.cursor().producer().component_id().clone(),
             first.cursor().producer().stream().clone(),
             uuid::Uuid::new_v4(),
             first.cursor().producer().persistent(),
@@ -1501,7 +1655,11 @@ async fn query_outputs_use_the_common_providers_over_existing_query_state() {
         Err(OutputReadError::EpochChanged { .. })
     ));
 
-    core.stop_query("query").await.unwrap();
+    core.stop_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     assert_retired(handle.snapshot().await);
     core.shutdown().await.unwrap();
 }
@@ -1509,20 +1667,30 @@ async fn query_outputs_use_the_common_providers_over_existing_query_state() {
 #[tokio::test]
 async fn query_replay_reports_an_explicit_gap_when_retention_is_exceeded() {
     let core = running_query(1).await;
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
     let handle = core
         .output_catalogue()
         .unwrap()
-        .resolve(&endpoint("query", "out"))
+        .resolve(&endpoint_by_name(&core, "query", "out"))
         .unwrap();
     for (id, name) in [("one", "Alice"), ("two", "Bob"), ("three", "Carol")] {
-        insert_person(&core, "source", id, name).await;
+        insert_person(&core, &component_id_by_name(&core, "source"), id, name).await;
     }
     let snapshot = wait_for_records(&handle, 3).await;
     assert!(matches!(
@@ -1568,8 +1736,10 @@ async fn query_input_middleware_uses_the_upstream_component_for_snapshot_and_liv
     )
     .unwrap();
     core.initialize().await.unwrap();
-    let (source, _) = ControlledSource::new("source");
-    core.add_source(source).await.unwrap();
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    core.add_source_fixture(source).await.unwrap();
     let mut upstream = query_config(8);
     upstream.query = "MATCH (p:Person) WHERE p.normalized = true RETURN p.name AS name".into();
     upstream.inputs[0].pipeline = vec!["mark".into()];
@@ -1579,47 +1749,90 @@ async fn query_input_middleware_uses_the_upstream_component_for_snapshot_and_liv
         Default::default(),
     )];
     core.add_query(upstream).await.unwrap();
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
-    let catalogue = core.output_catalogue().unwrap();
-    let first = catalogue.resolve(&endpoint("query", "out")).unwrap();
-    insert_person(&core, "source", "one", "Alice").await;
-    let initial = wait_for_records(&first, 1).await;
-    assert!(initial.dataset().starts_with("drasi.output/"));
-    core.add_query(
-        crate::Query::cypher("normalized")
-            .query("MATCH (r:Result) RETURN r.name AS name, r.normalized AS normalized")
-            .from_input_with_pipeline("query", vec!["mark".into()])
-            .with_middleware(drasi_core::models::SourceMiddlewareConfig::new(
-                "mark-input",
-                "mark",
-                Default::default(),
-            ))
-            .auto_start(false)
-            .build(),
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
     )
     .await
     .unwrap();
-    core.start_query("normalized").await.unwrap();
-    core.computation_component("normalized")
-        .unwrap()
-        .wait_started()
-        .await
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    let catalogue = core.output_catalogue().unwrap();
+    let first = catalogue
+        .resolve(&endpoint_by_name(&core, "query", "out"))
         .unwrap();
-    let output = catalogue.resolve(&endpoint("normalized", "out")).unwrap();
+    insert_person(
+        &core,
+        &component_id_by_name(&core, "source"),
+        "one",
+        "Alice",
+    )
+    .await;
+    let initial = wait_for_records(&first, 1).await;
+    assert!(initial.dataset().starts_with("drasi.output/"));
+    core.add_query(
+        crate::Query::cypher(
+            drasi_core_types::ComponentName::try_new("normalized").expect("fixture component name"),
+        )
+        .query("MATCH (r:Result) RETURN r.name AS name, r.normalized AS normalized")
+        .from_input_with_pipeline_by_name(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            vec!["mark".into()],
+        )
+        .with_middleware(drasi_core::models::SourceMiddlewareConfig::new(
+            "mark-input",
+            "mark",
+            Default::default(),
+        ))
+        .auto_start(false)
+        .build()
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("normalized").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("normalized").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    let output = catalogue
+        .resolve(&endpoint_by_name(&core, "normalized", "out"))
+        .unwrap();
     wait_for_records(&output, 1).await;
     assert_eq!(
-        core.get_query_results("normalized").await.unwrap(),
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("normalized")
+                .expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         [serde_json::json!({"name":"Alice","normalized":true})]
     );
-    insert_person(&core, "source", "two", "Bob").await;
+    insert_person(&core, &component_id_by_name(&core, "source"), "two", "Bob").await;
     wait_for_records(&output, 2).await;
-    let mut rows = core.get_query_results("normalized").await.unwrap();
+    let mut rows = core
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("normalized")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
     rows.sort_by_key(|row| row["name"].as_str().unwrap().to_owned());
     assert_eq!(
         rows,
@@ -1634,77 +1847,149 @@ async fn query_input_middleware_uses_the_upstream_component_for_snapshot_and_liv
 #[tokio::test]
 async fn ordinary_query_inputs_bootstrap_from_query_outputs_and_follow_live_changes() {
     let core = running_query(8).await;
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
-    let catalogue = core.output_catalogue().unwrap();
-    let first = catalogue.resolve(&endpoint("query", "out")).unwrap();
-    insert_person(&core, "source", "one", "Alice").await;
-    wait_for_records(&first, 1).await;
-
-    core.add_query(
-        crate::Query::cypher("derived")
-            .query("MATCH (r:Result) RETURN r.name AS name")
-            .from_input("query")
-            .auto_start(false)
-            .build(),
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
     )
     .await
     .unwrap();
-    core.start_query("derived").await.unwrap();
-    core.computation_component("derived")
-        .unwrap()
-        .wait_started()
-        .await
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    let catalogue = core.output_catalogue().unwrap();
+    let first = catalogue
+        .resolve(&endpoint_by_name(&core, "query", "out"))
         .unwrap();
-    let derived = catalogue.resolve(&endpoint("derived", "out")).unwrap();
+    insert_person(
+        &core,
+        &component_id_by_name(&core, "source"),
+        "one",
+        "Alice",
+    )
+    .await;
+    wait_for_records(&first, 1).await;
+
+    core.add_query(
+        crate::Query::cypher(
+            drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+        )
+        .query("MATCH (r:Result) RETURN r.name AS name")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    let derived = catalogue
+        .resolve(&endpoint_by_name(&core, "derived", "out"))
+        .unwrap();
     assert_eq!(wait_for_records(&derived, 1).await.records().len(), 1);
     assert_eq!(
-        core.get_query_results("derived").await.unwrap(),
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         [serde_json::json!({"name":"Alice"})]
     );
 
-    insert_person(&core, "source", "two", "Bob").await;
+    insert_person(&core, &component_id_by_name(&core, "source"), "two", "Bob").await;
     wait_for_records(&derived, 2).await;
-    core.stop_query("derived").await.unwrap();
-    insert_person(&core, "source", "three", "Carol").await;
-    let first = catalogue.resolve(&endpoint("query", "out")).unwrap();
-    wait_for_records(&first, 3).await;
-    core.start_query("derived").await.unwrap();
-    core.computation_component("derived")
-        .unwrap()
-        .wait_started()
-        .await
+    core.stop_query_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    insert_person(
+        &core,
+        &component_id_by_name(&core, "source"),
+        "three",
+        "Carol",
+    )
+    .await;
+    let first = catalogue
+        .resolve(&endpoint_by_name(&core, "query", "out"))
         .unwrap();
-    let restarted = catalogue.resolve(&endpoint("derived", "out")).unwrap();
+    wait_for_records(&first, 3).await;
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    let restarted = catalogue
+        .resolve(&endpoint_by_name(&core, "derived", "out"))
+        .unwrap();
     wait_for_records(&restarted, 3).await;
     assert!(matches!(
         derived.snapshot().await,
         Err(OutputReadError::Retired)
     ));
-    core.update_query(
-        "derived",
-        crate::Query::cypher("derived")
+    let retired_id = component_id_by_name(&core, "derived");
+    core.remove_query_by_id(&retired_id).await.unwrap();
+    let replacement = core
+        .add_query_with_handle(
+            crate::Query::cypher(
+                drasi_core_types::ComponentName::try_new("derived")
+                    .expect("fixture component name"),
+            )
             .query("MATCH (r:Result) WHERE r.name = 'Carol' RETURN r.name AS name")
-            .from_input("query")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
             .auto_start(false)
-            .build(),
-    )
-    .await
-    .unwrap();
-    core.computation_component("derived")
-        .unwrap()
-        .wait_started()
+            .build()
+            .unwrap(),
+        )
         .await
         .unwrap();
-    let updated = catalogue.resolve(&endpoint("derived", "out")).unwrap();
+    assert_ne!(replacement.id(), &retired_id);
+    replacement.wait_created().await.unwrap();
+    replacement.start().await.unwrap();
+    replacement.wait_started().await.unwrap();
+    assert!(matches!(
+        restarted.snapshot().await,
+        Err(OutputReadError::Retired)
+    ));
+    let updated = catalogue
+        .resolve(&endpoint_by_name(&core, "derived", "out"))
+        .unwrap();
     wait_for_records(&updated, 1).await;
     assert_eq!(
-        core.get_query_results("derived").await.unwrap(),
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         [serde_json::json!({"name":"Carol"})]
     );
     core.shutdown().await.unwrap();
@@ -1712,20 +1997,37 @@ async fn ordinary_query_inputs_bootstrap_from_query_outputs_and_follow_live_chan
 
 #[tokio::test]
 async fn ordinary_query_inputs_can_be_declared_before_the_upstream_query() {
-    let core = builder().build().await.unwrap();
-    let (source, _) = ControlledSource::new("source");
-    core.add_source(source).await.unwrap();
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
+    let (source, _) = ControlledSource::fixture(
+        drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    );
+    core.add_source_fixture(source).await.unwrap();
     let waiting = core
         .add_query_with_handle(
-            crate::Query::cypher("derived")
-                .query("MATCH (r:Result) RETURN r.name AS name")
-                .from_input("query")
-                .auto_start(false)
-                .build(),
+            crate::Query::cypher(
+                drasi_core_types::ComponentName::try_new("derived")
+                    .expect("fixture component name"),
+            )
+            .query("MATCH (r:Result) RETURN r.name AS name")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .auto_start(false)
+            .build()
+            .unwrap(),
         )
         .await
         .unwrap();
-    assert_waiting_for(&waiting, "query");
+    assert_waiting_for(
+        &core,
+        &waiting,
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(5), core.add_query(query_config(8)))
         .await
         .unwrap_or_else(|_| {
@@ -1735,34 +2037,69 @@ async fn ordinary_query_inputs_can_be_declared_before_the_upstream_query() {
             )
         })
         .unwrap();
-    bounded(core.start_source("source")).await.unwrap();
-    bounded(core.start_query("query")).await.unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
+    bounded(core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    ))
+    .await
+    .unwrap();
+    bounded(core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    ))
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
     let catalogue = core.output_catalogue().unwrap();
-    let first = catalogue.resolve(&endpoint("query", "out")).unwrap();
-    insert_person(&core, "source", "one", "Alice").await;
-    wait_for_records(&first, 1).await;
-    core.start_query("derived").await.unwrap();
-    core.computation_component("derived")
-        .unwrap()
-        .wait_started()
-        .await
+    let first = catalogue
+        .resolve(&endpoint_by_name(&core, "query", "out"))
         .unwrap();
-    let derived = catalogue.resolve(&endpoint("derived", "out")).unwrap();
+    insert_person(
+        &core,
+        &component_id_by_name(&core, "source"),
+        "one",
+        "Alice",
+    )
+    .await;
+    wait_for_records(&first, 1).await;
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    let derived = catalogue
+        .resolve(&endpoint_by_name(&core, "derived", "out"))
+        .unwrap();
     wait_for_records(&derived, 1).await;
     assert_eq!(
-        core.get_query_results("derived").await.unwrap(),
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name")
+        )
+        .await
+        .unwrap(),
         [serde_json::json!({"name":"Alice"})]
     );
     core.shutdown().await.unwrap();
 }
 
+#[rstest::rstest]
+#[case::strict(crate::RecoveryPolicy::Strict)]
+#[case::auto_reset(crate::RecoveryPolicy::AutoReset)]
 #[tokio::test]
-async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps() {
+async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps(
+    #[case] policy: crate::RecoveryPolicy,
+) {
     let directory = tempfile::tempdir().unwrap();
     let mut middleware = drasi_core::middleware::MiddlewareTypeRegistry::new();
     middleware.register(Arc::new(MarkInputFactory));
@@ -1770,7 +2107,10 @@ async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps
         drasi_index_rocksdb::RocksDbIndexProvider::new(directory.path(), false, false),
     );
     let config = crate::config::RuntimeConfig::new(
-        crate::config::DrasiLibConfig::default(),
+        crate::config::DrasiLibConfig {
+            allow_external_component_ids: true,
+            ..Default::default()
+        },
         std::collections::HashMap::from([("persistent".into(), provider)]),
         None,
         None,
@@ -1793,77 +2133,124 @@ async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps
     inventory.apply("a", 1);
     let source = add_source(&core, fixture_source("inventory", &inventory, BOTH, "out")).await;
     source.start().await.unwrap();
-    let config = crate::Query::cypher("derived")
-        .query("MATCH (n:Item) WHERE n.normalized = true RETURN n.count AS count")
-        .from_input_with_pipeline("inventory", vec!["mark".into()])
-        .with_middleware(drasi_core::models::SourceMiddlewareConfig::new(
-            "mark-input",
-            "mark",
-            Default::default(),
-        ))
-        .auto_start(false)
-        .build();
+    let config = crate::Query::cypher(
+        drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .query("MATCH (n:Item) WHERE n.normalized = true RETURN n.count AS count")
+    .from_input_with_pipeline_by_name(
+        drasi_core_types::ComponentName::try_new("inventory").expect("fixture component name"),
+        vec!["mark".into()],
+    )
+    .with_middleware(drasi_core::models::SourceMiddlewareConfig::new(
+        "mark-input",
+        "mark",
+        Default::default(),
+    ))
+    .with_recovery_policy(policy)
+    .auto_start(false)
+    .build()
+    .unwrap();
     core.add_query(config.clone()).await.unwrap();
-    core.start_query("derived").await.unwrap();
-    core.computation_component("derived")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
     let catalogue = core.output_catalogue().unwrap();
-    let handle = catalogue.resolve(&endpoint("derived", "out")).unwrap();
+    let handle = catalogue
+        .resolve(&endpoint_by_name(&core, "derived", "out"))
+        .unwrap();
     let original = wait_for_records(&handle, 1).await;
 
-    core.stop_query("derived").await.unwrap();
+    core.stop_query_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     // The fixture exposes retained history but sends no live events while the
     // query is stopped, so these changes must come through ReplayProvider.
     inventory.apply("b", 2);
     inventory.apply("a", 3);
-    core.start_query("derived").await.unwrap();
-    core.computation_component("derived")
-        .unwrap()
-        .wait_started()
-        .await
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    let handle = catalogue
+        .resolve(&endpoint_by_name(&core, "derived", "out"))
         .unwrap();
-    let handle = catalogue.resolve(&endpoint("derived", "out")).unwrap();
-    let replayed = wait_for_records(&handle, 2).await;
+    let replayed = wait_for_count_rows(&core, &handle, &[2, 3]).await;
     original
         .cursor()
         .ensure_same_epoch(replayed.cursor())
         .unwrap();
-    let mut rows = core.get_query_results("derived").await.unwrap();
+    let mut rows = core
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
     rows.sort_by_key(|row| row["count"].as_i64());
     assert_eq!(
         rows,
         [serde_json::json!({"count":2}), serde_json::json!({"count":3})]
     );
 
-    core.stop_query("derived").await.unwrap();
+    core.stop_query_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     for value in 4..=8 {
         inventory.apply("a", value);
     }
-    let error = core
-        .start_query("derived")
-        .await
-        .expect_err("retention gap must fail strict recovery");
-    assert!(format!("{error:#}").contains("output history after 3 is unavailable"));
-    core.stop_query("derived").await.unwrap();
-    let mut reset = config;
-    reset.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
-    core.update_query("derived", reset).await.unwrap();
-    core.start_query("derived").await.unwrap();
-    core.computation_component("derived")
-        .unwrap()
-        .wait_started()
-        .await
+    let restart = core
+        .start_query_by_name(
+            &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+        )
+        .await;
+    if policy == crate::RecoveryPolicy::Strict {
+        let error = restart.expect_err("retention gap must fail strict recovery");
+        assert!(format!("{error:#}").contains("output history after 3 is unavailable"));
+        core.shutdown().await.unwrap();
+        return;
+    }
+    restart.unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
+    let handle = catalogue
+        .resolve(&endpoint_by_name(&core, "derived", "out"))
         .unwrap();
-    let handle = catalogue.resolve(&endpoint("derived", "out")).unwrap();
-    let refreshed = wait_for_records(&handle, 2).await;
+    let refreshed = wait_for_count_rows(&core, &handle, &[2, 8]).await;
     assert!(matches!(
         replayed.cursor().ensure_same_epoch(refreshed.cursor()),
         Err(OutputReadError::EpochChanged { .. })
     ));
-    let mut rows = core.get_query_results("derived").await.unwrap();
+    let mut rows = core
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("derived").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
     rows.sort_by_key(|row| row["count"].as_i64());
     assert_eq!(
         rows,
@@ -1875,15 +2262,27 @@ async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps
 #[tokio::test]
 async fn query_snapshot_follow_retains_changes_and_retires_with_the_generation() {
     let core = running_query(8).await;
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
     let catalogue = core.output_catalogue().unwrap();
-    let handle = catalogue.resolve(&endpoint("query", "out")).unwrap();
+    let handle = catalogue
+        .resolve(&endpoint_by_name(&core, "query", "out"))
+        .unwrap();
     assert!(handle.provides_snapshot_follow());
     assert_eq!(
         catalogue
@@ -1893,13 +2292,25 @@ async fn query_snapshot_follow_retains_changes_and_retires_with_the_generation()
         Provision::Provided
     );
 
-    insert_person(&core, "source", "one", "Alice").await;
+    insert_person(
+        &core,
+        &component_id_by_name(&core, "source"),
+        "one",
+        "Alice",
+    )
+    .await;
     wait_for_records(&handle, 1).await;
     let opened = handle.snapshot_and_follow(follow_limits(8)).await.unwrap();
     let position = opened.snapshot().cursor().clone();
     assert_eq!(opened.snapshot().records().len(), 1);
-    insert_person(&core, "source", "two", "Bob").await;
-    insert_person(&core, "source", "three", "Carol").await;
+    insert_person(&core, &component_id_by_name(&core, "source"), "two", "Bob").await;
+    insert_person(
+        &core,
+        &component_id_by_name(&core, "source"),
+        "three",
+        "Carol",
+    )
+    .await;
     let latest = wait_for_records(&handle, 3).await;
     let (snapshot, mut follow) = opened.into_parts();
     assert_eq!(snapshot.records().len(), 1);
@@ -1911,7 +2322,11 @@ async fn query_snapshot_follow_retains_changes_and_retires_with_the_generation()
         assert_eq!(progress.identity(), position.producer());
         assert_eq!(progress.sequence(), sequence);
     }
-    core.stop_query("query").await.unwrap();
+    core.stop_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         bounded(follow.next()).await,
         Err(OutputReadError::Retired)
@@ -1922,31 +2337,55 @@ async fn query_snapshot_follow_retains_changes_and_retires_with_the_generation()
 #[tokio::test]
 async fn query_snapshot_follow_overflow_is_explicit_and_does_not_stall_queries() {
     let core = running_query(2).await;
-    core.start_source("source").await.unwrap();
-    core.start_query("query").await.unwrap();
-    core.computation_component("query")
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
+    core.start_source_by_name(
+        &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .await
+    .unwrap();
+    core.component_by_name(
+        &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+    )
+    .unwrap()
+    .wait_started()
+    .await
+    .unwrap();
     let handle = core
         .output_catalogue()
         .unwrap()
-        .resolve(&endpoint("query", "out"))
+        .resolve(&endpoint_by_name(&core, "query", "out"))
         .unwrap();
     let (_, mut follow) = handle
         .snapshot_and_follow(follow_limits(1))
         .await
         .unwrap()
         .into_parts();
-    insert_person(&core, "source", "one", "Alice").await;
-    insert_person(&core, "source", "two", "Bob").await;
+    insert_person(
+        &core,
+        &component_id_by_name(&core, "source"),
+        "one",
+        "Alice",
+    )
+    .await;
+    insert_person(&core, &component_id_by_name(&core, "source"), "two", "Bob").await;
     wait_for_records(&handle, 2).await;
     assert!(matches!(
         bounded(follow.next()).await,
         Err(OutputReadError::Gap { .. })
     ));
     assert!(matches!(follow.next().await, Err(OutputReadError::Retired)));
-    assert_eq!(core.get_query_results("query").await.unwrap().len(), 2);
+    assert_eq!(
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+        )
+        .await
+        .unwrap()
+        .len(),
+        2
+    );
     core.shutdown().await.unwrap();
 }

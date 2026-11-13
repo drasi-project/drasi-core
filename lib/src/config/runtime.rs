@@ -17,11 +17,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::schema::QueryConfig;
+use super::{ComponentId, ComponentName};
 use crate::channels::ComponentStatus;
 use crate::identity::IdentityProvider;
 use crate::indexes::IndexBackendPlugin;
 use crate::indexes::IndexFactory;
 use crate::state_store::{MemoryStateStoreProvider, StateStoreProvider};
+
+/// Identity, current name and status from one coherent inventory publication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentListEntry {
+    pub id: ComponentId,
+    pub name: ComponentName,
+    pub status: ComponentStatus,
+}
 
 /// Runtime representation of a source with execution status
 ///
@@ -50,7 +59,7 @@ use crate::state_store::{MemoryStateStoreProvider, StateStoreProvider};
 /// core.start().await?;
 ///
 /// // Get runtime information for a source
-/// let source_info = core.get_source_info("orders_db").await?;
+/// let source_info = core.get_source_info_by_name(&drasi_lib::ComponentName::try_new("orders_db")?).await?;
 /// println!("Source {} is {:?}", source_info.id, source_info.status);
 ///
 /// if let Some(error) = source_info.error_message {
@@ -62,7 +71,9 @@ use crate::state_store::{MemoryStateStoreProvider, StateStoreProvider};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRuntime {
     /// Unique identifier for the source
-    pub id: String,
+    pub id: ComponentId,
+    /// Current graph-owned name.
+    pub name: ComponentName,
     /// Type of source (e.g., "postgres", "http", "mock", "platform")
     pub source_type: String,
     /// Current status of the source
@@ -97,7 +108,7 @@ pub struct SourceRuntime {
 /// core.start().await?;
 ///
 /// // Get runtime information for a query
-/// let query_info = core.get_query_info("active_orders").await?;
+/// let query_info = core.get_query_info_by_name(&drasi_lib::ComponentName::try_new("active_orders")?).await?;
 /// println!("Query: {}", query_info.query);
 /// println!("Status: {:?}", query_info.status);
 /// println!("Inputs: {:?}", query_info.inputs);
@@ -111,7 +122,9 @@ pub struct SourceRuntime {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRuntime {
     /// Unique identifier for the query
-    pub id: String,
+    pub id: ComponentId,
+    /// Current graph-owned name.
+    pub name: ComponentName,
     /// Cypher or GQL query string
     pub query: String,
     /// Current status of the query
@@ -120,7 +133,7 @@ pub struct QueryRuntime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     /// Upstream component inputs with middleware pipelines
-    pub inputs: Vec<super::schema::QueryInputConfig>,
+    pub inputs: Vec<super::QueryInputConfig>,
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<super::schema::QueryJoinConfig>>,
@@ -149,7 +162,7 @@ pub struct QueryRuntime {
 /// core.start().await?;
 ///
 /// // Get runtime information for a reaction
-/// let reaction_info = core.get_reaction_info("order_webhook").await?;
+/// let reaction_info = core.get_reaction_info_by_name(&drasi_lib::ComponentName::try_new("order_webhook")?).await?;
 /// println!("Reaction {} ({}) is {:?}",
 ///     reaction_info.id,
 ///     reaction_info.reaction_type,
@@ -166,7 +179,9 @@ pub struct QueryRuntime {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactionRuntime {
     /// Unique identifier for the reaction
-    pub id: String,
+    pub id: ComponentId,
+    /// Current graph-owned name.
+    pub name: ComponentName,
     /// Type of reaction (e.g., "log", "http", "grpc", "sse", "platform")
     pub reaction_type: String,
     /// Current status of the reaction
@@ -175,15 +190,16 @@ pub struct ReactionRuntime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     /// IDs of queries this reaction subscribes to
-    pub queries: Vec<String>,
+    pub queries: Vec<super::ComponentReference>,
     /// Reaction-specific configuration properties
     pub properties: HashMap<String, serde_json::Value>,
 }
 
-impl From<QueryConfig> for QueryRuntime {
-    fn from(config: QueryConfig) -> Self {
+impl From<super::AssignedQueryConfig> for QueryRuntime {
+    fn from(config: super::AssignedQueryConfig) -> Self {
         Self {
             id: config.id,
+            name: config.name,
             query: config.query,
             status: ComponentStatus::Stopped,
             error_message: None,
@@ -236,6 +252,8 @@ impl From<QueryConfig> for QueryRuntime {
 pub struct RuntimeConfig {
     /// Unique identifier for this DrasiLib instance
     pub id: String,
+    /// Immutable component identity-admission policy.
+    pub allow_external_component_ids: bool,
     /// Index factory for creating storage backend indexes for queries
     pub index_factory: Arc<IndexFactory>,
     /// State store provider for plugin state persistence
@@ -377,6 +395,7 @@ impl RuntimeConfig {
 
         Self {
             id: config.id,
+            allow_external_component_ids: config.allow_external_component_ids,
             index_factory,
             state_store_provider,
             identity_provider,

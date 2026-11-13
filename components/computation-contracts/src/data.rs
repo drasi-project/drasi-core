@@ -19,6 +19,8 @@ use bytes::Bytes;
 use super::{ContractError, Result};
 use crate::internal::change::computation_bridge;
 
+pub use drasi_core_types::{ComponentId, ComponentIdentityError, ComponentName, StreamId};
+
 pub fn validate_identifier(kind: &'static str, value: &str) -> Result<()> {
     if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(ContractError::InvalidIdentifier {
@@ -78,13 +80,8 @@ name_type!(
     SchemaId,
     "Schema identity, scoped by its provider's naming convention."
 );
-name_type!(ComponentId, "Component identity within a graph.");
 name_type!(PortId, "Port identity within a component.");
 name_type!(ResourceId, "Resource identity within a computation graph.");
-name_type!(
-    StreamId,
-    "Logical producer stream identity, unique to a producer/output port."
-);
 
 macro_rules! identity_type {
     ($name:ident, $doc:literal) => {

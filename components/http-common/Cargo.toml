@@ -14,6 +14,7 @@ adaptive = ["dep:tokio"]
 reaction = [
     "dep:drasi-computation-contracts", "dep:drasi-reaction-common", "dep:reqwest",
     "dep:handlebars-reaction", "dep:utoipa", "dep:tokio",
+    "drasi-core-types/openapi",
 ]
 bootstrap = [
     "dep:reqwest", "dep:handlebars", "dep:serde_yaml", "dep:quick-xml",

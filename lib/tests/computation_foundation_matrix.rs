@@ -41,9 +41,24 @@ struct Stage {
 
 fn stage_descriptor(role: ComponentRole) -> ComponentDescriptor {
     match role {
-        ComponentRole::Source => descriptor("source", &[], &["out"]),
-        ComponentRole::Transformer => descriptor("transform", &["in"], &["out"]),
-        ComponentRole::Sink => descriptor("sink", &["in"], &[]),
+        ComponentRole::Source => descriptor(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            &[],
+            &["out"],
+        ),
+        ComponentRole::Transformer => descriptor(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                .expect("fixture UUID"),
+            &["in"],
+            &["out"],
+        ),
+        ComponentRole::Sink => descriptor(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+            &["in"],
+            &[],
+        ),
         ComponentRole::Service => unreachable!("synthetic pipeline roles"),
     }
 }
@@ -197,12 +212,14 @@ async fn matrix() {
                         .into_iter()
                         .enumerate()
                 {
+                    let name = ComponentName::try_new(format!("{role:?}").to_ascii_lowercase())
+                        .expect("fixture name");
                     if factory_mask & (1 << bit) == 0 {
                         let stage = Box::new(Stage::new(role, evidence.clone()));
                         builder = match role {
-                            ComponentRole::Source => builder.source(stage),
-                            ComponentRole::Transformer => builder.transformer(stage),
-                            ComponentRole::Sink => builder.sink(stage),
+                            ComponentRole::Source => builder.source(name, stage),
+                            ComponentRole::Transformer => builder.transformer(name, stage),
+                            ComponentRole::Sink => builder.sink(name, stage),
                             ComponentRole::Service => unreachable!(),
                         };
                     } else {
@@ -210,6 +227,7 @@ async fn matrix() {
                             ImplementationIdentity::try_new(format!("test/{role:?}"), "1")
                                 .expect("implementation");
                         builder = builder.component(
+                            name,
                             ComponentSpecification {
                                 descriptor: stage_descriptor(role),
                                 role,
@@ -236,6 +254,12 @@ async fn matrix() {
                 for (profile, from, to) in
                     [(incoming, "source", "transform"), (outgoing, "transform", "sink")]
                 {
+                    let component_id = |name| match name {
+                        "source" => component(77),
+                        "transform" => component(429),
+                        "sink" => component(101),
+                        other => panic!("missing explicit fixture component ID for {other}"),
+                    };
                     let capacity = NonZeroUsize::new(if profile.backpressure() { 1 } else { 8 })
                         .expect("capacity");
                     let (provider, resources) = profile.provider(from, stream(from), capacity);
@@ -253,8 +277,8 @@ async fn matrix() {
                             .expect("resource binding");
                     }
                     builder = builder
-                        .bind_stream(endpoint(from, "out"), stream(from))
-                        .connect(edge(from, to), provider);
+                        .bind_stream(endpoint(&component_id(from), "out"), stream(from))
+                        .connect(edge(&component_id(from), &component_id(to)), provider);
                 }
                 let case = format!("{incoming:?} -> {outgoing:?}, factory mask {factory_mask}");
                 let mut graph = builder
@@ -316,7 +340,7 @@ async fn matrix() {
                     ids.sort();
                     assert_eq!(
                         ids,
-                        [component("sink"), component("source"), component("transform")],
+                        [component(77), component(101), component(429)],
                         "{case}"
                     );
                 }
@@ -326,7 +350,7 @@ async fn matrix() {
                 dropped.sort();
                 assert_eq!(
                     dropped,
-                    [component("sink"), component("source"), component("transform")],
+                    [component(77), component(101), component(429)],
                     "{case}"
                 );
                 combinations += 1;

@@ -58,7 +58,7 @@ use crate::otlp::proto::collector::trace::v1::{
 
 /// Shared runtime used by both transports and the TTL sweeper.
 pub struct OtelRuntime {
-    pub source_id: String,
+    pub source_id: drasi_lib::ComponentId,
     pub config: Arc<OtelSourceConfig>,
     pub base: SourceBase,
     pub lifecycle: Arc<RwLock<LifecycleState>>,
@@ -203,7 +203,10 @@ impl OtelRuntime {
         let Some(wal) = &self.wal else {
             return Ok(None);
         };
-        match wal.append(&self.source_id, change).await {
+        match wal
+            .append(&drasi_lib::StorageScope::default(), &self.source_id, change)
+            .await
+        {
             Ok(seq) => Ok(Some(seq)),
             Err(WalError::CapacityExhausted(msg)) => {
                 Err(anyhow::anyhow!("WAL capacity exhausted: {msg}"))
@@ -258,7 +261,14 @@ impl OtelRuntime {
                 }
             }
         };
-        if let Err(e) = store.set(&self.source_id, "lifecycle", bytes).await {
+        if let Err(e) = store
+            .set(
+                &drasi_lib::StorePartition::component(self.source_id.clone()),
+                "lifecycle",
+                bytes,
+            )
+            .await
+        {
             warn!("[{}] failed to persist lifecycle: {e}", self.source_id);
         }
     }
@@ -683,9 +693,14 @@ mod tests {
     }
 
     fn runtime(config: OtelSourceConfig) -> OtelRuntime {
-        let base = SourceBase::new(SourceBaseParams::new("otel")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         OtelRuntime {
-            source_id: "otel".to_string(),
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
             config: Arc::new(config),
             base,
             lifecycle: Arc::new(RwLock::new(LifecycleState::default())),

@@ -149,13 +149,17 @@ impl Default for OracleBootstrapProviderBuilder {
 
 struct OracleBootstrapHandler {
     config: OracleSourceConfig,
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     pk_cache: PrimaryKeyCache,
     snapshot_scn: Option<Scn>,
 }
 
 impl OracleBootstrapHandler {
-    fn new(config: OracleSourceConfig, source_id: String, snapshot_scn: Option<Scn>) -> Self {
+    fn new(
+        config: OracleSourceConfig,
+        source_id: drasi_lib::ComponentId,
+        snapshot_scn: Option<Scn>,
+    ) -> Self {
         Self {
             config,
             source_id,
@@ -197,7 +201,7 @@ impl OracleBootstrapHandler {
                 let effective_from = timestamp.timestamp_millis() as u64;
                 let element = Element::Node {
                     metadata: ElementMetadata {
-                        reference: ElementReference::new(&self.source_id, &element_id),
+                        reference: ElementReference::new(self.source_id.as_str(), &element_id),
                         labels: Arc::from([Arc::from(table_name.to_lowercase())]),
                         effective_from,
                     },

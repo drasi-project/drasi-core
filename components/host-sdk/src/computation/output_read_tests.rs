@@ -94,11 +94,11 @@ fn out() -> PortId {
     PortId::try_new("out").unwrap()
 }
 
-fn producer_for(component: &str) -> GraphProducerIdentity {
+fn producer_for(component: &ComponentId) -> GraphProducerIdentity {
     GraphProducerIdentity::new(
         "scope".into(),
         "graph".into(),
-        ComponentId::try_new(component).unwrap(),
+        component.clone(),
         StreamId::try_new(format!("{component}/out")).unwrap(),
         true,
     )
@@ -138,7 +138,7 @@ fn logical_envelope(identity: &GraphProducerIdentity, logical: u64) -> ChangeEnv
 impl Shared {
     fn new(component: &ComponentId) -> Arc<Self> {
         Arc::new(Self {
-            identity: producer_for(component.as_str()),
+            identity: producer_for(component),
             log: Mutex::new(Log {
                 head: 0,
                 oldest: 1,
@@ -244,7 +244,16 @@ impl Provider {
                 OutputSnapshot::try_new(self.0.cursor(head), DATASET, other, Default::default())
             }
             Mode::ForeignCursor => OutputSnapshot::try_new(
-                OutputCursor::try_new(producer_for("someone-else"), head).unwrap(),
+                OutputCursor::try_new(
+                    producer_for(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000445",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    head,
+                )
+                .unwrap(),
                 DATASET,
                 descriptor,
                 Default::default(),
@@ -303,7 +312,14 @@ impl ReplayProvider for Provider {
             return Err(error);
         }
         if mode == Mode::ForeignCursor {
-            return Ok(OutputCursor::try_new(producer_for("someone-else"), head).unwrap());
+            return Ok(OutputCursor::try_new(
+                producer_for(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000445")
+                        .expect("fixture UUID"),
+                ),
+                head,
+            )
+            .unwrap());
         }
         Ok(self.0.cursor(head))
     }
@@ -504,10 +520,40 @@ fn fixture(kind: Kind) -> anyhow::Result<Fixture> {
 }
 
 impl Fixture {
-    fn create(&self, name: &str) -> anyhow::Result<(NativeComponentProxy, Arc<Shared>)> {
-        let proxy =
-            self.plugin.factories()[0].create_component(ComponentId::try_new(name)?, json!({}))?;
-        let shared = self.created.lock().unwrap()[name].clone();
+    fn try_create(&self, name: &str) -> anyhow::Result<(NativeComponentProxy, Arc<Shared>)> {
+        let id = component_id(match name {
+            "source" => 1,
+            "component" => 2,
+            "transformer" => 3,
+            "mismatch" => 4,
+            "paged-observation" => 5,
+            "paged-release" => 6,
+            "stopped-transfer" => 7,
+            "raw" => 8,
+            "pending" => 9,
+            "errors" => 10,
+            "lifecycle" => 11,
+            "cancelled" => 12,
+            "limits" => 13,
+            "replaced" => 14,
+            "replaced-again" => 15,
+            "follow" => 16,
+            "follow-errors" => 17,
+            "follow-lifecycle" => 18,
+            "follow-independent" => 19,
+            "raw-follow" => 20,
+            "release-next" => 21,
+            "release-open" => 22,
+            other => panic!("missing explicit fixture component ID for {other}"),
+        });
+        let proxy = self.plugin.factories()[0].create_component(id.clone(), json!({}))?;
+        let shared = self.created.lock().unwrap()[id.as_str()].clone();
+        Ok((proxy, shared))
+    }
+
+    async fn create(&self, name: &str) -> anyhow::Result<(NativeComponentProxy, Arc<Shared>)> {
+        let (mut proxy, shared) = self.try_create(name)?;
+        proxy.initialize().await?;
         Ok((proxy, shared))
     }
 }
@@ -536,7 +582,7 @@ fn logical(envelope: &ChangeEnvelope) -> u64 {
 #[tokio::test(flavor = "current_thread")]
 async fn source_snapshot_and_replay_cross_the_exported_tables() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("source")?;
+    let (mut proxy, shared) = fixture.create("source").await?;
     shared.commit(3);
     proxy.start().await?;
     let readers = proxy.output_readers();
@@ -585,7 +631,7 @@ async fn snapshot_and_replay_capabilities_are_independent_per_output() -> anyhow
         let capabilities = &fixture.plugin.factories()[0].metadata().capabilities;
         assert_eq!(!capabilities.output_snapshots.is_empty(), snapshot);
         assert_eq!(!capabilities.output_replays.is_empty(), replay);
-        let (proxy, _) = fixture.create("component")?;
+        let (proxy, _) = fixture.create("component").await?;
         let readers = proxy.output_readers();
         let registered = &readers.ports()[&out()];
         assert_eq!(registered.snapshot().is_some(), snapshot, "{kind:?}");
@@ -593,7 +639,7 @@ async fn snapshot_and_replay_capabilities_are_independent_per_output() -> anyhow
         assert_eq!(readers.ports().len(), 1);
     }
     let fixture = fixture(Kind::Transformer)?;
-    let (mut proxy, shared) = fixture.create("transformer")?;
+    let (mut proxy, shared) = fixture.create("transformer").await?;
     shared.commit(2);
     proxy.start().await?;
     let readers = proxy.output_readers();
@@ -607,7 +653,7 @@ async fn snapshot_and_replay_capabilities_are_independent_per_output() -> anyhow
 async fn declarations_must_match_registrations_and_declared_outputs() -> anyhow::Result<()> {
     for kind in [Kind::DeclaredNotRegistered, Kind::RegisteredNotDeclared] {
         assert!(
-            fixture(kind)?.create("mismatch").is_err(),
+            fixture(kind)?.try_create("mismatch").is_err(),
             "{kind:?} created a component"
         );
     }
@@ -683,7 +729,7 @@ async fn transfer_owns_one_observation_and_cannot_cross_activation() -> anyhow::
         *sdk::ExportedPlugin::new(definition(Kind::Both, &Created::default())?)?.output_reads()
     };
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("paged-observation")?;
+    let (mut proxy, shared) = fixture.create("paged-observation").await?;
     shared.commit(2049);
     proxy.start().await?;
     let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
@@ -763,7 +809,7 @@ async fn transfer_release_cancels_unpolled_work_and_returns_capacity() -> anyhow
         *sdk::ExportedPlugin::new(definition(Kind::Both, &Created::default())?)?.output_reads()
     };
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("paged-release")?;
+    let (mut proxy, shared) = fixture.create("paged-release").await?;
     proxy.start().await?;
     let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
     let mut held = Vec::new();
@@ -812,7 +858,7 @@ async fn stop_releases_an_abandoned_transfer_without_any_follow_lease() -> anyho
         *sdk::ExportedPlugin::new(definition(Kind::Both, &Created::default())?)?.output_reads()
     };
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("stopped-transfer")?;
+    let (mut proxy, shared) = fixture.create("stopped-transfer").await?;
     proxy.start().await?;
     shared.block(true);
     let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
@@ -842,7 +888,7 @@ async fn raw_extension_rejects_unknown_ports_capabilities_and_operations() -> an
         *sdk::ExportedPlugin::new(definition(Kind::SnapshotOnly, &created)?)?.output_reads()
     };
     let fixture = fixture(Kind::SnapshotOnly)?;
-    let (proxy, _) = fixture.create("raw")?;
+    let (proxy, _) = fixture.create("raw").await?;
 
     let code =
         |result: Result<abi::output_reads::OutputReadHandle, sdk::transport::Failure>| match result
@@ -905,7 +951,7 @@ async fn raw_extension_rejects_unknown_ports_capabilities_and_operations() -> an
 async fn reads_are_independent_of_pending_data_work_and_retire_with_the_proxy() -> anyhow::Result<()>
 {
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("pending")?;
+    let (mut proxy, shared) = fixture.create("pending").await?;
     shared.commit(2);
     proxy.start().await?;
     let readers = proxy.output_readers();
@@ -953,7 +999,7 @@ async fn reads_are_independent_of_pending_data_work_and_retire_with_the_proxy() 
 #[tokio::test(flavor = "current_thread")]
 async fn typed_errors_are_preserved_and_never_become_empty_results() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("errors")?;
+    let (mut proxy, shared) = fixture.create("errors").await?;
     proxy.start().await?;
     let readers = proxy.output_readers();
     let (snapshot, replay) = (snapshots(&readers), replays(&readers));
@@ -981,7 +1027,13 @@ async fn typed_errors_are_preserved_and_never_become_empty_results() -> anyhow::
         3
     );
 
-    let foreign = OutputCursor::try_new(producer_for("errors"), 4)?;
+    let foreign = OutputCursor::try_new(
+        producer_for(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000446")
+                .expect("fixture UUID"),
+        ),
+        4,
+    )?;
     let Err(OutputReadError::EpochChanged { requested, current }) =
         replay.replay_after(&foreign).await
     else {
@@ -1029,7 +1081,7 @@ async fn typed_errors_are_preserved_and_never_become_empty_results() -> anyhow::
 #[tokio::test(flavor = "current_thread")]
 async fn inactive_components_are_not_ready_and_stop_ends_in_flight_reads() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("lifecycle")?;
+    let (mut proxy, shared) = fixture.create("lifecycle").await?;
     shared.commit(1);
     let readers = proxy.output_readers();
     let snapshot = snapshots(&readers);
@@ -1069,7 +1121,7 @@ async fn inactive_components_are_not_ready_and_stop_ends_in_flight_reads() -> an
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_reads_release_their_slots_and_cancel_the_provider() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("cancelled")?;
+    let (mut proxy, shared) = fixture.create("cancelled").await?;
     shared.commit(1);
     proxy.start().await?;
     let readers = proxy.output_readers();
@@ -1098,7 +1150,7 @@ async fn cancelled_reads_release_their_slots_and_cancel_the_provider() -> anyhow
 #[tokio::test(flavor = "current_thread")]
 async fn large_snapshots_and_replay_use_complete_bounded_transfers() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
-    let (mut proxy, shared) = fixture.create("limits")?;
+    let (mut proxy, shared) = fixture.create("limits").await?;
     proxy.start().await?;
     let readers = proxy.output_readers();
 
@@ -1166,14 +1218,14 @@ async fn large_snapshots_and_replay_use_complete_bounded_transfers() -> anyhow::
 #[tokio::test(flavor = "current_thread")]
 async fn a_replaced_component_never_serves_its_successor_or_predecessor() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
-    let (mut first, first_state) = fixture.create("replaced")?;
+    let (mut first, first_state) = fixture.create("replaced").await?;
     first_state.commit(1);
     first.start().await?;
     let old = snapshots(&first.output_readers());
     first.stop().await?;
     drop(first);
 
-    let (mut second, second_state) = fixture.create("replaced-again")?;
+    let (mut second, second_state) = fixture.create("replaced-again").await?;
     second_state.commit(2);
     second.start().await?;
     let new = snapshots(&second.output_readers());
@@ -1202,7 +1254,7 @@ fn open_limits() -> OutputFollowLimits {
 #[tokio::test(flavor = "current_thread")]
 async fn follow_delivers_a_coherent_snapshot_then_the_live_tail_in_order() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Follow)?;
-    let (mut proxy, shared) = fixture.create("follow")?;
+    let (mut proxy, shared) = fixture.create("follow").await?;
     shared.commit(2);
     proxy.start().await?;
     let readers = proxy.output_readers();
@@ -1234,7 +1286,7 @@ async fn follow_delivers_a_coherent_snapshot_then_the_live_tail_in_order() -> an
 #[tokio::test(flavor = "current_thread")]
 async fn follow_lag_expiry_and_capacity_are_distinct_typed_errors() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Follow)?;
-    let (mut proxy, shared) = fixture.create("follow-errors")?;
+    let (mut proxy, shared) = fixture.create("follow-errors").await?;
     proxy.start().await?;
     let readers = proxy.output_readers();
     let provider = follow_provider(&readers);
@@ -1332,7 +1384,7 @@ async fn follow_lag_expiry_and_capacity_are_distinct_typed_errors() -> anyhow::R
 #[tokio::test(flavor = "current_thread")]
 async fn stop_releases_leases_and_a_restart_never_revives_them() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Follow)?;
-    let (mut proxy, shared) = fixture.create("follow-lifecycle")?;
+    let (mut proxy, shared) = fixture.create("follow-lifecycle").await?;
     proxy.start().await?;
     let readers = proxy.output_readers();
     let provider = follow_provider(&readers);
@@ -1393,7 +1445,7 @@ async fn stop_releases_leases_and_a_restart_never_revives_them() -> anyhow::Resu
 #[tokio::test(flavor = "current_thread")]
 async fn a_pending_follow_does_not_block_other_output_reads() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Follow)?;
-    let (mut proxy, shared) = fixture.create("follow-independent")?;
+    let (mut proxy, shared) = fixture.create("follow-independent").await?;
     shared.commit(1);
     proxy.start().await?;
     let readers = proxy.output_readers();
@@ -1430,7 +1482,7 @@ async fn follow_declarations_must_match_registrations_and_outputs() -> anyhow::R
         Kind::FollowRegisteredNotDeclared,
     ] {
         assert!(
-            fixture(kind)?.create("mismatch").is_err(),
+            fixture(kind)?.try_create("mismatch").is_err(),
             "{kind:?} created a component"
         );
     }
@@ -1480,7 +1532,7 @@ async fn raw_lease_retains_an_unacknowledged_item_until_it_is_observed() -> anyh
     let table =
         unsafe { *sdk::ExportedPlugin::new(definition(Kind::Follow, &created)?)?.output_follow() };
     let fixture = fixture(Kind::Follow)?;
-    let (mut proxy, shared) = fixture.create("raw-follow")?;
+    let (mut proxy, shared) = fixture.create("raw-follow").await?;
 
     let mut provider = follow::OutputFollowProviderHandle::null();
     let status = |result: Result<(), sdk::transport::Failure>| result.err().map(|e| e.code);
@@ -1678,7 +1730,7 @@ async fn releasing_a_lease_drops_a_running_next_while_its_operation_is_retained(
 ) -> anyhow::Result<()> {
     let table = raw_follow_table()?;
     let fixture = fixture(Kind::Follow)?;
-    let (mut proxy, _shared) = fixture.create("release-next")?;
+    let (mut proxy, _shared) = fixture.create("release-next").await?;
     proxy.start().await?;
     let provider = raw_follow_provider(&table, &proxy)?;
 
@@ -1730,7 +1782,7 @@ async fn releasing_a_lease_cancels_its_pending_open_while_its_operation_is_retai
 ) -> anyhow::Result<()> {
     let table = raw_follow_table()?;
     let fixture = fixture(Kind::Follow)?;
-    let (mut proxy, shared) = fixture.create("release-open")?;
+    let (mut proxy, shared) = fixture.create("release-open").await?;
     proxy.start().await?;
     let provider = raw_follow_provider(&table, &proxy)?;
 

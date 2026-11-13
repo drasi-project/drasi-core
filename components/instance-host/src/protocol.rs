@@ -121,15 +121,15 @@ pub enum ControlCommand {
     },
     StopTree,
     RepairChild {
-        component: String,
+        component: drasi_lib::ComponentId,
         generation: Uuid,
     },
     StopChild {
-        component: String,
+        component: drasi_lib::ComponentId,
         generation: Uuid,
     },
     ForceChild {
-        component: String,
+        component: drasi_lib::ComponentId,
         generation: Uuid,
     },
     /// CLI process boundary only; never a DrasiLib component cancellation mode.

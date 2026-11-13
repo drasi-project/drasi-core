@@ -831,8 +831,18 @@ fn rpc_error(code: i64, message: &str) -> Value {
 
 async fn initialize_with_store(reaction: &A2AReaction, store: Arc<MemoryStateStoreProvider>) {
     let (update_tx, _rx) = tokio::sync::mpsc::channel(16);
-    let context = ReactionRuntimeContext::new("a2a-g", reaction.id(), Some(store), update_tx, None);
-    reaction.initialize(context).await;
+    let context = ReactionRuntimeContext::new(
+        "a2a-g",
+        reaction.id().clone(),
+        vec![
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        ],
+        Some(store),
+        update_tx,
+        None,
+    );
+    reaction.bind_runtime_context(context).await;
 }
 
 fn memory_store() -> Arc<MemoryStateStoreProvider> {
@@ -2042,8 +2052,10 @@ async fn run_one_process(case: &ProcCase) -> Result<(), String> {
             .await;
     }
 
-    let mut builder = A2AReaction::builder(format!("g-{}", case.name))
-        .with_query("q1")
+    let mut builder = A2AReaction::builder(drasi_lib::ComponentId::generate())
+        .with_query_by_name(
+            drasi_lib::ComponentName::try_new("q1").expect("fixture component name"),
+        )
         .with_endpoint(server.uri())
         .with_result_key_fields(case.keys.iter().copied())
         .with_terminal_update_policy(case.policy);
@@ -2064,7 +2076,12 @@ async fn run_one_process(case: &ProcCase) -> Result<(), String> {
         match event {
             Event::Add { seq, extra, .. } => {
                 reaction
-                    .enqueue_query_result(mock_source::add_result("q1", *seq, extra.clone()))
+                    .enqueue_query_result(mock_source::add_result(
+                        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                            .expect("fixture UUID"),
+                        *seq,
+                        extra.clone(),
+                    ))
                     .await
                     .map_err(|e| e.to_string())?;
             }
@@ -2072,7 +2089,8 @@ async fn run_one_process(case: &ProcCase) -> Result<(), String> {
                 let before = after.clone();
                 reaction
                     .enqueue_query_result(mock_source::update_result(
-                        "q1",
+                        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                            .expect("fixture UUID"),
                         *seq,
                         before,
                         after.clone(),
@@ -2096,7 +2114,12 @@ async fn run_one_process(case: &ProcCase) -> Result<(), String> {
                     data = json!({"arr":[1,2]});
                 }
                 reaction
-                    .enqueue_query_result(mock_source::delete_result("q1", *seq, data))
+                    .enqueue_query_result(mock_source::delete_result(
+                        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                            .expect("fixture UUID"),
+                        *seq,
+                        data,
+                    ))
                     .await
                     .map_err(|e| e.to_string())?;
             }

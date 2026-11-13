@@ -6,7 +6,7 @@
 //! panic containment without adding failure injection to production plugins.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     ffi::c_void,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -31,6 +31,10 @@ use drasi_plugin_sdk::ffi::{
     build_source_vtable_from_boxed, FfiLifecycleEventType, ReactionVtable,
 };
 
+#[path = "fixtures/plugin_directory.rs"]
+mod plugin_directory;
+use plugin_directory::plugin_dir;
+
 #[derive(Default)]
 struct Counts {
     initialized: AtomicUsize,
@@ -38,6 +42,8 @@ struct Counts {
     started: AtomicUsize,
     mutations: AtomicUsize,
     stops: AtomicUsize,
+    disposals: AtomicUsize,
+    running: AtomicBool,
     allow_cleanup: AtomicBool,
     cleaned: AtomicBool,
     dropped: AtomicBool,
@@ -46,6 +52,7 @@ struct Counts {
 struct Probe {
     counts: Arc<Counts>,
     panic: bool,
+    bound_store: Mutex<Option<Arc<dyn StateStoreProvider>>>,
     store: Mutex<Option<Arc<dyn StateStoreProvider>>>,
 }
 
@@ -65,22 +72,27 @@ impl Probe {
     }
     async fn start_instance(&self) -> anyhow::Result<()> {
         self.counts.started.fetch_add(1, Ordering::SeqCst);
+        self.counts.running.store(true, Ordering::SeqCst);
         Ok(())
     }
     async fn stop_instance(&self) -> anyhow::Result<()> {
         self.counts.stops.fetch_add(1, Ordering::SeqCst);
+        self.counts.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn dispose_instance(&self) -> anyhow::Result<()> {
+        self.counts.disposals.fetch_add(1, Ordering::SeqCst);
         anyhow::ensure!(
             self.counts.allow_cleanup.load(Ordering::SeqCst),
             "cleanup is blocked"
         );
         self.store.lock().expect("partial initialization").take();
+        self.bound_store.lock().expect("context ownership").take();
         self.counts.cleaned.store(true, Ordering::SeqCst);
         Ok(())
     }
     fn status_value(&self) -> ComponentStatus {
-        if self.counts.started.load(Ordering::SeqCst) != 0
-            && !self.counts.cleaned.load(Ordering::SeqCst)
-        {
+        if self.counts.running.load(Ordering::SeqCst) {
             ComponentStatus::Running
         } else {
             ComponentStatus::Stopped
@@ -96,8 +108,13 @@ impl Drop for Probe {
 
 #[async_trait]
 impl Source for Probe {
-    fn id(&self) -> &str {
-        "initializer"
+    fn id(&self) -> &drasi_core_types::ComponentId {
+        static ID: std::sync::LazyLock<drasi_core_types::ComponentId> =
+            std::sync::LazyLock::new(|| {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000121")
+                    .expect("fixture UUID")
+            });
+        &ID
     }
     fn type_name(&self) -> &str {
         "initialization-probe"
@@ -111,14 +128,26 @@ impl Source for Probe {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.initialize_store(context.state_store).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        *self.bound_store.lock().expect("source context binding") = context.state_store;
+    }
+    async fn initialize(&self) -> anyhow::Result<()> {
+        let store = self
+            .bound_store
+            .lock()
+            .expect("source context binding")
+            .clone();
+        self.initialize_store(store).await;
+        Ok(())
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.start_instance().await
     }
     async fn stop(&self) -> anyhow::Result<()> {
         self.stop_instance().await
+    }
+    async fn dispose(&self) -> anyhow::Result<()> {
+        self.dispose_instance().await
     }
     async fn status(&self) -> ComponentStatus {
         self.status_value()
@@ -137,8 +166,13 @@ impl Source for Probe {
 
 #[async_trait]
 impl Reaction for Probe {
-    fn id(&self) -> &str {
-        "initializer"
+    fn id(&self) -> &drasi_core_types::ComponentId {
+        static ID: std::sync::LazyLock<drasi_core_types::ComponentId> =
+            std::sync::LazyLock::new(|| {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000121")
+                    .expect("fixture UUID")
+            });
+        &ID
     }
     fn type_name(&self) -> &str {
         "initialization-probe"
@@ -146,20 +180,32 @@ impl Reaction for Probe {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()
     }
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
         vec![]
     }
     fn auto_start(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.initialize_store(context.state_store).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        *self.bound_store.lock().expect("reaction context binding") = context.state_store;
+    }
+    async fn initialize(&self) -> anyhow::Result<()> {
+        let store = self
+            .bound_store
+            .lock()
+            .expect("reaction context binding")
+            .clone();
+        self.initialize_store(store).await;
+        Ok(())
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.start_instance().await
     }
     async fn stop(&self) -> anyhow::Result<()> {
         self.stop_instance().await
+    }
+    async fn dispose(&self) -> anyhow::Result<()> {
+        self.dispose_instance().await
     }
     async fn status(&self) -> ComponentStatus {
         self.status_value()
@@ -224,7 +270,7 @@ extern "C" fn unused_executor(_: *mut c_void) -> *mut c_void {
     panic!("the lifecycle bridge must use the plugin runtime")
 }
 
-fn unexpected_fallback(_: &str, _: FfiLifecycleEventType, _: &str) {
+fn unexpected_fallback(_: &drasi_core_types::ComponentId, _: FfiLifecycleEventType, _: &str) {
     panic!("initialized instances must use their own lifecycle callback")
 }
 
@@ -264,6 +310,7 @@ impl Factory {
         Probe {
             counts,
             panic,
+            bound_store: Mutex::new(None),
             store: Mutex::new(None),
         }
     }
@@ -299,7 +346,7 @@ impl SourcePluginConstructor for Factory {
         } else {
             build_source_vtable(source, unused_executor, unexpected_fallback, runtime)
         };
-        Ok(Box::new(SourceProxy::new(table, self.library.clone())))
+        Ok(Box::new(SourceProxy::new(table, self.library.clone())?))
     }
 }
 
@@ -309,7 +356,7 @@ impl ReactionPluginConstructor for Factory {
         Ok(Box::new(ReactionProxy::new(
             self.reaction_table(),
             self.library.clone(),
-        )))
+        )?))
     }
 }
 
@@ -319,7 +366,7 @@ enum Plugin {
 }
 
 impl Plugin {
-    async fn initialize(
+    async fn bind_runtime_context(
         &self,
         store: Option<Arc<dyn StateStoreProvider>>,
     ) -> tokio::sync::mpsc::Receiver<ComponentUpdate> {
@@ -327,27 +374,46 @@ impl Plugin {
         match self {
             Self::Source(source) => {
                 source
-                    .initialize(SourceRuntimeContext::new(
+                    .bind_runtime_context(SourceRuntimeContext::new(
                         "init-failure",
-                        "initializer",
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000121",
+                        )
+                        .expect("fixture UUID"),
                         store,
                         sender,
                         None,
                     ))
-                    .await
+                    .await;
             }
             Self::Reaction(reaction) => {
                 reaction
-                    .initialize(ReactionRuntimeContext::new(
+                    .bind_runtime_context(ReactionRuntimeContext::new(
                         "init-failure",
-                        "initializer",
+                        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000121")
+                            .expect("fixture UUID"),
+                        vec![],
                         store,
                         sender,
                         None,
                     ))
-                    .await
+                    .await;
             }
         }
+        observer
+    }
+    async fn initialize_result(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(source) => source.initialize().await,
+            Self::Reaction(reaction) => reaction.initialize().await,
+        }
+    }
+    async fn initialize(
+        &self,
+        store: Option<Arc<dyn StateStoreProvider>>,
+    ) -> tokio::sync::mpsc::Receiver<ComponentUpdate> {
+        let observer = self.bind_runtime_context(store).await;
+        let _ = self.initialize_result().await;
         observer
     }
     async fn start(&self) -> anyhow::Result<()> {
@@ -362,6 +428,12 @@ impl Plugin {
             Self::Reaction(reaction) => reaction.stop().await,
         }
     }
+    async fn dispose(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(source) => source.dispose().await,
+            Self::Reaction(reaction) => reaction.dispose().await,
+        }
+    }
     async fn status(&self) -> ComponentStatus {
         match self {
             Self::Source(source) => source.status().await,
@@ -373,9 +445,15 @@ impl Plugin {
             Self::Source(source) => {
                 assert!(source
                     .subscribe(drasi_lib::config::SourceSubscriptionSettings {
-                        source_id: "initializer".into(),
+                        source_id: drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000121"
+                        )
+                        .expect("fixture UUID"),
                         enable_bootstrap: false,
-                        query_id: "query".into(),
+                        query_id: drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002e"
+                        )
+                        .expect("fixture UUID"),
                         nodes: Default::default(),
                         relations: Default::default(),
                         resume_from: None,
@@ -396,7 +474,10 @@ impl Plugin {
             Self::Reaction(reaction) => {
                 let error = reaction
                     .bootstrap(BootstrapContext::from_backend(
-                        "query".into(),
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002e",
+                        )
+                        .expect("fixture UUID"),
                         false,
                         Box::new(RejectedBackend),
                     ))
@@ -452,7 +533,9 @@ async fn generated_c_initializers_preserve_panics_and_forbid_reusing_the_instanc
                 "{error:#}"
             );
             assert!(
-                error.to_string().contains("recreate this plugin instance"),
+                error
+                    .to_string()
+                    .contains("dispose and recreate this instance"),
                 "{error:#}"
             );
             let rejected_store = Arc::new(drasi_lib::MemoryStateStoreProvider::new());
@@ -466,8 +549,15 @@ async fn generated_c_initializers_preserve_panics_and_forbid_reusing_the_instanc
             assert_eq!(counts.mutations.load(Ordering::SeqCst), 0);
             assert_eq!(counts.initialized.load(Ordering::SeqCst), 1);
             assert_eq!(counts.started.load(Ordering::SeqCst), 0);
+            plugin.stop().await.unwrap();
+            assert!(
+                weak.upgrade().is_some(),
+                "stop alone must retain failed-initialization ownership"
+            );
+            assert!(!counts.cleaned.load(Ordering::SeqCst));
+            assert_eq!(counts.disposals.load(Ordering::SeqCst), 0);
             assert!(plugin
-                .stop()
+                .dispose()
                 .await
                 .unwrap_err()
                 .to_string()
@@ -477,7 +567,12 @@ async fn generated_c_initializers_preserve_panics_and_forbid_reusing_the_instanc
                 "failed cleanup must retain partial state"
             );
             counts.allow_cleanup.store(true, Ordering::SeqCst);
-            plugin.stop().await.unwrap();
+            plugin.dispose().await.unwrap();
+            assert!(counts.cleaned.load(Ordering::SeqCst));
+            assert!(
+                weak.upgrade().is_none(),
+                "confirmed disposal releases the partially initialized store"
+            );
             let _cleanup_observer = plugin.initialize(None).await;
             plugin.rejected_operations().await;
             assert!(
@@ -519,7 +614,9 @@ async fn poisoned_reactions_reject_delivery_without_leaving_a_pending_forwarder(
         let table = factory.reaction_table();
         let state = table.state;
         let push = table.start_result_push_fn;
-        let plugin = Plugin::Reaction(Box::new(ReactionProxy::new(table, factory.library.clone())));
+        let plugin = Plugin::Reaction(Box::new(
+            ReactionProxy::new(table, factory.library.clone()).expect("reaction proxy"),
+        ));
         let _observer = plugin.initialize(None).await;
         let counts = Arc::new(PushCounts::default());
         push(
@@ -533,6 +630,7 @@ async fn poisoned_reactions_reject_delivery_without_leaving_a_pending_forwarder(
         let instance = factory.instances().remove(0);
         instance.allow_cleanup.store(true, Ordering::SeqCst);
         plugin.stop().await.unwrap();
+        plugin.dispose().await.unwrap();
         drop(plugin);
         wait_dropped(&instance).await;
     }
@@ -540,12 +638,10 @@ async fn poisoned_reactions_reject_delivery_without_leaving_a_pending_forwarder(
 
 #[tokio::test]
 async fn separately_built_initializer_panic_retains_partial_state_until_cleanup() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug")
-        .join(libloading::library_filename("drasi_reaction_snapshot_test"));
+    let path = plugin_dir().join(libloading::library_filename("drasi_reaction_snapshot_test"));
     assert!(
         path.is_file(),
-        "build the fault fixture with `make build-test-plugins`: {}",
+        "build/stage the fault fixture in the selected ordinary plugin directory: {}",
         path.display()
     );
     let library = drasi_host_sdk::loader::load_plugin_from_path(
@@ -563,7 +659,8 @@ async fn separately_built_initializer_panic_retains_partial_state_until_cleanup(
     assert_eq!(descriptor.kind(), "snapshot-test");
     let reaction = descriptor
         .create_reaction(
-            "initializer",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000121")
+                .expect("fixture UUID"),
             vec![],
             &serde_json::json!({"panic_on_initialize": true}),
             false,
@@ -597,7 +694,12 @@ async fn separately_built_initializer_panic_retains_partial_state_until_cleanup(
             .contains("snapshot-test initialization panic"),
         "{error:#}"
     );
-    plugin.stop().await.expect("cleanup the failed instance");
+    plugin.stop().await.expect("stop the failed instance");
+    assert!(
+        weak.upgrade().is_some(),
+        "stop alone must retain the partially initialized store"
+    );
+    plugin.dispose().await.expect("dispose the failed instance");
     assert!(
         weak.upgrade().is_none(),
         "confirmed cleanup releases partial state"
@@ -606,13 +708,19 @@ async fn separately_built_initializer_panic_retains_partial_state_until_cleanup(
     assert_eq!(plugin.status().await, ComponentStatus::Error);
     assert!(
         plugin.start().await.is_err(),
-        "successful stop does not undo initialization failure"
+        "successful disposal does not undo initialization failure"
     );
     drop(plugin);
 
     let fresh = Plugin::Reaction(
         descriptor
-            .create_reaction("initializer", vec![], &serde_json::json!({}), false)
+            .create_reaction(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000121")
+                    .expect("fixture UUID"),
+                vec![],
+                &serde_json::json!({}),
+                false,
+            )
             .await
             .expect("construct fresh instance after cleanup"),
     );
@@ -620,68 +728,337 @@ async fn separately_built_initializer_panic_retains_partial_state_until_cleanup(
     fresh.start().await.expect("fresh instance can activate");
     assert_eq!(fresh.status().await, ComponentStatus::Running);
     fresh.stop().await.expect("stop fresh instance");
+    fresh.dispose().await.expect("dispose fresh instance");
+}
+
+struct GraphProbe {
+    descriptor: ComponentDescriptor,
+    plugin: Plugin,
+    store: Option<Arc<dyn StateStoreProvider>>,
+    observer: Option<tokio::sync::mpsc::Receiver<ComponentUpdate>>,
+}
+
+#[async_trait]
+impl ComputationComponent for GraphProbe {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.observer = Some(self.plugin.bind_runtime_context(self.store.take()).await);
+        self.plugin.initialize_result().await
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        self.plugin.start().await
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        self.plugin.stop().await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.plugin.dispose().await
+    }
+}
+
+#[async_trait]
+impl ComputationService for GraphProbe {
+    async fn run(&mut self) -> anyhow::Result<()> {
+        std::future::pending().await
+    }
+}
+
+struct ReconstructionFactory {
+    descriptor: FactoryDescriptor,
+    probes: Arc<Factory>,
+    source: bool,
+}
+
+impl ReconstructionFactory {
+    fn new(probes: Arc<Factory>, source: bool) -> Self {
+        Self {
+            descriptor: FactoryDescriptor {
+                implementation: ImplementationIdentity::try_new("test/initializer-owner", "1")
+                    .expect("fixture initializer-owner implementation"),
+                role: ComponentRole::Service,
+                configuration_version: 1,
+                configuration: ConfigurationSchema {
+                    fields: [(
+                        Arc::from("panic"),
+                        ConfigurationField {
+                            value_type: ConfigurationType::Boolean,
+                            required: true,
+                            secret: false,
+                            constraint: None,
+                        },
+                    )]
+                    .into(),
+                    allow_additional: false,
+                },
+                dependencies: BTreeMap::new(),
+            },
+            probes,
+            source,
+        }
+    }
+    fn specification(&self, id: ComponentId, panic: bool) -> ComponentSpecification {
+        ComponentSpecification {
+            descriptor: ComponentDescriptor::try_new(id, vec![])
+                .expect("fixture service descriptor"),
+            role: ComponentRole::Service,
+            completion: None,
+            implementation: self.descriptor.implementation.clone(),
+            configuration_version: 1,
+            configuration: [(
+                Arc::from("panic"),
+                ConfigurationValue::Literal(panic.into()),
+            )]
+            .into(),
+            dependencies: BTreeMap::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl ComponentFactory for ReconstructionFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            specification.role == ComponentRole::Service
+                && specification.descriptor.ports().is_empty()
+                && specification.completion.is_none(),
+            "initializer fixture requires a portless service"
+        );
+        Ok(())
+    }
+    fn plan_update(
+        &self,
+        _: &ComponentSpecification,
+        _: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        let construct = || -> anyhow::Result<ConstructedComponent> {
+            let mut probe = self.probes.next();
+            probe.panic = context
+                .configuration()
+                .get("panic")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| anyhow::anyhow!("missing initializer fault configuration"))?;
+            let plugin = if self.source {
+                let table = if self.probes.boxed {
+                    build_source_vtable_from_boxed(
+                        Box::new(probe),
+                        unused_executor,
+                        unexpected_fallback,
+                        runtime,
+                    )
+                } else {
+                    build_source_vtable(probe, unused_executor, unexpected_fallback, runtime)
+                };
+                Plugin::Source(Box::new(SourceProxy::new(
+                    table,
+                    self.probes.library.clone(),
+                )?))
+            } else {
+                let table = if self.probes.boxed {
+                    build_reaction_vtable_from_boxed(
+                        Box::new(probe),
+                        unused_executor,
+                        unexpected_fallback,
+                        runtime,
+                    )
+                } else {
+                    build_reaction_vtable(probe, unused_executor, unexpected_fallback, runtime)
+                };
+                Plugin::Reaction(Box::new(ReactionProxy::new(
+                    table,
+                    self.probes.library.clone(),
+                )?))
+            };
+            Ok(ConstructedComponent::service(Box::new(GraphProbe {
+                descriptor: context.specification.descriptor.clone(),
+                plugin,
+                store: Some(Arc::new(drasi_lib::MemoryStateStoreProvider::new())),
+                observer: None,
+            })))
+        };
+        construct().map_err(ComponentCreationError::terminal)
+    }
 }
 
 #[tokio::test]
 async fn framework_reconstructs_only_after_failed_initializer_cleanup_is_confirmed() {
+    async fn wait_reconstruction_drop(
+        counts: &Arc<Counts>,
+        boxed: bool,
+        source: bool,
+        phase: &str,
+    ) {
+        use futures_util::FutureExt;
+
+        if let Err(payload) = std::panic::AssertUnwindSafe(wait_dropped(counts))
+            .catch_unwind()
+            .await
+        {
+            eprintln!(
+                "reconstruction drop failure: boxed={boxed}, source={source}, phase={phase}, \
+                 counts_arc_strong={}, initialized={}, initialization_exited={}, started={}, \
+                 mutations={}, stops={}, disposals={}, running={}, allow_cleanup={}, \
+                 cleaned={}, dropped={}",
+                Arc::strong_count(counts),
+                counts.initialized.load(Ordering::SeqCst),
+                counts.initialization_exited.load(Ordering::SeqCst),
+                counts.started.load(Ordering::SeqCst),
+                counts.mutations.load(Ordering::SeqCst),
+                counts.stops.load(Ordering::SeqCst),
+                counts.disposals.load(Ordering::SeqCst),
+                counts.running.load(Ordering::SeqCst),
+                counts.allow_cleanup.load(Ordering::SeqCst),
+                counts.cleaned.load(Ordering::SeqCst),
+                counts.dropped.load(Ordering::SeqCst),
+            );
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     for boxed in [false, true] {
         for source in [false, true] {
             let factory = Arc::new(Factory::new(boxed));
-            let mut services = LegacyPluginServices::empty("init-reconstruction");
-            services.state_store = Some(Arc::new(drasi_lib::MemoryStateStoreProvider::new()));
-            let id = ComponentId::try_new("initializer").unwrap();
-            let mut component: Box<dyn ComputationComponent> = if source {
-                let host = SourcePluginHost::recreatable(factory.clone(), services)
+            let recipe = Arc::new(ReconstructionFactory::new(factory.clone(), source));
+            let id = ComponentId::try_new("1b7cfb32-60e0-5170-a167-c52c72e61ca7").unwrap();
+            let mut graph = ComputationGraph::builder("init-reconstruction")
+                .component(
+                    ComponentName::try_new("initializer").unwrap(),
+                    recipe.specification(id.clone(), true),
+                    recipe.clone(),
+                )
+                .build()
+                .unwrap();
+            let run = graph.run().unwrap();
+            let control = run.control();
+            let (result, ()) = tokio::join!(run, async {
+                let deployment = control.deployment_report().await.unwrap();
+                let CreationOutcome::CreationFailed(failure) = &deployment.components[&id] else {
+                    panic!("the real initializer must fail: {deployment:?}");
+                };
+                assert!(
+                    format!("{:#}", failure.cause).contains("original initialization panic"),
+                    "{failure:?}"
+                );
+                let first = factory.instances().remove(0);
+                let original_generation = control.observed().components[&id].generation;
+                assert!(!first.dropped.load(Ordering::SeqCst));
+                assert!(!first.cleaned.load(Ordering::SeqCst));
+                let started = control
+                    .start_requested(deployment.revision, GraphSelection::All)
                     .await
                     .unwrap();
-                let subscription = LegacySourceSubscription::new(
-                    host,
-                    SourceSubscriptionOptions::default(),
-                    StreamId::try_new("initializer/out").unwrap(),
-                    None,
-                    "initializer",
-                )
-                .unwrap();
-                Box::new(SourcePluginAdapter::new(id, subscription))
-            } else {
-                let host = ReactionPluginHost::recreatable(
-                    factory.clone(),
-                    services,
-                    QueryResultsCatalog::new("init-reconstruction").unwrap(),
-                    ReactionPluginOptions::default(),
-                )
-                .await
-                .unwrap();
-                Box::new(ReactionPluginAdapter::new(id, host).unwrap())
-            };
-            let error = component.start().await.unwrap_err();
-            assert!(
-                format!("{error:#}").contains("original initialization panic"),
-                "{error:#}"
-            );
-            assert!(component.stop().await.is_err());
-            assert!(component.start().await.is_err());
-            assert_eq!(
-                factory.instances().len(),
-                1,
-                "failed cleanup cannot construct a replacement"
-            );
-            let first = factory.instances().remove(0);
-            assert!(!first.dropped.load(Ordering::SeqCst));
-            first.allow_cleanup.store(true, Ordering::SeqCst);
-            component.stop().await.unwrap();
-            component.start().await.unwrap();
-            assert_eq!(factory.instances().len(), 2);
-            assert_eq!(first.initialized.load(Ordering::SeqCst), 1);
-            assert_eq!(first.started.load(Ordering::SeqCst), 0);
-            wait_dropped(&first).await;
+                assert_ne!(started.summary, OperationSummary::Completed);
+                assert_eq!(first.started.load(Ordering::SeqCst), 0);
+                assert_eq!(first.mutations.load(Ordering::SeqCst), 0);
+
+                let mut replacement = control
+                    .desired_snapshot()
+                    .select(GraphSelection::All)
+                    .unwrap()
+                    .components
+                    .remove(0);
+                replacement.construction =
+                    ComponentConstruction::Factory(recipe.specification(id.clone(), false));
+                let preview = control
+                    .preview(
+                        deployment.revision,
+                        vec![DesiredMutation::ReplaceComponent(replacement.clone())],
+                    )
+                    .await
+                    .unwrap();
+                let rejected = control
+                    .reconcile(preview, TopologyBindings::default())
+                    .await
+                    .unwrap();
+                assert!(
+                    !rejected.committed,
+                    "unconfirmed disposal cannot permit replacement"
+                );
+                assert!(rejected.failures.iter().any(|failure| {
+                    format!("{:#}", failure.cause).contains("cleanup is blocked")
+                }));
+                assert_eq!(
+                    factory.instances().len(),
+                    1,
+                    "failed cleanup cannot construct a replacement"
+                );
+                assert!(!first.dropped.load(Ordering::SeqCst));
+                assert_eq!(
+                    control.observed().components[&id].generation,
+                    original_generation
+                );
+                first.allow_cleanup.store(true, Ordering::SeqCst);
+                let preview = control
+                    .preview(
+                        rejected.revision,
+                        vec![DesiredMutation::ReplaceComponent(replacement)],
+                    )
+                    .await
+                    .unwrap();
+                let replaced = control
+                    .reconcile(preview, TopologyBindings::default())
+                    .await
+                    .unwrap();
+                assert!(replaced.committed, "{replaced:?}");
+                assert_eq!(
+                    replaced.summary,
+                    OperationSummary::Completed,
+                    "{replaced:?}"
+                );
+                assert_eq!(factory.instances().len(), 2);
+                assert_eq!(first.initialized.load(Ordering::SeqCst), 1);
+                assert_eq!(first.started.load(Ordering::SeqCst), 0);
+                wait_reconstruction_drop(&first, boxed, source, "old instance after replacement")
+                    .await;
+                let second = factory.instances().remove(1);
+                let started = control
+                    .start_requested(replaced.revision, GraphSelection::All)
+                    .await
+                    .unwrap();
+                assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
+                assert_eq!(second.initialized.load(Ordering::SeqCst), 1);
+                assert_eq!(second.started.load(Ordering::SeqCst), 1);
+                assert_ne!(
+                    control.observed().components[&id].generation,
+                    original_generation
+                );
+                second.allow_cleanup.store(true, Ordering::SeqCst);
+                let stopped = control
+                    .stop_components(replaced.revision, GraphSelection::All)
+                    .await
+                    .unwrap();
+                assert_eq!(stopped.summary, OperationSummary::Completed, "{stopped:?}");
+                assert!(
+                    !second.cleaned.load(Ordering::SeqCst),
+                    "stop is not final disposal"
+                );
+                control.cancel();
+            });
+            assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
+            graph.dispose().await.unwrap();
+            drop(control);
+            drop(graph);
             let second = factory.instances().remove(1);
-            assert_eq!(second.initialized.load(Ordering::SeqCst), 1);
-            assert_eq!(second.started.load(Ordering::SeqCst), 1);
-            second.allow_cleanup.store(true, Ordering::SeqCst);
-            component.stop().await.unwrap();
-            drop(component);
-            wait_dropped(&second).await;
+            wait_reconstruction_drop(
+                &second,
+                boxed,
+                source,
+                "replacement after disposal and graph/control release",
+            )
+            .await;
         }
     }
 }

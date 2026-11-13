@@ -10,4 +10,6 @@ pub mod templates;
 pub mod sse;
 
 pub use config::AdaptiveBatchConfig;
-pub use templates::{OperationType, QueryConfig, TemplateRouting, TemplateSpec};
+pub use templates::{
+    input_alias, input_aliases, OperationType, QueryConfig, TemplateRouting, TemplateSpec,
+};

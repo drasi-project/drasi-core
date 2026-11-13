@@ -104,6 +104,28 @@ inspection exposes resource-to-resource links. Direct builders support
 `resource_dependency`, and desired definitions expose
 `resource_construction_order` for validation.
 
+For recipe changes affecting constructed component users, the provider's
+`ManagementResourceResolver::plan_update` must assess the explicit change.
+The supported plan is `Recreate` with `Preserve`, retaining the graph-owned
+resource's ID, role and binding interface. The default assessment rejects live
+changes. Consumers do not reconfigure their injected provider or approve its
+configuration: their unchanged recipes are reconstructed as dependency effects.
+Their registered factories must still support the reconstruction's safety
+contract. Concurrent changes to a consumer's own configuration require its
+ordinary factory assessment and a compatible `Recreate`/`Preserve` plan.
+
+Acceptance persists the desired provider recipe and original request receipt
+before cleanup or construction. Failed cleanup retains the old owner; failed
+replacement retains the accepted target for retry. Reopening a durable instance
+constructs that target directly, not the superseded provider first. Replacement
+is break-before-make, not atomic or zero-downtime, and public-waiter cancellation
+does not cancel the management owner's work. Borrowed providers remain outside
+this configuration and lifecycle authority.
+
+Reconciliation may finish its pass while replacement users are still `Starting`.
+Observe their lifecycle/readiness and `management_status().converged()` before
+using the replacement; a receipt or completed construction alone is not readiness.
+
 This is ownership ordering, not permission to discard processing obligations.
 It neither migrates storage nor proves arbitrary path/identity changes safe
 across accepted-definition restart.
@@ -439,8 +461,8 @@ transactional-registry and configuration-resolver recipes. Applications supply
 additional `ManagementResourceResolver` implementations for their providers.
 No opaque provider object is inferred from its type or serialized as a pointer.
 Existing descriptor-backed plugin factories and adapters remain available through
-Host SDK / Plugin SDK; supported legacy loading remains independent (ABI 0.17,
-with 0.16 fast-mode compatibility).
+Host SDK / Plugin SDK; ordinary loading remains independent (ABI 0.18;
+older layouts are rejected).
 
 Native source/reaction recipe declarations use `add_source_from_factory` and
 `add_reaction_from_factory`; the existing legacy object APIs remain available.

@@ -66,12 +66,16 @@ fn durability_config(
 }
 
 /// Helper: initialize a source with WAL provider
-async fn init_source_with_wal(source: &dyn Source, wal: Arc<dyn WalProvider>, source_id: &str) {
+async fn init_source_with_wal(
+    source: &dyn Source,
+    wal: Arc<dyn WalProvider>,
+    source_id: drasi_core::ComponentId,
+) {
     let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
     source
-        .initialize(SourceRuntimeContext {
+        .bind_runtime_context(SourceRuntimeContext {
             instance_id: "test-instance".to_string(),
-            source_id: source_id.to_string(),
+            source_id,
             update_tx: update_tx.into(),
             state_store: None,
             identity_provider: None,
@@ -79,13 +83,15 @@ async fn init_source_with_wal(source: &dyn Source, wal: Arc<dyn WalProvider>, so
             resource_observer: None,
         })
         .await;
+    source.initialize().await.expect("source initialization");
 }
 
 /// Helper: create subscription settings (no resume)
-fn fresh_settings(source_id: &str) -> SourceSubscriptionSettings {
+fn fresh_settings(source_id: drasi_core::ComponentId) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: source_id.to_string(),
-        query_id: "test-query".to_string(),
+        source_id,
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
@@ -96,10 +102,14 @@ fn fresh_settings(source_id: &str) -> SourceSubscriptionSettings {
 }
 
 /// Helper: create subscription settings with resume position
-fn resume_settings(source_id: &str, resume_seq: u64) -> SourceSubscriptionSettings {
+fn resume_settings(
+    source_id: drasi_core::ComponentId,
+    resume_seq: u64,
+) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: source_id.to_string(),
-        query_id: "test-query-resume".to_string(),
+        source_id,
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000155")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
@@ -112,7 +122,7 @@ fn resume_settings(source_id: &str, resume_seq: u64) -> SourceSubscriptionSettin
 /// Helper: subscribe with default settings (no resume)
 async fn subscribe_fresh(
     source: &dyn Source,
-    source_id: &str,
+    source_id: drasi_core::ComponentId,
 ) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
     let resp = source.subscribe(fresh_settings(source_id)).await.unwrap();
     resp.receiver
@@ -170,11 +180,13 @@ async fn post_event_status(
 async fn concurrent_http_requests_preserve_wal_order() {
     for webhook in [false, true] {
         for durable in [false, true] {
-            let source_id = "http-concurrent";
             let port = reserve_port();
-            let mut builder = HttpSourceBuilder::new(source_id)
-                .with_host("127.0.0.1")
-                .with_port(port);
+            let mut builder = HttpSourceBuilder::new(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ec")
+                    .expect("fixture UUID"),
+            )
+            .with_host("127.0.0.1")
+            .with_port(port);
             if durable {
                 builder = builder.with_durability(durability_config(
                     true,
@@ -212,11 +224,23 @@ async fn concurrent_http_requests_preserve_wal_order() {
                 });
             }
             let source = builder.build().unwrap();
+            let source_id = source.id().to_string();
             let directory = TempDir::new().unwrap();
             let wal = Arc::new(RedbWalProvider::new(directory.path()));
-            init_source_with_wal(&source, wal.clone(), source_id).await;
+            init_source_with_wal(
+                &source,
+                wal.clone(),
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ec")
+                    .expect("fixture UUID"),
+            )
+            .await;
             source.start().await.unwrap();
-            let mut receiver = subscribe_fresh(&source, source_id).await;
+            let mut receiver = subscribe_fresh(
+                &source,
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ec")
+                    .expect("fixture UUID"),
+            )
+            .await;
             let client = Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -243,6 +267,7 @@ async fn concurrent_http_requests_preserve_wal_order() {
             for producer in 0..8 {
                 let client = client.clone();
                 let barrier = barrier.clone();
+                let source_id = source_id.clone();
                 producers.spawn(async move {
                     for index in 0..10 {
                         let id = format!("{producer}-{index}");
@@ -277,7 +302,15 @@ async fn concurrent_http_requests_preserve_wal_order() {
             }
             let total = if webhook { 160 } else { 120 };
             let records = if durable {
-                let records = wal.read_from(source_id, 1).await.unwrap();
+                let records = wal
+                    .read_from(
+                        &drasi_core::interface::StorageScope::default(),
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ec")
+                            .expect("fixture UUID"),
+                        1,
+                    )
+                    .await
+                    .unwrap();
                 assert_eq!(records.len(), total);
                 Some(records)
             } else {
@@ -318,57 +351,84 @@ async fn concurrent_http_requests_preserve_wal_order() {
 // ============================================================
 
 #[tokio::test]
-#[ignore]
 async fn test_http_wal_disabled_no_persistence() {
     let port = 19301u16;
-    let source = HttpSourceBuilder::new("http-disabled")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000156")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .build()
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "http-disabled").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000156")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     assert!(!source.supports_replay());
 
-    let count = wal.event_count("http-disabled").await;
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000156")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert!(count.is_err(), "WAL should not be registered when disabled");
 
     source.stop().await.unwrap();
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_http_wal_enabled_events_persisted() {
     let port = 19302u16;
-    let source = HttpSourceBuilder::new("http-persist")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_durability(durability_config(
-            true,
-            10_000,
-            CapacityPolicy::RejectIncoming,
-        ))
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000157")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_durability(durability_config(
+        true,
+        10_000,
+        CapacityPolicy::RejectIncoming,
+    ))
+    .build()
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "http-persist").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000157")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(source.supports_replay());
 
-    let mut rx = subscribe_fresh(&source, "http-persist").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000157")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let client = Client::new();
-    post_event(&client, port, "http-persist", "n1", "Alice").await;
+    post_event(&client, port, source.id().as_str(), "n1", "Alice").await;
 
     let event = tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
@@ -377,32 +437,52 @@ async fn test_http_wal_enabled_events_persisted() {
     assert_eq!(event.sequence, 1);
     assert!(event.source_position.is_some());
 
-    let count = wal.event_count("http-persist").await.unwrap();
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000157")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(count, 1);
 
     source.stop().await.unwrap();
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_http_capacity_exhaustion_returns_503() {
     let port = 19303u16;
     // redb WAL requires max_events >= 16
-    let source = HttpSourceBuilder::new("http-cap")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_durability(durability_config(true, 16, CapacityPolicy::RejectIncoming))
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000158")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_durability(durability_config(true, 16, CapacityPolicy::RejectIncoming))
+    .build()
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "http-cap").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000158")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut rx = subscribe_fresh(&source, "http-cap").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000158")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let client = Client::new();
 
@@ -411,7 +491,7 @@ async fn test_http_capacity_exhaustion_returns_503() {
         post_event(
             &client,
             port,
-            "http-cap",
+            source.id().as_str(),
             &format!("n{i}"),
             &format!("V{i}"),
         )
@@ -422,7 +502,7 @@ async fn test_http_capacity_exhaustion_returns_503() {
     }
 
     // 17th event should return 503
-    let status = post_event_status(&client, port, "http-cap", "n17", "C").await;
+    let status = post_event_status(&client, port, source.id().as_str(), "n17", "C").await;
     assert_eq!(
         status, 503,
         "Expected 503 Service Unavailable when WAL is full"
@@ -432,7 +512,6 @@ async fn test_http_capacity_exhaustion_returns_503() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_http_crash_recovery_and_replay() {
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
@@ -440,29 +519,43 @@ async fn test_http_crash_recovery_and_replay() {
 
     // First lifecycle — write events
     {
-        let source = HttpSourceBuilder::new("http-crash")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_durability(durability_config(
-                true,
-                10_000,
-                CapacityPolicy::RejectIncoming,
-            ))
-            .build()
-            .unwrap();
+        let source = HttpSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000159")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_durability(durability_config(
+            true,
+            10_000,
+            CapacityPolicy::RejectIncoming,
+        ))
+        .build()
+        .unwrap();
 
-        init_source_with_wal(&source, wal.clone(), "http-crash").await;
+        init_source_with_wal(
+            &source,
+            wal.clone(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000159")
+                .expect("fixture UUID"),
+        )
+        .await;
         source.start().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let mut rx = subscribe_fresh(&source, "http-crash").await;
+        let mut rx = subscribe_fresh(
+            &source,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000159")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         let client = Client::new();
         for i in 1..=5 {
             post_event(
                 &client,
                 port,
-                "http-crash",
+                source.id().as_str(),
                 &format!("n{i}"),
                 &format!("Name{i}"),
             )
@@ -472,7 +565,14 @@ async fn test_http_crash_recovery_and_replay() {
                 .unwrap();
         }
 
-        let head = wal.head_sequence("http-crash").await.unwrap();
+        let head = wal
+            .head_sequence(
+                &drasi_core::interface::StorageScope::default(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000159")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
         assert_eq!(head, 5);
 
         source.stop().await.unwrap();
@@ -481,24 +581,37 @@ async fn test_http_crash_recovery_and_replay() {
     // Second lifecycle — resume and replay
     {
         let port2 = 19305u16;
-        let source = HttpSourceBuilder::new("http-crash")
-            .with_host("127.0.0.1")
-            .with_port(port2)
-            .with_durability(durability_config(
-                true,
-                10_000,
-                CapacityPolicy::RejectIncoming,
-            ))
-            .build()
-            .unwrap();
+        let source = HttpSourceBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000159")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port2)
+        .with_durability(durability_config(
+            true,
+            10_000,
+            CapacityPolicy::RejectIncoming,
+        ))
+        .build()
+        .unwrap();
 
-        init_source_with_wal(&source, wal.clone(), "http-crash").await;
+        init_source_with_wal(
+            &source,
+            wal.clone(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000159")
+                .expect("fixture UUID"),
+        )
+        .await;
         source.start().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Subscribe with resume_from = seq 3 → should replay events 4, 5
         let resp = source
-            .subscribe(resume_settings("http-crash", 3))
+            .subscribe(resume_settings(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000159")
+                    .expect("fixture UUID"),
+                3,
+            ))
             .await
             .unwrap();
         let mut rx = resp.receiver;
@@ -517,7 +630,7 @@ async fn test_http_crash_recovery_and_replay() {
 
         // New event should be seq 6
         let client = Client::new();
-        post_event(&client, port2, "http-crash", "n6", "Name6").await;
+        post_event(&client, port2, source.id().as_str(), "n6", "Name6").await;
         let event6 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .unwrap()
@@ -529,41 +642,69 @@ async fn test_http_crash_recovery_and_replay() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_http_deprovision_removes_wal() {
     let port = 19306u16;
-    let source = HttpSourceBuilder::new("http-deprov")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_durability(durability_config(
-            true,
-            10_000,
-            CapacityPolicy::RejectIncoming,
-        ))
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000015a")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_durability(durability_config(
+        true,
+        10_000,
+        CapacityPolicy::RejectIncoming,
+    ))
+    .build()
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "http-deprov").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000015a")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut rx = subscribe_fresh(&source, "http-deprov").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000015a")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let client = Client::new();
-    post_event(&client, port, "http-deprov", "n1", "X").await;
+    post_event(&client, port, source.id().as_str(), "n1", "X").await;
     let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .unwrap();
 
-    assert!(wal.event_count("http-deprov").await.unwrap() > 0);
+    assert!(
+        wal.event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000015a")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap()
+            > 0
+    );
 
     source.stop().await.unwrap();
-    source.deprovision().await.unwrap();
+    source.delete_owned_resources().await.unwrap();
 
-    let count = wal.event_count("http-deprov").await;
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000015a")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");
 }
 
@@ -576,15 +717,24 @@ async fn test_http_sequence_stamped_without_durability() {
     // Ephemeral port so this can run in CI without colliding with other tests.
     let port = reserve_port();
     // No `.with_durability(...)` → durability is OFF, so no WAL sequence source.
-    let source = HttpSourceBuilder::new("http-noseq")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000015b")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .build()
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "http-noseq").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000015b")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -592,7 +742,12 @@ async fn test_http_sequence_stamped_without_durability() {
     // Durability is off, so the source does not support replay / persist.
     assert!(!source.supports_replay());
 
-    let mut rx = subscribe_fresh(&source, "http-noseq").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000015b")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let client = Client::new();
     let event_count = 5u64;
@@ -600,7 +755,7 @@ async fn test_http_sequence_stamped_without_durability() {
         post_event(
             &client,
             port,
-            "http-noseq",
+            source.id().as_str(),
             &format!("n{i}"),
             &format!("Name{i}"),
         )

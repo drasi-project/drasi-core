@@ -13,8 +13,8 @@
 // limitations under the License.
 
 //! Explicit computation resources, separate from the ordinary index plugin.
-//! Data lives below `computation-v1/<encoded graph>/<encoded query>`, never in a
-//! legacy query's database. Output staging requires this bundle's active session.
+//! Graph and component ownership use separate typed storage scopes. Output
+//! staging requires this bundle's active session.
 //! Bootstrap checkpoint clearing preserves committed output heads and generations.
 
 mod checkpoint;
@@ -30,6 +30,7 @@ use drasi_core::{
     },
     interface::{IndexError, IndexSet, SessionControl},
 };
+use drasi_core_types::{ComponentId, StorageScope};
 
 use crate::{
     element_index::RocksDbElementIndex, future_queue::RocksDbFutureQueue, open_unified_db,
@@ -55,7 +56,7 @@ impl RocksDbComputationProvider {
     }
 }
 
-fn scope_segment(id: &str) -> Result<String, IndexError> {
+fn validate_graph_scope(id: &str) -> Result<(), IndexError> {
     if id.is_empty()
         || id
             .chars()
@@ -66,7 +67,7 @@ fn scope_segment(id: &str) -> Result<String, IndexError> {
             "computation scope identifiers must be nonempty without whitespace or controls",
         )));
     }
-    Ok(id.bytes().map(|byte| format!("{byte:02x}")).collect())
+    Ok(())
 }
 
 #[async_trait]
@@ -74,18 +75,17 @@ impl ComputationIndexProvider for RocksDbComputationProvider {
     async fn create_indexes(
         &self,
         graph_id: &str,
-        query_id: &str,
+        query_id: &ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
-        let graph = scope_segment(graph_id)?;
-        let query = scope_segment(query_id)?;
-        let path = crate::plugin::storage_directory(&self.path.join("computation-v1"), &graph);
-        let path = path.to_str().ok_or_else(|| {
+        validate_graph_scope(graph_id)?;
+        let scope = StorageScope::new("computation").nested(&StorageScope::new(graph_id));
+        let path = self.path.to_str().ok_or_else(|| {
             IndexError::other(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "computation index path must be valid UTF-8",
             ))
         })?;
-        let db = open_unified_db(path, &query, &self.options)?;
+        let db = open_unified_db(path, &scope, query_id, &self.options)?;
         let session = Arc::new(RocksDbSessionState::new(db.clone()));
         let work = Arc::new(BlockingScope::default());
         let owner = Arc::new(ComputationSession {
@@ -153,14 +153,20 @@ impl ComputationIndexProvider for RocksDbComputationProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::scope_segment;
+    use super::{validate_graph_scope, StorageScope};
 
     #[test]
     fn scope_segments_are_unambiguous_and_cannot_escape_the_graph_directory() {
-        assert_ne!(scope_segment("a/b").unwrap(), scope_segment("a-b").unwrap());
-        assert_eq!(scope_segment("../query").unwrap(), "2e2e2f7175657279");
+        assert_ne!(
+            StorageScope::new("a/b").storage_key(),
+            StorageScope::new("a-b").storage_key()
+        );
+        let traversal = StorageScope::new("../query").storage_key();
+        assert!(!traversal.contains('/'));
+        assert!(!traversal.contains(".."));
+        assert!(traversal.ends_with("2e2e2f7175657279"));
         for invalid in ["", "a b", "a\0b", "a\nb"] {
-            assert!(scope_segment(invalid).is_err());
+            assert!(validate_graph_scope(invalid).is_err());
         }
     }
 }

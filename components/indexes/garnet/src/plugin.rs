@@ -32,6 +32,7 @@
 
 use async_trait::async_trait;
 use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
+use drasi_core::{interface::StorageScope, ComponentId};
 use std::sync::Arc;
 
 use crate::checkpoint::GarnetCheckpointStore;
@@ -126,8 +127,8 @@ impl GarnetIndexProvider {
     /// identities are isolated within that scope's Redis Cluster hash tag.
     pub async fn create_scoped_indexes(
         &self,
-        storage_scope: &str,
-        query_id: &str,
+        storage_scope: &StorageScope,
+        query_id: &ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         let client = redis::Client::open(self.connection_string.as_str())
             .map_err(IndexError::connection_failed)?;
@@ -135,39 +136,42 @@ impl GarnetIndexProvider {
             .get_multiplexed_async_connection()
             .await
             .map_err(IndexError::connection_failed)?;
+        crate::storage_format::ensure_current(&connection).await?;
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
 
         let element_index = Arc::new(GarnetElementIndex::new(
             storage_scope,
+            query_id,
             connection.clone(),
             self.enable_archive,
             session_state.clone(),
         ));
         let result_index = Arc::new(GarnetResultIndex::new(
             storage_scope,
+            query_id,
             connection.clone(),
             session_state.clone(),
         ));
         let future_queue = Arc::new(GarnetFutureQueue::new(
             storage_scope,
+            query_id,
             connection.clone(),
             session_state.clone(),
         ));
         let checkpoint_store = Arc::new(GarnetCheckpointStore::new(
             storage_scope,
+            query_id,
             connection.clone(),
             session_state.clone(),
         ));
         let outbox_writer = Arc::new(
-            GarnetOutboxWriter::new(storage_scope, connection.clone())
-                .with_query_id(query_id)
+            GarnetOutboxWriter::new(storage_scope, query_id, connection.clone())
                 .with_session_state(session_state.clone()),
         );
         let live_results_writer = Arc::new(
-            GarnetLiveResultsWriter::new(storage_scope, connection)
-                .with_query_id(query_id)
+            GarnetLiveResultsWriter::new(storage_scope, query_id, connection)
                 .with_session_state(session_state),
         );
 
@@ -188,14 +192,15 @@ impl GarnetIndexProvider {
 
 #[async_trait]
 impl IndexBackendPlugin for GarnetIndexProvider {
-    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
-        self.create_scoped_indexes(query_id, query_id).await
+    async fn create_indexes(&self, query_id: &ComponentId) -> Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(&StorageScope::default(), query_id)
+            .await
     }
 
     async fn create_scoped_indexes(
         &self,
-        storage_scope: &str,
-        query_id: &str,
+        storage_scope: &StorageScope,
+        query_id: &ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         GarnetIndexProvider::create_scoped_indexes(self, storage_scope, query_id).await
     }

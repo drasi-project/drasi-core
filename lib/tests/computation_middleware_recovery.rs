@@ -18,6 +18,10 @@
     any(feature = "middleware-unwind", feature = "middleware-all")
 ))]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::{BTreeMap, HashMap},
     num::NonZeroUsize,
@@ -37,9 +41,9 @@ use drasi_core::{
         InMemoryComputationProvider, TransactionDomain,
     },
     interface::{
-        CheckpointStore, ElementIndex, ElementStream, IndexError, IndexJoin, IndexSet,
-        MiddlewareError, MiddlewareSetupError, OutboxWriter, SessionControl, SourceCheckpoint,
-        SourceMiddleware, SourceMiddlewareFactory,
+        CheckpointKey, CheckpointStore, ElementIndex, ElementStream, IndexError, IndexJoin,
+        IndexSet, MiddlewareError, MiddlewareSetupError, OutboxWriter, OutputPartition,
+        SessionControl, SourceCheckpoint, SourceMiddleware, SourceMiddlewareFactory,
     },
     middleware::MiddlewareTypeRegistry,
     models::{
@@ -54,13 +58,31 @@ use drasi_lib::{
     channels::{SourceEvent, SourceEventWrapper},
     computation::v1::*,
     profiling::ProfilingMetadata,
+    StorageScope,
 };
 use serde_json::json;
 
 const GRAPH: &str = "middleware-recovery";
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("component ID")
+    fixture_support::component_id(match value {
+        "middleware" => 1,
+        "source" => 2,
+        "query" => 3,
+        "second" => 4,
+        "sink" => 5,
+        "a" => 6,
+        "b" => 7,
+        "invalid" => 8,
+        "query-a" => 9,
+        "query-b" => 10,
+        "sink-a" => 11,
+        "sink-b" => 12,
+        "pipe-a" => 13,
+        "pipe-b" => 14,
+        "other" => 15,
+        _ => panic!("unknown fixture component: {value}"),
+    })
 }
 fn stream(value: &str) -> StreamId {
     StreamId::try_new(format!("{value}/out")).expect("stream ID")
@@ -239,7 +261,7 @@ fn event(
     if raw {
         GraphChangeCodec::encode_source_event(
             Arc::new(SourceEventWrapper {
-                source_id: source.into(),
+                source_id: id(source),
                 event: SourceEvent::Change(change),
                 timestamp: chrono::DateTime::from_timestamp_millis(1_000 + sequence as i64)
                     .expect("event timestamp"),
@@ -708,7 +730,7 @@ async fn configuration_and_retained_input_identity_mismatches_are_rejected() {
         8
     );
     assert_eq!(
-        progress.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+        progress.snapshot().checkpoints[&SourceProgressKey::Source(id("source"))].sequence,
         1
     );
     verified.stop().await.unwrap();
@@ -784,7 +806,7 @@ async fn raw_zero_and_generic_progress_are_distinct_from_chained_logical_output_
         assert!(view.persistent && view.ready);
         for source in ["a", "b"] {
             let key = if raw {
-                SourceProgressKey::Source(source.into())
+                SourceProgressKey::Source(id(source))
             } else {
                 SourceProgressKey::Stream(stream(source))
             };
@@ -923,7 +945,10 @@ async fn nested_unwind_and_patch_properties_survive_reconstruction() {
     middleware.delivery_completed(&output).await.unwrap();
     middleware.stop().await.unwrap();
     drop(middleware);
-    let resources = provider.create_indexes(GRAPH, "middleware").await.unwrap();
+    let resources = provider
+        .create_indexes(GRAPH, &id("middleware"))
+        .await
+        .unwrap();
     resources.indexes().session_control.begin().await.unwrap();
     let element = resources
         .indexes()
@@ -1160,18 +1185,18 @@ impl CheckpointStore for Checkpoints {
     }
     async fn stage_checkpoint(
         &self,
-        key: &str,
+        key: &CheckpointKey,
         sequence: u64,
         position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
         self.inner.stage_checkpoint(key, sequence, position).await?;
-        let point = if key.starts_with("computation:input:") {
+        let point = if key.is_progress() {
             Some(Fault::InputCheckpoint)
-        } else if key == "\0computation:middleware-head:v1" {
+        } else if key.metadata_name() == Some("\0computation:middleware-head:v1") {
             Some(Fault::Head)
-        } else if key == "\0computation:middleware-emission:v1" {
+        } else if key.metadata_name() == Some("\0computation:middleware-emission:v1") {
             Some(Fault::Emission)
-        } else if key == "\0computation:middleware-confirmed:v1" {
+        } else if key.metadata_name() == Some("\0computation:middleware-confirmed:v1") {
             Some(Fault::Confirmation)
         } else {
             None
@@ -1181,10 +1206,15 @@ impl CheckpointStore for Checkpoints {
         }
         Ok(())
     }
-    async fn read_checkpoint(&self, key: &str) -> Result<Option<SourceCheckpoint>, IndexError> {
+    async fn read_checkpoint(
+        &self,
+        key: &CheckpointKey,
+    ) -> Result<Option<SourceCheckpoint>, IndexError> {
         self.inner.read_checkpoint(key).await
     }
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
         self.inner.read_all_checkpoints().await
     }
     async fn clear_checkpoints(&self) -> Result<(), IndexError> {
@@ -1196,10 +1226,14 @@ impl CheckpointStore for Checkpoints {
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
         self.inner.read_config_hash().await
     }
-    async fn stage_result_sequence(&self, key: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(
+        &self,
+        key: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         self.inner.stage_result_sequence(key, sequence).await
     }
-    async fn read_result_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(&self, key: &OutputPartition) -> Result<Option<u64>, IndexError> {
         self.inner.read_result_sequence(key).await
     }
 }
@@ -1209,12 +1243,17 @@ struct Outbox {
 }
 #[async_trait]
 impl OutboxWriter for Outbox {
-    async fn append(&self, key: &str, sequence: u64, bytes: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        key: &OutputPartition,
+        sequence: u64,
+        bytes: &[u8],
+    ) -> Result<(), IndexError> {
         self.inner.append(key, sequence, bytes).await
     }
     async fn append_and_trim(
         &self,
-        key: &str,
+        key: &OutputPartition,
         sequence: u64,
         bytes: &[u8],
         retain: u64,
@@ -1228,19 +1267,27 @@ impl OutboxWriter for Outbox {
         }
         Ok(result)
     }
-    async fn read_from(&self, key: &str, after: u64) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_from(
+        &self,
+        key: &OutputPartition,
+        after: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.inner.read_from(key, after).await
     }
-    async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(&self, key: &OutputPartition) -> Result<Option<u64>, IndexError> {
         self.inner.read_latest_sequence(key).await
     }
-    async fn clear(&self, key: &str) -> Result<(), IndexError> {
+    async fn clear(&self, key: &OutputPartition) -> Result<(), IndexError> {
         self.inner.clear(key).await
     }
-    async fn trim_before(&self, key: &str, retain: u64) -> Result<usize, IndexError> {
+    async fn trim_before(&self, key: &OutputPartition, retain: u64) -> Result<usize, IndexError> {
         self.inner.trim_before(key, retain).await
     }
-    async fn trim_to_capacity(&self, key: &str, size: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        key: &OutputPartition,
+        size: usize,
+    ) -> Result<usize, IndexError> {
         self.inner.trim_to_capacity(key, size).await
     }
 }
@@ -1253,7 +1300,7 @@ impl ComputationIndexProvider for InjectingProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        id: &str,
+        id: &ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         let original = self.inner.create_indexes(graph, id).await?;
         let set = original.indexes();
@@ -1351,7 +1398,7 @@ async fn element_outbox_checkpoint_and_commit_failures_rollback_the_whole_input(
             progress
                 .snapshot()
                 .checkpoints
-                .get(&SourceProgressKey::Source("source".into()))
+                .get(&SourceProgressKey::Source(id("source")))
                 .unwrap()
                 .sequence,
             1
@@ -1559,7 +1606,7 @@ async fn graph_progress_metadata_is_versioned_and_validates_its_immediate_owner(
         (vec!["version"], json!(2)),
         (vec!["sequence"], json!(0)),
         (vec!["identity", "stream"], json!("other/out")),
-        (vec!["identity", "component_id"], json!("other")),
+        (vec!["identity", "component_id"], json!(id("other"))),
         (
             vec!["identity", "incarnation"],
             json!("00000000-0000-0000-0000-000000000000"),
@@ -1658,15 +1705,15 @@ fn source_resume_checkpoint_cannot_skip_an_intervening_middleware_boundary() {
         |component: &str, port: &str| Endpoint::new(id(component), PortId::try_new(port).unwrap());
     let progress = Arc::new(QuerySourceProgress::new(GRAPH, id("query")).unwrap());
     let builder = ComputationGraph::builder(GRAPH)
-        .source(Box::new(ProgressSource {
+        .fixture_source(Box::new(ProgressSource {
             descriptor: descriptor("source", PortDirection::Output),
             progress,
         }))
-        .transformer(Box::new(
+        .fixture_transformer(Box::new(
             MiddlewareTransformer::new(definition(), registry(Arc::new(ProbeState::default())))
                 .unwrap(),
         ))
-        .sink(Box::new(ProgressSink(descriptor(
+        .fixture_sink(Box::new(ProgressSink(descriptor(
             "query",
             PortDirection::Input,
         ))))
@@ -1715,7 +1762,7 @@ impl ComputationIndexProvider for IncompleteProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        id: &str,
+        id: &ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         let original = self.inner.create_indexes(graph, id).await?;
         let set = original.indexes();
@@ -1838,12 +1885,19 @@ async fn durable_emission_overflow_cannot_mutate_input_state_or_discard_pending_
         }
         middleware.stop().await.unwrap();
         drop(middleware);
-        let resources = provider.create_indexes(GRAPH, "middleware").await.unwrap();
+        let resources = provider
+            .create_indexes(GRAPH, &id("middleware"))
+            .await
+            .unwrap();
         resources.indexes().session_control.begin().await.unwrap();
         resources
             .checkpoint_store()
             .unwrap()
-            .stage_checkpoint("\0computation:middleware-emission:v1", u64::MAX, None)
+            .stage_checkpoint(
+                &CheckpointKey::Metadata("\0computation:middleware-emission:v1".into()),
+                u64::MAX,
+                None,
+            )
             .await
             .unwrap();
         resources.indexes().session_control.commit().await.unwrap();
@@ -1864,11 +1918,18 @@ async fn durable_emission_overflow_cannot_mutate_input_state_or_discard_pending_
         assert_eq!(calls.calls.load(Ordering::SeqCst), evaluated);
         middleware.stop().await.unwrap();
         drop(middleware);
-        let resources = provider.create_indexes(GRAPH, "middleware").await.unwrap();
+        let resources = provider
+            .create_indexes(GRAPH, &id("middleware"))
+            .await
+            .unwrap();
         let entries = resources
             .outbox_writer()
             .unwrap()
-            .read_from("computation:middleware-output:v1", 0)
+            .read_from(
+                &OutputPartition::Component(id("middleware"))
+                    .metadata("computation:middleware-output:v1"),
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(entries.len(), 1);
@@ -1877,7 +1938,9 @@ async fn durable_emission_overflow_cannot_mutate_input_state_or_discard_pending_
             resources
                 .checkpoint_store()
                 .unwrap()
-                .read_checkpoint("\0computation:middleware-head:v1")
+                .read_checkpoint(&CheckpointKey::Metadata(
+                    "\0computation:middleware-head:v1".into()
+                ),)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1896,20 +1959,21 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
     let provider = provider(&directory.path().join("indexes"), Backend::Computation);
     let registry = registry(Arc::new(ProbeState::default()));
     let progress = Arc::new(QuerySourceProgress::new(GRAPH, id("middleware")).unwrap());
+    let scope = StorageScope::new(GRAPH);
     let wal = Arc::new(drasi_wal_redb::RedbWalProvider::new(
         directory.path().join("wal"),
     ));
-    wal.register("source", WriteAheadLogConfig::default())
+    wal.register(&scope, &id("source"), WriteAheadLogConfig::default())
         .await
         .unwrap();
     assert_eq!(
-        wal.append("source", &change(1, &["a", "b"], false))
+        wal.append(&scope, &id("source"), &change(1, &["a", "b"], false))
             .await
             .unwrap(),
         1
     );
     assert_eq!(
-        wal.append("source", &change(2, &["a"], true))
+        wal.append(&scope, &id("source"), &change(2, &["a"], true))
             .await
             .unwrap(),
         2
@@ -1931,7 +1995,8 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
         stream("source"),
         Arc::new(WalSourceResource {
             provider: wal.clone(),
-            partition: "source".into(),
+            scope: scope.clone(),
+            source_id: id("source"),
         }),
         0,
     )
@@ -1944,12 +2009,12 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
         .unwrap();
     assert_eq!(logical(&committed[0].envelope), 1);
     assert_eq!(
-        progress.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+        progress.snapshot().checkpoints[&SourceProgressKey::Source(id("source"))].sequence,
         1
     );
     // Input can be pruned at the middleware commit: its still-unconfirmed
     // transformed output is now the durable recovery boundary.
-    assert_eq!(wal.prune_up_to("source", 1).await.unwrap(), 1);
+    assert_eq!(wal.prune_up_to(&scope, &id("source"), 1).await.unwrap(), 1);
     source.stop().await.unwrap();
     middleware.stop().await.unwrap();
     drop((source, middleware, wal));
@@ -1957,7 +2022,7 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
     let wal = Arc::new(drasi_wal_redb::RedbWalProvider::new(
         directory.path().join("wal"),
     ));
-    wal.register("source", WriteAheadLogConfig::default())
+    wal.register(&scope, &id("source"), WriteAheadLogConfig::default())
         .await
         .unwrap();
     let mut middleware =
@@ -1969,7 +2034,8 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
     middleware.start().await.unwrap();
     let resource = Arc::new(WalSourceResource {
         provider: wal.clone(),
-        partition: "source".into(),
+        scope,
+        source_id: id("source"),
     });
     let mut invalid = WalReplaySource::new(id("invalid"), stream("invalid"), resource.clone(), 2)
         .with_source_progress(progress.clone());
@@ -2024,7 +2090,7 @@ async fn durable_control_notifications_checkpoint_logical_progress_before_later_
     let mut query = query(provider).await;
     let signal = GraphChangeCodec::encode_source_event(
         Arc::new(SourceEventWrapper::with_sequence(
-            "source".into(),
+            id("source"),
             SourceEvent::Control(drasi_lib::channels::SourceControl::FuturesDue),
             chrono::DateTime::from_timestamp_millis(1).unwrap(),
             0,
@@ -2095,7 +2161,7 @@ async fn replayed_middleware_control_does_not_evaluate_not_yet_due_query_futures
     middleware.delivery_completed(&output).await.unwrap();
     let signal = GraphChangeCodec::encode_source_event(
         Arc::new(SourceEventWrapper::with_sequence(
-            "source".into(),
+            id("source"),
             SourceEvent::Control(drasi_lib::channels::SourceControl::FuturesDue),
             chrono::Utc::now(),
             2,
@@ -2231,7 +2297,7 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
             .clone(),
     };
     let mut builder = ComputationGraph::builder(GRAPH)
-        .source(Box::new(GatedSource {
+        .fixture_source(Box::new(GatedSource {
             descriptor: ComponentDescriptor::try_new(
                 id("source"),
                 vec![PortDescriptor::new(
@@ -2249,7 +2315,7 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
             release: release.clone(),
             progress: progress.clone(),
         }))
-        .component(
+        .fixture_component(
             specification,
             Arc::new(MiddlewareTransformerFactory::default()),
         )
@@ -2302,7 +2368,7 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
         let sink_id = format!("sink-{name}");
         let resource_id = ResourceId::try_new(format!("pipe-{name}")).unwrap();
         let indexes = provider
-            .create_indexes(GRAPH, resource_id.as_str())
+            .create_indexes(GRAPH, &id(resource_id.as_str()))
             .await
             .unwrap();
         let mut codec = EnvelopeCodec::new(capacity(8 * 1024 * 1024));
@@ -2345,8 +2411,8 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
                 ResourceHandle::new(ResourceRole::StateStore, store.clone()).with_cleanup(store),
             )
             .unwrap()
-            .transformer(Box::new(query))
-            .sink(Box::new(SignalSink {
+            .fixture_transformer(Box::new(query))
+            .fixture_sink(Box::new(SignalSink {
                 descriptor: ComponentDescriptor::try_new(
                     id(&sink_id),
                     vec![PortDescriptor::new(

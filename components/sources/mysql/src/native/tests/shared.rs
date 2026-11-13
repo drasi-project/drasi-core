@@ -12,27 +12,27 @@ use drasi_lib::{computation::v1::*, DrasiLib};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio::sync::{mpsc, Notify};
 
-fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("component")
+fn id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
 }
 fn stream(name: &str) -> StreamId {
     StreamId::try_new(name).expect("stream")
 }
-fn endpoint(name: &str, port: &str) -> Endpoint {
-    Endpoint::new(id(name), PortId::try_new(port).expect("port"))
+fn endpoint(component: &ComponentId, port: &str) -> Endpoint {
+    Endpoint::new(component.clone(), PortId::try_new(port).expect("port"))
 }
 fn owners(graph: &str) -> Vec<Arc<QuerySourceProgress>> {
-    ["left", "right"]
+    [id(743), id(465)]
         .into_iter()
-        .map(|name| Arc::new(QuerySourceProgress::new(graph, id(name)).expect("owner")))
+        .map(|component| Arc::new(QuerySourceProgress::new(graph, component).expect("owner")))
         .collect()
 }
 fn group(graph: &str, owners: &[Arc<QuerySourceProgress>]) -> Arc<ConsumerProgressSet> {
-    Arc::new(ConsumerProgressSet::new(graph, id("source"), owners.iter().cloned()).expect("group"))
+    Arc::new(ConsumerProgressSet::new(graph, id(77), owners.iter().cloned()).expect("group"))
 }
 
 fn query_definition(owner: &QuerySourceProgress) -> ContinuousQueryDefinition {
-    let alias = if owner.component_id().as_str() == "right" {
+    let alias = if owner.component_id() == &id(465) {
         "other"
     } else {
         "value"
@@ -112,30 +112,56 @@ fn queries(
 ) -> Result<(ComputationGraphBuilder, Vec<mpsc::Receiver<ChangeEnvelope>>)> {
     let mut receivers = Vec::new();
     for query in queries {
-        let name = query.descriptor().id().to_string();
-        let sink = format!("{name}-sink");
+        let query_id = query.descriptor().id().clone();
+        let (name, sink, sink_id) = if query_id == id(743) {
+            ("left", "left-sink", id(1743))
+        } else if query_id == id(465) {
+            ("right", "right-sink", id(1465))
+        } else if query_id == id(795) {
+            ("fresh", "fresh-sink", id(1795))
+        } else {
+            anyhow::bail!("unexpected query component ID {query_id}");
+        };
         let (sender, receiver) = mpsc::channel(32);
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Sink {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&sink),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                sender,
-            }))
-            .bind_stream(endpoint(&name, "out"), stream(&format!("{name}/results")))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new(name)
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new(sink)
+                    .expect("fixture component name"),
+                Box::new(Sink {
+                    descriptor: ComponentDescriptor::try_new(
+                        sink_id.clone(),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    sender,
+                }),
+            )
+            .bind_stream(
+                endpoint(&query_id, "out"),
+                stream(&format!("{query_id}/results")),
+            )
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint(&name, "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(&query_id, "in"),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 4 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint(&name, "out"), endpoint(&sink, "in")),
+                EdgeDefinition::new(endpoint(&query_id, "out"), endpoint(&sink_id, "in")),
                 Box::new(BoundedPipeConfig { capacity: 4 }),
             );
         receivers.push(receiver);
@@ -167,29 +193,40 @@ fn producer(
     snapshots: &[Arc<MySqlSnapshot>],
     factory_created: bool,
 ) -> Result<ComputationGraphBuilder> {
-    let builder = builder.bind_stream(endpoint("source", "out"), stream("changes"));
+    let builder = builder.bind_stream(
+        endpoint(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "out",
+        ),
+        stream("changes"),
+    );
     if !factory_created {
         let source = if snapshots.is_empty() {
             MySqlSource::new_with_consumer_progress(
-                id("source"),
+                id(77),
                 stream("changes"),
                 settings.clone(),
                 consumers,
             )?
         } else {
             MySqlSource::with_consumer_snapshots(
-                id("source"),
+                id(77),
                 stream("changes"),
                 settings.clone(),
                 consumers,
                 snapshots.iter().cloned(),
             )?
         };
-        return Ok(builder.source(Box::new(source)));
+        return Ok(builder.source(
+            drasi_lib::computation::v1::ComponentName::try_new("source")
+                .expect("fixture component name"),
+            Box::new(source),
+        ));
     }
     let factory = Arc::new(MySqlSourceFactory::default());
     let mut specification = ComponentSpecification {
-        descriptor: MySqlSource::describe(id("source"), MySqlOutput::Transactions)?,
+        descriptor: MySqlSource::describe(id(77), MySqlOutput::Transactions)?,
         role: ComponentRole::Source,
         completion: None,
         implementation: factory.descriptor().implementation.clone(),
@@ -244,7 +281,12 @@ fn producer(
             ResourceHandle::new(ResourceRole::Bootstrap, snapshot.clone()),
         )?;
     }
-    Ok(builder.component(specification, factory))
+    Ok(builder.component(
+        drasi_lib::computation::v1::ComponentName::try_new("source")
+            .expect("fixture component name"),
+        specification,
+        factory,
+    ))
 }
 
 fn effects(envelope: &ChangeEnvelope, alias: &str) -> Result<Vec<(String, i64, String)>> {
@@ -298,7 +340,7 @@ fn shared_construction_retains_real_owners_and_does_not_reinterpret_single_owner
         position: 4,
     };
     let source = MySqlSource::new_with_consumer_progress(
-        id("source"),
+        id(77),
         stream("changes"),
         settings.clone(),
         consumers.clone(),
@@ -306,7 +348,7 @@ fn shared_construction_retains_real_owners_and_does_not_reinterpret_single_owner
     assert!(source.recovery_reader().is_none());
     assert!(source.recovery_progress().is_none());
     assert!(MySqlSource::new_with_consumer_progress(
-        id("wrong"),
+        id(905),
         stream("changes"),
         settings.clone(),
         consumers.clone(),
@@ -317,7 +359,7 @@ fn shared_construction_retains_real_owners_and_does_not_reinterpret_single_owner
         &settings,
         "server",
         &tables,
-        &id("source"),
+        &id(77),
         &stream("changes"),
         Some(&SourceProgressReader::from(owners[0].clone()).read_only()),
     )?;
@@ -325,7 +367,7 @@ fn shared_construction_retains_real_owners_and_does_not_reinterpret_single_owner
         &settings,
         "server",
         &tables,
-        &id("source"),
+        &id(77),
         &stream("changes"),
         "graph",
     )?;
@@ -334,14 +376,14 @@ fn shared_construction_retains_real_owners_and_does_not_reinterpret_single_owner
         lock_timeout_ms: NonZeroU64::new(2000).expect("timeout"),
     };
     let (_, snapshots) = MySqlSource::coordinated_consumers(
-        id("source"),
+        id(77),
         stream("changes"),
         settings.clone(),
         consumers.clone(),
     )?;
     assert_eq!(snapshots.len(), 2);
     assert!(MySqlSource::with_consumer_snapshots(
-        id("source"),
+        id(77),
         stream("changes"),
         settings.clone(),
         consumers.clone(),
@@ -349,35 +391,35 @@ fn shared_construction_retains_real_owners_and_does_not_reinterpret_single_owner
     )
     .is_err());
     assert!(MySqlSource::with_snapshot(
-        id("source"),
+        id(77),
         stream("changes"),
         settings.clone(),
         owners[0].clone(),
         snapshots[0].clone(),
     )
     .is_err());
-    let impostor = Arc::new(QuerySourceProgress::new("graph", id("left"))?);
+    let impostor = Arc::new(QuerySourceProgress::new("graph", id(743))?);
     let wrong = group("graph", &[impostor, owners[1].clone()]);
     assert!(MySqlSource::with_consumer_snapshots(
-        id("source"),
+        id(77),
         stream("changes"),
         settings.clone(),
         wrong,
         snapshots.iter().cloned(),
     )
     .is_err());
-    let added = Arc::new(QuerySourceProgress::new("graph", id("third"))?);
+    let added = Arc::new(QuerySourceProgress::new("graph", id(795))?);
     let replacement = group("graph", &[owners[0].clone(), owners[1].clone(), added]);
     let mut extended = snapshots;
     extended.push(Arc::new(MySqlSnapshot::for_consumer_group(
-        id("source"),
+        id(77),
         stream("changes"),
         settings.clone(),
         &replacement,
-        &id("third"),
+        &id(795),
     )?));
     MySqlSource::with_consumer_snapshots(
-        id("source"),
+        id(77),
         stream("changes"),
         settings,
         replacement,
@@ -407,7 +449,7 @@ async fn shared_replay_rejects_volatile_actual_owners_before_opening_a_socket() 
         position: 4,
     };
     let mut source = MySqlSource::new_with_consumer_progress(
-        id("source"),
+        id(77),
         stream("changes"),
         settings,
         group("graph", &owners),
@@ -432,11 +474,11 @@ async fn a_query_rejects_a_same_named_bootstrap_reader_substitute_before_databas
         lock_timeout_ms: NonZeroU64::new(1000).expect("timeout"),
     };
     let snapshot = Arc::new(MySqlSnapshot::for_consumer_group(
-        id("source"),
+        id(77),
         stream("changes"),
         settings,
         &group("graph", &substitute),
-        &id("left"),
+        &id(743),
     )?);
     let path = tempfile::tempdir()?;
     let mut query = query_for(actual[0].clone(), indexes(path.path())?)
@@ -457,6 +499,7 @@ async fn graph_case(factory_created: bool, initialize: bool) -> Result<()> {
     let mut database = Database::new(MySqlRetention::UntilProcessed).await?;
     let path = tempfile::tempdir()?;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -492,7 +535,7 @@ async fn graph_case(factory_created: bool, initialize: bool) -> Result<()> {
         let provider = indexes(path.path())?;
         let snapshots = if initialize {
             let (_, snapshots) = MySqlSource::coordinated_consumers(
-                id("source"),
+                id(77),
                 stream("changes"),
                 database.settings.clone(),
                 consumers.clone(),
@@ -523,11 +566,12 @@ async fn graph_case(factory_created: bool, initialize: bool) -> Result<()> {
             &snapshots,
             factory_created,
         )?;
-        let report = core.add_components(builder.build_components()?).await?;
-        anyhow::ensure!(report.committed, "{report:?}");
+        core.add_components(builder.build_components()?).await?;
         core.start().await?;
         for name in ["source", "left", "right", "left-sink", "right-sink"] {
-            core.computation_component(name)?.wait_started().await?;
+            core.component_by_name(&ComponentName::try_new(name)?)?
+                .wait_started()
+                .await?;
         }
         for results in &results {
             anyhow::ensure!(
@@ -666,6 +710,7 @@ async fn replay_different_owners(add_member: bool) -> Result<()> {
     let mut database = Database::new(MySqlRetention::UntilProcessed).await?;
     let path = tempfile::tempdir()?;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -694,7 +739,7 @@ async fn replay_different_owners(add_member: bool) -> Result<()> {
             actual.push(query_for(owner.clone(), provider.clone()).await?);
         }
         let mut seed = MySqlSource::new_with_consumer_progress(
-            id("source"),
+            id(77),
             stream("changes"),
             database.settings.clone(),
             group(&graph_id, &owners),
@@ -717,7 +762,10 @@ async fn replay_different_owners(add_member: bool) -> Result<()> {
                 .execute("UPDATE items SET value='second' WHERE id=1")
                 .await?;
             apply(&mut actual[0], next(&mut seed).await?).await?;
-            let key = SourceProgressKey::Source("source".into());
+            let key = SourceProgressKey::Source(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            );
             anyhow::ensure!(
                 owners[0].snapshot().checkpoints[&key].sequence
                     > owners[1].snapshot().checkpoints[&key].sequence,
@@ -746,7 +794,7 @@ async fn replay_different_owners(add_member: bool) -> Result<()> {
             .into());
         }
         if add_member {
-            let owner = Arc::new(QuerySourceProgress::new(graph_id.as_str(), id("third"))?);
+            let owner = Arc::new(QuerySourceProgress::new(graph_id.as_str(), id(795))?);
             actual.push(query_for(owner.clone(), provider.clone()).await?);
             owners.push(owner);
         }
@@ -773,11 +821,12 @@ async fn replay_different_owners(add_member: bool) -> Result<()> {
             &[],
             true,
         )?;
-        let report = core.add_components(builder.build_components()?).await?;
-        anyhow::ensure!(report.committed, "{report:?}");
+        core.add_components(builder.build_components()?).await?;
         core.start().await?;
         for name in ["source", "left", "right"] {
-            core.computation_component(name)?.wait_started().await?;
+            core.component_by_name(&ComponentName::try_new(name)?)?
+                .wait_started()
+                .await?;
         }
         for (index, receiver) in received.iter_mut().enumerate() {
             let expected = match index {
@@ -952,6 +1001,7 @@ async fn unequal_snapshots() -> Result<()> {
     let mut database = Database::new(MySqlRetention::UntilProcessed).await?;
     let path = tempfile::tempdir()?;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -982,7 +1032,7 @@ async fn unequal_snapshots() -> Result<()> {
             .to_string();
         let owners = owners(&graph_id);
         let (source, snapshots) = MySqlSource::coordinated_consumers(
-            id("source"),
+            id(77),
             stream("changes"),
             database.settings.clone(),
             group(&graph_id, &owners),
@@ -1014,16 +1064,26 @@ async fn unequal_snapshots() -> Result<()> {
         let (builder, mut received) =
             queries(ComputationGraph::builder(graph_id.as_str()), actual)?;
         let builder = builder
-            .source(Box::new(SourceGate {
-                inner: source,
-                ready: source_ready.clone(),
-                release: source_release.clone(),
-            }))
-            .bind_stream(endpoint("source", "out"), stream("changes"));
-        let report = core.add_components(builder.build_components()?).await?;
-        anyhow::ensure!(report.committed, "{report:?}");
+            .source(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-source-2")
+                    .expect("fixture component name"),
+                Box::new(SourceGate {
+                    inner: source,
+                    ready: source_ready.clone(),
+                    release: source_release.clone(),
+                }),
+            )
+            .bind_stream(
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("changes"),
+            );
+        core.add_components(builder.build_components()?).await?;
         let writes = async {
-            anyhow::ensure!(captures.recv().await == Some(id("left")), "first snapshot");
+            anyhow::ensure!(captures.recv().await == Some(id(743)), "first snapshot");
             database.admin.execute("BEGIN").await?;
             database
                 .admin
@@ -1039,10 +1099,7 @@ async fn unequal_snapshots() -> Result<()> {
                 .await?;
             database.admin.execute("COMMIT").await?;
             second_begin.notify_one();
-            anyhow::ensure!(
-                captures.recv().await == Some(id("right")),
-                "second snapshot"
-            );
+            anyhow::ensure!(captures.recv().await == Some(id(465)), "second snapshot");
             database.admin.execute("BEGIN").await?;
             database
                 .admin
@@ -1061,7 +1118,10 @@ async fn unequal_snapshots() -> Result<()> {
                 release.notify_one();
             }
             source_ready.notified().await;
-            let key = SourceProgressKey::Source("source".into());
+            let key = SourceProgressKey::Source(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            );
             anyhow::ensure!(
                 owners[0].snapshot().checkpoints[&key].sequence
                     < owners[1].snapshot().checkpoints[&key].sequence,
@@ -1161,7 +1221,7 @@ async fn an_actual_stopped_member_fences_live_replication_until_awaited_cleanup(
         queries.push(query_for(owner.clone(), provider.clone()).await?);
     }
     let mut source = MySqlSource::new_with_consumer_progress(
-        id("source"),
+        id(77),
         stream("changes"),
         database.settings.clone(),
         group("mysql-stopped-member", &owners),

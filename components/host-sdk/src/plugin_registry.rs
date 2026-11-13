@@ -752,7 +752,7 @@ mod tests {
         }
         async fn create_source(
             &self,
-            _id: &str,
+            _id: &drasi_core_types::ComponentId,
             _config_json: &serde_json::Value,
             _auto_start: bool,
         ) -> anyhow::Result<Box<dyn Source>> {
@@ -780,8 +780,8 @@ mod tests {
         }
         async fn create_reaction(
             &self,
-            _id: &str,
-            _query_ids: Vec<String>,
+            _id: &drasi_core_types::ComponentId,
+            _query_ids: Vec<drasi_computation_contracts::ComponentReference>,
             _config_json: &serde_json::Value,
             _auto_start: bool,
         ) -> anyhow::Result<Box<dyn drasi_lib::reactions::Reaction>> {

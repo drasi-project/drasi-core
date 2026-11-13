@@ -55,9 +55,16 @@ impl Gate {
 pub struct Probe {
     pub starts: AtomicUsize,
     pub accepted: Mutex<Vec<QueryResult>>,
-    pub attempts: Mutex<Vec<(String, u64)>>,
+    pub attempts: Mutex<Vec<(drasi_core_types::ComponentId, u64)>>,
     pub handled: Mutex<Vec<QueryResult>>,
-    pub snapshots: Mutex<Vec<(String, bool, u64, Vec<serde_json::Value>)>>,
+    pub snapshots: Mutex<
+        Vec<(
+            drasi_core_types::ComponentId,
+            bool,
+            u64,
+            Vec<serde_json::Value>,
+        )>,
+    >,
     pub fail_effect: AtomicBool,
     pub fail_bootstrap: AtomicBool,
 }
@@ -75,14 +82,13 @@ pub struct ProbeReaction {
 }
 
 impl ProbeReaction {
-    pub fn new(id: &str, queries: &[&str]) -> Self {
+    pub fn new(
+        id: drasi_core_types::ComponentId,
+        queries: Vec<drasi_computation_contracts::ComponentReference>,
+    ) -> Self {
         Self {
             base: Arc::new(ReactionBase::new(
-                ReactionBaseParams::new(
-                    id,
-                    queries.iter().map(|query| (*query).to_owned()).collect(),
-                )
-                .with_auto_start(false),
+                ReactionBaseParams::new(id, queries).with_auto_start(false),
             )),
             probe: Arc::new(Probe::default()),
             start_gate: None,
@@ -97,7 +103,7 @@ impl ProbeReaction {
 
 #[async_trait]
 impl Reaction for ProbeReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         self.base.get_id()
     }
 
@@ -109,8 +115,8 @@ impl Reaction for ProbeReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
     fn auto_start(&self) -> bool {
@@ -129,8 +135,8 @@ impl Reaction for ProbeReaction {
         self.policy
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -219,11 +225,12 @@ impl Reaction for ProbeReaction {
 
 pub async fn checkpoint(
     store: &dyn StateStoreProvider,
-    reaction: &str,
-    query: &str,
+    reaction: &drasi_core_types::ComponentId,
+    query: &drasi_core_types::ComponentId,
 ) -> Option<ReactionCheckpoint> {
+    let partition = drasi_core_types::StorePartition::component(reaction.clone());
     store
-        .get(reaction, &format!("checkpoint:{query}"))
+        .get(&partition, &format!("checkpoint:{query}"))
         .await
         .expect("read checkpoint")
         .map(|bytes| bincode::deserialize(&bytes).expect("checkpoint payload"))
@@ -231,8 +238,8 @@ pub async fn checkpoint(
 
 pub async fn wait_checkpoint(
     store: &dyn StateStoreProvider,
-    reaction: &str,
-    query: &str,
+    reaction: &drasi_core_types::ComponentId,
+    query: &drasi_core_types::ComponentId,
     sequence: u64,
 ) -> ReactionCheckpoint {
     tokio::time::timeout(DEADLINE, async {

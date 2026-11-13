@@ -214,11 +214,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn loss_authorized_retirement_only_allows_processing_failure_after_completed_stop() {
-        let id = ComponentId::try_new("service").unwrap();
+        let id = ComponentId::generate();
         let mut graph = ComputationGraph::builder("freeze")
-            .service(Box::new(Service(
-                ComponentDescriptor::try_new(id.clone(), vec![]).unwrap(),
-            )))
+            .service(
+                crate::config::ComponentName::try_new("service").unwrap(),
+                Box::new(Service(
+                    ComponentDescriptor::try_new(id.clone(), vec![]).unwrap(),
+                )),
+            )
             .build()
             .unwrap();
         for phase in [
@@ -295,7 +298,14 @@ mod tests {
                     .unwrap();
                 let result = control
                     .management_control()
-                    .reconcile_components(desired.clone(), desired, TopologyBindings::default())
+                    .reconcile_components(
+                        desired.clone(),
+                        desired,
+                        TopologyBindings::default(),
+                        BTreeMap::new(),
+                        BTreeSet::new(),
+                        BTreeMap::new(),
+                    )
                     .await;
                 assert_eq!(result.is_ok(), resolution != 2);
                 let started = control

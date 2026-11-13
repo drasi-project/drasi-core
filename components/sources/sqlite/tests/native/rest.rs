@@ -34,7 +34,7 @@ async fn native_rest_crud_batches_and_rowids_use_the_source_connection() -> Resu
     for mode in [SqliteOutput::Changes, SqliteOutput::Transactions] {
         let directory = tempfile::tempdir()?;
         let mut source = SqliteSource::new(
-            id("source"),
+            id(SOURCE_ID),
             stream("changes"),
             volatile(directory.path(), mode),
         )?
@@ -201,7 +201,7 @@ async fn native_rest_honors_configured_keys_and_table_filters() -> Result<()> {
         key_columns: vec!["code".into()],
     }];
     let mut source =
-        SqliteSource::new(id("source"), stream("changes"), settings)?.with_rest_api(rest())?;
+        SqliteSource::new(id(SOURCE_ID), stream("changes"), settings)?.with_rest_api(rest())?;
     source.start().await?;
     let result = async {
         source
@@ -332,7 +332,7 @@ async fn native_rest_cancelled_and_timed_out_stop_retain_accepted_requests() -> 
         let mut settings = volatile(directory.path(), SqliteOutput::Changes);
         settings.shutdown_timeout_ms = NonZeroU64::new(80).context("cleanup timeout")?;
         let mut source =
-            SqliteSource::new(id("source"), stream("changes"), settings)?.with_rest_api(rest())?;
+            SqliteSource::new(id(SOURCE_ID), stream("changes"), settings)?.with_rest_api(rest())?;
         source.start().await?;
         let handle = source.handle();
         handle
@@ -397,7 +397,7 @@ async fn native_rest_bind_failure_does_not_create_or_admit_sql_work() -> Result<
     let address = occupied.local_addr()?;
     let settings = volatile(directory.path(), SqliteOutput::Changes);
     let path = settings.path.clone().context("database path")?;
-    let mut source = SqliteSource::new(id("source"), stream("changes"), settings)?.with_rest_api(
+    let mut source = SqliteSource::new(id(SOURCE_ID), stream("changes"), settings)?.with_rest_api(
         RestApiConfig {
             host: address.ip().to_string(),
             port: address.port(),

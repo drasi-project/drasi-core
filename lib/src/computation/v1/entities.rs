@@ -27,9 +27,12 @@ use super::{
 
 /// An entity identity scoped to one computation graph. Native pipes use full
 /// port endpoints; host subscriptions use component pairs in a separate namespace.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum GraphEntityId {
     Component(ComponentId),
+    Instance(String),
+    BootstrapProvider(ComponentId),
+    InstanceIdentityProvider,
     Resource(ResourceId),
     /// A particular plugin ID/version pair.
     Plugin(PluginIdentity),
@@ -46,12 +49,22 @@ pub(super) fn encode_entity_key(value: &str) -> String {
 }
 
 impl GraphEntityId {
+    pub fn component_id(&self) -> Option<&ComponentId> {
+        match self {
+            Self::Component(id) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Stable, collision-free graph-as-data key. Each identifier is encoded
     /// separately, so delimiters in user identifiers cannot alias another entity.
-    /// Component/resource keys retain the original inspection source namespaces.
+    /// Component keys are exactly their UUIDs. Other entity kinds are namespaced.
     pub fn key(&self) -> String {
         match self {
-            Self::Component(id) => format!("component:{}", encode_entity_key(id.as_str())),
+            Self::Component(id) => id.as_str().to_owned(),
+            Self::Instance(id) => format!("v1:instance:{}", encode_entity_key(id)),
+            Self::BootstrapProvider(owner) => format!("v1:bootstrap:{owner}"),
+            Self::InstanceIdentityProvider => "v1:instance-identity-provider".into(),
             Self::Resource(id) => format!("resource:{}", encode_entity_key(id.as_str())),
             Self::Plugin(identity) => format!(
                 "v1:plugin:{}:{}",
@@ -72,6 +85,12 @@ impl GraphEntityId {
                 encode_entity_key(to.as_str()),
             ),
         }
+    }
+}
+
+impl std::fmt::Display for GraphEntityId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.key())
     }
 }
 

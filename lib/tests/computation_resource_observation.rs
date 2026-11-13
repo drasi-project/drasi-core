@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
@@ -29,7 +33,21 @@ use drasi_lib::computation::v1::*;
 use drasi_lib::context::{ComponentResource, ComponentResourceObserver};
 
 fn component(name: &str) -> ComponentId {
-    ComponentId::try_new(name).unwrap()
+    fixture_support::component_id(match name {
+        "first" => 1,
+        "second" => 2,
+        "separate-binding" => 3,
+        "component" => 4,
+        "observer" => 5,
+        "absent" => 6,
+        "declared" => 7,
+        "opaque" => 8,
+        "probe" => 9,
+        "store" => 10,
+        "identity" => 11,
+        "other-interface" => 12,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 fn resource(name: &str) -> ResourceId {
@@ -67,7 +85,7 @@ impl ComputationService for Idle {
 fn graph(names: &[&str]) -> ComputationGraph {
     let mut builder = ComputationGraph::builder("resource-observation");
     for name in names {
-        builder = builder.service(Box::new(Idle(descriptor(name))));
+        builder = builder.fixture_service(Box::new(Idle(descriptor(name))));
     }
     builder.build().unwrap()
 }
@@ -133,7 +151,7 @@ fn report(
     name: &str,
     resources: Vec<(ResourceSpecification, ResourceHandle)>,
 ) {
-    let handle = control.component_handle(&component(name)).unwrap();
+    let handle = control.component_handle_by_id(&component(name)).unwrap();
     control
         .observe_resources(handle.id(), handle.generation(), resources)
         .unwrap();
@@ -380,6 +398,7 @@ async fn probe_binding<T: Any + Send + Sync>(
     });
     let probe = control
         .add_component(ComponentAddition::from_specification(
+            ComponentName::try_new("probe").unwrap(),
             ComponentSpecification {
                 descriptor: descriptor("probe"),
                 role: ComponentRole::Service,
@@ -408,7 +427,7 @@ async fn observing_an_owned_instance_preserves_its_binding_and_cleanup_responsib
     let cleanup = Arc::new(AtomicUsize::new(0));
     let id = resource("attached/owned-store");
     let mut graph = ComputationGraph::builder("owned-observation")
-        .service(Box::new(Idle(descriptor("component"))))
+        .fixture_service(Box::new(Idle(descriptor("component"))))
         .declare_resource(specification(
             id.as_str(),
             ResourceRole::StateStore,
@@ -471,7 +490,7 @@ async fn explicit_rebinding_still_requires_a_new_binding_not_a_new_shared_provid
     let original = native(&provider).with_cleanup(Arc::new(CountCleanup(old_cleanup.clone())));
     let id = resource("owned-store");
     let mut graph = ComputationGraph::builder("explicit-rebinding")
-        .service(Box::new(Idle(descriptor("component"))))
+        .fixture_service(Box::new(Idle(descriptor("component"))))
         .declare_resource(specification(
             id.as_str(),
             ResourceRole::StateStore,
@@ -527,16 +546,16 @@ async fn verify_declared_resource_names_do_not_transfer_ownership() {
     enum Change {
         Detach,
         Remove,
-        Replace,
+        Recreate,
     }
 
     for ownership in [ResourceOwnership::Borrowed, ResourceOwnership::Graph] {
-        for change in [Change::Detach, Change::Remove, Change::Replace] {
+        for change in [Change::Detach, Change::Remove, Change::Recreate] {
             let provider = Arc::new(19usize);
             let cleanup = Arc::new(AtomicUsize::new(0));
             let id = resource("attached/caller-chosen-name");
             let mut graph = ComputationGraph::builder("declared-observation")
-                .service(Box::new(Idle(descriptor("observer"))))
+                .fixture_service(Box::new(Idle(descriptor("observer"))))
                 .declare_resource(specification(
                     id.as_str(),
                     ResourceRole::StateStore,
@@ -571,7 +590,7 @@ async fn verify_declared_resource_names_do_not_transfer_ownership() {
                         published(&control, desired.revision.0 + 1).await;
                     }
                     Change::Remove => remove(&control, "observer").await,
-                    Change::Replace => {
+                    Change::Recreate => {
                         let definition = desired
                             .select(GraphSelection::All)
                             .unwrap()
@@ -579,29 +598,19 @@ async fn verify_declared_resource_names_do_not_transfer_ownership() {
                             .into_iter()
                             .find(|node| node.descriptor.id() == &component("observer"))
                             .unwrap();
-                        let ComponentConstruction::External { binding } = &definition.construction
-                        else {
-                            panic!("the observer is an explicitly supplied instance");
-                        };
-                        let mut bindings = TopologyBindings::default();
-                        bindings.components.insert(
-                            binding.clone(),
-                            ConstructedComponent::service(Box::new(Idle(descriptor("observer")))),
-                        );
-                        let preview = control
-                            .preview(
-                                desired.revision,
-                                vec![DesiredMutation::ReplaceComponent(definition)],
-                            )
+                        remove(&control, "observer").await;
+                        control
+                            .add_component(ComponentAddition::new(
+                                definition.name,
+                                ConstructedComponent::service(Box::new(Idle(descriptor(
+                                    "observer",
+                                )))),
+                            ))
+                            .await
+                            .unwrap()
+                            .wait_created()
                             .await
                             .unwrap();
-                        assert!(
-                            control
-                                .reconcile(preview, bindings)
-                                .await
-                                .unwrap()
-                                .committed
-                        );
                     }
                 }
                 assert!(
@@ -669,7 +678,7 @@ async fn explicitly_rebound_observation_becomes_a_declared_resource() {
             .unwrap();
         let mut bindings = TopologyBindings::default();
         bindings.components.insert(
-            desired.external_bindings[&component("observer")].to_string(),
+            desired.external_bindings[&component("observer")].clone(),
             ConstructedComponent::service(Box::new(Idle(descriptor("observer")))),
         );
         bindings.resources.insert(
@@ -702,7 +711,9 @@ async fn invalid_reports_reject_ownership_transfer_roles_duplicates_and_obsolete
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.unwrap();
-        let handle = control.component_handle(&component("component")).unwrap();
+        let handle = control
+            .component_handle_by_id(&component("component"))
+            .unwrap();
         let report =
             |bindings| control.observe_resources(handle.id(), handle.generation(), bindings);
         let revision = control.desired_snapshot().revision.0;
@@ -758,7 +769,9 @@ async fn queued_reports_cannot_restore_retired_links_or_provenance_on_a_reused_c
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.unwrap();
-        let old = control.component_handle(&component("component")).unwrap();
+        let old = control
+            .component_handle_by_id(&component("component"))
+            .unwrap();
         let revision = control.desired_snapshot().revision.0;
         report(
             &control,
@@ -791,9 +804,10 @@ async fn queued_reports_cannot_restore_retired_links_or_provenance_on_a_reused_c
         assert!(removal.await.unwrap().committed);
         let replacement = control
             .add_component(
-                ComponentAddition::new(ConstructedComponent::service(Box::new(Idle(descriptor(
-                    "component",
-                )))))
+                ComponentAddition::new(
+                    ComponentName::try_new("component").unwrap(),
+                    ConstructedComponent::service(Box::new(Idle(descriptor("component")))),
+                )
                 .auto_start(false),
             )
             .await
@@ -833,19 +847,21 @@ fn plugin(id: &str, version: &str) -> PluginIdentity {
 async fn plugin_provenance_is_validated_before_queuing_and_again_at_publication() {
     let declared = plugin("declared-plugin", "1");
     let mut graph = ComputationGraph::builder("plugin-observation")
-        .service(Box::new(Idle(
+        .fixture_service(Box::new(Idle(
             descriptor("declared")
                 .with_plugin_identity(declared.clone())
                 .unwrap(),
         )))
-        .service(Box::new(Idle(descriptor("opaque"))))
+        .fixture_service(Box::new(Idle(descriptor("opaque"))))
         .build()
         .unwrap();
     let run = graph.run().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.unwrap();
-        let known = control.component_handle(&component("declared")).unwrap();
+        let known = control
+            .component_handle_by_id(&component("declared"))
+            .unwrap();
         assert!(matches!(
             control.observe_plugin(
                 known.id(),
@@ -863,7 +879,9 @@ async fn plugin_provenance_is_validated_before_queuing_and_again_at_publication(
         control
             .observe_plugin(known.id(), known.generation(), declared.clone())
             .unwrap();
-        let opaque = control.component_handle(&component("opaque")).unwrap();
+        let opaque = control
+            .component_handle_by_id(&component("opaque"))
+            .unwrap();
         let first = plugin("reported-plugin", "1");
         control
             .observe_plugin(opaque.id(), opaque.generation(), first.clone())
@@ -921,7 +939,9 @@ async fn observation_admission_is_nonblocking_and_reports_full_or_closed_queues(
     let mut graph = graph(&["component"]);
     let run = graph.run().unwrap();
     let control = run.control();
-    let handle = control.component_handle(&component("component")).unwrap();
+    let handle = control
+        .component_handle_by_id(&component("component"))
+        .unwrap();
     let mut accepted = 0;
     loop {
         match control.observe_resources(handle.id(), handle.generation(), Vec::new()) {
@@ -953,7 +973,7 @@ async fn weak_graph_publications_do_not_retain_shared_identity_owners() {
     let owner = Arc::new(7usize);
     let weak = Arc::downgrade(&owner);
     let mut graph = ComputationGraph::builder("identity-lifetime")
-        .service(Box::new(Idle(descriptor("component"))))
+        .fixture_service(Box::new(Idle(descriptor("component"))))
         .declare_resource(specification(
             "provider",
             ResourceRole::StateStore,
@@ -1008,8 +1028,8 @@ async fn compatibility_observers_reuse_untagged_legacy_bindings_without_weakenin
     );
     let original_binding = Arc::new(LegacyIdentityResource(provider.clone()));
     let mut graph = ComputationGraph::builder("legacy-normalization")
-        .service(Box::new(Idle(descriptor("first"))))
-        .service(Box::new(Idle(descriptor("second"))))
+        .fixture_service(Box::new(Idle(descriptor("first"))))
+        .fixture_service(Box::new(Idle(descriptor("second"))))
         .declare_resource(specification(
             "declared-identity",
             ResourceRole::Identity,
@@ -1029,7 +1049,7 @@ async fn compatibility_observers_reuse_untagged_legacy_bindings_without_weakenin
         control.deployment_report().await.unwrap();
         let revision = control.desired_snapshot().revision.0;
         for name in ["first", "second"] {
-            let handle = control.component_handle(&component(name)).unwrap();
+            let handle = control.component_handle_by_id(&component(name)).unwrap();
             GraphResourceObserver::new(control.clone(), handle.id().clone(), handle.generation())
                 .observe(vec![ComponentResource::Identity(provider.clone())])
                 .await
@@ -1052,7 +1072,7 @@ async fn compatibility_observers_reuse_untagged_legacy_bindings_without_weakenin
         .await;
         let revision = control.desired_snapshot().revision.0;
         for name in ["first", "second"] {
-            let handle = control.component_handle(&component(name)).unwrap();
+            let handle = control.component_handle_by_id(&component(name)).unwrap();
             GraphResourceObserver::new(control.clone(), handle.id().clone(), handle.generation())
                 .observe(Vec::new())
                 .await

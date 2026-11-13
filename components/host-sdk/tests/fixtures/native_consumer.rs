@@ -31,6 +31,7 @@ impl sdk::Factory for Factory {
                         (
                             name.into(),
                             sdk::ConfigField {
+                                constraint: None,
                                 value_type: sdk::ConfigType::String,
                                 required: false,
                                 secret: false,

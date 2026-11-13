@@ -1,6 +1,9 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use std::{num::NonZeroUsize, sync::Arc};
 
 use drasi_core::{
@@ -26,7 +29,7 @@ async fn open(
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "temporal-retraction".into(),
-            id: ComponentId::try_new("capacity")?,
+            id: fixture_support::component_id(734),
             query: QUERY.into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("capacity/out")?,

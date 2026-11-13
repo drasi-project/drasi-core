@@ -1,11 +1,14 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use drasi_core_types::models::SourceMiddlewareConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::{normalize_query_joins, QueryJoinConfig, SourceTransactionLimits};
+use crate::{
+    normalize_query_joins, ComponentId, ComponentIdentityError, PortId, QueryJoinConfig,
+    SourceTransactionLimits,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ComputationQueryLanguage {
@@ -14,30 +17,35 @@ pub enum ComputationQueryLanguage {
     Gql,
 }
 
-/// One query input, including source interests and its ordered middleware pipeline.
-///
-/// A component name is the shorthand form. The expanded form accepts only
-/// `component`, `port`, `nodes`, `relations` and `pipeline`. Input order remains
-/// significant for the query's existing same-timestamp merge policy.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// A resolved execution input. Authoring names must be bound before construction.
+/// Input order remains significant for the same-timestamp merge policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryInputConfig {
-    pub component: String,
-    pub port: Option<String>,
+    pub component: ComponentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<PortId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pipeline: Vec<String>,
 }
 
 impl QueryInputConfig {
-    pub fn new(component: impl Into<String>) -> Self {
+    pub fn new(component: ComponentId) -> Self {
         Self {
-            component: component.into(),
-            ..Self::default()
+            component,
+            port: None,
+            nodes: Vec::new(),
+            relations: Vec::new(),
+            pipeline: Vec::new(),
         }
     }
 
-    pub fn with_port(mut self, port: impl Into<String>) -> Self {
-        self.port = Some(port.into());
+    pub fn with_port(mut self, port: PortId) -> Self {
+        self.port = Some(port);
         self
     }
 
@@ -47,91 +55,25 @@ impl QueryInputConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        crate::validate_identifier("query input component", &self.component)?;
-        if let Some(port) = &self.port {
-            crate::validate_identifier("query input port", port)?;
-        }
-        for (kind, labels) in [("node", &self.nodes), ("relation", &self.relations)] {
-            if labels.iter().any(|label| label.is_empty()) {
-                anyhow::bail!("query input '{}' has an empty {kind} label", self.component);
-            }
-        }
-        if self.pipeline.iter().any(|name| name.is_empty()) {
-            anyhow::bail!(
-                "query input '{}' has an empty pipeline name",
-                self.component
-            );
-        }
-        Ok(())
-    }
-
-    fn is_shorthand(&self) -> bool {
-        self.port.is_none()
-            && self.nodes.is_empty()
-            && self.relations.is_empty()
-            && self.pipeline.is_empty()
+        validate_query_input_annotations(&self.nodes, &self.relations, &self.pipeline)
+            .with_context(|| format!("query input '{}'", self.component))
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExpandedQueryInput {
-    component: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    port: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    nodes: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    relations: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pipeline: Vec<String>,
-}
-
-impl Serialize for QueryInputConfig {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.is_shorthand() {
-            return serializer.serialize_str(&self.component);
-        }
-        ExpandedQueryInput {
-            component: self.component.clone(),
-            port: self.port.clone(),
-            nodes: self.nodes.clone(),
-            relations: self.relations.clone(),
-            pipeline: self.pipeline.clone(),
-        }
-        .serialize(serializer)
+/// Validate data labels and middleware names shared by authoring and execution.
+pub fn validate_query_input_annotations(
+    nodes: &[String],
+    relations: &[String],
+    pipeline: &[String],
+) -> Result<()> {
+    for (kind, labels) in [("node", nodes), ("relation", relations)] {
+        anyhow::ensure!(!labels.iter().any(String::is_empty), "empty {kind} label");
     }
-}
-
-impl<'de> Deserialize<'de> for QueryInputConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct InputVisitor;
-        impl<'de> serde::de::Visitor<'de> for InputVisitor {
-            type Value = QueryInputConfig;
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a component name or an input object")
-            }
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(QueryInputConfig::new(value))
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let expanded = ExpandedQueryInput::deserialize(
-                    serde::de::value::MapAccessDeserializer::new(map),
-                )?;
-                Ok(QueryInputConfig {
-                    component: expanded.component,
-                    port: expanded.port,
-                    nodes: expanded.nodes,
-                    relations: expanded.relations,
-                    pipeline: expanded.pipeline,
-                })
-            }
-        }
-        deserializer.deserialize_any(InputVisitor)
-    }
+    anyhow::ensure!(
+        !pipeline.iter().any(String::is_empty),
+        "empty pipeline name"
+    );
+    Ok(())
 }
 
 /// The graph node label of result rows; the output schema remains graph-change.
@@ -174,21 +116,17 @@ pub struct QueryExecutionSettings {
 /// Host-side authoring adapters retain their own source-subscription types.
 pub trait QueryConfigurationSource {
     type Subscription;
-    fn execution_settings(&self) -> QueryExecutionSettings;
+    fn execution_settings(&self) -> Result<QueryExecutionSettings>;
     fn subscription_settings(&self) -> Result<Vec<Self::Subscription>>;
 }
 
+/// Identify the query-owned reader for an actual source UUID.
+/// Editable component names are not valid inputs or part of the helper identity.
 pub fn query_source_component_id(
-    query: &str,
-    source: &str,
-) -> std::result::Result<crate::ComponentId, crate::ContractError> {
-    let encoded = |value: &str| {
-        value
-            .bytes()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
-    crate::ComponentId::try_new(format!("source/{}/{}", encoded(query), encoded(source)))
+    query: &ComponentId,
+    source: &ComponentId,
+) -> std::result::Result<ComponentId, ComponentIdentityError> {
+    ComponentId::derive_owned(query, &format!("query-input/{source}"))
 }
 
 impl<T> QueryConfigurationSource for T
@@ -198,7 +136,7 @@ where
 {
     type Subscription = <T::Target as QueryConfigurationSource>::Subscription;
 
-    fn execution_settings(&self) -> QueryExecutionSettings {
+    fn execution_settings(&self) -> Result<QueryExecutionSettings> {
         QueryConfigurationSource::execution_settings(self.deref())
     }
 
@@ -216,17 +154,16 @@ impl QueryExecutionSettings {
             input.relations.sort();
             input.relations.dedup();
         }
+
         normalize_query_joins(&mut settings.joins);
         settings
     }
 
-    pub fn from_legacy_config(config: &impl QueryConfigurationSource) -> Self {
+    pub fn from_configuration(config: &impl QueryConfigurationSource) -> Result<Self> {
         config.execution_settings()
     }
 
-    pub fn legacy_subscriptions<C: QueryConfigurationSource>(
-        config: &C,
-    ) -> Result<Vec<C::Subscription>> {
+    pub fn subscriptions<C: QueryConfigurationSource>(config: &C) -> Result<Vec<C::Subscription>> {
         config.subscription_settings()
     }
 
@@ -236,5 +173,61 @@ impl QueryExecutionSettings {
             && self.inputs.is_empty()
             && self.result.is_default()
             && self.source_transactions.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const QUERY: &str = "00112233-4455-4677-8899-aabbccddeeff";
+    const SOURCE: &str = "11223344-5566-4788-99aa-bbccddeeff00";
+
+    #[test]
+    fn component_source_helper_depends_on_actual_uuid_owners() {
+        let reader = query_source_component_id(
+            &drasi_core_types::ComponentId::try_new("00112233-4455-4677-8899-aabbccddeeff")
+                .expect("fixture UUID"),
+            &drasi_core_types::ComponentId::try_new("11223344-5566-4788-99aa-bbccddeeff00")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
+        assert_eq!(
+            reader,
+            query_source_component_id(
+                &drasi_core_types::ComponentId::try_new(QUERY.to_ascii_uppercase())
+                    .expect("uppercase fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("11223344-5566-4788-99aa-bbccddeeff00")
+                    .expect("fixture UUID")
+            )
+            .unwrap()
+        );
+        assert_ne!(reader.as_str(), QUERY);
+        assert_ne!(reader.as_str(), SOURCE);
+        assert_ne!(
+            reader,
+            query_source_component_id(
+                &drasi_core_types::ComponentId::try_new("11223344-5566-4788-99aa-bbccddeeff00")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00112233-4455-4677-8899-aabbccddeeff")
+                    .expect("fixture UUID")
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            reader,
+            query_source_component_id(
+                &drasi_core_types::ComponentId::try_new("00112233-4455-4677-8899-aabbccddeeff")
+                    .expect("fixture UUID"),
+                &crate::ComponentId::generate()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn component_source_helper_requires_uuid_inputs_before_derivation() {
+        assert!(ComponentId::try_new("query").is_err());
+        assert!(ComponentId::try_new("source").is_err());
     }
 }

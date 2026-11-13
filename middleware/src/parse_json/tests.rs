@@ -46,7 +46,7 @@ fn create_node_element(props_map: ElementPropertyMap) -> Element {
     Element::Node {
         metadata: ElementMetadata {
             reference: ElementReference {
-                source_id: Arc::from("test_source"),
+                namespace: Arc::from("test_source"),
                 element_id: Arc::from("node:1"),
             },
             labels: vec![Arc::from("TestNode")].into(),
@@ -84,7 +84,7 @@ fn create_node_delete_change() -> SourceChange {
     SourceChange::Delete {
         metadata: ElementMetadata {
             reference: ElementReference {
-                source_id: Arc::from("test_source"),
+                namespace: Arc::from("test_source"),
                 element_id: Arc::from("node:1"),
             },
             labels: vec![Arc::from("TestNode")].into(),

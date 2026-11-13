@@ -166,7 +166,7 @@ async fn setup_query(
     // Define pipeline using helpers from queries.rs
     let pipeline_steps =
         queries::create_pipeline(&decoder_mw_name, &parser_mw_name, &promoter_mw_name);
-    builder = builder.with_source_pipeline(SOURCE_ID, &pipeline_steps);
+    builder = builder.with_namespace_pipeline(SOURCE_ID, &pipeline_steps);
 
     builder.build().await
 }

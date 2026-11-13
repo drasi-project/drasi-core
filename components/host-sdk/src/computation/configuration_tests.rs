@@ -93,12 +93,21 @@ fn configuration_extension_enriches_discovery_and_validates_before_construction(
     assert_eq!(schema["properties"]["count"]["default"], 2);
     assert_eq!(schema["properties"]["count"]["maximum"], 4);
     assert!(factory
-        .specification(ComponentId::try_new("test")?, json!({"count":5}))
+        .specification(
+            ComponentId::try_new("85e5f698-5a7c-51f4-8fe4-7ed2f3aa670e")?,
+            json!({"count":5})
+        )
         .is_err());
     assert!(factory
-        .create_component(ComponentId::try_new("test")?, json!({"count":5}))
+        .create_component(
+            ComponentId::try_new("85e5f698-5a7c-51f4-8fe4-7ed2f3aa670e")?,
+            json!({"count":5})
+        )
         .is_err());
-    factory.create_component(ComponentId::try_new("test")?, json!({"count":4}))?;
+    factory.create_component(
+        ComponentId::try_new("85e5f698-5a7c-51f4-8fe4-7ed2f3aa670e")?,
+        json!({"count":4}),
+    )?;
     Ok(())
 }
 
@@ -110,10 +119,16 @@ fn old_entry_points_keep_the_original_metadata_contract() -> anyhow::Result<()> 
     assert!(factory.configuration_schema()["properties"]["count"]
         .get("maximum")
         .is_none());
-    factory.specification(ComponentId::try_new("old-host")?, json!({"count":5}))?;
+    factory.specification(
+        ComponentId::try_new("7901ce5e-2a32-551d-a6d2-71bc91a9af4c")?,
+        json!({"count":5}),
+    )?;
     // New plugins still validate their own description if an older host does not.
     assert!(factory
-        .create_component(ComponentId::try_new("old-host")?, json!({"count":5}))
+        .create_component(
+            ComponentId::try_new("7901ce5e-2a32-551d-a6d2-71bc91a9af4c")?,
+            json!({"count":5})
+        )
         .is_err());
     let base = serde_json::to_value(plugin.metadata())?;
     assert!(base["factories"][0]["configuration"]["fields"]["count"]

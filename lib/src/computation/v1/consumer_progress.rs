@@ -162,12 +162,24 @@ mod tests {
     use futures::poll;
 
     fn owner(graph: &str, name: &str) -> Arc<QuerySourceProgress> {
-        Arc::new(QuerySourceProgress::new(graph, ComponentId::try_new(name).unwrap()).unwrap())
+        let value = match name {
+            "left" => 1,
+            "right" => 2,
+            "producer" => 3,
+            name if name.starts_with("consumer-") => {
+                name["consumer-".len()..]
+                    .parse::<u128>()
+                    .expect("fixture consumer index")
+                    + 100
+            }
+            other => panic!("missing explicit fixture component ID for {other}"),
+        };
+        Arc::new(QuerySourceProgress::new(graph, crate::test_helpers::component_id(value)).unwrap())
     }
 
     fn group(owners: Vec<Arc<QuerySourceProgress>>) -> Arc<ConsumerProgressSet> {
         Arc::new(
-            ConsumerProgressSet::new("graph", ComponentId::try_new("producer").unwrap(), owners)
+            ConsumerProgressSet::new("graph", crate::test_helpers::component_id(3), owners)
                 .unwrap(),
         )
     }
@@ -178,7 +190,10 @@ mod tests {
             recovered: true,
             persistent,
             checkpoints: BTreeMap::from([(
-                super::super::SourceProgressKey::Source("input".into()),
+                super::super::SourceProgressKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                        .expect("fixture UUID"),
+                ),
                 SourceCheckpoint::new(sequence, Some(Bytes::copy_from_slice(cursor))),
             )]),
             ..Default::default()
@@ -210,7 +225,7 @@ mod tests {
         assert!(group.read_only().same_binding(&group.read_only()));
         let replacement = super::ConsumerProgressSet::new(
             "graph",
-            ComponentId::try_new("producer").unwrap(),
+            crate::test_helpers::component_id(3),
             [left, right],
         )
         .unwrap();
@@ -221,7 +236,7 @@ mod tests {
 
     #[test]
     fn invalid_membership_never_becomes_partial_membership() {
-        let producer = ComponentId::try_new("producer").unwrap();
+        let producer = crate::test_helpers::component_id(3);
         for owners in [
             vec![],
             vec![owner("other", "left")],
@@ -258,7 +273,7 @@ mod tests {
         assert_eq!(view.snapshot().unwrap().consumers.len(), 2);
         right.fail();
         let error = view.wait_recovered().await.unwrap_err();
-        assert!(error.to_string().contains("right"));
+        assert!(error.to_string().contains(right.component_id().as_str()));
     }
 
     #[tokio::test(flavor = "current_thread")]

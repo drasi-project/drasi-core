@@ -44,7 +44,7 @@ impl SessionControl for HeldCommit {
         let output = !self.gate.require_output
             || self
                 .checkpoints
-                .read_checkpoint("\0native-query:live-row-count:v1")
+                .read_checkpoint(&metadata_checkpoint("\0native-query:live-row-count:v1"))
                 .await?
                 .is_some_and(|checkpoint| checkpoint.sequence > 0);
         let hold = output && self.gate.armed.swap(false, Ordering::AcqRel);
@@ -129,7 +129,7 @@ fn held_indexes(
 
 async fn channel(
     root: &Path,
-    name: &str,
+    name: &drasi_core_types::ComponentId,
     gate: Option<Arc<CommitGate>>,
 ) -> Result<Arc<QosChannel>> {
     let indexes = held_indexes(
@@ -168,8 +168,20 @@ impl Fixture {
         gate: Option<Arc<CommitGate>>,
     ) -> Result<Self> {
         let channels = [
-            channel(root, "left", None).await?,
-            channel(root, "right", gate).await?,
+            channel(
+                root,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002e7")
+                    .expect("fixture UUID"),
+                None,
+            )
+            .await?,
+            channel(
+                root,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001d1")
+                    .expect("fixture UUID"),
+                gate,
+            )
+            .await?,
         ];
         let changed = [Arc::new(Notify::new()), Arc::new(Notify::new())];
         let seen = [
@@ -178,8 +190,10 @@ impl Fixture {
         ];
         let factory = factory()?;
         let indexes = ResourceId::try_new("indexes")?;
-        let mut specification =
-            factory.specification(ComponentId::try_new(COMPONENT)?, json!({"query":QUERY}))?;
+        let mut specification = factory.specification(
+            component_id()?,
+            json!({"query":QUERY, "stream":format!("{COMPONENT}/out")}),
+        )?;
         specification
             .dependencies
             .insert("processing".into(), vec![indexes.clone()]);
@@ -199,31 +213,52 @@ impl Fixture {
                     )?)),
                 ),
             )?
-            .source(Box::new(Source {
-                descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new("source")?,
-                    vec![port("out", PortDirection::Output)?],
-                )?,
-                envelope: input,
-            }))
-            .component(specification, factory)
+            .source(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                    .expect("fixture component name"),
+                Box::new(Source {
+                    descriptor: ComponentDescriptor::try_new(
+                        ComponentId::try_new("5c0e81d4-0199-5f29-8c30-6e624342a539")?,
+                        vec![port("out", PortDirection::Output)?],
+                    )?,
+                    envelope: input,
+                }),
+            )
+            .component(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                    .expect("fixture component name"),
+                specification,
+                factory,
+            )
             .connect(
                 EdgeDefinition::new(
-                    Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?),
-                    Endpoint::new(ComponentId::try_new(COMPONENT)?, PortId::try_new("in")?),
+                    Endpoint::new(
+                        ComponentId::try_new("5c0e81d4-0199-5f29-8c30-6e624342a539")?,
+                        PortId::try_new("out")?,
+                    ),
+                    Endpoint::new(component_id()?, PortId::try_new("in")?),
                 ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .bind_stream(
-                Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?),
+                Endpoint::new(
+                    ComponentId::try_new("5c0e81d4-0199-5f29-8c30-6e624342a539")?,
+                    PortId::try_new("out")?,
+                ),
                 StreamId::try_new("source/out")?,
             )
             .bind_stream(
-                Endpoint::new(ComponentId::try_new(COMPONENT)?, PortId::try_new("out")?),
+                Endpoint::new(component_id()?, PortId::try_new("out")?),
                 StreamId::try_new(format!("{COMPONENT}/out"))?,
             );
         for (index, name) in ["left", "right"].iter().enumerate() {
             let resource = ResourceId::try_new(*name)?;
+            let owner = ComponentId::try_new(
+                [
+                    "00000000-0000-0000-0000-0000000002e7",
+                    "00000000-0000-0000-0000-0000000001d1",
+                ][index],
+            )?;
             graph = graph
                 .declare_resource(ResourceSpecification {
                     id: resource.clone(),
@@ -232,18 +267,21 @@ impl Fixture {
                     binding: (*name).into(),
                 })?
                 .provide_resource(resource.clone(), channels[index].resource())?
-                .sink(Box::new(Sink {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new(*name)?,
-                        vec![port("in", PortDirection::Input)?],
-                    )?,
-                    received: seen[index].clone(),
-                    notification: changed[index].clone(),
-                }))
+                .sink(
+                    ComponentName::try_new(*name)?,
+                    Box::new(Sink {
+                        descriptor: ComponentDescriptor::try_new(
+                            owner.clone(),
+                            vec![port("in", PortDirection::Input)?],
+                        )?,
+                        received: seen[index].clone(),
+                        notification: changed[index].clone(),
+                    }),
+                )
                 .connect(
                     EdgeDefinition::new(
-                        Endpoint::new(ComponentId::try_new(COMPONENT)?, PortId::try_new("out")?),
-                        Endpoint::new(ComponentId::try_new(*name)?, PortId::try_new("in")?),
+                        Endpoint::new(component_id()?, PortId::try_new("out")?),
+                        Endpoint::new(owner, PortId::try_new("in")?),
                     ),
                     Box::new(channels[index].definition().pipe(resource, "target")),
                 );
@@ -290,7 +328,7 @@ async fn actual_destinations() -> Result<()> {
     drop(first);
     let owner = ComputationTransaction::try_new(
         provider(&root.join("query"))?
-            .create_indexes(GRAPH, COMPONENT)
+            .create_indexes(GRAPH, &component_id()?)
             .await?,
     )?;
     let store = owner
@@ -299,13 +337,19 @@ async fn actual_destinations() -> Result<()> {
         .expect("actual checkpoint store");
     let bindings = OutputBindings::load(
         store
-            .read_checkpoint(OUTPUT_BINDINGS_CHECKPOINT)
+            .read_checkpoint(&metadata_checkpoint(OUTPUT_BINDINGS_CHECKPOINT))
             .await?
             .as_ref(),
     )?;
     assert_eq!(bindings.destinations().len(), 2);
-    assert_eq!(bindings.destinations()[0].consumer.as_str(), "left");
-    assert_eq!(bindings.destinations()[1].consumer.as_str(), "right");
+    assert_eq!(
+        bindings.destinations()[0].consumer,
+        ComponentId::try_new("00000000-0000-0000-0000-0000000001d1")?
+    );
+    assert_eq!(
+        bindings.destinations()[1].consumer,
+        ComponentId::try_new("00000000-0000-0000-0000-0000000002e7")?
+    );
     assert_ne!(
         bindings.destinations()[0].journal,
         bindings.destinations()[1].journal
@@ -331,16 +375,18 @@ async fn actual_destinations() -> Result<()> {
     stopped?;
     drop(second);
     let mut blocked = create(&root.join("query"), QUERY, 3)?;
+    blocked.initialize().await?;
     blocked.start().await?;
     blocked.stop().await?;
     for _ in 0..2 {
         let failure = blocked
-            .deprovision()
+            .delete_owned_resources()
             .await
             .expect_err("bound destinations must protect their state");
         assert!(format!("{failure:#}").contains("destinations"));
     }
     let mut query = create(&root.join("query"), QUERY, 3)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(
         query.continue_transform().await.is_err(),
@@ -351,7 +397,7 @@ async fn actual_destinations() -> Result<()> {
         .await?;
     assert!(query.continue_transform().await?.is_empty());
     query.stop().await?;
-    query.deprovision().await?;
+    query.delete_owned_resources().await?;
     drop(blocked);
     Ok(())
 }

@@ -133,6 +133,7 @@ use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::secret_store::SecretStoreProvider;
 use drasi_lib::sources::Source;
+use drasi_lib::{config::ComponentReference, ComponentId};
 use std::sync::Arc;
 
 /// Descriptor for a **source** plugin.
@@ -236,7 +237,7 @@ pub trait SourcePluginDescriptor: Send + Sync {
     /// Returns an error if the configuration is invalid or the source cannot be created.
     async fn create_source(
         &self,
-        id: &str,
+        id: &ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Source>>;
@@ -285,13 +286,13 @@ pub trait ReactionPluginDescriptor: Send + Sync {
     /// # Arguments
     ///
     /// - `id` — The unique identifier for this reaction instance.
-    /// - `query_ids` — The IDs of queries this reaction subscribes to.
+    /// - `query_inputs` — Explicit name or ID references for the query inputs.
     /// - `config_json` — The plugin-specific configuration as a JSON value.
     /// - `auto_start` — Whether the reaction should start automatically after creation.
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &ComponentId,
+        query_inputs: Vec<ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>>;
@@ -509,12 +510,12 @@ mod tests {
 
     // A minimal mock source for testing the descriptor trait
     struct MockTestSource {
-        id: String,
+        id: drasi_core_types::ComponentId,
     }
 
     #[async_trait]
     impl Source for MockTestSource {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             &self.id
         }
         fn type_name(&self) -> &str {
@@ -541,7 +542,7 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        async fn initialize(&self, _context: drasi_lib::SourceRuntimeContext) {}
+        async fn bind_runtime_context(&self, _context: drasi_lib::SourceRuntimeContext) {}
     }
 
     struct TestSourceDescriptor;
@@ -562,11 +563,11 @@ mod tests {
         }
         async fn create_source(
             &self,
-            id: &str,
+            id: &drasi_core_types::ComponentId,
             _config_json: &serde_json::Value,
             _auto_start: bool,
         ) -> anyhow::Result<Box<dyn Source>> {
-            Ok(Box::new(MockTestSource { id: id.to_string() }))
+            Ok(Box::new(MockTestSource { id: id.clone() }))
         }
     }
 
@@ -595,9 +596,18 @@ mod tests {
         let desc = TestSourceDescriptor;
         let config = serde_json::json!({});
         let source = desc
-            .create_source("my-source", &config, true)
+            .create_source(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                    .expect("fixture UUID"),
+                &config,
+                true,
+            )
             .await
             .expect("create source");
-        assert_eq!(source.id(), "my-source");
+        assert_eq!(
+            source.id(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID")
+        );
     }
 }

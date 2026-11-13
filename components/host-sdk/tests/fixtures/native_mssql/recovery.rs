@@ -84,7 +84,10 @@ fn position(owner: &QuerySourceProgress) -> Result<bytes::Bytes> {
     owner
         .snapshot()
         .checkpoints
-        .get(&SourceProgressKey::Source("items".into()))
+        .get(&SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b3")
+                .expect("fixture UUID"),
+        ))
         .context("actual query source checkpoint is missing")?
         .source_position
         .clone()
@@ -126,7 +129,7 @@ pub(super) async fn partial_persistent(dynamic: bool) -> Result<()> {
             }
         }).await??;
         ensure!(harness.owners.iter().all(|owner|owner.snapshot().persistent),"test is not using actual persistent query progress");
-        let source=harness.core.computation_component("items")?;
+        let source=harness.core.component_by_name(&drasi_core_types::ComponentName::try_new("items").expect("fixture component name"))?;
         let mut stopping=Box::pin(source.stop());
         let finished=tokio::select! {
             result=&mut stopping=>{result?;true},

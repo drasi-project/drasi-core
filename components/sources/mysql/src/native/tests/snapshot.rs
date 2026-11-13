@@ -23,7 +23,7 @@ fn paired(
     owner: Arc<QuerySourceProgress>,
 ) -> Result<(MySqlSource, Arc<MySqlSnapshot>)> {
     MySqlSource::coordinated(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("cbee0527-c158-5313-bfd6-b7672cf312ee")?,
         StreamId::try_new("changes")?,
         config,
         owner,
@@ -40,14 +40,14 @@ fn native_snapshot_requires_opt_in_and_the_actual_paired_owner() -> Result<()> {
     };
     let (_source, snapshot) = paired(config.clone(), owner.clone())?;
     assert!(MySqlSource::new(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("cbee0527-c158-5313-bfd6-b7672cf312ee")?,
         StreamId::try_new("changes")?,
         config.clone(),
         Some(owner.clone())
     )
     .is_err());
     assert!(MySqlSource::with_snapshot(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("cbee0527-c158-5313-bfd6-b7672cf312ee")?,
         StreamId::try_new("changes")?,
         config.clone(),
         progress()?,
@@ -55,7 +55,7 @@ fn native_snapshot_requires_opt_in_and_the_actual_paired_owner() -> Result<()> {
     )
     .is_err());
     assert!(MySqlSource::with_snapshot(
-        ComponentId::try_new("other")?,
+        ComponentId::try_new("e76674ea-2e1a-5cb3-8929-2a68353e187f")?,
         StreamId::try_new("changes")?,
         config.clone(),
         owner.clone(),
@@ -461,11 +461,12 @@ async fn native_snapshot_reused_binlog_contents_fail_before_live_admission() -> 
     let path = tempfile::tempdir()?;
     let owner = progress()?;
     let (source, bootstrap) = paired(config.clone(), owner.clone())?;
+    let key = SourceProgressKey::Source(source.descriptor().id().clone());
     let mut query = query(path.path(), owner.clone())
         .await?
         .with_bootstrap(bootstrap);
     query.start().await?;
-    let saved = owner.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].clone();
+    let saved = owner.snapshot().checkpoints[&key].clone();
     let position: super::super::binlog::Position = serde_json::from_slice(
         saved
             .source_position
@@ -508,10 +509,7 @@ async fn native_snapshot_reused_binlog_contents_fail_before_live_admission() -> 
             || error.to_string().contains("not an event boundary"),
         "{error:#}"
     );
-    assert_eq!(
-        owner.snapshot().checkpoints[&SourceProgressKey::Source("source".into())],
-        saved
-    );
+    assert_eq!(owner.snapshot().checkpoints[&key], saved);
     assert_eq!(
         rows(&query)?,
         vec![serde_json::json!({"id":1,"value":"initial"})]

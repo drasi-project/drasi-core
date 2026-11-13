@@ -6,7 +6,7 @@ mod coordinator;
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
     Component, ConfigField, ConfigSchema, ConfigType, ControlSender, CreateRequest,
@@ -130,6 +130,7 @@ impl Factory for SqliteFactory {
             configuration.fields.insert(
                 "coordinated_snapshot".into(),
                 ConfigField {
+                    constraint: None,
                     value_type: ConfigType::Boolean,
                     required: false,
                     secret: false,
@@ -141,13 +142,7 @@ impl Factory for SqliteFactory {
                 .expect("constant implementation"),
             role: ComponentRole::Source,
             completion: None,
-            ports: SqliteSource::describe(
-                ComponentId::try_new("sqlite").expect("constant id"),
-                self.output(),
-            )
-            .expect("source descriptor")
-            .ports()
-            .to_vec(),
+            ports: SqliteSource::ports(self.output()).expect("constant port descriptor"),
             configuration_version: 1,
             configuration,
             capabilities: Default::default(),
@@ -267,3 +262,50 @@ impl Factory for SqliteFactory {
 
 #[cfg(feature = "dynamic-plugin")]
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_computation_contracts::{ComponentId, PortDirection};
+    use drasi_computation_plugin_sdk::ExportedPlugin;
+
+    #[test]
+    fn factory_metadata_constructs_without_database_io() -> Result<()> {
+        ExportedPlugin::new(plugin()?)?;
+        #[cfg(feature = "dynamic-plugin")]
+        assert!(!drasi_computation_plugin_metadata().is_null());
+        for (mode, name, output) in [
+            (Mode::Changes, SQLITE_CHANGES, SqliteOutput::Changes),
+            (
+                Mode::Transactions,
+                SQLITE_TRANSACTIONS,
+                SqliteOutput::Transactions,
+            ),
+            (Mode::Replay, SQLITE_REPLAY, SqliteOutput::Transactions),
+            (Mode::Shared, SQLITE_SHARED, SqliteOutput::Transactions),
+        ] {
+            let metadata = SqliteFactory(mode).metadata();
+            assert_eq!(
+                metadata.implementation,
+                ImplementationIdentity::try_new(name, "1")?
+            );
+            assert_eq!(metadata.role, ComponentRole::Source);
+            assert_eq!(metadata.completion, None);
+            assert_eq!(metadata.ports, SqliteSource::ports(output)?);
+            assert_eq!(metadata.ports.len(), 1);
+            assert_eq!(metadata.ports[0].id().as_str(), "out");
+            assert_eq!(metadata.ports[0].direction(), PortDirection::Output);
+            assert_eq!(
+                metadata.ports[0].schema(),
+                GraphChangeCodec::schema().descriptor()
+            );
+            let id = ComponentId::generate();
+            let descriptor = SqliteSource::describe(id.clone(), output)?;
+            assert_eq!(descriptor.id(), &id);
+            assert_eq!(descriptor.ports(), metadata.ports.as_slice());
+        }
+        assert!(SqliteFactory(Mode::Replay).supports_source_progress());
+        assert!(SqliteFactory(Mode::Shared).supports_consumer_progress());
+        Ok(())
+    }
+}

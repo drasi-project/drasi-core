@@ -26,6 +26,7 @@
 //! - **read_snapshot**: Returns all currently live rows.
 //! - **clear**: Removes all rows (used during `AutoReset` recovery).
 
+use crate::ComponentId;
 use async_trait::async_trait;
 
 use super::{IndexError, OutboxPageLimits};
@@ -54,7 +55,7 @@ pub trait LiveResultsWriter: Send + Sync {
     /// when possible for efficiency.
     async fn apply_mutations(
         &self,
-        query_id: &str,
+        component_id: &ComponentId,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError>;
 
@@ -62,7 +63,10 @@ pub trait LiveResultsWriter: Send + Sync {
     ///
     /// Returns `(row_signature, serialized_data)` pairs in unspecified order.
     /// Returns an empty vec if no rows exist for this query.
-    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError>;
+    async fn read_snapshot(
+        &self,
+        component_id: &ComponentId,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError>;
 
     /// Read committed rows in strictly increasing signature order, after the
     /// optional exclusive cursor. `None` includes signature zero.
@@ -72,7 +76,7 @@ pub trait LiveResultsWriter: Send + Sync {
     /// and truncate it. Callers must exclude writers across a multi-page read.
     async fn read_page(
         &self,
-        _query_id: &str,
+        _component_id: &ComponentId,
         _after_signature: Option<u64>,
         _limits: OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
@@ -82,10 +86,10 @@ pub trait LiveResultsWriter: Send + Sync {
     /// Delete all live rows for a query.
     ///
     /// Used during `AutoReset` recovery and reaction deprovisioning.
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError>;
+    async fn clear(&self, component_id: &ComponentId) -> Result<(), IndexError>;
 
     /// Count the number of live rows for a query.
     ///
     /// Useful for diagnostics and capacity monitoring.
-    async fn row_count(&self, query_id: &str) -> Result<usize, IndexError>;
+    async fn row_count(&self, component_id: &ComponentId) -> Result<usize, IndexError>;
 }

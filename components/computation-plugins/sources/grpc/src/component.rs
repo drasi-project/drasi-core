@@ -78,7 +78,7 @@ impl source::source_service_server::SourceService for SourceService {
             .into_inner()
             .event
             .context("event is required")
-            .and_then(|event| wire::grpc_change(event, &self.0.config.source_id));
+            .and_then(|event| wire::grpc_change(event, &self.0.source_id));
         let change = match converted {
             Ok(change) => change,
             Err(error) => {
@@ -134,7 +134,7 @@ impl source::source_service_server::SourceService for SourceService {
                         result.map_err(|_| Status::deadline_exceeded("native source stream idle timeout")).and_then(|value| value),
                 }?;
                 let Some(event) = event else { break; };
-                let change = match wire::grpc_change(event, &ingress.config.source_id) {
+                let change = match wire::grpc_change(event, &ingress.source_id) {
                     Ok(change) => change,
                     Err(error) => {
                         eprintln!("drasi.network gRPC stream invalid event: {error:#}");

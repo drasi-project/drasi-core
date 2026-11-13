@@ -285,7 +285,7 @@ impl MySqlBootstrapHandler {
         let element_id = format!("{}:{}", table_name, key_parts.join("_"));
 
         let metadata = ElementMetadata {
-            reference: ElementReference::new(&context.source_id, &element_id),
+            reference: ElementReference::new(context.source_id.as_str(), &element_id),
             labels: Arc::from(vec![Arc::from(label)]),
             effective_from: Utc::now().timestamp_millis() as u64,
         };

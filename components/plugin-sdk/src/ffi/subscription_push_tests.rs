@@ -93,7 +93,10 @@ fn assert_push_backpressure_does_not_starve_runtime(bootstrap: bool, shutdown_ru
     if bootstrap {
         bootstrap_tx
             .try_send(BootstrapEvent {
-                source_id: "source".into(),
+                source_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000004d",
+                )
+                .expect("fixture UUID"),
                 change,
                 timestamp: chrono::Utc::now(),
                 sequence: 1,
@@ -102,7 +105,8 @@ fn assert_push_backpressure_does_not_starve_runtime(bootstrap: bool, shutdown_ru
     } else {
         events_tx
             .try_send(Arc::new(SourceEventWrapper::new(
-                "source".into(),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
                 1,
@@ -112,8 +116,14 @@ fn assert_push_backpressure_does_not_starve_runtime(bootstrap: bool, shutdown_ru
     let subscription = unsafe {
         Box::from_raw(wrap_subscription_response(
             drasi_lib::SubscriptionResponse {
-                query_id: "query".into(),
-                source_id: "source".into(),
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000002e",
+                )
+                .expect("fixture UUID"),
+                source_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000004d",
+                )
+                .expect("fixture UUID"),
                 receiver: Box::new(Receiver(events_rx)),
                 bootstrap_receiver: bootstrap.then_some(bootstrap_rx),
                 position_handle: None,

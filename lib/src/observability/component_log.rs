@@ -52,7 +52,7 @@
 //! ```no_run
 //! # use drasi_lib::DrasiLib;
 //! # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
-//! let (history, mut receiver) = core.subscribe_source_logs("my-source").await?;
+//! let (history, mut receiver) = core.subscribe_source_logs_by_name(&drasi_lib::ComponentName::try_new("my-source")?).await?;
 //! while let Ok(log) = receiver.recv().await {
 //!     println!("[{}] {}: {}", log.level, log.component_id, log.message);
 //! }
@@ -68,6 +68,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::channels::ComponentType;
 use crate::computation::v1::{ComponentRole, ComponentSemanticKind};
+use crate::ComponentId;
 
 /// Component categories in logs, including native processing roles.
 ///
@@ -172,12 +173,12 @@ pub const DEFAULT_MAX_LOGS_PER_COMPONENT: usize = 100;
 /// are kept separate.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComponentLogKey {
-    /// The DrasiLib instance ID (or empty string for legacy/default behavior)
+    /// The DrasiLib instance scope, empty for an explicitly unscoped log.
     pub instance_id: String,
     /// The component's log category, including its native processing role.
     pub component_type: ComponentLogType,
     /// The component's ID within its DrasiLib instance
-    pub component_id: String,
+    pub component_id: ComponentId,
 }
 
 impl ComponentLogKey {
@@ -185,43 +186,25 @@ impl ComponentLogKey {
     pub fn new(
         instance_id: impl Into<String>,
         component_type: impl Into<ComponentLogType>,
-        component_id: impl Into<String>,
+        component_id: ComponentId,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             component_type: component_type.into(),
-            component_id: component_id.into(),
+            component_id,
         }
-    }
-
-    /// Create a key from string representation (for backwards compatibility).
-    /// Format: "instance_id:component_type:component_id" or just "component_id" for legacy.
-    pub fn from_str_key(key: &str) -> Option<Self> {
-        let parts: Vec<&str> = key.split(':').collect();
-        match parts.len() {
-            1 => None, // Legacy single-part key, can't reconstruct
-            3 => {
-                let component_type = ComponentLogType::parse(parts[1])?;
-                Some(Self {
-                    instance_id: parts[0].to_string(),
-                    component_type,
-                    component_id: parts[2].to_string(),
-                })
-            }
-            _ => None,
-        }
-    }
-
-    /// Convert to string key for HashMap storage.
-    pub fn to_string_key(&self) -> String {
-        let type_str = self.component_type.as_str();
-        format!("{}:{}:{}", self.instance_id, type_str, self.component_id)
     }
 }
 
 impl std::fmt::Display for ComponentLogKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string_key())
+        write!(
+            f,
+            "{}:{}:{}",
+            self.instance_id,
+            self.component_type.as_str(),
+            self.component_id
+        )
     }
 }
 
@@ -273,7 +256,7 @@ pub struct LogMessage {
     /// ID of the DrasiLib instance that owns the component
     pub instance_id: String,
     /// ID of the component that emitted the log
-    pub component_id: String,
+    pub component_id: ComponentId,
     /// The component's log category, including its native processing role.
     pub component_type: ComponentLogType,
 }
@@ -283,7 +266,7 @@ impl LogMessage {
     pub fn new(
         level: LogLevel,
         message: impl Into<String>,
-        component_id: impl Into<String>,
+        component_id: ComponentId,
         component_type: impl Into<ComponentLogType>,
     ) -> Self {
         Self::with_instance(level, message, "", component_id, component_type)
@@ -294,7 +277,7 @@ impl LogMessage {
         level: LogLevel,
         message: impl Into<String>,
         instance_id: impl Into<String>,
-        component_id: impl Into<String>,
+        component_id: ComponentId,
         component_type: impl Into<ComponentLogType>,
     ) -> Self {
         Self {
@@ -302,7 +285,7 @@ impl LogMessage {
             level,
             message: message.into(),
             instance_id: instance_id.into(),
-            component_id: component_id.into(),
+            component_id,
             component_type: component_type.into(),
         }
     }
@@ -363,7 +346,7 @@ impl ComponentLogChannel {
 /// This is shared by `DrasiLib` instances and their graph-backed inspection APIs.
 pub struct ComponentLogRegistry {
     /// Log channels per component ID
-    channels: RwLock<HashMap<String, ComponentLogChannel>>,
+    channels: RwLock<HashMap<ComponentLogKey, ComponentLogChannel>>,
     /// Maximum log history per component
     max_history: usize,
     /// Broadcast channel capacity
@@ -407,9 +390,9 @@ impl ComponentLogRegistry {
     /// Log a message for a component.
     ///
     /// Creates the component's channel if it doesn't exist.
-    /// Uses composite key (instance_id:component_type:component_id) for storage.
+    /// Keeps instance scope, category and component identity as a structured key.
     pub async fn log(&self, message: LogMessage) {
-        let key = message.key().to_string_key();
+        let key = message.key();
         let mut channels = self.channels.write().await;
         let channel = channels
             .entry(key)
@@ -425,7 +408,7 @@ impl ComponentLogRegistry {
     pub fn try_log(&self, message: LogMessage) -> bool {
         match self.channels.try_write() {
             Ok(mut channels) => {
-                let key = message.key().to_string_key();
+                let key = message.key();
                 let channel = channels.entry(key).or_insert_with(|| {
                     ComponentLogChannel::new(self.max_history, self.channel_capacity)
                 });
@@ -442,7 +425,7 @@ impl ComponentLogRegistry {
     pub async fn get_history_by_key(&self, key: &ComponentLogKey) -> Vec<LogMessage> {
         let channels = self.channels.read().await;
         channels
-            .get(&key.to_string_key())
+            .get(key)
             .map(|c| c.get_history())
             .unwrap_or_default()
     }
@@ -457,7 +440,7 @@ impl ComponentLogRegistry {
     ) -> (Vec<LogMessage>, broadcast::Receiver<LogMessage>) {
         let mut channels = self.channels.write().await;
         let channel = channels
-            .entry(key.to_string_key())
+            .entry(key.clone())
             .or_insert_with(|| ComponentLogChannel::new(self.max_history, self.channel_capacity));
 
         let history = channel.get_history();
@@ -469,7 +452,7 @@ impl ComponentLogRegistry {
     ///
     /// Called when a component is deleted to clean up resources.
     pub async fn remove_component_by_key(&self, key: &ComponentLogKey) {
-        self.channels.write().await.remove(&key.to_string_key());
+        self.channels.write().await.remove(key);
     }
 
     /// Get the number of log messages stored for a component using composite key.
@@ -477,7 +460,7 @@ impl ComponentLogRegistry {
         self.channels
             .read()
             .await
-            .get(&key.to_string_key())
+            .get(key)
             .map(|c| c.history.len())
             .unwrap_or(0)
     }
@@ -487,7 +470,11 @@ impl ComponentLogRegistry {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    fn make_key(instance: &str, component_type: ComponentType, component: &str) -> ComponentLogKey {
+    fn make_key(
+        instance: &str,
+        component_type: ComponentType,
+        component: drasi_core_types::ComponentId,
+    ) -> ComponentLogKey {
         ComponentLogKey::new(instance, component_type, component)
     }
 
@@ -499,21 +486,28 @@ mod tests {
             LogLevel::Info,
             "First message",
             "instance1",
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentType::Source,
         );
         let msg2 = LogMessage::with_instance(
             LogLevel::Error,
             "Second message",
             "instance1",
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentType::Source,
         );
 
         registry.log(msg1).await;
         registry.log(msg2).await;
 
-        let key = make_key("instance1", ComponentType::Source, "source1");
+        let key = make_key(
+            "instance1",
+            ComponentType::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         let history = registry.get_history_by_key(&key).await;
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].message, "First message");
@@ -530,13 +524,19 @@ mod tests {
                 LogLevel::Info,
                 format!("Message {i}"),
                 "instance1",
-                "source1",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                    .expect("fixture UUID"),
                 ComponentType::Source,
             );
             registry.log(msg).await;
         }
 
-        let key = make_key("instance1", ComponentType::Source, "source1");
+        let key = make_key(
+            "instance1",
+            ComponentType::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         let history = registry.get_history_by_key(&key).await;
         assert_eq!(history.len(), 3);
         // Should have messages 2, 3, 4 (oldest removed)
@@ -553,13 +553,19 @@ mod tests {
             LogLevel::Info,
             "History 1",
             "instance1",
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentType::Source,
         );
         registry.log(msg1).await;
 
         // Subscribe
-        let key = make_key("instance1", ComponentType::Source, "source1");
+        let key = make_key(
+            "instance1",
+            ComponentType::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         let (history, mut receiver) = registry.subscribe_by_key(&key).await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].message, "History 1");
@@ -572,7 +578,8 @@ mod tests {
                 LogLevel::Info,
                 "Live message",
                 "instance1",
-                "source1",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                    .expect("fixture UUID"),
                 ComponentType::Source,
             );
             registry_clone.log(msg2).await;
@@ -591,12 +598,18 @@ mod tests {
             LogLevel::Info,
             "Test",
             "instance1",
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentType::Source,
         );
         registry.log(msg).await;
 
-        let key = make_key("instance1", ComponentType::Source, "source1");
+        let key = make_key(
+            "instance1",
+            ComponentType::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         assert_eq!(registry.log_count_by_key(&key).await, 1);
 
         registry.remove_component_by_key(&key).await;
@@ -612,22 +625,34 @@ mod tests {
             LogLevel::Info,
             "Source log",
             "instance1",
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentType::Source,
         );
         let msg2 = LogMessage::with_instance(
             LogLevel::Info,
             "Query log",
             "instance1",
-            "query1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000052")
+                .expect("fixture UUID"),
             ComponentType::Query,
         );
 
         registry.log(msg1).await;
         registry.log(msg2).await;
 
-        let source_key = make_key("instance1", ComponentType::Source, "source1");
-        let query_key = make_key("instance1", ComponentType::Query, "query1");
+        let source_key = make_key(
+            "instance1",
+            ComponentType::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
+        let query_key = make_key(
+            "instance1",
+            ComponentType::Query,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000052")
+                .expect("fixture UUID"),
+        );
 
         let source_history = registry.get_history_by_key(&source_key).await;
         let query_history = registry.get_history_by_key(&query_key).await;
@@ -648,22 +673,34 @@ mod tests {
             LogLevel::Info,
             "Instance 1 log",
             "instance1",
-            "my-source",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID"),
             ComponentType::Source,
         );
         let msg2 = LogMessage::with_instance(
             LogLevel::Info,
             "Instance 2 log",
             "instance2",
-            "my-source",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID"),
             ComponentType::Source,
         );
 
         registry.log(msg1).await;
         registry.log(msg2).await;
 
-        let key1 = make_key("instance1", ComponentType::Source, "my-source");
-        let key2 = make_key("instance2", ComponentType::Source, "my-source");
+        let key1 = make_key(
+            "instance1",
+            ComponentType::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID"),
+        );
+        let key2 = make_key(
+            "instance2",
+            ComponentType::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID"),
+        );
 
         let history1 = registry.get_history_by_key(&key1).await;
         let history2 = registry.get_history_by_key(&key2).await;
@@ -677,15 +714,27 @@ mod tests {
 
     #[test]
     fn test_component_log_key() {
-        let key = ComponentLogKey::new("my-instance", ComponentType::Source, "my-source");
-        assert_eq!(key.to_string_key(), "my-instance:source:my-source");
+        let key = ComponentLogKey::new(
+            "my-instance",
+            ComponentType::Source,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID"),
+        );
+        assert_eq!(
+            key.to_string(),
+            "my-instance:source:00000000-0000-0000-0000-000000000030"
+        );
         assert_eq!(key.instance_id, "my-instance");
         assert_eq!(key.component_type, ComponentLogType::Source);
-        assert_eq!(key.component_id, "my-source");
+        assert_eq!(
+            key.component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
-    fn all_log_categories_round_trip_through_scoped_keys() {
+    fn all_log_categories_render_through_scoped_keys() {
         for category in [
             ComponentLogType::Source,
             ComponentLogType::Query,
@@ -696,18 +745,24 @@ mod tests {
             ComponentLogType::Sink,
             ComponentLogType::Service,
         ] {
-            let key = ComponentLogKey::new("instance", category.clone(), "component");
+            let key = ComponentLogKey::new(
+                "instance",
+                category.clone(),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000033")
+                    .expect("fixture UUID"),
+            );
             assert_eq!(
-                ComponentLogKey::from_str_key(&key.to_string_key()),
-                Some(key)
+                key.to_string(),
+                format!(
+                    "instance:{}:00000000-0000-0000-0000-000000000033",
+                    category.as_str()
+                )
             );
             assert_eq!(
                 ComponentLogType::parse(&category.as_str().to_ascii_uppercase()),
                 Some(category)
             );
         }
-        assert!(ComponentLogKey::from_str_key("instance:unknown:component").is_none());
-        assert!(ComponentLogKey::from_str_key("component").is_none());
     }
 
     #[test]
@@ -780,7 +835,8 @@ mod tests {
                 LogLevel::Info,
                 "retained message",
                 "instance",
-                "component",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000033")
+                    .expect("fixture UUID"),
                 category.clone(),
             );
             let legacy = LegacyLogMessage {
@@ -788,7 +844,7 @@ mod tests {
                 level: message.level,
                 message: message.message.clone(),
                 instance_id: message.instance_id.clone(),
-                component_id: message.component_id.clone(),
+                component_id: message.component_id.to_string(),
                 component_type: category,
             };
             assert_eq!(
@@ -830,28 +886,44 @@ mod tests {
             ComponentLogType::for_component(ComponentRole::Service, None),
         ];
         for category in categories.clone() {
-            let key = ComponentLogKey::new("instance", category.clone(), "same-id");
+            let key = ComponentLogKey::new(
+                "instance",
+                category.clone(),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000284")
+                    .expect("fixture UUID"),
+            );
             let (history, mut live) = registry.subscribe_by_key(&key).await;
             assert!(history.is_empty());
             assert!(registry.try_log(LogMessage::with_instance(
                 LogLevel::Info,
                 key.component_type.as_str(),
                 "instance",
-                "same-id",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000284")
+                    .expect("fixture UUID"),
                 category.clone(),
             )));
             let message = live.try_recv().unwrap();
             assert_eq!(message.component_type, category);
             assert_eq!(registry.get_history_by_key(&key).await.len(), 1);
         }
-        let transformer = ComponentLogKey::new("instance", ComponentRole::Transformer, "same-id");
+        let transformer = ComponentLogKey::new(
+            "instance",
+            ComponentRole::Transformer,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000284")
+                .expect("fixture UUID"),
+        );
         registry.remove_component_by_key(&transformer).await;
         assert_eq!(registry.log_count_by_key(&transformer).await, 0);
         for category in categories
             .into_iter()
             .filter(|category| *category != ComponentLogType::Transformer)
         {
-            let key = ComponentLogKey::new("instance", category, "same-id");
+            let key = ComponentLogKey::new(
+                "instance",
+                category,
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000284")
+                    .expect("fixture UUID"),
+            );
             assert_eq!(registry.log_count_by_key(&key).await, 1);
         }
     }

@@ -66,8 +66,8 @@ impl ContextEntry {
         })
     }
 
-    pub fn contributor(&self) -> &str {
-        self.inner.contributor.as_str()
+    pub fn contributor(&self) -> &ComponentId {
+        &self.inner.contributor
     }
 
     pub fn key(&self) -> &str {
@@ -651,7 +651,7 @@ mod tests {
         input
             .append_annotation(
                 ContextEntry::try_new(
-                    ComponentId::try_new("source").unwrap(),
+                    ComponentId::try_new("b53b4fa3-3e91-5a4e-ba5a-62eea95e99a7").unwrap(),
                     "inherited",
                     ContextValue::Bool(true),
                 )
@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn copied_annotation_entries_share_immutable_storage() {
         let entry = ContextEntry::try_new(
-            ComponentId::try_new("source").unwrap(),
+            ComponentId::try_new("b53b4fa3-3e91-5a4e-ba5a-62eea95e99a7").unwrap(),
             "visited",
             ContextValue::Bool(true),
         )

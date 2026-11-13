@@ -290,7 +290,7 @@ impl drasi_core::computation::ComputationIndexProvider for ConsumerProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_lib::ComponentId,
     ) -> std::result::Result<
         drasi_core::computation::ComputationIndexes,
         drasi_core::interface::IndexError,

@@ -19,11 +19,10 @@
 //! `Arc<dyn WalProvider>`). The plugin wraps it in `FfiWalProviderProxy`
 //! and uses it as a normal `WalProvider`.
 
-use std::ffi::c_void;
-
-use super::types::FfiStr;
+use super::types::{FfiStr, FfiWalEntry, FfiWalReadResult};
 use super::vtables::WalProviderVtable;
 use drasi_core::models::SourceChange;
+use drasi_core_types::{ComponentId, StorageScope};
 use drasi_lib::wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig};
 
 /// Plugin-side proxy: wraps a host-provided `WalProviderVtable` into a local
@@ -47,9 +46,32 @@ impl Drop for FfiWalProviderProxy {
     }
 }
 
+fn encode_scope(scope: &StorageScope) -> Result<String, WalError> {
+    serde_json::to_string(scope).map_err(|error| WalError::StorageError(error.to_string()))
+}
+
+struct ReadResult {
+    raw: FfiWalReadResult,
+    release: extern "C" fn(*mut FfiWalEntry, usize, usize),
+}
+
+impl Drop for ReadResult {
+    fn drop(&mut self) {
+        if !self.raw.entries.is_null() {
+            (self.release)(self.raw.entries, self.raw.count, self.raw.capacity);
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl WalProvider for FfiWalProviderProxy {
-    async fn register(&self, source_id: &str, config: WriteAheadLogConfig) -> Result<(), WalError> {
+    async fn register(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        config: WriteAheadLogConfig,
+    ) -> Result<(), WalError> {
+        let scope_json = encode_scope(scope)?;
         unsafe {
             let vtable = &*self.vtable;
             let capacity_policy: u8 = match config.capacity_policy {
@@ -58,7 +80,8 @@ impl WalProvider for FfiWalProviderProxy {
             };
             let result = (vtable.register_fn)(
                 vtable.state,
-                FfiStr::from_str(source_id),
+                FfiStr::from_str(&scope_json),
+                FfiStr::from_str(source_id.as_str()),
                 config.max_events,
                 capacity_policy,
             );
@@ -66,14 +89,33 @@ impl WalProvider for FfiWalProviderProxy {
         }
     }
 
-    async fn append(&self, source_id: &str, event: &SourceChange) -> Result<u64, WalError> {
+    async fn append(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        event: &SourceChange,
+    ) -> Result<u64, WalError> {
+        let scope_json = encode_scope(scope)?;
+        let bytes = rmp_serde::to_vec_named(event).map_err(|error| {
+            WalError::StorageError(format!("could not encode WAL event: {error}"))
+        })?;
+        if bytes.len() > super::payload::MAX_FFI_PAYLOAD_BYTES {
+            return Err(WalError::StorageError(
+                "WAL event exceeds the FFI payload limit".into(),
+            ));
+        }
         unsafe {
             let vtable = &*self.vtable;
-            let event_ptr = event as *const SourceChange as *const c_void;
-            let result = (vtable.append_fn)(vtable.state, FfiStr::from_str(source_id), event_ptr);
+            let result = (vtable.append_fn)(
+                vtable.state,
+                FfiStr::from_str(&scope_json),
+                FfiStr::from_str(source_id.as_str()),
+                bytes.as_ptr(),
+                bytes.len(),
+            );
             match result.into_result() {
                 Ok(seq) => Ok(seq),
-                Err((1, _msg)) => Err(WalError::CapacityExhausted(source_id.to_string())),
+                Err((1, _msg)) => Err(WalError::CapacityExhausted(source_id.clone())),
                 Err((_code, msg)) => Err(WalError::StorageError(msg)),
             }
         }
@@ -81,77 +123,161 @@ impl WalProvider for FfiWalProviderProxy {
 
     async fn read_from(
         &self,
-        source_id: &str,
+        scope: &StorageScope,
+        source_id: &ComponentId,
         sequence: u64,
     ) -> Result<Vec<(u64, SourceChange)>, WalError> {
+        let scope_json = encode_scope(scope)?;
         unsafe {
             let vtable = &*self.vtable;
-            let result = (vtable.read_from_fn)(vtable.state, FfiStr::from_str(source_id), sequence);
+            let guard = ReadResult {
+                raw: (vtable.read_from_fn)(
+                    vtable.state,
+                    FfiStr::from_str(&scope_json),
+                    FfiStr::from_str(source_id.as_str()),
+                    sequence,
+                ),
+                release: vtable.free_read_result_fn,
+            };
+            let result = &guard.raw;
 
-            if result.error_code != 0 {
-                let msg = if !result.error_msg.is_null() {
+            let message = if result.error_msg.is_null() {
+                None
+            } else {
+                Some(
                     std::ffi::CString::from_raw(result.error_msg)
-                        .into_string()
-                        .unwrap_or_default()
-                } else {
-                    "unknown WAL error".to_string()
-                };
-                return Err(WalError::StorageError(msg));
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            };
+            if result.error_code != 0 {
+                return Err(WalError::StorageError(message.unwrap_or_else(|| {
+                    "WAL read failed without an error message".into()
+                })));
+            }
+            if let Some(message) = message {
+                return Err(WalError::StorageError(format!(
+                    "WAL read returned contradictory success and error: {message}"
+                )));
+            }
+            if result.count > result.capacity
+                || result.count
+                    > super::payload::MAX_FFI_PAYLOAD_BYTES / std::mem::size_of::<FfiWalEntry>()
+                || result.count > 0 && (result.entries.is_null() || !result.entries.is_aligned())
+            {
+                return Err(WalError::StorageError(
+                    "invalid WAL read-result buffer".into(),
+                ));
             }
 
             let mut events = Vec::with_capacity(result.count);
             if !result.entries.is_null() && result.count > 0 {
                 let entries_slice = std::slice::from_raw_parts(result.entries, result.count);
                 for entry in entries_slice {
-                    // Take ownership of the SourceChange from the host
-                    let source_change = *Box::from_raw(entry.event as *mut SourceChange);
+                    if entry.event.is_null()
+                        || entry.event_len == 0
+                        || entry.event_len > super::payload::MAX_FFI_PAYLOAD_BYTES
+                    {
+                        return Err(WalError::StorageError("invalid WAL event buffer".into()));
+                    }
+                    let source_change = rmp_serde::from_slice(std::slice::from_raw_parts(
+                        entry.event,
+                        entry.event_len,
+                    ))
+                    .map_err(|error| {
+                        WalError::StorageError(format!("invalid WAL event payload: {error}"))
+                    })?;
                     events.push((entry.sequence, source_change));
                 }
-                // Free the entries buffer (NOT the SourceChange pointers, we took those)
-                (vtable.free_read_result_fn)(result.entries, result.count, result.capacity);
             }
 
             Ok(events)
         }
     }
 
-    async fn prune_up_to(&self, source_id: &str, sequence: u64) -> Result<u64, WalError> {
+    async fn prune_up_to(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        sequence: u64,
+    ) -> Result<u64, WalError> {
+        let scope_json = encode_scope(scope)?;
         unsafe {
             let vtable = &*self.vtable;
-            let result =
-                (vtable.prune_up_to_fn)(vtable.state, FfiStr::from_str(source_id), sequence);
+            let result = (vtable.prune_up_to_fn)(
+                vtable.state,
+                FfiStr::from_str(&scope_json),
+                FfiStr::from_str(source_id.as_str()),
+                sequence,
+            );
             result.into_result().map_err(WalError::StorageError)
         }
     }
 
-    async fn head_sequence(&self, source_id: &str) -> Result<u64, WalError> {
+    async fn head_sequence(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<u64, WalError> {
+        let scope_json = encode_scope(scope)?;
         unsafe {
             let vtable = &*self.vtable;
-            let result = (vtable.head_sequence_fn)(vtable.state, FfiStr::from_str(source_id));
+            let result = (vtable.head_sequence_fn)(
+                vtable.state,
+                FfiStr::from_str(&scope_json),
+                FfiStr::from_str(source_id.as_str()),
+            );
             result.into_result().map_err(WalError::StorageError)
         }
     }
 
-    async fn oldest_sequence(&self, source_id: &str) -> Result<Option<u64>, WalError> {
+    async fn oldest_sequence(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<Option<u64>, WalError> {
+        let scope_json = encode_scope(scope)?;
         unsafe {
             let vtable = &*self.vtable;
-            let result = (vtable.oldest_sequence_fn)(vtable.state, FfiStr::from_str(source_id));
+            let result = (vtable.oldest_sequence_fn)(
+                vtable.state,
+                FfiStr::from_str(&scope_json),
+                FfiStr::from_str(source_id.as_str()),
+            );
             result.into_result().map_err(WalError::StorageError)
         }
     }
 
-    async fn event_count(&self, source_id: &str) -> Result<u64, WalError> {
+    async fn event_count(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<u64, WalError> {
+        let scope_json = encode_scope(scope)?;
         unsafe {
             let vtable = &*self.vtable;
-            let result = (vtable.event_count_fn)(vtable.state, FfiStr::from_str(source_id));
+            let result = (vtable.event_count_fn)(
+                vtable.state,
+                FfiStr::from_str(&scope_json),
+                FfiStr::from_str(source_id.as_str()),
+            );
             result.into_result().map_err(WalError::StorageError)
         }
     }
 
-    async fn delete_wal(&self, source_id: &str) -> Result<(), WalError> {
+    async fn delete_wal(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<(), WalError> {
+        let scope_json = encode_scope(scope)?;
         unsafe {
             let vtable = &*self.vtable;
-            let result = (vtable.delete_wal_fn)(vtable.state, FfiStr::from_str(source_id));
+            let result = (vtable.delete_wal_fn)(
+                vtable.state,
+                FfiStr::from_str(&scope_json),
+                FfiStr::from_str(source_id.as_str()),
+            );
             result.into_result().map_err(WalError::StorageError)
         }
     }

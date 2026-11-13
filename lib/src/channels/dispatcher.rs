@@ -106,13 +106,13 @@ use tokio::sync::{broadcast, mpsc};
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Sources are now instance-based - create them externally and use .with_source()
 /// let core = DrasiLib::builder()
-///     // .with_source(my_source_instance)
+///     // .with_source(crate::Source::id(&my_source_instance).to_owned(), my_source_instance)
 ///     .with_query(
-///         Query::cypher("active_orders")
+///         Query::cypher(drasi_lib::ComponentName::try_new("active_orders")?)
 ///             .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o")
-///             .from_input("orders_db")
+///             .from_input_by_name(drasi_lib::ComponentName::try_new("orders_db")?)
 ///             .with_dispatch_mode(DispatchMode::Channel)    // Default, independent processing
-///             .build()
+///             .build()?
 ///     )
 ///     .build()
 ///     .await?;

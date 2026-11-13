@@ -736,9 +736,9 @@ fn get_join_virtual_ref(
     ref2: &ElementReference,
 ) -> ElementReference {
     let new_id = join.relationship_id(
-        &ref1.source_id,
+        &ref1.namespace,
         &ref1.element_id,
-        &ref2.source_id,
+        &ref2.namespace,
         &ref2.element_id,
     );
     ElementReference::new("&join", new_id.as_str())

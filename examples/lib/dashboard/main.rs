@@ -324,13 +324,13 @@ async fn main() -> Result<()> {
                 .query_factory()?,
             )
             .with_id("iot-sensor-app")
-            .with_source(mock_source)
+            .with_source(drasi_lib::Source::id(&mock_source).to_owned(), mock_source)
             .with_query(all_sensors)
             .with_query(hot_sensors)
             .with_query(humid_sensors)
             .with_query(sensor_overview)
             .with_query(sensor_mesh)
-            .with_reaction(dashboard_reaction)
+            .with_reaction(drasi_lib::Reaction::id(&dashboard_reaction).to_owned(), dashboard_reaction)
             .build()
             .await?,
     );

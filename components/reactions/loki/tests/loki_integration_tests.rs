@@ -24,22 +24,31 @@ async fn test_loki_reaction_insert_update_delete() {
         properties: HashMap::new(),
         durability: None,
     };
-    let (source, handle) = ApplicationSource::new("test-source", source_config)
-        .expect("Application source should be created");
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+        source_config,
+    )
+    .expect("Application source should be created");
 
-    let query = Query::cypher("sensor-query")
-        .query(
-            r#"
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("sensor-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (s:Sensor)
             RETURN s.id AS id, s.temperature AS temperature
             "#,
-        )
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let reaction = LokiReaction::builder("test-reaction")
-        .with_query("sensor-query")
+    let reaction = LokiReaction::builder(drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021").expect("fixture UUID"))
+        .with_query_by_name(drasi_core::ComponentName::try_new("sensor-query").expect("fixture component name"))
         .with_endpoint(endpoint.clone())
         .with_label("job", "drasi-test")
         .with_default_template(QueryConfig {
@@ -66,9 +75,16 @@ async fn test_loki_reaction_insert_update_delete() {
                 .clone(),
         )
         .with_id("loki-integration-test")
-        .with_source(source)
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("test-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .expect("DrasiLib should build");
@@ -77,7 +93,10 @@ async fn test_loki_reaction_insert_update_delete() {
     tokio::time::timeout(
         Duration::from_secs(10),
         drasi
-            .computation_component("test-reaction")
+            .component_by_name(
+                &drasi_core::ComponentName::try_new("test-reaction")
+                    .expect("fixture component name"),
+            )
             .expect("reaction handle")
             .wait_started(),
     )

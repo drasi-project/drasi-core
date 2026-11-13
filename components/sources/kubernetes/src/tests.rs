@@ -376,7 +376,11 @@ async fn test_dispatch_changes_stamps_monotonic_sequence() {
 
     let source_id = "k8s-seq-source";
     let cfg = sample_config();
-    let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+    let base = SourceBase::new(SourceBaseParams::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c5")
+            .expect("fixture UUID"),
+    ))
+    .unwrap();
 
     // Subscribe before dispatching so we receive the emitted events.
     let mut rx = base.test_subscribe().await;
@@ -391,9 +395,14 @@ async fn test_dispatch_changes_stamps_monotonic_sequence() {
         "expected at least an insert and a delete change"
     );
 
-    crate::source::dispatch_changes(source_id, &base, changes)
-        .await
-        .unwrap();
+    crate::source::dispatch_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c5")
+            .expect("fixture UUID"),
+        &base,
+        changes,
+    )
+    .await
+    .unwrap();
 
     // Collect every dispatched change event and assert monotonic sequences.
     let mut sequences = Vec::new();

@@ -28,15 +28,72 @@
 //! use drasi_lib::error::DrasiError;
 //! let cause = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
 //! let result: anyhow::Result<()> = Err(cause.into());
+//! let source_id = drasi_lib::ComponentId::generate();
 //!
 //! // Convert to DrasiError at API boundary
-//! let error = map_component_error(result, "source", "my-source", "start").unwrap_err();
+//! let error = map_component_error(result, "source", &source_id, "start").unwrap_err();
 //! assert!(matches!(error.classification(), DrasiError::OperationFailed { .. }));
 //! assert!(error.downcast_ref::<std::io::Error>().is_some());
 //! ```
 
-use crate::error::DrasiError;
+use crate::{
+    computation::v1::{ComponentId, ComponentName},
+    error::DrasiError,
+    lib_core::DrasiLib,
+};
 use anyhow::Result as AnyhowResult;
+
+impl DrasiLib {
+    pub(crate) fn resolve_component_name(
+        &self,
+        name: &ComponentName,
+        component_type: &'static str,
+    ) -> crate::error::Result<ComponentId> {
+        self.resolve_component_name_inner(name, Some(component_type))
+    }
+
+    pub(crate) fn resolve_any_component_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<ComponentId> {
+        self.resolve_component_name_inner(name, None)
+    }
+
+    fn resolve_component_name_inner(
+        &self,
+        name: &ComponentName,
+        component_type: Option<&'static str>,
+    ) -> crate::error::Result<ComponentId> {
+        self.state_guard.require_initialized()?;
+        self.computation_runtime
+            .component_id_by_name(name, component_type)
+    }
+}
+
+impl crate::computation::runtime::Runtime {
+    pub(crate) fn component_id_by_name(
+        &self,
+        name: &ComponentName,
+        component_type: Option<&'static str>,
+    ) -> crate::error::Result<ComponentId> {
+        let publication = self.control()?.registry_snapshot();
+        let node = publication
+            .desired
+            .component_by_name(name)
+            .filter(|node| {
+                component_type.is_none_or(|component_type| {
+                    crate::computation::runtime::Runtime::public_component_kind(
+                        &publication.desired,
+                        node,
+                    ) == Some(component_type)
+                })
+            })
+            .ok_or_else(|| {
+                DrasiError::component_not_found_by_name(component_type.unwrap_or("component"), name)
+            })?;
+        Ok(node.descriptor.id().clone())
+    }
+}
 
 // ============================================================================
 // Error mapping functions
@@ -63,18 +120,24 @@ use anyhow::Result as AnyhowResult;
 ///
 /// ```rust
 /// use drasi_lib::component_ops::map_component_error;
-/// let result = map_component_error(Ok(42), "source", "my-source", "start");
+/// let source_id = drasi_lib::ComponentId::generate();
+/// let result = map_component_error(Ok(42), "source", &source_id, "start");
 /// assert_eq!(result.unwrap(), 42);
 /// ```
 pub fn map_component_error<T>(
     result: AnyhowResult<T>,
     component_type: &str,
-    component_id: &str,
+    component_id: &ComponentId,
     operation: &str,
 ) -> crate::error::Result<T> {
     result.map_err(|e| {
-        DrasiError::operation_failed(component_type, component_id, operation, e.to_string())
-            .with_cause(e)
+        DrasiError::operation_failed(
+            component_type,
+            crate::error::OperationSubject::Id(component_id.clone()),
+            operation,
+            e.to_string(),
+        )
+        .with_cause(e)
     })
 }
 
@@ -96,7 +159,7 @@ pub fn map_component_error<T>(
 pub fn map_state_error<T>(
     result: AnyhowResult<T>,
     _component_type: &str,
-    _component_id: &str,
+    _component_id: &ComponentId,
 ) -> crate::error::Result<T> {
     result.map_err(|e| DrasiError::invalid_state(e.to_string()).with_cause(e))
 }
@@ -113,7 +176,13 @@ mod tests {
     #[test]
     fn test_map_component_error_success() {
         let result: AnyhowResult<i32> = Ok(42);
-        let mapped = map_component_error(result, "source", "test-id", "start");
+        let mapped = map_component_error(
+            result,
+            "source",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e0")
+                .expect("fixture UUID"),
+            "start",
+        );
         assert!(mapped.is_ok());
         assert_eq!(mapped.unwrap(), 42);
     }
@@ -121,19 +190,28 @@ mod tests {
     #[test]
     fn test_map_component_error_failure() {
         let result: AnyhowResult<()> = Err(anyhow!("Connection timeout"));
-        let mapped = map_component_error(result, "query", "test-query", "stop");
+        let mapped = map_component_error(
+            result,
+            "query",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
+            "stop",
+        );
         assert!(mapped.is_err());
 
         let err = mapped.unwrap_err();
         match err.classification() {
             DrasiError::OperationFailed {
                 component_type,
-                component_id,
+                subject: crate::error::OperationSubject::Id(component_id),
                 operation,
                 reason,
             } => {
                 assert_eq!(component_type, "query");
-                assert_eq!(component_id, "test-query");
+                assert_eq!(
+                    component_id,
+                    &crate::ComponentId::try_new("00000000-0000-0000-0000-000000000050").unwrap()
+                );
                 assert_eq!(operation, "stop");
                 assert!(reason.contains("Connection timeout"));
             }
@@ -144,7 +222,12 @@ mod tests {
     #[test]
     fn test_map_state_error_success() {
         let result: AnyhowResult<String> = Ok("success".to_string());
-        let mapped = map_state_error(result, "reaction", "test-reaction");
+        let mapped = map_state_error(
+            result,
+            "reaction",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+        );
         assert!(mapped.is_ok());
         assert_eq!(mapped.unwrap(), "success");
     }
@@ -152,7 +235,12 @@ mod tests {
     #[test]
     fn test_map_state_error_failure() {
         let result: AnyhowResult<()> = Err(anyhow!("Component is already running"));
-        let mapped = map_state_error(result, "source", "running-source");
+        let mapped = map_state_error(
+            result,
+            "source",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e1")
+                .expect("fixture UUID"),
+        );
         assert!(mapped.is_err());
 
         let err = mapped.unwrap_err();
@@ -174,9 +262,20 @@ mod tests {
             .context("flushing progress");
             let result: AnyhowResult<()> = Err(cause);
             let error = if state {
-                map_state_error(result, "source", "input")
+                map_state_error(
+                    result,
+                    "source",
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                        .expect("fixture UUID"),
+                )
             } else {
-                map_component_error(result, "source", "input", "stop")
+                map_component_error(
+                    result,
+                    "source",
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                        .expect("fixture UUID"),
+                    "stop",
+                )
             }
             .unwrap_err();
             assert_eq!(
@@ -192,7 +291,7 @@ mod tests {
         use crate::context::workers::WorkerCleanupError;
 
         let cause = GraphError::Component {
-            component: ComponentId::try_new("input").unwrap(),
+            component: ComponentId::generate(),
             operation: "stop",
             source: anyhow::Error::new(WorkerCleanupError::TimedOut {
                 timeout: std::time::Duration::from_secs(5),
@@ -202,7 +301,8 @@ mod tests {
         let error = map_component_error::<()>(
             Err(anyhow::Error::new(cause).context("stopping graph")),
             "source",
-            "input",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                .expect("fixture UUID"),
             "stop",
         )
         .unwrap_err();

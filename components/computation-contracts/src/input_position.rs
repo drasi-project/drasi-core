@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use crate::{ComponentId, SourceProgressKey, MAX_SOURCE_POSITION_BYTES};
+use crate::{SourceProgressKey, MAX_SOURCE_POSITION_BYTES};
 use std::sync::Arc;
 
 /// Source-defined ordering for an event and a consumer's handled position.
@@ -36,9 +36,6 @@ impl InputPositionPolicy {
         key: SourceProgressKey,
         comparator: Arc<dyn InputPositionComparator>,
     ) -> anyhow::Result<Self> {
-        if let SourceProgressKey::Source(source) = &key {
-            ComponentId::try_new(source.as_str())?;
-        }
         Ok(Self { key, comparator })
     }
 
@@ -81,7 +78,10 @@ mod tests {
     #[test]
     fn replay_ordering_is_source_defined_not_lexicographic_or_a_shared_counter() {
         let policy = InputPositionPolicy::new(
-            SourceProgressKey::Source("partitioned-source".into()),
+            SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000381")
+                    .expect("fixture UUID"),
+            ),
             Arc::new(Partitioned),
         )
         .unwrap();
@@ -94,10 +94,5 @@ mod tests {
         assert!(policy
             .is_after(&vec![0; MAX_SOURCE_POSITION_BYTES + 1], &[0])
             .is_err());
-        assert!(InputPositionPolicy::new(
-            SourceProgressKey::Source(String::new()),
-            Arc::new(Partitioned),
-        )
-        .is_err());
     }
 }

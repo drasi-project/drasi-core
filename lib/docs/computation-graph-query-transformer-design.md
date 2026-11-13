@@ -269,16 +269,13 @@ clones or branches for this effort. Serialize Cargo commands sharing a target.
 Implement one failing native case, then run its focused group and the directly
 affected preservation targets; do not rerun every connector after each edit.
 
-`bash lib/tests/run-query-plugin.sh smoke` rebuilds the actual query, SQLite and
-middleware libraries and includes ordinary APIs, large reads and test clocks.
-`ordinary` isolates required registration and ordinary native construction.
-`retained-recovery` covers native recovery consumers, corrupt-state rebuilding
-and reset-baseline guards alongside their shared/reference preservation cases.
-Other groups cover subscriptions, evaluator lifetime, scheduling, archives,
-middleware, joins, bootstrap, progress and recovery. The `semantics`, `recovery`
-and `timers` groups and the library portion of `api` still explicitly use the
-linked reference. The script does not install dependencies, start containers,
-run Server or execute every workspace suite.
+`make build-test-plugins` rebuilds and stages matching shared libraries.
+`cargo test --locked -p drasi-host-sdk --test native_query_plugin -- --test-threads=1`
+runs the native suite, including ordinary APIs, large reads and test clocks.
+Use Cargo's substring filters for focused cases; the plugin README lists useful
+filters. Run the affected library preservation targets separately. Linked
+reference tests do not establish loaded-plugin parity. These commands do not
+install dependencies, start containers or run Server.
 
 Use [CW-77](computation-graph-remaining-work.md#cw-77) for missing native cases
 and [CW-78](computation-graph-remaining-work.md#cw-78) for full-suite execution.

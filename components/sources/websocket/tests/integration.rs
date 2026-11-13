@@ -52,7 +52,8 @@ mod protocol_frames {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let source = WebSocketSource::new(
-            "websocket-ping-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000009")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -112,7 +113,8 @@ mod protocol_frames {
 
         let _response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-ping-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000009")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -167,7 +169,8 @@ mod protocol_frames {
             regex: None,
         });
         let source = WebSocketSource::new(
-            "websocket-operation-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000a")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -179,7 +182,8 @@ mod protocol_frames {
         .unwrap();
         let response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-operation-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000a")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -217,7 +221,8 @@ mod protocol_frames {
         });
 
         let source = WebSocketSource::new(
-            "websocket-oversized-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000b")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -229,7 +234,8 @@ mod protocol_frames {
         .unwrap();
         let response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-oversized-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000b")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -277,7 +283,8 @@ mod protocol_frames {
         });
 
         let source = WebSocketSource::new(
-            "websocket-malformed-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000c")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -288,7 +295,8 @@ mod protocol_frames {
         .unwrap();
         let response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-malformed-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000c")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -338,7 +346,8 @@ mod protocol_frames {
         });
 
         let source = WebSocketSource::new(
-            "websocket-binary-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000d")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -349,7 +358,8 @@ mod protocol_frames {
         .unwrap();
         let response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-binary-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000d")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -450,7 +460,12 @@ mod reconnect {
             buffer_capacity: 8,
             ..Default::default()
         };
-        let source = WebSocketSource::new("websocket-test", config).unwrap();
+        let source = WebSocketSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000e")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
         let response = source.subscribe(subscription_settings()).await.unwrap();
         let mut receiver = response.receiver;
 
@@ -520,7 +535,8 @@ mod reconnect {
         });
 
         let source = WebSocketSource::new(
-            "websocket-rate-limit-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000f")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/path-secret?token=query-secret"),
                 allow_insecure: true,
@@ -541,9 +557,10 @@ mod reconnect {
         .unwrap();
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "websocket-test-instance",
-                "websocket-rate-limit-test",
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000f")
+                    .expect("fixture UUID"),
                 None,
                 update_tx,
                 None,
@@ -551,7 +568,8 @@ mod reconnect {
             .await;
         let response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-rate-limit-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000f")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -597,7 +615,8 @@ mod reconnect {
         drop(probe);
 
         let source = WebSocketSource::new(
-            "websocket-initial-retry-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000010")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -613,9 +632,10 @@ mod reconnect {
         .unwrap();
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "websocket-test-instance",
-                "websocket-initial-retry-test",
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000010")
+                    .expect("fixture UUID"),
                 None,
                 update_tx,
                 None,
@@ -623,7 +643,8 @@ mod reconnect {
             .await;
         let _response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-initial-retry-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000010")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -694,7 +715,8 @@ mod reconnect {
         });
 
         let source = WebSocketSource::new(
-            "websocket-rejection-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000011")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -710,7 +732,8 @@ mod reconnect {
         .unwrap();
         let _response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-rejection-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000011")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -739,7 +762,8 @@ mod reconnect {
         });
 
         let source = WebSocketSource::new(
-            "websocket-not-found-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000012")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/path-secret?token=query-secret"),
                 allow_insecure: true,
@@ -760,9 +784,10 @@ mod reconnect {
         .unwrap();
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "websocket-test-instance",
-                "websocket-not-found-test",
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000012")
+                    .expect("fixture UUID"),
                 None,
                 update_tx,
                 None,
@@ -770,7 +795,8 @@ mod reconnect {
             .await;
         let _response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-not-found-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000012")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -845,7 +871,8 @@ mod backpressure {
         });
 
         let source = WebSocketSource::new(
-            "websocket-backpressure-stop-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000013")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -857,7 +884,8 @@ mod backpressure {
         .unwrap();
         let _response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-backpressure-stop-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000013")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -925,7 +953,8 @@ mod backpressure {
         });
 
         let source = WebSocketSource::new(
-            "websocket-saturated-shutdown-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000014")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -937,7 +966,8 @@ mod backpressure {
         .unwrap();
         let response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-saturated-shutdown-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000014")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -989,7 +1019,8 @@ mod lifecycle {
         });
 
         let source = WebSocketSource::new(
-            "websocket-cancel-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000015")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -1001,7 +1032,8 @@ mod lifecycle {
         .unwrap();
         let _response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-cancel-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000015")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -1052,7 +1084,8 @@ mod lifecycle {
         });
 
         let source = WebSocketSource::new(
-            "websocket-restart-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000016")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -1064,8 +1097,10 @@ mod lifecycle {
 
         let first = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-restart-test".to_string(),
-                query_id: "first-query".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000016")
+                    .expect("fixture UUID"),
+                query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001a")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -1084,8 +1119,10 @@ mod lifecycle {
         assert_eq!(source.status().await, ComponentStatus::Starting);
         let second = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-restart-test".to_string(),
-                query_id: "second-query".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000016")
+                    .expect("fixture UUID"),
+                query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001b")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -1125,7 +1162,8 @@ mod lifecycle {
         });
 
         let source = WebSocketSource::new(
-            "websocket-clean-close-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000017")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -1140,7 +1178,8 @@ mod lifecycle {
         .unwrap();
         let _response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-clean-close-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000017")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -1166,7 +1205,8 @@ mod lifecycle {
         });
 
         let source = WebSocketSource::new(
-            "websocket-unclean-close-test",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000018")
+                .expect("fixture UUID"),
             WebSocketSourceConfig {
                 url: format!("ws://{address}/events"),
                 allow_insecure: true,
@@ -1181,7 +1221,8 @@ mod lifecycle {
         .unwrap();
         let _response = source
             .subscribe(SourceSubscriptionSettings {
-                source_id: "websocket-unclean-close-test".to_string(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000018")
+                    .expect("fixture UUID"),
                 ..subscription_settings()
             })
             .await
@@ -1260,9 +1301,11 @@ fn sensor_mapping() -> SourceMapping {
 
 fn subscription_settings() -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: "websocket-test".to_string(),
+        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000000e")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
-        query_id: "sensor-query".to_string(),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+            .expect("fixture UUID"),
         nodes: HashSet::from(["Sensor".to_string()]),
         relations: HashSet::new(),
         resume_from: None,

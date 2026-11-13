@@ -135,6 +135,7 @@ impl NativeBootstrapFactory {
         let request = CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
+            update_directive: None,
             id,
             configuration,
             scope,

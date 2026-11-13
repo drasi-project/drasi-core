@@ -73,7 +73,14 @@ fn test_builder_rejects_invalid_template() {
         ..Default::default()
     };
 
-    let result = RabbitMQReaction::new("test", vec!["q1".to_string()], config);
+    let result = RabbitMQReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
+        config,
+    );
     assert!(result.is_err());
 }
 
@@ -85,7 +92,14 @@ fn test_tls_requires_amqps() {
         ..Default::default()
     };
 
-    let result = RabbitMQReaction::new("test", vec!["q1".to_string()], config);
+    let result = RabbitMQReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
+        config,
+    );
     assert!(result.is_err());
 }
 
@@ -99,7 +113,14 @@ fn test_validate_config_rejects_mismatched_route() {
         ..Default::default()
     };
 
-    let result = RabbitMQReaction::new("test", vec!["my-query".to_string()], config);
+    let result = RabbitMQReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("my-query").expect("fixture component name"),
+        )],
+        config,
+    );
     assert!(result.is_err());
     let err_msg = result.err().unwrap().to_string();
     assert!(err_msg.contains("unknown-query"));
@@ -117,7 +138,14 @@ fn test_validate_config_accepts_dotted_query_match() {
     };
 
     // Query "ns.q1" should match route "q1" via the dotted-suffix logic
-    let result = RabbitMQReaction::new("test", vec!["ns.q1".to_string()], config);
+    let result = RabbitMQReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("ns.q1").expect("fixture component name"),
+        )],
+        config,
+    );
     assert!(result.is_ok());
 }
 

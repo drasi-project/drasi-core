@@ -172,7 +172,10 @@ mod tests {
     fn consumer_progress_input_policy_preserves_partition_semantics_bounds_and_ownership(
     ) -> anyhow::Result<()> {
         let policy = Arc::new(InputPositionPolicy::new(
-            SourceProgressKey::Source("source".into()),
+            SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             Arc::new(Partitioned),
         )?);
         let weak = Arc::downgrade(&policy);
@@ -182,7 +185,10 @@ mod tests {
         let description = unsafe { take_reply(raw.describe.unwrap()(raw.context))? };
         assert_eq!(
             decode_key(&description)?,
-            SourceProgressKey::Source("source".into())
+            SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            )
         );
         assert!(compare(&raw, &[0, 7], &[6, 90])?);
         assert!(!compare(&raw, &[1, 89], &[6, 90])?);
@@ -244,19 +250,19 @@ mod tests {
 
     #[test]
     fn consumer_progress_input_policy_rejects_invalid_key_descriptions() -> anyhow::Result<()> {
-        assert!(encode_key(&SourceProgressKey::Source(String::new())).is_err());
         assert!(decode_key(&encode(&Identity {
             version: VERSION + 1,
-            key: Key::Source("source".into())
-        })?)
-        .is_err());
-        assert!(decode_key(&encode(&Identity {
-            version: VERSION,
-            key: Key::Source(String::new())
+            key: Key::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            )
         })?)
         .is_err());
         for key in [
-            SourceProgressKey::Source("source".into()),
+            SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             SourceProgressKey::Stream(StreamId::try_new("source/out")?),
         ] {
             assert_eq!(decode_key(&encode_key(&key)?)?, key);

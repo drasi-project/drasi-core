@@ -18,7 +18,13 @@ const INSTANCE: &str = "admission-activation";
 const DEADLINE: Duration = Duration::from_secs(10);
 
 fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("component id")
+    let owner =
+        ComponentId::try_new("67ca4db3-34b3-5d35-a917-290a9b50f323").expect("component namespace");
+    ComponentId::derive_owned(&owner, name).expect("component id")
+}
+
+fn name(value: &str) -> ComponentName {
+    ComponentName::try_new(value).expect("component name")
 }
 
 fn port(name: &str) -> PortId {
@@ -147,7 +153,11 @@ impl Fixture {
                 subscribers: BTreeMap::from([("sink".into(), SubscriptionStart::Earliest)]),
             },
             provider
-                .create_indexes(GRAPH, "ingress")
+                .create_indexes(
+                    GRAPH,
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001cc")
+                        .expect("fixture UUID"),
+                )
                 .await
                 .expect("indexes"),
             codec,
@@ -170,16 +180,22 @@ impl Fixture {
         let (received, receive) = mpsc::unbounded_channel();
         let handled = Arc::new(Semaphore::new(0));
         let batch = ComponentBatch::builder()
-            .source(Box::new(Source {
-                descriptor: descriptor("source", PortDirection::Output),
-                admission: admission.clone(),
-                fail_start,
-            }))
-            .sink(Box::new(Sink {
-                descriptor: descriptor("sink", PortDirection::Input),
-                received,
-                handled: handled.clone(),
-            }))
+            .source(
+                name("source"),
+                Box::new(Source {
+                    descriptor: descriptor("source", PortDirection::Output),
+                    admission: admission.clone(),
+                    fail_start,
+                }),
+            )
+            .sink(
+                name("sink"),
+                Box::new(Sink {
+                    descriptor: descriptor("sink", PortDirection::Input),
+                    received,
+                    handled: handled.clone(),
+                }),
+            )
             .declare_resource(ResourceSpecification {
                 id: resource.clone(),
                 role: ResourceRole::StateStore,
@@ -200,6 +216,7 @@ impl Fixture {
             .build()
             .expect("native graph");
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -318,7 +335,9 @@ async fn real_mailbox_after_start() {
     );
     fixture
         .core
-        .stop_source("source")
+        .stop_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
         .await
         .expect("stop native source");
     assert!(!fixture.admission.is_active().expect("revoked"));
@@ -332,7 +351,9 @@ async fn real_mailbox_after_start() {
     ));
     fixture
         .core
-        .start_source("source")
+        .start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
         .await
         .expect("restart native source");
     fixture

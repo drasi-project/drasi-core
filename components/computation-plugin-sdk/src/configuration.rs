@@ -101,7 +101,7 @@ impl ConfigDetails {
             }
             for value in &details.allowed_values {
                 ensure!(
-                    field.value_type.accepts(value),
+                    field.accepts(value),
                     "configuration choice has the wrong type for {name}"
                 );
                 details.validate_value(name, value)?;
@@ -112,7 +112,7 @@ impl ConfigDetails {
                     "secret configuration field {name} cannot publish a literal default"
                 );
                 ensure!(
-                    field.value_type.accepts(value),
+                    field.accepts(value),
                     "configuration default has the wrong type for {name}"
                 );
                 details.validate_value(name, value)?;
@@ -134,6 +134,34 @@ impl ConfigDetails {
         }
         Ok(())
     }
+
+    /// Compare configurations after filling only missing top-level fields with
+    /// their published literal defaults. Explicit values are never overwritten,
+    /// unknown/additional fields are never discarded, and nested objects are
+    /// compared exactly. Both inputs are validated and remain unchanged; this
+    /// does not normalize accepted definitions, update requests or receipts.
+    pub fn equivalent_with_defaults(
+        &self,
+        schema: &ConfigSchema,
+        left: &Value,
+        right: &Value,
+    ) -> Result<bool> {
+        self.validate_schema(schema)?;
+        for configuration in [left, right] {
+            schema.validate(configuration)?;
+            self.validate(configuration)?;
+        }
+        let (Some(left), Some(right)) = (left.as_object(), right.as_object()) else {
+            anyhow::bail!("native component configuration must be an object");
+        };
+        Ok(left.keys().chain(right.keys()).all(|name| {
+            let default = self
+                .fields
+                .get(name)
+                .and_then(|details| details.default.as_ref());
+            left.get(name).or(default) == right.get(name).or(default)
+        }))
+    }
 }
 
 /// One declaration supplies both the old field/type schema and optional details.
@@ -151,12 +179,20 @@ impl ConfigOption {
                 value_type,
                 required,
                 secret: false,
+                constraint: None,
             },
             details: ConfigFieldDetails {
                 description: description.into(),
                 ..Default::default()
             },
         }
+    }
+    pub fn constraint(
+        mut self,
+        constraint: drasi_computation_contracts::ConfigurationConstraint,
+    ) -> Self {
+        self.field.constraint = Some(constraint);
+        self
     }
     pub fn default(mut self, value: impl Into<Value>) -> Self {
         self.details.default = Some(value.into());
@@ -195,7 +231,7 @@ impl ConfigDefinition {
         };
         let mut names = std::collections::BTreeSet::new();
         for option in &definition.options {
-            drasi_computation_contracts::ComponentId::try_new(option.name.as_str())?;
+            drasi_computation_contracts::validate_identifier("configuration field", &option.name)?;
             ensure!(
                 names.insert(&option.name),
                 "duplicate configuration field {}",
@@ -279,7 +315,9 @@ pub fn configuration_json_schema(schema: &ConfigSchema, details: Option<&ConfigD
         let kind = match field.value_type {
             ConfigType::Boolean => Some("boolean"),
             ConfigType::Integer => Some("integer"),
-            ConfigType::String => Some("string"),
+            ConfigType::String | ConfigType::ComponentId | ConfigType::ComponentName => {
+                Some("string")
+            }
             ConfigType::Object => Some("object"),
             ConfigType::Array => Some("array"),
             ConfigType::Json => None,
@@ -289,9 +327,25 @@ pub fn configuration_json_schema(schema: &ConfigSchema, details: Option<&ConfigD
             if kind == "array" {
                 property.insert("items".into(), json!({}));
             }
+            match field.value_type {
+                ConfigType::ComponentId => {
+                    property.insert("format".into(), json!("uuid"));
+                }
+                ConfigType::ComponentName => {
+                    property.insert("minLength".into(), json!(1));
+                    property.insert(
+                        "pattern".into(),
+                        json!(drasi_computation_contracts::ComponentName::JSON_SCHEMA_PATTERN),
+                    );
+                }
+                _ => {}
+            }
         }
         if field.secret {
             property.insert("writeOnly".into(), json!(true));
+        }
+        if let Some(constraint) = &field.constraint {
+            property.insert("allOf".into(), json!([constraint.schema()]));
         }
         if let Some(details) = details.and_then(|details| details.fields.get(name)) {
             let description = match &details.default_description {
@@ -437,6 +491,92 @@ mod tests {
             schema["properties"]["value"].get("default"),
             Some(&Value::Null)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn default_equivalence_is_symmetric_without_mutating_or_discarding_fields() -> Result<()> {
+        let definition = ConfigDefinition::try_new([
+            ConfigOption::new("start", ConfigType::Integer, false, "Initial value.").default(0),
+            ConfigOption::new("step", ConfigType::Integer, false, "Increment.").default(1),
+            ConfigOption::new("label", ConfigType::String, false, "Optional label.")
+                .default_description("Chosen by the component."),
+        ])?;
+        let details = definition.details();
+        let mut schema = definition.schema();
+        let omitted = json!({});
+        let expanded = json!({"start": 0, "step": 1});
+        assert!(details.equivalent_with_defaults(&schema, &omitted, &expanded)?);
+        assert!(details.equivalent_with_defaults(&schema, &expanded, &omitted)?);
+        assert_eq!(omitted, json!({}));
+        assert_eq!(expanded, json!({"start": 0, "step": 1}));
+        assert!(!details.equivalent_with_defaults(&schema, &omitted, &json!({"step": 2}))?);
+        assert!(!details.equivalent_with_defaults(
+            &schema,
+            &omitted,
+            &json!({"label": "chosen"})
+        )?);
+        assert!(details
+            .equivalent_with_defaults(&schema, &omitted, &json!({"extra": 1}))
+            .is_err());
+        schema.allow_additional = true;
+        assert!(!details.equivalent_with_defaults(&schema, &omitted, &json!({"extra": 1}))?);
+        assert!(details.equivalent_with_defaults(
+            &schema,
+            &json!({"extra": 1}),
+            &json!({"extra": 1, "start": 0, "step": 1}),
+        )?);
+        assert!(!ConfigDetails::default().equivalent_with_defaults(&schema, &omitted, &expanded)?);
+        Ok(())
+    }
+
+    #[test]
+    fn default_equivalence_validates_values_and_never_merges_explicit_objects() -> Result<()> {
+        let definition = ConfigDefinition::try_new([
+            ConfigOption::new("required", ConfigType::String, true, "Required value.")
+                .default("value"),
+            ConfigOption::new("step", ConfigType::Integer, false, "Bounded increment.")
+                .default(1)
+                .minimum(1)
+                .maximum(2),
+            ConfigOption::new(
+                "settings",
+                ConfigType::Object,
+                false,
+                "Whole object default.",
+            )
+            .default(json!({"nested": 1})),
+            ConfigOption::new("nullable", ConfigType::Json, false, "Literal null default.")
+                .default(Value::Null),
+        ])?;
+        let schema = definition.schema();
+        let details = definition.details();
+        let base = json!({"required": "value"});
+        assert!(details.equivalent_with_defaults(
+            &schema,
+            &base,
+            &json!({"required": "value", "settings": {"nested": 1}, "nullable": null}),
+        )?);
+        assert!(!details.equivalent_with_defaults(
+            &schema,
+            &base,
+            &json!({"required": "value", "settings": {}}),
+        )?);
+        for invalid in [
+            json!({}),
+            json!({"required": "value", "step": 0}),
+            json!({"required": "value", "step": 3}),
+            json!({"required": "value", "step": "1"}),
+            json!({"required": "value", "step": null}),
+            json!([]),
+        ] {
+            assert!(details
+                .equivalent_with_defaults(&schema, &base, &invalid)
+                .is_err());
+            assert!(details
+                .equivalent_with_defaults(&schema, &invalid, &base)
+                .is_err());
+        }
         Ok(())
     }
 }

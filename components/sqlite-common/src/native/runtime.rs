@@ -280,7 +280,7 @@ mod tests {
     async fn unexpected_rest_worker_failure_is_a_native_source_failure() -> Result<()> {
         let context = || -> Result<StartContext> {
             Ok(StartContext {
-                source: ComponentId::try_new("sqlite")?,
+                source: ComponentId::try_new("ed31460a-3a84-513d-9642-88f49710c80e")?,
                 stream: StreamId::try_new("changes")?,
                 config: SqliteConfig {
                     path: None,

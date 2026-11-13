@@ -30,6 +30,7 @@ impl Default for MySqlSourceFactory {
                         (
                             Arc::from("stream"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::String,
                                 required: true,
                                 secret: false,
@@ -38,6 +39,7 @@ impl Default for MySqlSourceFactory {
                         (
                             Arc::from("settings"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Object,
                                 required: true,
                                 secret: true,

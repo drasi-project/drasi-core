@@ -80,8 +80,19 @@ async fn wait_for_count(config: &MysqlConfig, expected: i64, timeout_ms: u64) {
     }
 }
 
-fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
-    QueryResult::new(query_id.to_string(), 0, Utc::now(), diffs, HashMap::new())
+fn make_query_result(query_id: drasi_lib::ComponentId, diffs: Vec<ResultDiff>) -> QueryResult {
+    QueryResult::new(query_id, 0, Utc::now(), diffs, HashMap::new())
+}
+
+fn make_named_query_result(
+    query_id: drasi_lib::ComponentId,
+    query_name: &str,
+    diffs: Vec<ResultDiff>,
+) -> QueryResult {
+    let mut result = make_query_result(query_id, diffs);
+    result.query_name =
+        Some(drasi_lib::ComponentName::try_new(query_name).expect("fixture component name"));
+    result
 }
 
 fn add_user_template(proc: &str) -> QueryConfig {
@@ -116,17 +127,26 @@ async fn test_route_overrides_default_template() {
         ..Default::default()
     };
 
-    let reaction = MySqlStoredProcReaction::builder("routing-e2e")
-        .with_query("routed-query")
-        .with_query("default-query")
-        .with_config(reaction_config)
-        .build()
-        .await
-        .expect("build");
+    let reaction = MySqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000061")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_lib::ComponentName::try_new("routed-query").expect("fixture component name"),
+    )
+    .with_query_by_name(
+        drasi_lib::ComponentName::try_new("default-query").expect("fixture component name"),
+    )
+    .with_config(reaction_config)
+    .build()
+    .await
+    .expect("build");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result(
+        .enqueue_query_result(make_named_query_result(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000039b")
+                .expect("fixture UUID"),
             "routed-query",
             vec![ResultDiff::Add {
                 data: json!({"id": 1, "name": "Alice", "email": "alice@example.com"}),
@@ -137,7 +157,9 @@ async fn test_route_overrides_default_template() {
         .expect("enqueue routed");
 
     reaction
-        .enqueue_query_result(make_query_result(
+        .enqueue_query_result(make_named_query_result(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000039c")
+                .expect("fixture UUID"),
             "default-query",
             vec![ResultDiff::Add {
                 data: json!({"id": 2, "name": "Bob", "email": "bob@example.com"}),
@@ -185,16 +207,23 @@ async fn test_route_matches_last_dotted_segment() {
         ..Default::default()
     };
 
-    let reaction = MySqlStoredProcReaction::builder("routing-segment-e2e")
-        .with_query("source.my_query")
-        .with_config(reaction_config)
-        .build()
-        .await
-        .expect("build");
+    let reaction = MySqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000062")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_lib::ComponentName::try_new("source.my_query").expect("fixture component name"),
+    )
+    .with_config(reaction_config)
+    .build()
+    .await
+    .expect("build");
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result(
+        .enqueue_query_result(make_named_query_result(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000039d")
+                .expect("fixture UUID"),
             "source.my_query",
             vec![ResultDiff::Add {
                 data: json!({"id": 7, "name": "Carol", "email": "carol@example.com"}),
@@ -232,19 +261,23 @@ async fn test_parameter_binding_preserves_value_types() {
         ..Default::default()
     };
 
-    let reaction = MySqlStoredProcReaction::builder("binding-e2e")
-        .with_query("q")
-        .with_config(reaction_config)
-        .build()
-        .await
-        .expect("build");
+    let reaction = MySqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000063")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q").expect("fixture component name"))
+    .with_config(reaction_config)
+    .build()
+    .await
+    .expect("build");
     reaction.start().await.expect("start");
 
     // A numeric id and a name containing SQL metacharacters must be bound
     // positionally, not substituted into the SQL string.
     reaction
         .enqueue_query_result(make_query_result(
-            "q",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
             vec![ResultDiff::Add {
                 data: json!({
                     "id": 12345,

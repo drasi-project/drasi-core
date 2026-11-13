@@ -52,10 +52,10 @@
 //!
 //! ```no_run
 //! use drasi_source_mssql::{MsSqlSource, StartPosition};
-//! use drasi_lib::Source;
+//! use drasi_lib::{ComponentId, Source};
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let source = MsSqlSource::builder("mssql-source")
+//! let source = MsSqlSource::builder(ComponentId::generate())
 //!     .with_host("localhost")
 //!     .with_database("production")
 //!     .with_user("drasi_user")
@@ -107,7 +107,7 @@ use tokio::sync::RwLock;
 /// Monitors MS SQL Server CDC change tables and emits source change events.
 pub struct MsSqlSource {
     /// Source identifier
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
 
     /// Configuration
     config: MsSqlSourceConfig,
@@ -128,7 +128,7 @@ pub struct MsSqlSource {
     /// and store it keyed by query_id. The CDC stream reads the minimum to
     /// decide where to start polling from. Entries are removed when a query
     /// calls `remove_position_handle`.
-    subscriber_resume_lsns: Arc<RwLock<HashMap<String, Lsn>>>,
+    subscriber_resume_lsns: Arc<RwLock<HashMap<drasi_lib::ComponentId, Lsn>>>,
 
     /// Best-effort cached schema populated from SQL Server catalog metadata.
     cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
@@ -213,11 +213,11 @@ impl MsSqlSource {
     /// # Arguments
     /// * `id` - Unique identifier for this source
     /// * `config` - MS SQL source configuration
-    pub fn new(id: impl Into<String>, config: MsSqlSourceConfig) -> Result<Self> {
-        let source_id = id.into();
+    pub fn new(id: drasi_lib::ComponentId, config: MsSqlSourceConfig) -> Result<Self> {
+        let source_id = id.clone();
 
         // Create base source parameters
-        let params = SourceBaseParams::new(&source_id);
+        let params = SourceBaseParams::new(source_id.clone());
 
         // Create shutdown channel (false = running, true = shutdown)
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
@@ -240,10 +240,11 @@ impl MsSqlSource {
     ///
     /// # Example
     /// ```no_run
+    /// use drasi_lib::ComponentId;
     /// use drasi_source_mssql::MsSqlSource;
     ///
     /// # fn example() -> anyhow::Result<()> {
-    /// let source = MsSqlSource::builder("my-source")
+    /// let source = MsSqlSource::builder(ComponentId::generate())
     ///     .with_host("localhost")
     ///     .with_database("mydb")
     ///     .with_user("user")
@@ -252,14 +253,14 @@ impl MsSqlSource {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn builder(id: impl Into<String>) -> MsSqlSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> MsSqlSourceBuilder {
         MsSqlSourceBuilder::new(id)
     }
 }
 
 #[async_trait]
 impl Source for MsSqlSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -491,8 +492,8 @@ impl Source for MsSqlSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
         // MSSQL LSNs are 10-byte big-endian — byte-lexicographic comparison is correct.
         self.base
             .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
@@ -506,7 +507,7 @@ impl Source for MsSqlSource {
         self.base.set_bootstrap_provider(provider).await;
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_lib::ComponentId) {
         // Remove the per-subscriber resume LSN so the CDC stream no longer
         // pins its start position on behalf of this query.
         self.subscriber_resume_lsns.write().await.remove(query_id);
@@ -518,16 +519,16 @@ impl Source for MsSqlSource {
 ///
 /// Provides a fluent API for constructing an MS SQL source with validation.
 pub struct MsSqlSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: MsSqlSourceConfig,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
 }
 
 impl MsSqlSourceBuilder {
     /// Create a new builder
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: MsSqlSourceConfig::default(),
             bootstrap_provider: None,
         }
@@ -639,7 +640,7 @@ impl MsSqlSourceBuilder {
         let source_id = self.id.clone();
 
         // Create base source parameters
-        let mut params = SourceBaseParams::new(&source_id);
+        let mut params = SourceBaseParams::new(source_id.clone());
 
         // Add bootstrap provider if configured
         if let Some(provider) = self.bootstrap_provider {
@@ -667,15 +668,22 @@ mod tests {
 
     #[test]
     fn test_builder_basic() {
-        let source = MsSqlSource::builder("test-source")
-            .with_host("localhost")
-            .with_database("testdb")
-            .with_user("testuser")
-            .with_password("testpass")
-            .build()
-            .unwrap();
+        let source = MsSqlSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_host("localhost")
+        .with_database("testdb")
+        .with_user("testuser")
+        .with_password("testpass")
+        .build()
+        .unwrap();
 
-        assert_eq!(source.id(), "test-source");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert_eq!(source.type_name(), "mssql");
         assert_eq!(source.config.host, "localhost");
         assert_eq!(source.config.database, "testdb");
@@ -683,33 +691,42 @@ mod tests {
 
     #[test]
     fn test_builder_with_tables() {
-        let source = MsSqlSource::builder("test-source")
-            .with_database("testdb")
-            .with_user("testuser")
-            .with_tables(vec!["table1".to_string(), "table2".to_string()])
-            .build()
-            .unwrap();
+        let source = MsSqlSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_database("testdb")
+        .with_user("testuser")
+        .with_tables(vec!["table1".to_string(), "table2".to_string()])
+        .build()
+        .unwrap();
 
         assert_eq!(source.config.tables.len(), 2);
     }
 
     #[test]
     fn test_builder_missing_required_fields() {
-        let result = MsSqlSource::builder("test-source")
-            .with_host("localhost")
-            .build();
+        let result = MsSqlSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_host("localhost")
+        .build();
 
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_table_keys() {
-        let source = MsSqlSource::builder("test-source")
-            .with_database("testdb")
-            .with_user("testuser")
-            .with_table_key("orders", vec!["order_id".to_string()])
-            .build()
-            .unwrap();
+        let source = MsSqlSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_database("testdb")
+        .with_user("testuser")
+        .with_table_key("orders", vec!["order_id".to_string()])
+        .build()
+        .unwrap();
 
         assert_eq!(source.config.table_keys.len(), 1);
         assert_eq!(source.config.table_keys[0].table, "orders");
@@ -717,12 +734,15 @@ mod tests {
 
     #[test]
     fn test_describe_schema_falls_back_to_configured_tables() {
-        let source = MsSqlSource::builder("test-source")
-            .with_database("testdb")
-            .with_user("testuser")
-            .with_tables(vec!["dbo.orders".to_string(), "customers".to_string()])
-            .build()
-            .unwrap();
+        let source = MsSqlSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_database("testdb")
+        .with_user("testuser")
+        .with_tables(vec!["dbo.orders".to_string(), "customers".to_string()])
+        .build()
+        .unwrap();
 
         let schema = source
             .describe_schema()

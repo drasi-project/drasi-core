@@ -9,7 +9,11 @@ async fn transformed_bootstrap() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("source.sqlite");
     create_database(&database)?;
-    let core = DrasiLib::builder().with_id(INSTANCE).build().await?;
+    let core = DrasiLib::builder()
+        .with_id(INSTANCE)
+        .with_allow_external_component_ids(true)
+        .build()
+        .await?;
     core.start().await?;
     let catalogue = core.output_catalogue()?;
     let scope = Scope {
@@ -18,6 +22,8 @@ async fn transformed_bootstrap() -> Result<()> {
         generation: 1,
     };
     let bootstrap_plugin = computation::load(bootstrap_library())?;
+    let mut bootstrap_configuration = provider_configuration(&database);
+    bootstrap_configuration["source"] = json!("a112a85e-ae22-5dd7-a624-6080d73fbb5e");
     let bootstrap = bootstrap_plugin
         .bootstrap_factories()
         .iter()
@@ -26,8 +32,8 @@ async fn transformed_bootstrap() -> Result<()> {
         })
         .context("missing file bootstrap")?
         .create_query_provider(
-            ComponentId::try_new("mapper")?,
-            provider_configuration(&database),
+            ComponentId::try_new("3a11845b-6b1d-5d8c-bb88-0d719e15667a")?,
+            bootstrap_configuration,
             scope.clone(),
             None,
         )?;
@@ -43,7 +49,7 @@ async fn transformed_bootstrap() -> Result<()> {
             factory.metadata().implementation.name.as_ref() == "drasi.standard/middleware"
         })
         .context("missing real middleware factory")?;
-    let mapper = middleware.create_component_with_bootstrap(ComponentId::try_new("mapper")?, json!({
+    let mapper = middleware.create_component_with_bootstrap(ComponentId::try_new("3a11845b-6b1d-5d8c-bb88-0d719e15667a")?, json!({
         "stream":"mapper/out", "bootstrap":true,
         "middleware":[{"name":"rename","kind":"relabel","config":{"labelMappings":{"items":"ReadyItem"}}}],
         "pipeline":["rename"]
@@ -54,9 +60,13 @@ async fn transformed_bootstrap() -> Result<()> {
     );
     let mapper = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::transformer(Box::new(mapper)))
-                .auto_start(false)
-                .bind_stream(PortId::try_new("out")?, StreamId::try_new("mapper/out")?),
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new("mapper")
+                    .expect("fixture component name"),
+                ConstructedComponent::transformer(Box::new(mapper)),
+            )
+            .auto_start(false)
+            .bind_stream(PortId::try_new("out")?, StreamId::try_new("mapper/out")?),
         )
         .await?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -78,9 +88,10 @@ async fn transformed_bootstrap() -> Result<()> {
         })
         .context("missing volatile query")?
         .create_component_with_output_snapshots(
-            ComponentId::try_new("downstream")?,
+            ComponentId::try_new("3559cf8e-3b46-5db6-b3d5-371e452f8fe2")?,
             json!({"query":"MATCH (n:ReadyItem) RETURN sum(n.amount) AS total", "volatile":true,
-                "bootstrap":[{"component":"mapper","port":"out"}]}),
+                "stream":"downstream/out",
+                "bootstrap":[{"component":mapper.id(),"port":"out"}]}),
             scope,
             Arc::new(NativeOutputSnapshotsResource::new(
                 [OutputSelector::new(
@@ -99,26 +110,34 @@ async fn transformed_bootstrap() -> Result<()> {
         )?;
     let query = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::transformer(Box::new(query)))
-                .auto_start(false)
-                .bind_stream(
-                    PortId::try_new("out")?,
-                    StreamId::try_new("downstream/out")?,
-                ),
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new("downstream")
+                    .expect("fixture component name"),
+                ConstructedComponent::transformer(Box::new(query)),
+            )
+            .auto_start(false)
+            .bind_stream(
+                PortId::try_new("out")?,
+                StreamId::try_new("downstream/out")?,
+            ),
         )
         .await?;
     let received = Arc::new(Mutex::new(Vec::new()));
     let changed = Arc::new(Notify::new());
     let sink = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink {
-                descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new("results")?,
-                    vec![super::super::super::port("in", PortDirection::Input)?],
-                )?,
-                received: received.clone(),
-                notification: changed.clone(),
-            })))
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new("results")
+                    .expect("fixture component name"),
+                ConstructedComponent::sink(Box::new(Sink {
+                    descriptor: ComponentDescriptor::try_new(
+                        ComponentId::try_new("cd9658eb-e648-5819-9e9a-42744e0894f0")?,
+                        vec![super::super::super::port("in", PortDirection::Input)?],
+                    )?,
+                    received: received.clone(),
+                    notification: changed.clone(),
+                })),
+            )
             .auto_start(false),
         )
         .await?;

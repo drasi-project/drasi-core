@@ -4,8 +4,10 @@
 //! Protocol-independent settings and validation shared by network components.
 
 use anyhow::{ensure, Result};
+#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
+use drasi_computation_contracts::ComponentId;
 #[cfg(feature = "ingress")]
-use drasi_computation_contracts::{ComponentId, StreamId};
+use drasi_computation_contracts::StreamId;
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
@@ -37,11 +39,6 @@ pub fn host() -> String {
 }
 
 #[cfg(feature = "ingress")]
-pub fn source_id() -> String {
-    "facilities-db".into()
-}
-
-#[cfg(feature = "ingress")]
 pub fn ingress_capacity() -> usize {
     1024
 }
@@ -51,7 +48,6 @@ pub fn ingress_capacity() -> usize {
 #[derive(Clone, Debug)]
 pub struct IngressConfig {
     pub stream: StreamId,
-    pub source_id: String,
     pub host: String,
     pub port: u16,
     pub timeout_ms: u64,
@@ -62,11 +58,6 @@ pub struct IngressConfig {
 #[cfg(feature = "ingress")]
 impl IngressConfig {
     pub fn validate(&self) -> Result<()> {
-        ComponentId::try_new(self.source_id.as_str())?;
-        ensure!(
-            !self.source_id.contains('/'),
-            "sourceId must be one URL path segment"
-        );
         self.host.parse::<std::net::IpAddr>()?;
         duration(self.timeout_ms, "timeoutMs")?;
         ensure!(
@@ -95,7 +86,7 @@ impl FailurePolicy {
     pub fn delivery(
         self,
         result: Result<()>,
-        component: &str,
+        component: &ComponentId,
         output: &str,
         sequence: u64,
     ) -> Result<()> {

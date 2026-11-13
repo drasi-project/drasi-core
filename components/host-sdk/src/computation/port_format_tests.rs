@@ -111,7 +111,7 @@ unsafe extern "C" fn entry(out: *mut abi::PluginHandle) -> abi::Status {
 fn selected_format_is_described_validated_and_constructed() -> anyhow::Result<()> {
     let plugin = unsafe { NativePlugin::from_entry_points(metadata, entry)? };
     let factory = &plugin.factories()[0];
-    let id = ComponentId::try_new("test")?;
+    let id = ComponentId::try_new("cb197930-0ddd-5a6a-9633-9e2c0a2b740a")?;
     let default_schema = GraphChangeCodec::schema().descriptor().clone();
 
     let default = factory.specification(id.clone(), json!({}))?;
@@ -156,7 +156,7 @@ fn selected_format_is_described_validated_and_constructed() -> anyhow::Result<()
 fn unsupported_selection_is_rejected_before_construction() -> anyhow::Result<()> {
     let plugin = unsafe { NativePlugin::from_entry_points(metadata, entry)? };
     let factory = &plugin.factories()[0];
-    let id = ComponentId::try_new("test")?;
+    let id = ComponentId::try_new("cb197930-0ddd-5a6a-9633-9e2c0a2b740a")?;
     for ports in [
         json!({"out": {"format": "test.unknown-v1"}}),
         json!({"missing": {"format": ALTERNATIVE_FORMAT}}),

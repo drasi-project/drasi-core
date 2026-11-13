@@ -36,7 +36,11 @@ native = [
     "dep:futures-util", "dep:mysql_common", "dep:native-tls",
     "dep:tokio", "dep:tokio-native-tls", "dep:rsa", "dep:sha1", "dep:sha2",
 ]
-storedproc = ["dep:handlebars", "dep:drasi-reaction-common"]
+storedproc = [
+    "dep:handlebars",
+    "dep:drasi-computation-contracts",
+    "dep:drasi-reaction-common",
+]
 
 [dependencies]
 drasi-core-types.workspace = true

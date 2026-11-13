@@ -66,15 +66,18 @@ pub enum RecoveryError {
     /// disabled).
     #[error("Incompatible source '{source_id}' for persistent query '{query_id}': {reason}")]
     IncompatibleSource {
-        query_id: String,
-        source_id: String,
+        query_id: crate::ComponentId,
+        source_id: crate::ComponentId,
         reason: String,
     },
 
     /// The `AutoReset` recovery policy fired: the query's index has been
     /// wiped and a full bootstrap will follow.
     #[error("Auto-reset triggered for query '{query_id}': {reason}")]
-    AutoResetTriggered { query_id: String, reason: String },
+    AutoResetTriggered {
+        query_id: crate::ComponentId,
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -114,24 +117,33 @@ mod tests {
     #[test]
     fn incompatible_source_message() {
         let err = RecoveryError::IncompatibleSource {
-            query_id: "q1".into(),
-            source_id: "s1".into(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000004e",
+            )
+            .expect("fixture UUID"),
             reason: "no WAL".into(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("q1"));
-        assert!(msg.contains("s1"));
+        assert!(msg.contains("00000000-0000-0000-0000-00000000002b"));
+        assert!(msg.contains("00000000-0000-0000-0000-00000000004e"));
         assert!(msg.contains("no WAL"));
     }
 
     #[test]
     fn auto_reset_message() {
         let err = RecoveryError::AutoResetTriggered {
-            query_id: "q1".into(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
             reason: "gap".into(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("q1"));
+        assert!(msg.contains("00000000-0000-0000-0000-00000000002b"));
         assert!(msg.contains("gap"));
     }
 

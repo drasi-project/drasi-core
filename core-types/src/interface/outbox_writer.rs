@@ -34,7 +34,7 @@
 use async_trait::async_trait;
 use std::num::NonZeroUsize;
 
-use super::IndexError;
+use super::{IndexError, OutputPartition};
 
 /// Bounds one read's record count and stored payload bytes. A first record larger
 /// than the byte limit is returned alone so paging always makes progress.
@@ -75,7 +75,12 @@ pub trait OutboxWriter: Send + Sync {
     /// If the outbox already contains an entry at this sequence, it is overwritten.
     /// This does not evict older entries. Durable output uses
     /// [`append_and_trim`](Self::append_and_trim) so the ring stays bounded.
-    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError>;
+    async fn append(
+        &self,
+        output: &OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError>;
 
     /// Read all entries with sequence strictly greater than `after_sequence`.
     ///
@@ -83,7 +88,7 @@ pub trait OutboxWriter: Send + Sync {
     /// Returns an empty vec if no entries exist after the given sequence.
     async fn read_from(
         &self,
-        query_id: &str,
+        output: &OutputPartition,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError>;
 
@@ -93,7 +98,7 @@ pub trait OutboxWriter: Send + Sync {
     /// Implementations must not materialize all history and truncate afterwards.
     async fn read_page(
         &self,
-        _query_id: &str,
+        _output: &OutputPartition,
         _after_sequence: u64,
         _limits: OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
@@ -103,12 +108,15 @@ pub trait OutboxWriter: Send + Sync {
     /// Read the highest sequence number stored for this query.
     ///
     /// Returns `None` if the outbox is empty for this query.
-    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError>;
+    async fn read_latest_sequence(
+        &self,
+        output: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError>;
 
     /// Delete all outbox entries for a query.
     ///
     /// Used during `AutoReset` recovery and reaction deprovisioning.
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError>;
+    async fn clear(&self, output: &OutputPartition) -> Result<(), IndexError>;
 
     /// Append `data` at `sequence`, then delete entries below `retain_from`.
     ///
@@ -117,13 +125,13 @@ pub trait OutboxWriter: Send + Sync {
     /// [`trim_before`](Self::trim_before).
     async fn append_and_trim(
         &self,
-        query_id: &str,
+        output: &OutputPartition,
         sequence: u64,
         data: &[u8],
         retain_from: u64,
     ) -> Result<usize, IndexError> {
-        self.append(query_id, sequence, data).await?;
-        self.trim_before(query_id, retain_from).await
+        self.append(output, sequence, data).await?;
+        self.trim_before(output, retain_from).await
     }
 
     /// Delete outbox entries with sequence strictly less than `retain_from`.
@@ -136,10 +144,14 @@ pub trait OutboxWriter: Send + Sync {
     /// by counting them via [`read_from`](Self::read_from) and calling
     /// [`trim_to_capacity`](Self::trim_to_capacity). It is not session-atomic.
     /// Backends that join an outer transaction must override this.
-    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        output: &OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
         let after = retain_from.saturating_sub(1);
-        let keep = self.read_from(query_id, after).await?.len();
-        self.trim_to_capacity(query_id, keep).await
+        let keep = self.read_from(output, after).await?.len();
+        self.trim_to_capacity(output, keep).await
     }
 
     /// Trim the outbox to at most `capacity` entries, removing the oldest.
@@ -151,5 +163,9 @@ pub trait OutboxWriter: Send + Sync {
     /// Returns the number of entries removed. If the outbox has ≤ `capacity`
     /// entries, this is a no-op returning 0. When a session is active, deletes
     /// are staged in that session.
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError>;
+    async fn trim_to_capacity(
+        &self,
+        output: &OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError>;
 }

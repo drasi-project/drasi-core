@@ -3,13 +3,12 @@
 
 use super::*;
 use crate::computation::v1::{
-    ChangeEnvelope, ChangeOperation, ChangeSet, ComponentDescriptor, ComponentId,
-    ComputationComponent, ComputationGraph, EdgeDefinition, Endpoint, EnvelopeSink, EnvelopeSource,
-    FailurePhase, GraphChangeCodec, GraphError, GraphProducerIdentity, GraphProducerProgress,
-    GraphState, LegacyIndexProviderAdapter, OutputEnvelope, PipeRequirements, PortDescriptor,
-    PortDirection, QosChannel, QosChannelDefinition, ResourceCleanup, ResourceId,
-    ResourceOwnership, ResourceRole, ResourceSpecification, RetentionPolicy, SinkCompletion,
-    SubscriptionStart,
+    ChangeEnvelope, ChangeOperation, ChangeSet, ComponentDescriptor, ComputationComponent,
+    ComputationGraph, EdgeDefinition, Endpoint, EnvelopeSink, EnvelopeSource, FailurePhase,
+    GraphChangeCodec, GraphError, GraphProducerIdentity, GraphProducerProgress, GraphState,
+    LegacyIndexProviderAdapter, OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection,
+    QosChannel, QosChannelDefinition, ResourceCleanup, ResourceId, ResourceOwnership, ResourceRole,
+    ResourceSpecification, RetentionPolicy, SinkCompletion, SubscriptionStart,
 };
 use drasi_core::{
     computation::{ComputationIndexProvider, ComputationResource, TransactionDomain},
@@ -62,7 +61,7 @@ fn scope() -> DeliveryScope {
     DeliveryScope::new(
         "scope".into(),
         "graph".into(),
-        ComponentId::try_new("sink").expect("id"),
+        crate::test_helpers::component_id(101),
     )
     .expect("scope")
 }
@@ -79,7 +78,7 @@ fn producer(stream: &str) -> GraphProducerIdentity {
     GraphProducerIdentity::new(
         "scope".into(),
         "graph".into(),
-        ComponentId::try_new("producer").expect("id"),
+        crate::test_helpers::component_id(749),
         StreamId::try_new(stream).expect("stream"),
         true,
     )
@@ -123,10 +122,16 @@ fn input(producer: &GraphProducerIdentity, sequence: u64, count: usize) -> Input
 }
 
 async fn indexes(path: &Path) -> ComputationIndexes {
-    LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false)))
-        .create_indexes("delivery", "consumer")
-        .await
-        .expect("indexes")
+    let consumer_id = crate::test_helpers::component_id(423);
+    // Crash-test inputs and effects must stay outside the versioned database directory.
+    LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
+        path.join("indexes"),
+        false,
+        false,
+    )))
+    .create_indexes("delivery", &consumer_id)
+    .await
+    .expect("indexes")
 }
 
 async fn runner(path: &Path) -> DeliveryRunner {
@@ -184,15 +189,19 @@ async fn retirement_requires_loaded_completion_and_excludes_reopening() -> anyho
         [(false, 0, false), (true, 0, false), (true, 3, false), (true, 3, true)]
     {
         let directory = tempfile::tempdir()?;
-        let provider: Arc<dyn ComputationIndexProvider> = LegacyIndexProviderAdapter::new(
-            Arc::new(RocksDbIndexProvider::new(directory.path(), false, false)),
-        );
+        let provider: Arc<dyn ComputationIndexProvider> =
+            LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
+                directory.path().join("indexes"),
+                false,
+                false,
+            )));
         let foreign: Arc<dyn ComputationIndexProvider> = LegacyIndexProviderAdapter::new(Arc::new(
-            RocksDbIndexProvider::new(directory.path(), false, false),
+            RocksDbIndexProvider::new(directory.path().join("indexes"), false, false),
         ));
+        let consumer_id = crate::test_helpers::component_id(423);
         let mut delivery = DeliveryRunner::new(
             scope(),
-            provider.create_indexes("delivery", "consumer").await?,
+            provider.create_indexes("delivery", &consumer_id).await?,
             codec(),
             options(),
         )?;
@@ -474,10 +483,14 @@ async fn uncertain_progress_commits_reconstruct_without_skipping_unfinished_effe
 ) -> anyhow::Result<()> {
     for after in [false, true] {
         let directory = tempfile::tempdir()?;
-        let provider: Arc<dyn ComputationIndexProvider> = LegacyIndexProviderAdapter::new(
-            Arc::new(RocksDbIndexProvider::new(directory.path(), false, false)),
-        );
-        let original = provider.create_indexes("delivery", "consumer").await?;
+        let provider: Arc<dyn ComputationIndexProvider> =
+            LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
+                directory.path().join("indexes"),
+                false,
+                false,
+            )));
+        let consumer_id = crate::test_helpers::component_id(423);
+        let original = provider.create_indexes("delivery", &consumer_id).await?;
         let armed = Arc::new(AtomicBool::new(false));
         let control = Arc::new(CommitFailure {
             inner: original.indexes().session_control.clone(),
@@ -533,6 +546,7 @@ async fn scope_and_damaged_progress_reject_before_destination_handling() -> anyh
         let mut delivery = runner(directory.path()).await;
         let mut handler = Handler::default();
         delivery.deliver(&batch, &mut handler).await?;
+        let metadata_key = delivery.metadata_key();
         delivery.shutdown().await?;
         drop(delivery);
         let indexes = indexes(directory.path()).await;
@@ -540,7 +554,7 @@ async fn scope_and_damaged_progress_reject_before_destination_handling() -> anyh
         let transaction = ComputationTransaction::try_new(indexes)?;
         transaction
             .run(async {
-                let records = outbox.read_from(METADATA_KEY, 0).await?;
+                let records = outbox.read_from(&metadata_key, 0).await?;
                 let mut value: serde_json::Value =
                     serde_json::from_slice(&records[0].1).expect("metadata");
                 match corruption {
@@ -553,7 +567,7 @@ async fn scope_and_damaged_progress_reject_before_destination_handling() -> anyh
                 }
                 outbox
                     .append(
-                        METADATA_KEY,
+                        &metadata_key,
                         1,
                         &serde_json::to_vec(&value).expect("encode"),
                     )
@@ -640,8 +654,13 @@ fn descriptor(
     port: &str,
     direction: PortDirection,
 ) -> anyhow::Result<ComponentDescriptor> {
+    let component_id = match id {
+        "sink" => crate::test_helpers::component_id(101),
+        "producer" => crate::test_helpers::component_id(749),
+        other => anyhow::bail!("missing explicit fixture component ID for {other}"),
+    };
     Ok(ComponentDescriptor::try_new(
-        ComponentId::try_new(id)?,
+        component_id,
         vec![PortDescriptor::new(
             PortId::try_new(port)?,
             direction,
@@ -677,14 +696,21 @@ async fn graph(
             SubscriptionStart::Earliest,
         )]),
     };
-    let pipe_indexes =
-        LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false)))
-            .create_indexes("delivery", "pipe")
-            .await?;
+    let pipe_id = crate::test_helpers::component_id(777);
+    let pipe_indexes = LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
+        path.join("indexes"),
+        false,
+        false,
+    )))
+    .create_indexes("delivery", &pipe_id)
+    .await?;
     let channel =
         QosChannel::persistent(definition.clone(), pipe_indexes, codec(), "journal").await?;
     let resource = ResourceId::try_new("pipe")?;
-    let source = Endpoint::new(ComponentId::try_new("producer")?, PortId::try_new("out")?);
+    let source = Endpoint::new(
+        crate::test_helpers::component_id(749),
+        PortId::try_new("out")?,
+    );
     let graph = ComputationGraph::builder("graph")
         .declare_resource(ResourceSpecification {
             id: resource.clone(),
@@ -693,16 +719,22 @@ async fn graph(
             binding: "pipe".into(),
         })?
         .provide_resource(resource.clone(), channel.resource())?
-        .source(Box::new(Source {
-            descriptor: descriptor("producer", "out", PortDirection::Output)?,
-            batch,
-        }))
-        .sink(sink)
+        .source(
+            super::super::ComponentName::try_new("producer")?,
+            Box::new(Source {
+                descriptor: descriptor("producer", "out", PortDirection::Output)?,
+                batch,
+            }),
+        )
+        .sink(super::super::ComponentName::try_new("sink")?, sink)
         .bind_stream(source.clone(), definition.stream.clone())
         .connect(
             EdgeDefinition::new(
                 source,
-                Endpoint::new(ComponentId::try_new("sink")?, PortId::try_new("in")?),
+                Endpoint::new(
+                    crate::test_helpers::component_id(101),
+                    PortId::try_new("in")?,
+                ),
             ),
             Box::new(definition.pipe(resource, "target")),
         )
@@ -714,7 +746,7 @@ async fn stop_after_consumer_failure(graph: &mut ComputationGraph) -> anyhow::Re
     tokio::time::timeout(Duration::from_secs(5), async {
         let run = graph.start()?;
         let control = run.control();
-        let sink = ComponentId::try_new("sink")?;
+        let sink = crate::test_helpers::component_id(101);
         let (result, ()) = tokio::join!(run, async {
             let mut observed = control.subscribe_observed();
             observed
@@ -905,17 +937,17 @@ fn operation_keys_cover_scope_port_producer_sequence_and_ordinal_not_transport(
         DeliveryScope::new(
             "different".into(),
             "graph".into(),
-            ComponentId::try_new("sink")?,
+            crate::test_helpers::component_id(101),
         )?,
         DeliveryScope::new(
             "scope".into(),
             "different".into(),
-            ComponentId::try_new("sink")?,
+            crate::test_helpers::component_id(101),
         )?,
         DeliveryScope::new(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("different")?,
+            crate::test_helpers::component_id(766),
         )?,
     ] {
         assert_ne!(operation_id(&changed, &input, &candidate, 0)?, key);
@@ -1100,7 +1132,7 @@ async fn delivery_stream_keys_separate_consumer_scope_port_and_persistent_produc
             DeliveryScope::new(
                 "different".into(),
                 "graph".into(),
-                ComponentId::try_new("sink")?,
+                crate::test_helpers::component_id(101),
             )?,
             original.clone(),
         ),
@@ -1108,7 +1140,7 @@ async fn delivery_stream_keys_separate_consumer_scope_port_and_persistent_produc
             DeliveryScope::new(
                 "scope".into(),
                 "different".into(),
-                ComponentId::try_new("sink")?,
+                crate::test_helpers::component_id(101),
             )?,
             original.clone(),
         ),
@@ -1116,7 +1148,7 @@ async fn delivery_stream_keys_separate_consumer_scope_port_and_persistent_produc
             DeliveryScope::new(
                 "scope".into(),
                 "graph".into(),
-                ComponentId::try_new("different")?,
+                crate::test_helpers::component_id(766),
             )?,
             original,
         ),

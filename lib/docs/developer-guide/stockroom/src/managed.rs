@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use drasi_lib::management::{ConfigurationStore, DesiredInstance, ManagementResourceResolver};
+use drasi_lib::management::{ConfigurationStore, ManagementResourceResolver};
 use drasi_state_store_redb::RedbConfigurationStore;
 
 struct FileFactory(FactoryDescriptor);
@@ -17,6 +17,7 @@ fn file_factory() -> anyhow::Result<Arc<FileFactory>> {
             fields: [(
                 "path".into(),
                 ConfigurationField {
+                    constraint: None,
                     value_type: ConfigurationType::String,
                     required: true,
                     secret: false,
@@ -39,9 +40,9 @@ fn alert_factory() -> anyhow::Result<Arc<AlertFactory>> {
     })))
 }
 
-fn source_descriptor() -> anyhow::Result<ComponentDescriptor> {
+fn source_descriptor(id: ComponentId) -> GraphResult<ComponentDescriptor> {
     descriptor(
-        "inventory",
+        id,
         &[(
             "out",
             PortDirection::Output,
@@ -50,9 +51,9 @@ fn source_descriptor() -> anyhow::Result<ComponentDescriptor> {
     )
 }
 
-fn alert_descriptor() -> anyhow::Result<ComponentDescriptor> {
+fn alert_descriptor(id: ComponentId) -> GraphResult<ComponentDescriptor> {
     descriptor(
-        "alerts",
+        id,
         &[(
             "in",
             PortDirection::Input,
@@ -68,7 +69,7 @@ impl ComponentFactory for FileFactory {
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
         ensure!(
-            spec.descriptor == source_descriptor()?,
+            spec.descriptor == source_descriptor(spec.descriptor.id().clone())?,
             "file factory requires the inventory descriptor"
         );
         Ok(())
@@ -83,7 +84,8 @@ impl ComponentFactory for FileFactory {
                 .get("path")
                 .and_then(serde_json::Value::as_str)
                 .context("missing inventory path")?;
-            Ok(ConstructedComponent::source(Box::new(Inventory::new(
+            Ok(ConstructedComponent::source(Box::new(Inventory::with_id(
+                context.component_id.clone(),
                 Path::new(path),
             )?)))
         };
@@ -98,7 +100,7 @@ impl ComponentFactory for AlertFactory {
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
         ensure!(
-            spec.descriptor == alert_descriptor()?
+            spec.descriptor == alert_descriptor(spec.descriptor.id().clone())?
                 && spec.completion == Some(SinkCompletion::Handled),
             "invalid alert descriptor"
         );
@@ -111,7 +113,7 @@ impl ComponentFactory for AlertFactory {
         let (view, _) = watch::channel(ResultView::default());
         Ok(ConstructedComponent::sink(Box::new(Alerts {
             descriptor: context.specification.descriptor.clone(),
-            query_id: "low-stock",
+            label: "low-stock",
             view,
             output: tokio::io::stdout(),
             audit: false,
@@ -149,10 +151,16 @@ impl ManagementResourceResolver for MemoryResources {
 }
 
 fn desired(
+    ids: &mut ComponentIds,
     path: &Path,
     threshold: Option<i64>,
     factories: &FactoryRegistry,
-) -> anyhow::Result<DesiredInstance> {
+) -> GraphResult<DesiredTopology> {
+    // ANCHOR: allocated-identities
+    let inventory_id = ids.allocate()?;
+    let query_id = ids.allocate()?;
+    let alerts_id = ids.allocate()?;
+    // ANCHOR_END: allocated-identities
     let source = factories.get_by_name("stockroom/file", Some("1"))?.clone();
     let sink = factories
         .get_by_name("stockroom/alerts", Some("1"))?
@@ -161,7 +169,7 @@ fn desired(
         .get_by_name("drasi/continuous-query", Some("1"))?
         .clone();
     let source_spec = ComponentSpecification {
-        descriptor: source_descriptor()?,
+        descriptor: source_descriptor(inventory_id.clone())?,
         role: ComponentRole::Source,
         completion: None,
         implementation: source.descriptor().implementation.clone(),
@@ -174,7 +182,7 @@ fn desired(
         dependencies: Default::default(),
     };
     let sink_spec = ComponentSpecification {
-        descriptor: alert_descriptor()?,
+        descriptor: alert_descriptor(alerts_id.clone())?,
         role: ComponentRole::Sink,
         completion: Some(SinkCompletion::Handled),
         implementation: sink.descriptor().implementation.clone(),
@@ -191,17 +199,22 @@ fn desired(
         },
     );
     let indexes = ResourceId::try_new("query-indexes")?;
-    let mut query_spec = query.specification_from_config(
-        ComponentId::try_new("low-stock")?,
-        serde_json::json!({"query":text, "stream":"low-stock/out"}),
-    )?;
+    let mut query_spec = query
+        .specification_from_config(
+            query_id.clone(),
+            serde_json::json!({"query":text, "stream":"low-stock/out"}),
+        )
+        .map_err(|source| GraphError::Validation {
+            component: query_id.clone(),
+            source,
+        })?;
     query_spec
         .dependencies
         .insert("indexes".into(), vec![indexes.clone()]);
     let mut batch = ComponentBatch::builder()
-        .component(source_spec, source)
-        .component(query_spec, query)
-        .component(sink_spec, sink)
+        .component(ComponentName::try_new("inventory")?, source_spec, source)
+        .component(ComponentName::try_new("low-stock")?, query_spec, query)
+        .component(ComponentName::try_new("alerts")?, sink_spec, sink)
         .declare_resource(ResourceSpecification {
             id: indexes.clone(),
             role: ResourceRole::IndexBackend,
@@ -209,13 +222,13 @@ fn desired(
             binding: "query-indexes".into(),
         })?
         .resource_configuration(indexes, serde_json::json!({"kind":"memory"}))?;
-    for producer in ["inventory", "low-stock"] {
+    for (name, producer) in [("inventory", inventory_id.clone()), ("low-stock", query_id.clone())] {
         batch = batch.bind_stream(
             endpoint(producer, "out")?,
-            StreamId::try_new(format!("{producer}/out"))?,
+            StreamId::try_new(format!("{name}/out"))?,
         );
     }
-    for (producer, consumer) in [("inventory", "low-stock"), ("low-stock", "alerts")] {
+    for (producer, consumer) in [(inventory_id, query_id.clone()), (query_id, alerts_id)] {
         batch = batch.connect(
             EdgeDefinition::new(endpoint(producer, "out")?, endpoint(consumer, "in")?),
             Box::new(BoundedPipeConfig { capacity: 8 }),
@@ -223,7 +236,7 @@ fn desired(
     }
     // ANCHOR: desired-from-batch
     let batch = batch.build()?;
-    DesiredInstance::from(batch.definition).normalized()
+    Ok(batch.definition)
     // ANCHOR_END: desired-from-batch
 }
 
@@ -247,22 +260,48 @@ async fn open(
     let setup = async {
         let mut health = cli::Health::new(&core)?;
         let current = core.desired_configuration()?;
-        if current.revision == 0 || threshold.is_some() {
+        if current.revision == 0 {
+            let path = path.to_owned();
             let request = core.new_configuration_request_id().await?;
-            core.apply_desired_state(
+            // ANCHOR: accept-created-components
+            core.create_managed_components(
                 current.revision,
                 request,
-                desired(path, threshold, &factories)?,
+                move |ids| desired(ids, &path, threshold, &factories),
             )
             .await?;
+            // ANCHOR_END: accept-created-components
+        } else if let Some(threshold) = threshold {
+            let expected = format!(
+                "MATCH (p:Product) WHERE p.quantity < {threshold} RETURN p.sku AS sku, p.quantity AS quantity"
+            );
+            let query = current.desired.topology.components.iter()
+                .find(|component| component.descriptor.semantic_kind() == Some(ComponentSemanticKind::Query))
+                .context("saved Stockroom definition has no query")?;
+            let ComponentConstruction::Factory(spec) = &query.construction else {
+                anyhow::bail!("saved Stockroom query requires a factory recipe");
+            };
+            ensure!(
+                spec.configuration.get("query") == Some(&ConfigurationValue::Literal(serde_json::json!(expected))),
+                "this lesson preserves the saved query; use its accepted threshold or a new configuration directory"
+            );
         }
-        ensure!(
-            core.reconcile_desired_state().await?.converged(),
-            "managed definition did not converge"
-        );
+        let status = core.reconcile_desired_state().await?;
+        ensure!(status.error.is_none() && status.resource_errors.is_empty(),
+            "managed definition could not be applied: {status:?}");
+        let mut components = Vec::new();
+        for component in &core.desired_configuration()?.desired.topology.components {
+            components.push((
+                component.name.clone(),
+                cli::declared_component(&core, component.descriptor.id(), &component.name).await?,
+            ));
+        }
         core.start().await?;
-        for component in ["inventory", "low-stock", "alerts"] {
-            cli::wait_started(&core, component, Duration::from_secs(10)).await?;
+        for (name, component) in components {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                component.wait_started(),
+            ).await.with_context(|| format!("wait for component '{name}' readiness"))??;
         }
         health.check()?;
         Ok(health)
@@ -326,6 +365,16 @@ mod tests {
             Some(10),
         )
         .await?;
+        let inventory_id = core
+            .component_by_name(&ComponentName::try_new("inventory")?)?
+            .id()
+            .clone();
+        ensure!(
+            inventory_id != component_id(758),
+            "managed construction must use an assigned UUID"
+        );
+        core.rename_component_by_id(&inventory_id, ComponentName::try_new("warehouse-input")?)
+            .await?;
         let saved = core.desired_configuration()?;
         core.shutdown().await?;
         drop(core);
@@ -339,20 +388,22 @@ mod tests {
             let reopened = core.desired_configuration()?;
             ensure!(reopened.revision == saved.revision);
             ensure!(reopened.desired == saved.desired);
+            ensure!(core.component_by_name(&ComponentName::try_new("inventory")?).is_err());
+            ensure!(core.component_by_name(&ComponentName::try_new("warehouse-input")?)?.id() == &inventory_id);
             let control = core.computation_control()?;
             let preview = control.preview(
                     control.desired_snapshot().revision,
                     vec![DesiredMutation::Restart(GraphSelection::Exact(vec![
-                        ComponentId::try_new("alerts")?,
+                        core.component_by_name(&ComponentName::try_new("alerts")?)?.id().clone(),
                     ]))],
                 )
                 .await?;
             let error = control.reconcile(preview, TopologyBindings::default()).await
                 .expect_err("managed mutation must use desired-state ownership");
             ensure!(error.to_string().contains("managed configuration must be changed"));
-            let mut next = reopened.desired;
+            let mut next = reopened.desired.clone();
             let query = next.topology.components.iter_mut()
-                .find(|component| component.descriptor.id().as_str() == "low-stock")
+                .find(|component| component.name.as_str() == "low-stock")
                 .context("saved topology omitted query")?;
             let ComponentConstruction::Factory(spec) = &mut query.construction else {
                 anyhow::bail!("query is not reconstructible");
@@ -360,9 +411,17 @@ mod tests {
             spec.configuration.insert("query".into(), ConfigurationValue::Literal(
                 serde_json::json!("MATCH (p:Product) WHERE p.quantity < 6 RETURN p.sku AS sku, p.quantity AS quantity"),
             ));
-            core.apply_desired_state(reopened.revision, "change-threshold", next).await?;
-            ensure!(core.reconcile_desired_state().await?.converged());
-            ensure!(core.desired_configuration()?.revision > saved.revision);
+            let error = core
+                .apply_desired_state(reopened.revision, "change-threshold", next)
+                .await
+                .expect_err("the creation-only query factory cannot assess semantic updates");
+            ensure!(
+                error.to_string().contains("query factory does not support configuration updates"),
+                "{error:#}"
+            );
+            let preserved = core.desired_configuration()?;
+            ensure!(preserved.revision == reopened.revision);
+            ensure!(preserved.desired == reopened.desired);
             Ok(())
         }
         .await;

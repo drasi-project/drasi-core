@@ -17,6 +17,11 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureDrasiLibBuilderExt as _;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::HashMap,
     future::pending,
@@ -59,7 +64,7 @@ struct InjectableSource {
 
 #[async_trait]
 impl Source for InjectableSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         self.base.get_id()
     }
 
@@ -75,8 +80,8 @@ impl Source for InjectableSource {
         false
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -115,7 +120,7 @@ struct CapturingReaction {
 
 #[async_trait]
 impl Reaction for CapturingReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         self.base.get_id()
     }
 
@@ -127,12 +132,12 @@ impl Reaction for CapturingReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -246,15 +251,24 @@ impl EnvelopeSink for NativeSink {
     }
 }
 
-async fn wait_for_legacy_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
+async fn wait_for_legacy_status(
+    drasi: &DrasiLib,
+    name: &drasi_core_types::ComponentName,
+    expected: ComponentStatus,
+) {
     let mut events = drasi.subscribe_all_component_events();
+    let id = drasi
+        .component_by_name(name)
+        .expect("component handle")
+        .id()
+        .clone();
     if drasi
         .get_graph()
         .await
         .unwrap()
         .nodes
         .iter()
-        .any(|node| node.id == id && node.status == expected)
+        .any(|node| node.name.as_ref() == Some(name) && node.status == expected)
     {
         return;
     }
@@ -269,21 +283,30 @@ async fn wait_for_legacy_status(drasi: &DrasiLib, id: &str, expected: ComponentS
 async fn assert_legacy_running(drasi: &DrasiLib) {
     assert_eq!(
         drasi
-            .get_source_status(LEGACY_SOURCE)
+            .get_source_status_by_name(
+                &drasi_core_types::ComponentName::try_new("legacy-source")
+                    .expect("fixture component name")
+            )
             .await
             .expect("read legacy source status"),
         ComponentStatus::Running
     );
     assert_eq!(
         drasi
-            .get_query_status(LEGACY_QUERY)
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("legacy-query")
+                    .expect("fixture component name")
+            )
             .await
             .expect("read legacy query status"),
         ComponentStatus::Running
     );
     assert_eq!(
         drasi
-            .get_reaction_status(LEGACY_REACTION)
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("legacy-reaction")
+                    .expect("fixture component name")
+            )
             .await
             .expect("read legacy reaction status"),
         ComponentStatus::Running
@@ -291,6 +314,7 @@ async fn assert_legacy_running(drasi: &DrasiLib) {
 }
 
 async fn inject_and_assert_result(
+    drasi: &DrasiLib,
     injector: &SourceBase,
     results: &mut mpsc::Receiver<QueryResult>,
     name: &str,
@@ -311,7 +335,15 @@ async fn inject_and_assert_result(
         .expect("inject legacy source event");
 
     let result = results.recv().await.expect("legacy result channel closed");
-    assert_eq!(result.query_id, LEGACY_QUERY);
+    assert_eq!(
+        result.query_id,
+        *drasi
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new(LEGACY_QUERY).expect("fixture name")
+            )
+            .expect("admitted query")
+            .id()
+    );
     match result.results.as_slice() {
         [ResultDiff::Add { data, .. }] => {
             assert_eq!(data, &serde_json::json!({ "name": name }));
@@ -323,8 +355,11 @@ async fn inject_and_assert_result(
 
 async fn assert_coexistence(instance_id: &str) {
     let injector = Arc::new(
-        SourceBase::new(SourceBaseParams::new(LEGACY_SOURCE))
-            .expect("construct injectable legacy source"),
+        SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000357")
+                .expect("fixture UUID"),
+        ))
+        .expect("construct injectable legacy source"),
     );
     let (results_tx, mut results_rx) = mpsc::channel(4);
     let legacy_loop_stops = Arc::new(AtomicUsize::new(0));
@@ -333,13 +368,18 @@ async fn assert_coexistence(instance_id: &str) {
     };
     let reaction = CapturingReaction {
         base: Arc::new(ReactionBase::new(ReactionBaseParams::new(
-            LEGACY_REACTION,
-            vec![LEGACY_QUERY.to_string()],
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000358")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("legacy-query")
+                    .expect("fixture component name"),
+            )],
         ))),
         results: results_tx,
         loop_stops: legacy_loop_stops.clone(),
     };
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -353,26 +393,46 @@ async fn assert_coexistence(instance_id: &str) {
                 .clone(),
         )
         .with_id(instance_id)
-        .with_source(source.clone())
-        .with_query(
-            Query::cypher(LEGACY_QUERY)
-                .query("MATCH (i:Item) RETURN i.name AS name")
-                .from_input(LEGACY_SOURCE)
-                .enable_bootstrap(false)
-                .auto_start(true)
-                .build(),
+        .with_fixture_source(
+            drasi_core_types::ComponentName::try_new(LEGACY_SOURCE)
+                .expect("fixture component name"),
+            source.clone(),
         )
-        .with_reaction(reaction.clone())
+        .with_query(
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("legacy-query")
+                    .expect("fixture component name"),
+            )
+            .query("MATCH (i:Item) RETURN i.name AS name")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("legacy-source")
+                    .expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .auto_start(true)
+            .build()
+            .expect("valid legacy query"),
+        )
+        .with_fixture_reaction(
+            drasi_core_types::ComponentName::try_new(LEGACY_REACTION)
+                .expect("fixture component name"),
+            reaction.clone(),
+        )
         .build()
         .await
         .expect("build legacy pipeline");
 
     drasi.start().await.expect("start legacy pipeline");
     for id in [LEGACY_SOURCE, LEGACY_QUERY, LEGACY_REACTION] {
-        wait_for_legacy_status(&drasi, id, ComponentStatus::Running).await;
+        wait_for_legacy_status(
+            &drasi,
+            &drasi_core_types::ComponentName::try_new(id).expect("fixture component name"),
+            ComponentStatus::Running,
+        )
+        .await;
     }
     assert_legacy_running(&drasi).await;
-    let before = inject_and_assert_result(&injector, &mut results_rx, "before", 1000).await;
+    let before = inject_and_assert_result(&drasi, &injector, &mut results_rx, "before", 1000).await;
 
     let schema = SchemaDescriptor::try_new(
         SchemaId::try_new("coexistence-empty").expect("valid empty schema ID"),
@@ -393,11 +453,11 @@ async fn assert_coexistence(instance_id: &str) {
         .expect("valid native envelope ID");
     let stream = StreamId::try_new("native-stream").expect("valid native stream ID");
     let output = Endpoint::new(
-        ComponentId::try_new("native-source").expect("valid native source ID"),
+        fixture_support::component_id(433),
         PortId::try_new("out").expect("valid native output port ID"),
     );
     let input = Endpoint::new(
-        ComponentId::try_new("native-sink").expect("valid native sink ID"),
+        fixture_support::component_id(434),
         PortId::try_new("in").expect("valid native input port ID"),
     );
     let descriptor = |endpoint: &Endpoint, direction| {
@@ -415,7 +475,7 @@ async fn assert_coexistence(instance_id: &str) {
     let stops = Arc::new(AtomicUsize::new(0));
     let (handled_tx, mut handled_rx) = mpsc::channel(1);
     let mut graph = ComputationGraph::builder("native-coexistence")
-        .source(Box::new(NativeSource {
+        .fixture_source(Box::new(NativeSource {
             descriptor: descriptor(&output, PortDirection::Output),
             event: Some(OutputEnvelope {
                 port: output.port.clone(),
@@ -427,7 +487,7 @@ async fn assert_coexistence(instance_id: &str) {
             }),
             stops: stops.clone(),
         }))
-        .sink(Box::new(NativeSink {
+        .fixture_sink(Box::new(NativeSink {
             descriptor: descriptor(&input, PortDirection::Input),
             handled: handled_tx,
             stops: stops.clone(),
@@ -457,7 +517,8 @@ async fn assert_coexistence(instance_id: &str) {
         assert_eq!(control.state(), GraphState::Running);
         assert_legacy_running(&drasi).await;
 
-        let during = inject_and_assert_result(&injector, &mut results_rx, "during", 2000).await;
+        let during =
+            inject_and_assert_result(&drasi, &injector, &mut results_rx, "during", 2000).await;
         assert!(during > before);
         assert_legacy_running(&drasi).await;
         assert_eq!(control.state(), GraphState::Running);
@@ -471,7 +532,7 @@ async fn assert_coexistence(instance_id: &str) {
     assert_legacy_running(&drasi).await;
 
     // Only inject after cancellation and cleanup have completed, not from a queued event.
-    let after = inject_and_assert_result(&injector, &mut results_rx, "after", 3000).await;
+    let after = inject_and_assert_result(&drasi, &injector, &mut results_rx, "after", 3000).await;
     assert!(after > during);
     assert_legacy_running(&drasi).await;
     assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 0);
@@ -485,13 +546,13 @@ async fn assert_coexistence(instance_id: &str) {
         use std::collections::BTreeMap;
 
         let factory = Arc::new(LegacySourceFactory::default());
-        let wrapped_id = ComponentId::try_new("wrapped-source").expect("id");
+        let wrapped_id = fixture_support::component_id(722);
         let wrapped_stream = StreamId::try_new("wrapped-source/out").expect("stream");
         let source_resource = ResourceId::try_new("borrowed-source").expect("resource");
         let graph_schema = GraphChangeCodec::schema();
         let output = Endpoint::new(wrapped_id.clone(), PortId::try_new("out").expect("port"));
         let input = Endpoint::new(
-            ComponentId::try_new("wrapped-sink").expect("id"),
+            fixture_support::component_id(723),
             PortId::try_new("in").expect("port"),
         );
         let source_descriptor = ComponentDescriptor::try_new(
@@ -508,6 +569,7 @@ async fn assert_coexistence(instance_id: &str) {
         let wrapped_stops = Arc::new(AtomicUsize::new(0));
         let mut wrapped_graph = ComputationGraph::builder("wrapped-coexistence")
             .component(
+                drasi_lib::config::ComponentName::try_new("wrapped-source").expect("fixture name"),
                 ComponentSpecification {
                     descriptor: source_descriptor,
                     role: ComponentRole::Source,
@@ -540,7 +602,7 @@ async fn assert_coexistence(instance_id: &str) {
                 ),
             )
             .expect("borrow actual running source")
-            .sink(Box::new(NativeSink {
+            .fixture_sink(Box::new(NativeSink {
                 descriptor: ComponentDescriptor::try_new(
                     input.component.clone(),
                     vec![PortDescriptor::new(
@@ -566,7 +628,7 @@ async fn assert_coexistence(instance_id: &str) {
         let (outcome, ()) = tokio::join!(run, async {
             control.startup_report().await.expect("wrapped startup");
             assert_legacy_running(&drasi).await;
-            inject_and_assert_result(&injector, &mut results_rx, "wrapped", 4000).await;
+            inject_and_assert_result(&drasi, &injector, &mut results_rx, "wrapped", 4000).await;
             let wrapped = wrapped_rx.recv().await.expect("wrapped source change");
             assert_eq!(wrapped.envelope.system().stream(), &wrapped_stream);
             assert_eq!(
@@ -577,7 +639,11 @@ async fn assert_coexistence(instance_id: &str) {
             let metadata = GraphChangeCodec::source_metadata(&wrapped.envelope)
                 .expect("raw metadata")
                 .expect("source metadata retained");
-            assert_eq!(metadata.source_id, LEGACY_SOURCE);
+            assert_eq!(
+                metadata.source_id,
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000357")
+                    .expect("fixture UUID")
+            );
             assert!(metadata.sequence.expect("raw source sequence") > 1);
             assert_eq!(
                 GraphChangeCodec::decode_changes(&wrapped.envelope)
@@ -594,7 +660,7 @@ async fn assert_coexistence(instance_id: &str) {
             .expect("borrowed source not deprovisioned");
         assert_eq!(wrapped_stops.load(Ordering::SeqCst), 1);
         assert_legacy_running(&drasi).await;
-        inject_and_assert_result(&injector, &mut results_rx, "after-wrapper", 5000).await;
+        inject_and_assert_result(&drasi, &injector, &mut results_rx, "after-wrapper", 5000).await;
         assert_legacy_running(&drasi).await;
         assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 0);
     }
@@ -605,7 +671,7 @@ async fn assert_coexistence(instance_id: &str) {
         };
         let wrapped = LegacySourceAdapter::bind(
             "native-query-graph",
-            ComponentId::try_new("native-source").expect("id"),
+            fixture_support::component_id(433),
             StreamId::try_new("native-source/out").expect("stream"),
             Arc::new(LegacySourceResource::borrowed(Arc::new(source.clone()))),
         )
@@ -614,7 +680,7 @@ async fn assert_coexistence(instance_id: &str) {
         let native_query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: "native-query-graph".into(),
-                id: ComponentId::try_new("native-query").expect("id"),
+                id: fixture_support::component_id(724),
                 query: "MATCH (i:Item) RETURN i.name AS name".into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new("native-query/out").expect("stream"),
@@ -624,41 +690,33 @@ async fn assert_coexistence(instance_id: &str) {
         )
         .await
         .expect("construct new graph-owned CQ");
-        let native_reaction = LegacyReactionSink::borrowed(
-            ComponentId::try_new("native-reaction").expect("id"),
-            Arc::new(reaction),
-        );
+        let native_reaction =
+            LegacyReactionSink::borrowed(fixture_support::component_id(725), Arc::new(reaction));
         assert_eq!(native_reaction.completion(), SinkCompletion::Accepted);
-        let endpoint = |node: &str, port: &str| {
+        let endpoint = |node: u128, port: &str| {
             Endpoint::new(
-                ComponentId::try_new(node).expect("id"),
+                fixture_support::component_id(node),
                 PortId::try_new(port).expect("port"),
             )
         };
         let mut native = ComputationGraph::builder("native-query-graph")
-            .source(Box::new(wrapped))
-            .transformer(Box::new(native_query))
-            .sink(Box::new(native_reaction))
+            .fixture_source(Box::new(wrapped))
+            .fixture_transformer(Box::new(native_query))
+            .fixture_sink(Box::new(native_reaction))
             .bind_stream(
-                endpoint("native-source", "out"),
+                endpoint(433, "out"),
                 StreamId::try_new("native-source/out").expect("stream"),
             )
             .bind_stream(
-                endpoint("native-query", "out"),
+                endpoint(724, "out"),
                 StreamId::try_new("native-query/out").expect("stream"),
             )
             .connect(
-                EdgeDefinition::new(
-                    endpoint("native-source", "out"),
-                    endpoint("native-query", "in"),
-                ),
+                EdgeDefinition::new(endpoint(433, "out"), endpoint(724, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(
-                    endpoint("native-query", "out"),
-                    endpoint("native-reaction", "in"),
-                ),
+                EdgeDefinition::new(endpoint(724, "out"), endpoint(725, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()
@@ -690,9 +748,19 @@ async fn assert_coexistence(instance_id: &str) {
             assert_eq!(
                 results
                     .iter()
-                    .map(|result| result.query_id.as_str())
-                    .collect::<Vec<_>>(),
-                [LEGACY_QUERY, "native-query"]
+                    .map(|result| result.query_id.clone())
+                    .collect::<std::collections::BTreeSet<_>>(),
+                std::collections::BTreeSet::from([
+                    drasi
+                        .component_by_name(
+                            &drasi_core_types::ComponentName::try_new(LEGACY_QUERY)
+                                .expect("fixture name")
+                        )
+                        .expect("ordinary query")
+                        .id()
+                        .clone(),
+                    fixture_support::component_id(724),
+                ])
             );
             for result in results {
                 assert!(
@@ -712,12 +780,24 @@ async fn assert_coexistence(instance_id: &str) {
             0,
             "borrowed reaction was not stopped"
         );
-        inject_and_assert_result(&injector, &mut results_rx, "after-native-query", 7000).await;
+        inject_and_assert_result(
+            &drasi,
+            &injector,
+            &mut results_rx,
+            "after-native-query",
+            7000,
+        )
+        .await;
         assert_legacy_running(&drasi).await;
     }
     assert_shared_source_ingress_fence(&drasi, source, &injector, &mut results_rx).await;
     drasi.stop().await.expect("stop legacy pipeline");
-    wait_for_legacy_status(&drasi, LEGACY_REACTION, ComponentStatus::Stopped).await;
+    wait_for_legacy_status(
+        &drasi,
+        &drasi_core_types::ComponentName::try_new(LEGACY_REACTION).expect("fixture component name"),
+        ComponentStatus::Stopped,
+    )
+    .await;
     assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 1);
     drasi
         .shutdown()
@@ -777,17 +857,25 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
     tokio::time::timeout(Duration::from_secs(20), async {
         for (bootstrap, has_snapshot) in [(false, true), (true, false), (true, true)] {
             let rows = Arc::new(Mutex::new(Vec::new()));
-            let mut params = SourceBaseParams::new(LEGACY_SOURCE);
+            let mut params = SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000357")
+                    .expect("fixture UUID"),
+            );
             if has_snapshot {
                 params = params.with_bootstrap_provider(SnapshotBootstrap(rows.clone()));
             }
             let injector = Arc::new(SourceBase::new(params).expect("source fixture"));
             let (results, mut receiver) = mpsc::channel(4);
             let reaction_base = Arc::new(ReactionBase::new(ReactionBaseParams::new(
-                LEGACY_REACTION,
-                vec![LEGACY_QUERY.into()],
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000358")
+                    .expect("fixture UUID"),
+                vec![drasi_computation_contracts::ComponentReference::by_name(
+                    drasi_core_types::ComponentName::try_new("legacy-query")
+                        .expect("fixture component name"),
+                )],
             )));
             let core = DrasiLib::builder()
+                .with_allow_external_component_ids(true)
                 .with_query_factory(
                     drasi_lib::computation::v1::FactoryRegistry::standard()
                         .get(
@@ -801,34 +889,52 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
                         .clone(),
                 )
                 .with_id(format!("clean-pipeline-restart-{bootstrap}-{has_snapshot}"))
-                .with_source(InjectableSource {
-                    base: injector.clone(),
-                })
-                .with_query(
-                    Query::cypher(LEGACY_QUERY)
-                        .query("MATCH (i:Item) RETURN i.name AS name")
-                        .from_input(LEGACY_SOURCE)
-                        .enable_bootstrap(bootstrap)
-                        .build(),
+                .with_source(
+                    drasi_core_types::ComponentName::try_new("legacy-source")
+                        .expect("fixture component name"),
+                    InjectableSource {
+                        base: injector.clone(),
+                    },
                 )
-                .with_reaction(CapturingReaction {
-                    base: reaction_base.clone(),
-                    results,
-                    loop_stops: Arc::new(AtomicUsize::new(0)),
-                })
+                .with_query(
+                    Query::cypher(
+                        drasi_core_types::ComponentName::try_new("legacy-query")
+                            .expect("fixture component name"),
+                    )
+                    .query("MATCH (i:Item) RETURN i.name AS name")
+                    .from_input_by_name(
+                        drasi_core_types::ComponentName::try_new("legacy-source")
+                            .expect("fixture component name"),
+                    )
+                    .enable_bootstrap(bootstrap)
+                    .build()
+                    .expect("valid legacy query"),
+                )
+                .with_reaction(
+                    drasi_core_types::ComponentName::try_new("legacy-reaction")
+                        .expect("fixture component name"),
+                    CapturingReaction {
+                        base: reaction_base.clone(),
+                        results,
+                        loop_stops: Arc::new(AtomicUsize::new(0)),
+                    },
+                )
                 .build()
                 .await
                 .expect("ordinary pipeline");
             core.start().await.expect("initial start");
             for id in [LEGACY_SOURCE, LEGACY_QUERY, LEGACY_REACTION] {
-                core.computation_component(id)
-                    .expect("component handle")
-                    .wait_started()
-                    .await
-                    .expect("initial component readiness");
+                core.component_by_name(
+                    &drasi_core_types::ComponentName::try_new(id).expect("fixture component name"),
+                )
+                .expect("component handle")
+                .wait_started()
+                .await
+                .expect("initial component readiness");
             }
             assert_eq!(
-                inject_and_assert_result(&injector, &mut receiver, "before-restart", 1_000).await,
+                inject_and_assert_result(&core, &injector, &mut receiver, "before-restart", 1_000)
+                    .await,
                 1
             );
             rows.lock()
@@ -845,9 +951,19 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
                         ),
                     },
                 });
+            let query_id = core
+                .component_by_name(
+                    &drasi_core_types::ComponentName::try_new(LEGACY_QUERY).expect("fixture name"),
+                )
+                .expect("admitted query")
+                .id()
+                .clone();
             let query = core
                 .query_manager()
-                .get_query_instance(LEGACY_QUERY)
+                .get_query_instance_by_name(
+                    &drasi_core_types::ComponentName::try_new("legacy-query")
+                        .expect("fixture component name"),
+                )
                 .await
                 .expect("query facade");
             let before = query
@@ -858,10 +974,15 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
             assert_eq!(before.len(), 1);
             core.stop().await.expect("clean instance stop");
             for id in [LEGACY_SOURCE, LEGACY_QUERY, LEGACY_REACTION] {
-                wait_for_legacy_status(&core, id, ComponentStatus::Stopped).await;
+                wait_for_legacy_status(
+                    &core,
+                    &drasi_core_types::ComponentName::try_new(id).expect("fixture component name"),
+                    ComponentStatus::Stopped,
+                )
+                .await;
             }
             let checkpoint = reaction_base
-                .read_checkpoint(LEGACY_QUERY)
+                .read_checkpoint(&query_id)
                 .await
                 .expect("reaction checkpoint lookup")
                 .expect("handled pre-stop output checkpoint");
@@ -874,22 +995,28 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
                     message.contains("Strict") && message.contains("generation"),
                     "{message}"
                 );
-                core.computation_component(LEGACY_QUERY)
-                    .expect("query handle")
-                    .wait_started()
-                    .await
-                    .expect("refreshed query readiness");
+                core.component_by_name(
+                    &drasi_core_types::ComponentName::try_new("legacy-query")
+                        .expect("fixture component name"),
+                )
+                .expect("query handle")
+                .wait_started()
+                .await
+                .expect("refreshed query readiness");
                 let refreshed = query.fetch_snapshot().await.expect("refreshed snapshot");
                 assert!(refreshed.output_generation > before.output_generation);
                 assert_eq!(refreshed.to_vec(), before.to_vec());
                 assert_eq!(
-                    core.get_reaction_status(LEGACY_REACTION)
-                        .await
-                        .expect("reaction status"),
+                    core.get_reaction_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("legacy-reaction")
+                            .expect("fixture component name")
+                    )
+                    .await
+                    .expect("reaction status"),
                     ComponentStatus::Error
                 );
                 let rejected = reaction_base
-                    .read_checkpoint(LEGACY_QUERY)
+                    .read_checkpoint(&query_id)
                     .await
                     .expect("reaction checkpoint lookup")
                     .expect("Strict must preserve its old checkpoint");
@@ -906,11 +1033,13 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
             }
             restarted.expect("streaming-only clean restart");
             for id in [LEGACY_SOURCE, LEGACY_QUERY, LEGACY_REACTION] {
-                core.computation_component(id)
-                    .expect("component handle")
-                    .wait_started()
-                    .await
-                    .expect("restarted component readiness");
+                core.component_by_name(
+                    &drasi_core_types::ComponentName::try_new(id).expect("fixture component name"),
+                )
+                .expect("component handle")
+                .wait_started()
+                .await
+                .expect("restarted component readiness");
             }
             let after = query
                 .fetch_snapshot()
@@ -923,7 +1052,8 @@ async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapsho
             assert_eq!(after.as_of_sequence, before.as_of_sequence);
             assert_eq!(after.to_vec(), before.to_vec());
             assert_eq!(
-                inject_and_assert_result(&injector, &mut receiver, "after-restart", 2_000).await,
+                inject_and_assert_result(&core, &injector, &mut receiver, "after-restart", 2_000)
+                    .await,
                 2
             );
             core.shutdown().await.expect("shutdown restarted pipeline");
@@ -940,15 +1070,15 @@ async fn assert_shared_source_ingress_fence(
     legacy_results: &mut mpsc::Receiver<QueryResult>,
 ) {
     use drasi_lib::computation::v1::*;
-    let endpoint = |node: &str, port: &str| {
+    let endpoint = |node: u128, port: &str| {
         Endpoint::new(
-            ComponentId::try_new(node).expect("id"),
+            fixture_support::component_id(node),
             PortId::try_new(port).expect("port"),
         )
     };
     let wrapped = LegacySourceAdapter::bind(
         "fenced-query",
-        ComponentId::try_new("wrapped").expect("id"),
+        fixture_support::component_id(726),
         StreamId::try_new("wrapped/out").expect("stream"),
         Arc::new(LegacySourceResource::borrowed(Arc::new(source))),
     )
@@ -957,7 +1087,7 @@ async fn assert_shared_source_ingress_fence(
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "fenced-query".into(),
-            id: ComponentId::try_new("query").expect("id"),
+            id: fixture_support::component_id(46),
             query: "MATCH (i:Item) RETURN size(42) AS invalid".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out").expect("stream"),
@@ -969,11 +1099,11 @@ async fn assert_shared_source_ingress_fence(
     .expect("runtime-invalid expression parses");
     let (received, mut failed_output) = mpsc::channel(1);
     let mut graph = ComputationGraph::builder("fenced-query")
-        .source(Box::new(wrapped))
-        .transformer(Box::new(query))
-        .sink(Box::new(NativeSink {
+        .fixture_source(Box::new(wrapped))
+        .fixture_transformer(Box::new(query))
+        .fixture_sink(Box::new(NativeSink {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("sink").expect("id"),
+                fixture_support::component_id(101),
                 vec![PortDescriptor::new(
                     PortId::try_new("in").expect("port"),
                     PortDirection::Input,
@@ -986,23 +1116,23 @@ async fn assert_shared_source_ingress_fence(
             stops: Arc::new(AtomicUsize::new(0)),
         }))
         .bind_stream(
-            endpoint("wrapped", "out"),
+            endpoint(726, "out"),
             StreamId::try_new("wrapped/out").expect("stream"),
         )
         .bind_stream(
-            endpoint("query", "out"),
+            endpoint(46, "out"),
             StreamId::try_new("query/out").expect("stream"),
         )
         .connect(
-            EdgeDefinition::new(endpoint("wrapped", "out"), endpoint("query", "in")),
+            EdgeDefinition::new(endpoint(726, "out"), endpoint(46, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+            EdgeDefinition::new(endpoint(46, "out"), endpoint(101, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .relationship_policy(
-            EdgeDefinition::new(endpoint("wrapped", "out"), endpoint("query", "in")),
+            EdgeDefinition::new(endpoint(726, "out"), endpoint(46, "in")),
             RelationshipPolicy {
                 fence_producer_on_failure: true,
                 ..RelationshipPolicy::default()
@@ -1018,17 +1148,17 @@ async fn assert_shared_source_ingress_fence(
             .start_components(GraphRevision(1), GraphSelection::All)
             .await
             .expect("startup");
-        inject_and_assert_result(injector, legacy_results, "trigger-fence", 8000).await;
+        inject_and_assert_result(drasi, injector, legacy_results, "trigger-fence", 8000).await;
         let mut observed = control.subscribe_observed();
         observed
             .wait_for(|state| {
-                state.components[&ComponentId::try_new("wrapped").expect("id")].lifecycle
+                state.components[&fixture_support::component_id(726)].lifecycle
                     == ComponentLifecycle::Failed
             })
             .await
             .expect("adapter stopped after consumer failure");
         assert_eq!(
-            control.observed().components[&ComponentId::try_new("query").expect("id")]
+            control.observed().components[&fixture_support::component_id(46)]
                 .failure
                 .as_ref()
                 .expect("query failure")
@@ -1042,6 +1172,7 @@ async fn assert_shared_source_ingress_fence(
         );
         for sequence in 0..64 {
             inject_and_assert_result(
+                drasi,
                 injector,
                 legacy_results,
                 &format!("after-fence-{sequence}"),

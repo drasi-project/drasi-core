@@ -106,11 +106,19 @@ fn value<'a>(
         .as_str()
 }
 
-fn open_and_parse(dir: &tempfile::TempDir, name: &str) -> HashMap<String, HashMap<String, String>> {
+fn open_and_parse(
+    dir: &tempfile::TempDir,
+    name: &drasi_core_types::ComponentId,
+) -> HashMap<String, HashMap<String, String>> {
     let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
-    let db = open_unified_db(dir.path().to_str().expect("utf-8 path"), name, &options)
-        .expect("open unified db");
-    let sections = parse_options_file(&dir.path().join(name));
+    let db = open_unified_db(
+        dir.path().to_str().expect("utf-8 path"),
+        &drasi_core_types::StorageScope::default(),
+        name,
+        &options,
+    )
+    .expect("open unified db");
+    let sections = parse_options_file(&dir.path().join(name.as_str()));
     drop(db);
     sections
 }
@@ -118,7 +126,11 @@ fn open_and_parse(dir: &tempfile::TempDir, name: &str) -> HashMap<String, HashMa
 #[test]
 fn point_lookup_cfs_carry_every_unrolled_setting() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let sections = open_and_parse(&dir, "point-lookup-test");
+    let sections = open_and_parse(
+        &dir,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003cf")
+            .expect("fixture UUID"),
+    );
 
     for cf in POINT_LOOKUP_CFS {
         // Memtable whole-key bloom, sized at 2% of write_buffer_size and
@@ -177,7 +189,11 @@ fn point_lookup_cfs_carry_every_unrolled_setting() {
 #[test]
 fn scan_cfs_do_not_carry_the_point_lookup_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let sections = open_and_parse(&dir, "scan-control-test");
+    let sections = open_and_parse(
+        &dir,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003d0")
+            .expect("fixture UUID"),
+    );
 
     for cf in SCAN_CFS {
         assert_eq!(
@@ -221,7 +237,11 @@ fn scan_cfs_do_not_carry_the_point_lookup_policy() {
 #[test]
 fn every_cf_charges_index_and_filter_blocks_to_the_shared_cache() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let sections = open_and_parse(&dir, "metadata-cache-test");
+    let sections = open_and_parse(
+        &dir,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003d1")
+            .expect("fixture UUID"),
+    );
 
     for cf in ALL_CFS {
         assert_eq!(
@@ -244,7 +264,11 @@ fn every_cf_charges_index_and_filter_blocks_to_the_shared_cache() {
 #[test]
 fn exactly_the_point_lookup_cfs_carry_the_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let sections = open_and_parse(&dir, "membership-test");
+    let sections = open_and_parse(
+        &dir,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003d2")
+            .expect("fixture UUID"),
+    );
 
     let mut with_policy = BTreeSet::new();
     for (section, keys) in &sections {

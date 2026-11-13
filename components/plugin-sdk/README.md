@@ -186,6 +186,49 @@ drasi_plugin_sdk::export_plugin!(
 
 Each descriptor is wrapped in an FFI vtable (`SourcePluginVtable`, `ReactionPluginVtable`, `BootstrapPluginVtable`) that provides `#[repr(C)]` function pointers. When the host calls a factory method (e.g., `create_source_fn`), the plugin constructs a trait object and wraps it in a component vtable (`SourceVtable`, `ReactionVtable`, `BootstrapProviderVtable`) with its own FFI-safe function pointers.
 
+#### Ordinary component lifecycle (ABI 0.18)
+
+Runtime-context binding is mandatory and separate from optional developer hooks:
+
+```text
+construct → bind_runtime_context(context) → initialize()
+            start() → stop() → start() → stop()
+            [delete_owned_resources(), only when explicitly requested]
+            dispose() → final object release
+```
+
+`Source::bind_runtime_context` and `Reaction::bind_runtime_context` are required
+async methods returning `()`. Implementations using `SourceBase` or `ReactionBase`
+delegate to `base.bind_runtime_context(context).await`. Do this even when the
+component needs no custom initialization: a default no-op hook must not skip
+identity, state-store, status, snapshot or WAL wiring.
+
+`initialize`, `start`, `stop`, `dispose`, `pause_processing` and `resume_processing`
+are zero-argument async `anyhow::Result<()>` hooks with no-op defaults.
+Initialization runs once per constructed object, not once per UUID or activation.
+Successful same-instance restart does not initialize or dispose again. A failed
+initializer cannot be retried on that object; dispose it, then construct a fresh
+one. Stop must also settle a partially failed start. A successful dispose happens
+once, including for an initialized instance that never started.
+
+Pause/resume is a temporary processing boundary, not another spelling of
+stop/start. `delete_owned_resources` replaces destructive `deprovision`; it
+defaults to **unsupported**, not successful deletion. Normal stop and disposal
+never imply deletion of persistent state or external artifacts.
+
+The generated vtables return `FfiResult` for binding and lifecycle calls,
+including initialization and disposal failures. The Host proxy retains each
+blocking call and the actual plugin/library until it has joined. Cancelling an
+async wait or reaching its deadline does not cancel the synchronous callback.
+Retry cleanup on the retained proxy; conflicting calls cannot overlap pending
+work. Dropping a proxy without confirmed disposal retains its unfinished owner
+and emits an error rather than freeing state still accessible to the plugin.
+This safety fallback is not completed cleanup and is not a force-cancel API.
+
+An ordinary creation descriptor alone does **not** authorize live updates,
+reconstruction, state loss or draining external effects. This lifecycle bridge
+does not advertise factory update planning or retained-object update support.
+
 #### Step 3: Build and deploy
 
 ```bash
@@ -211,7 +254,7 @@ When publishing plugins with `cargo xtask publish-plugins --sign`, each plugin i
 Both the plugin and the server **must** be compiled with:
 
 - The **same Rust toolchain version** — the Rust ABI is not stable across compiler versions.
-- The **same `drasi-plugin-sdk` version** — the server compares `SDK_VERSION` at load time and rejects mismatches.
+- A **compatible ordinary ABI** — the server checks `FFI_SDK_VERSION` at load time; package release versions do not select a binary layout.
 - The **same target triple** — validated via `PluginMetadata::target_triple`.
 - The **default System allocator** — neither the plugin nor the server may install a
   custom `#[global_allocator]` (`jemalloc`, `mimalloc`, `tcmalloc`, `snmalloc`, etc.).
@@ -228,6 +271,13 @@ The server performs a two-phase load:
 
 1. **Metadata validation** — calls `drasi_plugin_metadata()` to check SDK version, build hash, and target triple.
 2. **Initialization** — calls `drasi_plugin_init()` only if metadata validation passes.
+
+The ordinary binary contract is `FFI_SDK_VERSION = "0.18.0"`, independently of
+the crate package version. Hosts accept ordinary 0.18.x tables and reject
+0.16/0.17 component layouts before plugin initialization. Rebuild both sides for
+this breaking lifecycle change. The state-store table layout and transferred
+ownership introduced in 0.17 remain unchanged; they do not make an older
+Source/Reaction table compatible. The native computation ABI is independent.
 
 ## FFI Architecture
 

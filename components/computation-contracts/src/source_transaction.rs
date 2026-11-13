@@ -49,7 +49,7 @@ const STORED_OPERATION_OVERHEAD: usize = 20;
 #[serde(deny_unknown_fields)]
 struct ReplayProgress {
     version: u32,
-    source_id: String,
+    source_id: ComponentId,
     transaction_id: Vec<u8>,
     sequence: u64,
 }
@@ -63,7 +63,7 @@ struct TransactionContext {
     change_set_namespace: String,
     #[serde(with = "hex")]
     change_set_value: Vec<u8>,
-    source_id: String,
+    source_id: ComponentId,
     #[serde(with = "hex")]
     transaction_id: Vec<u8>,
     #[serde(with = "hex")]
@@ -188,23 +188,24 @@ impl From<GraphCodecError> for SourceTransactionError {
     }
 }
 
-fn validate_change(source: &str, change: &SourceChange) -> Result<(), SourceTransactionError> {
+fn validate_change(
+    source: &ComponentId,
+    change: &SourceChange,
+) -> Result<(), SourceTransactionError> {
     if matches!(change, SourceChange::Future { .. }) {
         return Err(SourceTransactionError::ScheduledChange);
     }
-    if change.get_reference().source_id.as_ref() != source {
+    if change.get_reference().namespace.as_ref() != source.as_str() {
         return Err(SourceTransactionError::MixedSources);
     }
     change.validate()?;
     Ok(())
 }
 
-fn validate_identity(
-    source_id: &str,
+fn validate_transaction_metadata(
     transaction_id: &[u8],
     position: &[u8],
 ) -> Result<(), SourceTransactionError> {
-    ComponentId::try_new(source_id)?;
     if transaction_id.is_empty() || transaction_id.len() > 256 {
         return Err(SourceTransactionError::Identity);
     }
@@ -230,13 +231,13 @@ fn operation_bytes(operation: &ChangeOperation) -> u64 {
     }
 }
 
-fn metadata_bytes(source_id: &str, transaction_id: &[u8], position: &[u8]) -> u64 {
-    (source_id.len() + transaction_id.len() + position.len()) as u64
+fn metadata_bytes(source_id: &ComponentId, transaction_id: &[u8], position: &[u8]) -> u64 {
+    (source_id.as_str().len() + transaction_id.len() + position.len()) as u64
 }
 
 /// The complete group as validated graph operations plus its decoded changes.
 struct Group {
-    source_id: String,
+    source_id: ComponentId,
     transaction_id: Bytes,
     position: Bytes,
     changes: Vec<SourceChange>,
@@ -274,7 +275,7 @@ impl Group {
 #[derive(Serialize, Deserialize)]
 struct StoredFrame {
     version: u32,
-    source_id: String,
+    source_id: ComponentId,
     transaction_id: Vec<u8>,
     position: Vec<u8>,
     operations: Vec<StoredOperation>,
@@ -367,7 +368,7 @@ impl StoredOperation {
 /// Decode ordered operations into changes and validate each one for `source`.
 /// `event_time` supplies the time identity-only deletions need, if any.
 fn changes_from_operations(
-    source: &str,
+    source: &ComponentId,
     operations: &[ChangeOperation],
     event_time: &dyn Fn() -> Result<u64, GraphCodecError>,
 ) -> Result<Vec<SourceChange>, SourceTransactionError> {
@@ -385,7 +386,7 @@ fn changes_from_operations(
 /// change it remains poisoned; restarting from the last committed cursor is
 /// required instead of publishing a prefix with a higher limit.
 pub struct SourceTransactionBuilder {
-    source_id: String,
+    source_id: ComponentId,
     changes: Vec<SourceChange>,
     operations: Vec<ChangeOperation>,
     operation_bytes: u64,
@@ -396,15 +397,14 @@ pub struct SourceTransactionBuilder {
 
 impl SourceTransactionBuilder {
     pub fn new(
-        source_id: &str,
+        source_id: &ComponentId,
         limits: SourceTransactionLimits,
     ) -> Result<Self, SourceTransactionError> {
-        ComponentId::try_new(source_id)?;
         let deadline = tokio::time::Instant::now()
             .checked_add(limits.duration())
             .ok_or(SourceTransactionError::InvalidDeadline)?;
         Ok(Self {
-            source_id: source_id.into(),
+            source_id: source_id.clone(),
             changes: Vec::new(),
             operations: Vec::new(),
             operation_bytes: 0,
@@ -460,7 +460,9 @@ impl SourceTransactionBuilder {
         let total = self
             .operation_bytes
             .saturating_add(operation_bytes(&operation));
-        if total.saturating_add(self.source_id.len() as u64) > self.limits.max_bytes.get() as u64 {
+        if total.saturating_add(self.source_id.as_str().len() as u64)
+            > self.limits.max_bytes.get() as u64
+        {
             return Err(SourceTransactionError::Limit {
                 kind: SourceTransactionLimit::Bytes,
                 limit: self.limits.max_bytes.get(),
@@ -489,7 +491,7 @@ impl SourceTransactionBuilder {
         position: Bytes,
     ) -> Result<PreparedSourceTransaction, SourceTransactionError> {
         self.check_deadline()?;
-        validate_identity(&self.source_id, &transaction_id, &position)?;
+        validate_transaction_metadata(&transaction_id, &position)?;
         let group = Group {
             source_id: self.source_id,
             transaction_id,
@@ -542,7 +544,7 @@ pub struct SourceTransaction {
 }
 
 impl SourceTransaction {
-    pub fn source_id(&self) -> &str {
+    pub fn source_id(&self) -> &ComponentId {
         &self.group.source_id
     }
 
@@ -578,7 +580,7 @@ impl SourceTransaction {
         };
         let mut envelope = self.into_envelope(stream, transport_sequence, timestamp)?;
         envelope.append_annotation(ContextEntry::try_new(
-            ComponentId::try_new(progress.source_id.as_str())?,
+            progress.source_id.clone(),
             REPLAY_CONTEXT,
             ContextValue::Bytes(Arc::from(serde_json::to_vec(&progress)?)),
         )?)?;
@@ -627,7 +629,7 @@ impl SourceTransaction {
                 .with_source_position(position),
         );
         envelope.append_annotation(ContextEntry::try_new(
-            ComponentId::try_new(context.source_id.as_str())?,
+            context.source_id.clone(),
             TRANSACTION_CONTEXT,
             ContextValue::Bytes(Arc::from(serde_json::to_vec(&context)?)),
         )?)?;
@@ -638,14 +640,14 @@ impl SourceTransaction {
 /// Identity of a current, valid complete-transaction marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceTransactionMetadata {
-    source_id: String,
+    source_id: ComponentId,
     transaction_id: Bytes,
     position: Bytes,
     operations: usize,
 }
 
 impl SourceTransactionMetadata {
-    pub fn source_id(&self) -> &str {
+    pub fn source_id(&self) -> &ComponentId {
         &self.source_id
     }
 
@@ -700,7 +702,7 @@ impl SourceTransactionCodec {
         if frame.version != CONTEXT_VERSION {
             return Err(SourceTransactionError::Identity);
         }
-        validate_identity(&frame.source_id, &frame.transaction_id, &frame.position)?;
+        validate_transaction_metadata(&frame.transaction_id, &frame.position)?;
         if frame.operations.len() > limits.max_changes.get() {
             return Err(SourceTransactionError::Limit {
                 kind: SourceTransactionLimit::Changes,
@@ -784,7 +786,7 @@ impl SourceTransactionCodec {
 
     pub fn replay_progress(
         envelope: &ChangeEnvelope,
-    ) -> Result<Option<(String, u64)>, SourceTransactionError> {
+    ) -> Result<Option<(ComponentId, u64)>, SourceTransactionError> {
         Ok(Self::current(envelope)?.and_then(|current| {
             current
                 .replay
@@ -823,15 +825,11 @@ impl SourceTransactionCodec {
         let context: TransactionContext = serde_json::from_slice(&bytes)?;
         if context.version != CONTEXT_VERSION
             || !context.complete
-            || entry.contributor() != context.source_id
+            || entry.contributor() != &context.source_id
         {
             return Err(SourceTransactionError::Identity);
         }
-        validate_identity(
-            &context.source_id,
-            &context.transaction_id,
-            &context.position,
-        )?;
+        validate_transaction_metadata(&context.transaction_id, &context.position)?;
         super::data::validate_schema(
             GraphChangeCodec::schema().descriptor(),
             envelope.changes().schema(),
@@ -868,7 +866,7 @@ impl SourceTransactionCodec {
         let progress: ReplayProgress = serde_json::from_slice(&Self::bytes(entry)?)?;
         if progress.version != CONTEXT_VERSION
             || progress.sequence == 0
-            || entry.contributor() != progress.source_id
+            || entry.contributor() != &progress.source_id
             || progress.source_id != context.source_id
             || progress.transaction_id != context.transaction_id
         {
@@ -891,6 +889,9 @@ mod tests {
     use drasi_core_types::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
     };
+
+    const SOURCE_ID: &str = "5c3e49cc-32f8-5b75-888d-30b75b572221";
+    const OTHER_SOURCE_ID: &str = "9a7efebd-4820-5bea-9eb3-17e12e60b60a";
 
     fn limits(changes: usize, bytes: usize) -> SourceTransactionLimits {
         SourceTransactionLimits {
@@ -918,9 +919,14 @@ mod tests {
     }
 
     fn builder(limits: SourceTransactionLimits, count: usize) -> SourceTransactionBuilder {
-        let mut builder = SourceTransactionBuilder::new("source", limits).unwrap();
+        let mut builder = SourceTransactionBuilder::new(
+            &drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID"),
+            limits,
+        )
+        .unwrap();
         for index in 0..count {
-            builder.push(change("source", &index.to_string())).unwrap();
+            builder.push(change(SOURCE_ID, &index.to_string())).unwrap();
         }
         builder
     }
@@ -982,7 +988,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         edit(&mut value);
         ContextEntry::try_new(
-            ComponentId::try_new("source").unwrap(),
+            ComponentId::try_new("d8ec5b56-62a2-5b2a-971b-874c25303574").unwrap(),
             TRANSACTION_CONTEXT,
             ContextValue::Bytes(Arc::from(serde_json::to_vec(&value).unwrap())),
         )
@@ -1012,7 +1018,7 @@ mod tests {
             version: 1,
             change_set_namespace: id.namespace().to_owned(),
             change_set_value: id.value().to_vec(),
-            source_id: source.into(),
+            source_id: ComponentId::try_new(source).expect("fixture UUID"),
             transaction_id: b"transaction".to_vec(),
             position: b"commit-position".to_vec(),
             operations: input.changes().operations().len() as u64,
@@ -1033,23 +1039,28 @@ mod tests {
     #[tokio::test]
     async fn one_ordered_mixed_transaction_is_ordinary_standard_graph_records() {
         let changes = vec![
-            change("source", "0"),
+            change(SOURCE_ID, "0"),
             SourceChange::update_with_removals(
-                element("source", "0", 2000),
+                element(SOURCE_ID, "0", 2000),
                 ["gone".to_string()].into(),
             )
             .unwrap(),
-            SourceChange::replace(element("source", "0", 3000)),
-            SourceChange::update(element("source", "0", 4000)),
+            SourceChange::replace(element(SOURCE_ID, "0", 3000)),
+            SourceChange::update(element(SOURCE_ID, "0", 4000)),
             SourceChange::Delete {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("source", "0"),
+                    reference: ElementReference::new(SOURCE_ID, "0"),
                     labels: Arc::from([Arc::from("Person")]),
                     effective_from: 5000,
                 },
             },
         ];
-        let mut assembly = SourceTransactionBuilder::new("source", limits(8, 4096)).unwrap();
+        let mut assembly = SourceTransactionBuilder::new(
+            &drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID"),
+            limits(8, 4096),
+        )
+        .unwrap();
         for change in &changes {
             assembly.push(change.clone()).unwrap();
         }
@@ -1109,8 +1120,13 @@ mod tests {
         assert_eq!(restored.into_changes(), changes);
 
         // An update that sets and removes one property is malformed and poisons assembly.
-        let mut assembly = SourceTransactionBuilder::new("source", limits(8, 4096)).unwrap();
-        let mut conflicting = element("source", "0", 2000);
+        let mut assembly = SourceTransactionBuilder::new(
+            &drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID"),
+            limits(8, 4096),
+        )
+        .unwrap();
+        let mut conflicting = element(SOURCE_ID, "0", 2000);
         if let Element::Node { properties, .. } = &mut conflicting {
             properties.insert("both", ElementValue::Null);
         }
@@ -1122,7 +1138,7 @@ mod tests {
             Err(SourceTransactionError::InvalidChange(_))
         ));
         assert!(matches!(
-            assembly.push(change("source", "1")),
+            assembly.push(change(SOURCE_ID, "1")),
             Err(SourceTransactionError::Interrupted)
         ));
     }
@@ -1130,22 +1146,27 @@ mod tests {
     #[tokio::test]
     async fn prepared_storage_is_bounded_and_restores_only_as_a_complete_committed_group() {
         let changes = vec![
-            change("source", "0"),
+            change(SOURCE_ID, "0"),
             SourceChange::update_with_removals(
-                element("source", "0", 2000),
+                element(SOURCE_ID, "0", 2000),
                 ["gone".to_string()].into(),
             )
             .unwrap(),
-            SourceChange::replace(element("source", "0", 3000)),
+            SourceChange::replace(element(SOURCE_ID, "0", 3000)),
             SourceChange::Delete {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("source", "0"),
+                    reference: ElementReference::new(SOURCE_ID, "0"),
                     labels: Arc::from([Arc::from("Person")]),
                     effective_from: 5000,
                 },
             },
         ];
-        let mut assembly = SourceTransactionBuilder::new("source", limits(4, 4096)).unwrap();
+        let mut assembly = SourceTransactionBuilder::new(
+            &drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID"),
+            limits(4, 4096),
+        )
+        .unwrap();
         for change in &changes {
             assembly.push(change.clone()).unwrap();
         }
@@ -1202,7 +1223,7 @@ mod tests {
             panic!("stored operations");
         };
         first.identity =
-            GraphChangeCodec::element_reference(&ElementReference::new("source", "other"))
+            GraphChangeCodec::element_reference(&ElementReference::new(SOURCE_ID, "other"))
                 .unwrap()
                 .identity()
                 .value()
@@ -1234,7 +1255,14 @@ mod tests {
             let progress = SourceTransactionCodec::replay_progress(&envelope)
                 .unwrap()
                 .expect("explicit replay progress");
-            assert_eq!(progress, ("source".into(), 42));
+            assert_eq!(
+                progress,
+                (
+                    drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                        .expect("fixture UUID"),
+                    42
+                )
+            );
             assert_eq!(
                 envelope
                     .system()
@@ -1253,20 +1281,20 @@ mod tests {
         duplicate.append_annotation(entry).unwrap();
         assert!(SourceTransactionCodec::decode(&duplicate, limits(2, 4096)).is_err());
         for (source, transaction, sequence) in [
-            ("wrong", b"transaction".as_slice(), 42),
-            ("source", b"wrong".as_slice(), 42),
-            ("source", b"transaction".as_slice(), 0),
+            (OTHER_SOURCE_ID, b"transaction".as_slice(), 42),
+            (SOURCE_ID, b"wrong".as_slice(), 42),
+            (SOURCE_ID, b"transaction".as_slice(), 0),
         ] {
             let mut envelope = envelope(1);
             envelope
                 .append_annotation(
                     ContextEntry::try_new(
-                        ComponentId::try_new("source").unwrap(),
+                        ComponentId::try_new("d8ec5b56-62a2-5b2a-971b-874c25303574").unwrap(),
                         REPLAY_CONTEXT,
                         ContextValue::Bytes(Arc::from(
                             serde_json::to_vec(&ReplayProgress {
                                 version: 1,
-                                source_id: source.into(),
+                                source_id: ComponentId::try_new(source).expect("fixture UUID"),
                                 transaction_id: transaction.to_vec(),
                                 sequence,
                             })
@@ -1283,7 +1311,7 @@ mod tests {
         // does not inherit it, and an ordinary envelope never has any.
         let derived = GraphChangeCodec::derive_changes(
             &replay(4),
-            &[change("source", "0")],
+            &[change(SOURCE_ID, "0")],
             StreamId::try_new("derived").unwrap(),
             1,
         )
@@ -1293,7 +1321,7 @@ mod tests {
             None
         );
         let ordinary =
-            GraphChangeCodec::encode_changes(&[change("source", "0")], stream(), 1, None).unwrap();
+            GraphChangeCodec::encode_changes(&[change(SOURCE_ID, "0")], stream(), 1, None).unwrap();
         assert_eq!(
             SourceTransactionCodec::replay_progress(&ordinary).unwrap(),
             None
@@ -1311,13 +1339,17 @@ mod tests {
         let restored = codec.decode(&bytes).unwrap();
         assert_eq!(codec.encode(&restored).unwrap(), bytes);
         let transaction = SourceTransactionCodec::decode(&restored, limits(3, 4096)).unwrap();
-        assert_eq!(transaction.source_id(), "source");
+        assert_eq!(
+            transaction.source_id(),
+            &drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID")
+        );
         assert_eq!(transaction.transaction_id(), b"transaction");
         assert_eq!(transaction.position(), b"commit-position");
         assert_eq!(
             transaction.into_changes(),
             (0..3)
-                .map(|n| change("source", &n.to_string()))
+                .map(|n| change(SOURCE_ID, &n.to_string()))
                 .collect::<Vec<_>>()
         );
         assert_eq!(restored.changes().operations().len(), 3);
@@ -1348,14 +1380,14 @@ mod tests {
     async fn exact_change_limit_rejects_and_poisoned_assembly_cannot_publish_a_prefix() {
         let mut assembly = builder(limits(2, 4096), 2);
         assert!(matches!(
-            assembly.push(change("source", "third")),
+            assembly.push(change(SOURCE_ID, "third")),
             Err(SourceTransactionError::Limit {
                 kind: SourceTransactionLimit::Changes,
                 limit: 2,
             })
         ));
         assert!(matches!(
-            assembly.push(change("source", "later")),
+            assembly.push(change(SOURCE_ID, "later")),
             Err(SourceTransactionError::Interrupted)
         ));
         assert!(matches!(
@@ -1401,7 +1433,7 @@ mod tests {
         ));
         let mut tiny = builder(limits(1, 1), 0);
         assert!(matches!(
-            tiny.push(change("source", "large")),
+            tiny.push(change(SOURCE_ID, "large")),
             Err(SourceTransactionError::Limit {
                 kind: SourceTransactionLimit::Bytes,
                 limit: 1,
@@ -1443,7 +1475,7 @@ mod tests {
     async fn mixed_sources_and_invalid_commit_metadata_never_create_a_complete_group() {
         let mut assembly = builder(limits(2, 4096), 1);
         assert!(matches!(
-            assembly.push(change("another", "1")),
+            assembly.push(change(OTHER_SOURCE_ID, "1")),
             Err(SourceTransactionError::MixedSources)
         ));
         assert!(matches!(
@@ -1454,7 +1486,7 @@ mod tests {
         assert!(matches!(
             scheduled.push(SourceChange::Future {
                 future_ref: drasi_core_types::interface::FutureElementRef {
-                    element_ref: ElementReference::new("source", "one"),
+                    element_ref: ElementReference::new(SOURCE_ID, "one"),
                     original_time: 1000,
                     due_time: 2000,
                     group_signature: 1,
@@ -1525,7 +1557,7 @@ mod tests {
         ));
 
         // The marker states the operation count: a fragment of the group is refused.
-        let regenerated = forged(&changes, "source");
+        let regenerated = forged(&changes, SOURCE_ID);
         assert!(SourceTransactionCodec::decode(&regenerated, limits(8, 4096)).is_ok());
         let fragment = input.derive(
             input.id().clone(),
@@ -1545,7 +1577,7 @@ mod tests {
             Box::new(|value: &mut serde_json::Value| value["version"] = 2.into())
                 as Box<dyn Fn(&mut serde_json::Value)>,
             Box::new(|value| value["complete"] = false.into()),
-            Box::new(|value| value["source_id"] = "other".into()),
+            Box::new(|value| value["source_id"] = OTHER_SOURCE_ID.into()),
             Box::new(|value| value["transaction_id"] = "".into()),
             Box::new(|value| value["position"] = "zz".into()),
             Box::new(|value| value["operations"] = 3.into()),
@@ -1610,7 +1642,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_sources_controls_and_positions_are_rejected_explicitly() {
         // A well-formed marker over another source's records.
-        let mixed = forged(&[change("another", "1")], "source");
+        let mixed = forged(&[change(OTHER_SOURCE_ID, "1")], SOURCE_ID);
         assert!(matches!(
             SourceTransactionCodec::decode(&mixed, limits(8, 4096)),
             Err(SourceTransactionError::MixedSources)
@@ -1631,7 +1663,7 @@ mod tests {
             Err(SourceTransactionError::Envelope)
         ));
         let due = GraphChangeCodec::encode_futures_due(stream(), 7, timestamp()).unwrap();
-        let due = envelope_with_marker(&due, "source");
+        let due = envelope_with_marker(&due, SOURCE_ID);
         assert!(SourceTransactionCodec::decode(&due, limits(8, 4096)).is_err());
 
         // The commit position cannot be rebound or removed, and a marker cannot repeat.

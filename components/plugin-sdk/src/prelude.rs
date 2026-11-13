@@ -57,5 +57,7 @@ pub use crate::descriptor::{
 pub use crate::registration::PluginRegistration;
 
 // Common re-exports that plugin authors need
+pub use crate::{ComponentId, ComponentName};
 pub use async_trait::async_trait;
+pub use drasi_lib::config::ComponentReference;
 pub use serde::{Deserialize, Serialize};

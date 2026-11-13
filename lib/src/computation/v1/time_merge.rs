@@ -118,7 +118,7 @@ struct Buffered {
 struct SourceState {
     sequence: u64,
     digest: [u8; 32],
-    progress_key: Option<String>,
+    progress_key: Option<drasi_core::interface::CheckpointKey>,
     producer: Option<GraphProducerIdentity>,
     max_time: Option<DateTime<Utc>>,
 }
@@ -218,7 +218,7 @@ impl SourceTimeMergeTransformer {
         );
         let mut result = Self::construct(definition, schema, true)?;
         let indexes = provider
-            .create_indexes(&result.definition.graph_id, result.definition.id.as_str())
+            .create_indexes(&result.definition.graph_id, &result.definition.id)
             .await?;
         anyhow::ensure!(
             indexes.cleanup().is_some()
@@ -840,10 +840,10 @@ impl Transformer for SourceTimeMergeTransformer {
         progress.validate_durability(self.transaction.is_some())?;
         let producer = GraphProducerProgress::from_envelope(&envelope)?
             .map(|progress| progress.identity().clone());
-        anyhow::ensure!(
-            progress.key.len() + serde_json::to_vec(&producer)?.len() <= MAX_SOURCE_IDENTITY_BYTES,
-            "merge source progress identity exceeds 4096 bytes"
-        );
+        drasi_computation_contracts::encode_bounded_messagepack(
+            &(&progress.key, &producer),
+            MAX_SOURCE_IDENTITY_BYTES,
+        )?;
         let digest: [u8; 32] = Sha256::digest(self.codec.encode(&envelope.reemit(1)?)?).into();
         let source = &self.state.sources[rank];
         if source.sequence > 0

@@ -15,13 +15,14 @@
 //! RocksDB implementation of [`OutboxWriter`].
 //!
 //! Uses a dedicated `outbox` column family with keys formatted as:
-//! `{query_id}:{sequence_u64_be}` (8-byte big-endian suffix for ordered iteration).
+//! `{storage_key}:{sequence_u64_be}` (8-byte big-endian suffix for ordered iteration).
 //!
 //! When a session is active, `append` stages into that transaction so outbox
 //! entries commit atomically with index writes, source checkpoints, live
 //! results, and the result sequence. Outside a session (tests, wipe/trim)
 //! writes go directly to the DB.
 
+use drasi_core_types::OutputPartition;
 use std::sync::Arc;
 
 use crate::{IndexDb, RocksDbSessionState};
@@ -40,12 +41,12 @@ pub(crate) fn outbox_cf_descriptor(options: &crate::RocksIndexOptions) -> Column
     crate::sizing::descriptor(OUTBOX_CF, opts, options)
 }
 
-/// Build the outbox key: `{query_id}\x00{sequence_be_bytes}`.
+/// Build the outbox key: `{storage_key}\x00{sequence_be_bytes}`.
 ///
 /// The null separator ensures correct prefix scanning even with variable-length query IDs.
-fn make_key(query_id: &str, sequence: u64) -> Vec<u8> {
-    let mut key = Vec::with_capacity(query_id.len() + 1 + 8);
-    key.extend_from_slice(query_id.as_bytes());
+fn make_key(storage_key: &str, sequence: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(storage_key.len() + 1 + 8);
+    key.extend_from_slice(storage_key.as_bytes());
     key.push(0x00);
     key.extend_from_slice(&sequence.to_be_bytes());
     key
@@ -60,37 +61,37 @@ fn sequence_from_key(key: &[u8], prefix_len: usize) -> Option<u64> {
     Some(u64::from_be_bytes(seq_bytes))
 }
 
-/// Build the prefix for scanning all entries of a query: `{query_id}\x00`.
-fn make_prefix(query_id: &str) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(query_id.len() + 1);
-    prefix.extend_from_slice(query_id.as_bytes());
+/// Build the prefix for scanning all entries of a query: `{storage_key}\x00`.
+fn make_prefix(storage_key: &str) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(storage_key.len() + 1);
+    prefix.extend_from_slice(storage_key.as_bytes());
     prefix.push(0x00);
     prefix
 }
 
 pub(crate) fn read_page(
     db: &IndexDb,
-    query_id: &str,
+    storage_key: &str,
     after: u64,
     limits: OutboxPageLimits,
 ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-    read_keyed_page(db, OUTBOX_CF, query_id, Some(after), limits)
+    read_keyed_page(db, OUTBOX_CF, storage_key, Some(after), limits)
 }
 
 pub(crate) fn read_keyed_page(
     db: &IndexDb,
     family: &str,
-    query_id: &str,
+    storage_key: &str,
     after: Option<u64>,
     limits: OutboxPageLimits,
 ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
     let cf = db.cf_handle(family).ok_or(IndexError::CorruptedData)?;
-    let prefix = make_prefix(query_id);
+    let prefix = make_prefix(storage_key);
     let mut iterator = db.raw_iterator_cf(&cf);
     // Seek to the last exact key, not the next integer: malformed suffixes
     // between consecutive sequence keys must not disappear at a page boundary.
     match after {
-        Some(after) => iterator.seek(make_key(query_id, after)),
+        Some(after) => iterator.seek(make_key(storage_key, after)),
         None => iterator.seek(&prefix),
     }
     let mut entries = Vec::new();
@@ -215,21 +216,28 @@ fn collect_keys_for_trim(
 impl OutboxWriter for RocksDbOutboxWriter {
     async fn read_page(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         after_sequence: u64,
         limits: OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
-        let query = query_id.to_owned();
+        let query = query_id.storage_key();
         task::spawn_blocking(move || read_page(&db, &query, after_sequence, limits))
             .await
             .map_err(IndexError::other)?
     }
 
-    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
         let session_state = self.session_state.clone();
-        let key = make_key(query_id, sequence);
+        let key = make_key(&query_id.storage_key(), sequence);
         let data = data.to_vec();
         // Capture intent before spawn_blocking: if this append was scheduled
         // inside a session, cancellation/rollback must not fall back to a
@@ -251,15 +259,16 @@ impl OutboxWriter for RocksDbOutboxWriter {
 
     async fn read_from(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        query_id.validate()?;
         let Some(first_sequence) = after_sequence.checked_add(1) else {
             return Ok(Vec::new());
         };
         let db = self.db.clone();
-        let prefix = make_prefix(query_id);
-        let start_key = make_key(query_id, first_sequence);
+        let prefix = make_prefix(&query_id.storage_key());
+        let start_key = make_key(&query_id.storage_key(), first_sequence);
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
@@ -288,9 +297,13 @@ impl OutboxWriter for RocksDbOutboxWriter {
         .map_err(IndexError::other)?
     }
 
-    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
-        let prefix = make_prefix(query_id);
+        let prefix = make_prefix(&query_id.storage_key());
         // Seek to the end of this prefix range by appending the maximum possible
         // sequence suffix (8 bytes of 0xFF). This ensures we land within the
         // exact prefix even when other query IDs share the same prefix string
@@ -323,15 +336,21 @@ impl OutboxWriter for RocksDbOutboxWriter {
         .map_err(IndexError::other)?
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &OutputPartition) -> Result<(), IndexError> {
+        query_id.validate()?;
         self.trim_to_capacity(query_id, 0).await?;
         Ok(())
     }
 
-    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        query_id: &OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
         let session_state = self.session_state.clone();
-        let prefix = make_prefix(query_id);
+        let prefix = make_prefix(&query_id.storage_key());
         let require_session = session_state.has_active_session()?;
 
         task::spawn_blocking(move || {
@@ -352,10 +371,15 @@ impl OutboxWriter for RocksDbOutboxWriter {
         .map_err(IndexError::other)?
     }
 
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        query_id: &OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
+        query_id.validate()?;
         let db = self.db.clone();
         let session_state = self.session_state.clone();
-        let prefix = make_prefix(query_id);
+        let prefix = make_prefix(&query_id.storage_key());
         let require_session = session_state.has_active_session()?;
 
         task::spawn_blocking(move || {

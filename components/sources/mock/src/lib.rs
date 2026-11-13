@@ -120,7 +120,7 @@
 //! let source = MockSource::new("my-mock", config)?;
 //!
 //! // Add to DrasiLib (ownership is transferred)
-//! drasi.add_source(source).await?;
+//! drasi.add_source(drasi_lib::Source::id(&source).to_owned(), source).await?;
 //! ```
 //!
 //! # Testing

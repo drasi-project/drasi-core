@@ -26,7 +26,7 @@ fn query(
     recovery: &str,
 ) -> Result<NativeComponentProxy> {
     let mut query = factory()?.create_component_with_processing_publication(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({
             "query": super::bootstrap::TEXT, "bootstrap": true, "outbox_capacity": 4,
             "recovery": recovery, "publication": if non_atomic { "non_atomic" } else { "atomic" },
@@ -96,6 +96,7 @@ async fn corrupted_state_recovery() -> Result<()> {
                     (provider.clone(), provider.clone(), provider)
                 };
             let mut original = query(&database, provider.clone(), 1, non_atomic, "strict")?;
+            original.initialize().await?;
             original.start().await?;
             let mut output = Vec::new();
             for sequence in 1..=3 {
@@ -128,8 +129,9 @@ async fn corrupted_state_recovery() -> Result<()> {
             original.stop().await?;
             drop(original);
 
-            let owner =
-                ComputationTransaction::try_new(primary.create_indexes(GRAPH, COMPONENT).await?)?;
+            let owner = ComputationTransaction::try_new(
+                primary.create_indexes(GRAPH, &component_id()?).await?,
+            )?;
             let codec = drasi_computation_plugin_sdk::wire::codec(&[GraphChangeCodec::schema()])?;
             let mut foreign = output
                 .last()
@@ -140,12 +142,13 @@ async fn corrupted_state_recovery() -> Result<()> {
                 .identity
                 .clone()
                 .with_construction_scope("foreign-instance")?;
-            foreign_identity.annotate(&mut foreign, &ComponentId::try_new(COMPONENT)?)?;
+            foreign_identity.annotate(&mut foreign, &component_id()?)?;
             assert_eq!(
                 QueryRecoveryIdentity::from_envelope(&foreign)?,
                 foreign_identity
             );
             let foreign = codec.encode(&foreign)?;
+            let query_id = component_id()?;
             owner
                 .run(async {
                     match damage {
@@ -157,7 +160,7 @@ async fn corrupted_state_recovery() -> Result<()> {
                                 .live_results_writer()
                                 .expect("stored rows")
                                 .apply_mutations(
-                                    COMPONENT,
+                                    &query_id,
                                     &[RowMutation {
                                         row_signature: signature,
                                         data: if matches!(damage, Damage::MissingRow) {
@@ -176,8 +179,10 @@ async fn corrupted_state_recovery() -> Result<()> {
                 .await?;
             owner.shutdown().await?;
             drop(owner);
-            let owner =
-                ComputationTransaction::try_new(outbox.create_indexes(GRAPH, COMPONENT).await?)?;
+            let owner = ComputationTransaction::try_new(
+                outbox.create_indexes(GRAPH, &component_id()?).await?,
+            )?;
+            let damaged_partition = output_partition()?;
             owner
                 .run(async {
                     match damage {
@@ -186,7 +191,7 @@ async fn corrupted_state_recovery() -> Result<()> {
                                 .resources()
                                 .outbox_writer()
                                 .expect("outbox")
-                                .append(COMPONENT, initial.sequence, b"invalid output")
+                                .append(&damaged_partition, initial.sequence, b"invalid output")
                                 .await?
                         }
                         Damage::MissingOutbox => {
@@ -194,7 +199,7 @@ async fn corrupted_state_recovery() -> Result<()> {
                                 .resources()
                                 .outbox_writer()
                                 .expect("outbox")
-                                .clear(COMPONENT)
+                                .clear(&damaged_partition)
                                 .await?
                         }
                         Damage::ForeignOutputAndInvalidRow => {
@@ -202,7 +207,7 @@ async fn corrupted_state_recovery() -> Result<()> {
                                 .resources()
                                 .outbox_writer()
                                 .expect("outbox")
-                                .append(COMPONENT, initial.sequence, &foreign)
+                                .append(&damaged_partition, initial.sequence, &foreign)
                                 .await?
                         }
                         _ => {}
@@ -214,11 +219,13 @@ async fn corrupted_state_recovery() -> Result<()> {
             drop(owner);
 
             let mut strict = query(&database, provider.clone(), 2, non_atomic, "strict")?;
+            strict.initialize().await?;
             assert!(strict.start().await.is_err(), "Strict adopted {damage:?}");
             assert!(snapshot_reader(&strict)?.snapshot().await.is_err());
             strict.stop().await?;
             drop(strict);
             let mut repaired = query(&database, provider.clone(), 3, non_atomic, "auto_reset")?;
+            repaired.initialize().await?;
             if matches!(damage, Damage::ForeignOutputAndInvalidRow) {
                 let error = repaired
                     .start()
@@ -228,27 +235,27 @@ async fn corrupted_state_recovery() -> Result<()> {
                 repaired.stop().await?;
                 drop(repaired);
                 let owner = ComputationTransaction::try_new(
-                    primary.create_indexes(GRAPH, COMPONENT).await?,
+                    primary.create_indexes(GRAPH, &component_id()?).await?,
                 )?;
                 assert_eq!(
                     owner
                         .resources()
                         .checkpoint_store()
                         .context("checkpoints")?
-                        .read_result_sequence(COMPONENT)
+                        .read_result_sequence(&output_partition()?)
                         .await?,
                     Some(initial.sequence)
                 );
                 owner.shutdown().await?;
                 drop(owner);
                 let owner = ComputationTransaction::try_new(
-                    outbox.create_indexes(GRAPH, COMPONENT).await?,
+                    outbox.create_indexes(GRAPH, &component_id()?).await?,
                 )?;
                 let retained = owner
                     .resources()
                     .outbox_writer()
                     .context("outbox")?
-                    .read_from(COMPONENT, 0)
+                    .read_from(&output_partition()?, 0)
                     .await?;
                 assert_eq!(retained.len(), 3);
                 assert_eq!(retained.last(), Some(&(initial.sequence, foreign)));
@@ -280,7 +287,7 @@ async fn corrupted_state_recovery() -> Result<()> {
             deliver(&mut destination, reset_output).await?;
             assert_eq!(
                 progress
-                    .load(COMPONENT)
+                    .load(&component_id()?)
                     .await?
                     .context("handled reset")?
                     .generation,
@@ -290,6 +297,7 @@ async fn corrupted_state_recovery() -> Result<()> {
             drop(repaired);
 
             let mut reopened = query(&database, provider.clone(), 4, non_atomic, "strict")?;
+            reopened.initialize().await?;
             reopened.start().await?;
             assert_eq!(
                 snapshot_reader(&reopened)?

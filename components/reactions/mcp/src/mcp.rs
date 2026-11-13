@@ -20,6 +20,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::{routing::post, Json, Router};
+use drasi_lib::ComponentId;
 use handlebars::Handlebars;
 use log::{debug, error, info, warn};
 use mcp_core::types::{
@@ -71,13 +72,14 @@ struct SessionState {
 
 #[derive(Debug)]
 struct McpState {
-    reaction_id: String,
+    reaction_id: ComponentId,
     config: McpReactionConfig,
-    query_ids: Vec<String>,
+    query_ids: Vec<ComponentId>,
+    query_aliases: HashMap<ComponentId, String>,
     sessions: Arc<RwLock<HashMap<String, SessionState>>>,
     subscriptions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     subscribers_by_uri: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    current_results: Arc<RwLock<HashMap<String, Vec<Value>>>>,
+    current_results: Arc<RwLock<HashMap<ComponentId, Vec<Value>>>>,
     session_cleanup: Arc<Notify>,
 }
 
@@ -260,7 +262,7 @@ pub struct McpReaction {
     sessions: Arc<RwLock<HashMap<String, SessionState>>>,
     subscriptions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     subscribers_by_uri: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    current_results: Arc<RwLock<HashMap<String, Vec<Value>>>>,
+    current_results: Arc<RwLock<HashMap<ComponentId, Vec<Value>>>>,
     cleanup_required: Mutex<bool>,
     server_task: RwLock<Option<JoinHandle<std::io::Result<()>>>>,
     shutdown_tx: watch::Sender<bool>,
@@ -280,35 +282,33 @@ impl std::fmt::Debug for McpReaction {
 
 impl McpReaction {
     /// Create a builder for McpReaction.
-    pub fn builder(id: impl Into<String>) -> McpReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> McpReactionBuilder {
         McpReactionBuilder::new(id)
     }
 
     /// Create a new MCP reaction.
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: McpReactionConfig) -> Self {
-        Self::create_internal(id.into(), queries, config, None, true)
+    pub fn new(
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
+        config: McpReactionConfig,
+    ) -> Self {
+        Self::create_internal(id.clone(), queries, config, None, true)
     }
 
     /// Create a new MCP reaction with custom priority queue capacity.
     pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: McpReactionConfig,
         priority_queue_capacity: usize,
     ) -> Self {
-        Self::create_internal(
-            id.into(),
-            queries,
-            config,
-            Some(priority_queue_capacity),
-            true,
-        )
+        Self::create_internal(id, queries, config, Some(priority_queue_capacity), true)
     }
 
     /// Create from builder (internal method).
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: McpReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -317,8 +317,8 @@ impl McpReaction {
     }
 
     fn create_internal(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: McpReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -365,7 +365,7 @@ impl McpReaction {
 
 #[async_trait]
 impl Reaction for McpReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -380,7 +380,7 @@ impl Reaction for McpReaction {
             .properties_or_serialize(&McpReactionConfigDto::from(&self.config))
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -388,8 +388,8 @@ impl Reaction for McpReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -401,6 +401,13 @@ impl Reaction for McpReaction {
         {
             return Err(WorkerAlreadyOwned.into());
         }
+        let query_ids = self.base.query_ids().await?;
+        let aliases = drasi_lib::reactions::common::input_aliases(self.base.query_inputs());
+        anyhow::ensure!(
+            query_ids.len() == aliases.len(),
+            "MCP query bindings do not match their declarations"
+        );
+        let query_aliases = query_ids.iter().cloned().zip(aliases).collect();
         log_component_start("MCP Reaction", &self.base.id);
 
         info!(
@@ -455,7 +462,8 @@ impl Reaction for McpReaction {
         let state = Arc::new(McpState {
             reaction_id: self.base.id.clone(),
             config: self.config.clone(),
-            query_ids: self.base.queries.clone(),
+            query_ids,
+            query_aliases,
             sessions: self.sessions.clone(),
             subscriptions: self.subscriptions.clone(),
             subscribers_by_uri: self.subscribers_by_uri.clone(),
@@ -516,7 +524,8 @@ impl Reaction for McpReaction {
                 }
 
                 let query_id = query_result.query_id.clone();
-                let query_config = get_query_config(&query_id, &query_configs);
+                let query_config = drasi_lib::reactions::common::input_alias(query_result.input_alias.as_deref(), query_result.query_name.as_ref())
+                    .and_then(|alias| get_query_config(alias, &query_configs));
                 let uri = format!("drasi://query/{query_id}");
 
                 debug!(
@@ -549,7 +558,9 @@ impl Reaction for McpReaction {
                     };
 
                     let mut context = Map::new();
-                    context.insert("queryId".to_string(), Value::String(query_id.clone()));
+                    context.insert("queryId".to_string(), json!(query_id));
+                    context.insert("queryName".to_string(), json!(query_result.query_name));
+                    context.insert("inputAlias".to_string(), json!(query_result.input_alias));
 
                     match diff {
                         ResultDiff::Add { data, .. } => {
@@ -758,12 +769,12 @@ fn get_query_config<'a>(
 }
 
 async fn apply_diff(
-    query_id: &str,
+    query_id: &ComponentId,
     diff: &ResultDiff,
-    current: &Arc<RwLock<HashMap<String, Vec<Value>>>>,
+    current: &Arc<RwLock<HashMap<ComponentId, Vec<Value>>>>,
 ) {
     let mut results = current.write().await;
-    let entry = results.entry(query_id.to_string()).or_default();
+    let entry = results.entry(query_id.clone()).or_default();
     match diff {
         ResultDiff::Add { data, .. } => entry.push(data.clone()),
         ResultDiff::Delete { data, .. } => remove_first(entry, data),
@@ -794,19 +805,12 @@ const QUERY_URI_PREFIX: &str = "drasi://query/";
 
 /// Validate a subscription URI and extract the query ID.
 /// Returns `Some(query_id)` if the URI is well-formed and matches a known query.
-fn validate_subscription_uri<'a>(uri: &'a str, query_ids: &[String]) -> Option<&'a str> {
-    let query_id = uri.strip_prefix(QUERY_URI_PREFIX)?;
-    if query_id.is_empty() {
-        return None;
-    }
-    if query_ids.iter().any(|id| id == query_id) {
-        Some(query_id)
-    } else {
-        None
-    }
+fn validate_subscription_uri(uri: &str, query_ids: &[ComponentId]) -> Option<ComponentId> {
+    let query_id = ComponentId::try_new(uri.strip_prefix(QUERY_URI_PREFIX)?).ok()?;
+    query_ids.contains(&query_id).then_some(query_id)
 }
 
-fn resource_uri(query_id: &str) -> Option<Url> {
+fn resource_uri(query_id: &ComponentId) -> Option<Url> {
     Url::parse(&format!("drasi://query/{query_id}")).ok()
 }
 
@@ -1321,13 +1325,16 @@ async fn handle_single_request(
                             Some(uri) => uri,
                             None => continue,
                         };
-                        let query_config = get_query_config(query_id, &state.config.routes);
+                        let query_config = state
+                            .query_aliases
+                            .get(query_id)
+                            .and_then(|alias| get_query_config(alias, &state.config.routes));
                         let (name, description) = match query_config {
                             Some(config) => (
-                                config.title.clone().unwrap_or_else(|| query_id.clone()),
+                                config.title.clone().unwrap_or_else(|| query_id.to_string()),
                                 config.description.clone(),
                             ),
-                            None => (query_id.clone(), None),
+                            None => (query_id.to_string(), None),
                         };
                         resources.push(Resource {
                             uri,
@@ -1379,31 +1386,26 @@ async fn handle_single_request(
                         }
                     };
 
-                    let query_id = match read_request.uri.host_str() {
-                        Some("query") => {
-                            read_request.uri.path().trim_start_matches('/').to_string()
-                        }
-                        _ => String::new(),
-                    };
-
-                    if query_id.is_empty() || !state.query_ids.contains(&query_id) {
+                    let Some(query_id) =
+                        validate_subscription_uri(read_request.uri.as_str(), &state.query_ids)
+                    else {
                         warn!(
-                            "[{}] resources/read: unknown query '{query_id}' (known: {:?})",
-                            state.reaction_id, state.query_ids
+                            "[{}] resources/read: invalid or unknown query URI '{}'",
+                            state.reaction_id, read_request.uri
                         );
                         return SingleRequestResult {
                             body: Some(
                                 serde_json::to_value(make_error(
                                     request_id,
                                     -32602,
-                                    "Invalid URI format (expected drasi://query/{id})",
+                                    "Invalid URI format or unknown query (expected drasi://query/{uuid})",
                                 ))
                                 .unwrap_or(Value::Null),
                             ),
                             session_id: None,
                             status: StatusCode::BAD_REQUEST,
                         };
-                    }
+                    };
 
                     let current = state.current_results.read().await;
                     let results = current.get(&query_id).cloned().unwrap_or_default();
@@ -1580,10 +1582,14 @@ mod tests {
 
     #[test]
     fn test_resource_uri_format() {
-        let uri = resource_uri("test-query").expect("should build resource uri");
+        let uri = resource_uri(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
+        )
+        .expect("should build resource uri");
         assert_eq!(uri.scheme(), "drasi");
         assert_eq!(uri.host_str(), Some("query"));
-        assert_eq!(uri.path(), "/test-query");
+        assert_eq!(uri.path(), "/00000000-0000-0000-0000-000000000050");
     }
 
     #[test]
@@ -1636,10 +1642,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_tracking() {
+        let query = ComponentId::try_new("00000000-0000-0000-0000-000000000052").unwrap();
         let state = McpState {
-            reaction_id: "test".to_string(),
+            reaction_id: drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
             config: McpReactionConfig::default(),
-            query_ids: vec!["query1".to_string()],
+            query_ids: vec![query.clone()],
+            query_aliases: HashMap::from([(query, "query1".into())]),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
@@ -1655,7 +1664,7 @@ mod tests {
             },
         );
 
-        let uri = "drasi://query/query1";
+        let uri = "drasi://query/00000000-0000-0000-0000-000000000052";
 
         // Add subscription
         assert!(state.add_subscription("session1", uri).await);
@@ -1699,10 +1708,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_session() {
+        let first = ComponentId::try_new("00000000-0000-0000-0000-000000000052").unwrap();
+        let second = ComponentId::try_new("00000000-0000-0000-0000-0000000000e5").unwrap();
         let state = McpState {
-            reaction_id: "test".to_string(),
+            reaction_id: drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
             config: McpReactionConfig::default(),
-            query_ids: vec!["query1".to_string(), "query2".to_string()],
+            query_ids: vec![first.clone(), second.clone()],
+            query_aliases: HashMap::from([(first, "query1".into()), (second, "query2".into())]),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
@@ -1722,10 +1735,16 @@ mod tests {
 
         // Add subscriptions
         state
-            .add_subscription("session1", "drasi://query/query1")
+            .add_subscription(
+                "session1",
+                "drasi://query/00000000-0000-0000-0000-000000000052",
+            )
             .await;
         state
-            .add_subscription("session1", "drasi://query/query2")
+            .add_subscription(
+                "session1",
+                "drasi://query/00000000-0000-0000-0000-0000000000e5",
+            )
             .await;
 
         // Cleanup session
@@ -1739,21 +1758,30 @@ mod tests {
 
     #[test]
     fn test_validate_subscription_uri() {
-        let query_ids = vec!["query1".to_string(), "query2".to_string()];
+        let first = ComponentId::try_new("00000000-0000-0000-0000-000000000052").unwrap();
+        let second = ComponentId::try_new("00000000-0000-0000-0000-0000000000e5").unwrap();
+        let query_ids = vec![first.clone(), second.clone()];
 
         // Valid URIs
         assert_eq!(
-            validate_subscription_uri("drasi://query/query1", &query_ids),
-            Some("query1")
+            validate_subscription_uri(&format!("drasi://query/{first}"), &query_ids),
+            Some(first)
         );
         assert_eq!(
-            validate_subscription_uri("drasi://query/query2", &query_ids),
-            Some("query2")
+            validate_subscription_uri(&format!("drasi://query/{second}"), &query_ids),
+            Some(second)
         );
 
-        // Invalid: unknown query
+        // A valid but unbound UUID is not a subscription.
         assert_eq!(
-            validate_subscription_uri("drasi://query/unknown", &query_ids),
+            validate_subscription_uri(
+                "drasi://query/00000000-0000-0000-0000-000000000099",
+                &query_ids
+            ),
+            None
+        );
+        assert_eq!(
+            validate_subscription_uri("drasi://query/query1", &query_ids),
             None
         );
 
@@ -1774,6 +1802,7 @@ mod tests {
     }
 
     fn test_state_with_session() -> (Arc<McpState>, String) {
+        let query = ComponentId::try_new("00000000-0000-0000-0000-000000000052").unwrap();
         let session_id = "test-session-id".to_string();
         let (tx, rx) = mpsc::channel(16);
         let mut sessions = HashMap::new();
@@ -1785,9 +1814,11 @@ mod tests {
             },
         );
         let state = Arc::new(McpState {
-            reaction_id: "test".to_string(),
+            reaction_id: drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
             config: McpReactionConfig::default(),
-            query_ids: vec!["query1".to_string()],
+            query_ids: vec![query.clone()],
+            query_aliases: HashMap::from([(query, "query1".into())]),
             sessions: Arc::new(RwLock::new(sessions)),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
@@ -1824,11 +1855,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_ends_buffered_streams_and_rejects_closed_session_subscriptions() {
         let (state, session_id) = test_state_with_session();
-        assert!(
-            state
-                .add_subscription(&session_id, "drasi://query/query1")
-                .await
-        );
+        let uri = resource_uri(&state.query_ids[0]).expect("fixture query URI");
+        assert!(state.add_subscription(&session_id, uri.as_str()).await);
         let session = state
             .sessions
             .read()
@@ -1856,7 +1884,7 @@ mod tests {
                 jsonrpc: "2.0".into(),
                 id: Some(json!(1)),
                 method: "resources/subscribe".into(),
-                params: Some(json!({"uri": "drasi://query/query1"})),
+                params: Some(json!({"uri": uri.as_str()})),
             },
         )
         .await;
@@ -1866,20 +1894,38 @@ mod tests {
         assert!(state.sessions.read().await.is_empty());
         assert!(state.subscriptions.read().await.is_empty());
         assert!(state.subscribers_by_uri.read().await.is_empty());
-        assert!(
-            !state
-                .add_subscription(&session_id, "drasi://query/query1")
-                .await
-        );
+        assert!(!state.add_subscription(&session_id, uri.as_str()).await);
+    }
+
+    async fn initialize_reaction(
+        reaction: &McpReaction,
+        query_ids: Vec<ComponentId>,
+    ) -> Result<()> {
+        let (update_tx, _updates) = mpsc::channel(32);
+        reaction
+            .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+                "mcp-lifecycle-test",
+                reaction.id().clone(),
+                query_ids,
+                None,
+                update_tx,
+                None,
+            ))
+            .await;
+        reaction.initialize().await
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn bind_failure_is_typed_and_running_means_the_listener_is_bound() -> Result<()> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let reaction = McpReaction::builder("occupied")
-            .with_host("127.0.0.1")
-            .with_port(listener.local_addr()?.port())
-            .build()?;
+        let reaction = McpReaction::builder(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000053")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(listener.local_addr()?.port())
+        .build()?;
+        initialize_reaction(&reaction, vec![]).await?;
         let error = reaction.start().await.unwrap_err();
         assert_eq!(
             error
@@ -1903,7 +1949,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_cleanup_retains_worker_connection_and_registry_ownership() -> Result<()> {
         for boundary in ["worker", "connection", "registry"] {
-            let reaction = McpReaction::builder("cancelled").with_port(0).build()?;
+            let reaction = McpReaction::builder(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000054")
+                    .expect("fixture UUID"),
+            )
+            .with_port(0)
+            .build()?;
+            initialize_reaction(&reaction, vec![]).await?;
             *reaction.cleanup_required.lock().await = true;
             let release = Arc::new(Notify::new());
             let connection = if boundary == "connection" {
@@ -1955,7 +2007,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn server_failures_preserve_typed_causes_and_require_remaining_cleanup() -> Result<()> {
         for panic in [false, true] {
-            let reaction = McpReaction::builder("failed").with_port(0).build()?;
+            let reaction = McpReaction::builder(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                    .expect("fixture UUID"),
+            )
+            .with_port(0)
+            .build()?;
+            initialize_reaction(&reaction, vec![]).await?;
             *reaction.cleanup_required.lock().await = true;
             spawn_owned_worker(&reaction.server_task, async move {
                 assert!(!panic, "injected MCP server panic");
@@ -2022,12 +2080,21 @@ mod tests {
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = reservation.local_addr()?.port();
         drop(reservation);
-        let reaction = McpReaction::builder("restart")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_query("query1")
-            .with_max_sessions(2)
-            .build()?;
+        let query_id =
+            ComponentId::try_new("00000000-0000-0000-0000-000000000052").expect("fixture UUID");
+        let uri = resource_uri(&query_id).expect("fixture query URI");
+        let reaction = McpReaction::builder(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000055")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_query_by_name(
+            drasi_lib::ComponentName::try_new("query1").expect("fixture component name"),
+        )
+        .with_max_sessions(2)
+        .build()?;
+        initialize_reaction(&reaction, vec![query_id]).await?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(2))
@@ -2050,7 +2117,7 @@ mod tests {
                 .header(MCP_SESSION_HEADER, &session_id)
                 .json(&json!({
                     "jsonrpc": "2.0", "id": 2, "method": "resources/subscribe",
-                    "params": {"uri": "drasi://query/query1"}
+                    "params": {"uri": uri.as_str()}
                 }))
                 .send()
                 .await?
@@ -2123,10 +2190,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn incomplete_http_requests_retain_the_server_until_a_later_stop() -> Result<()> {
         use tokio::io::AsyncWriteExt;
-        let reaction = McpReaction::builder("partial-http")
-            .with_host("127.0.0.1")
-            .with_port(0)
-            .build()?;
+        let reaction = McpReaction::builder(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000056")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(0)
+        .build()?;
+        initialize_reaction(&reaction, vec![]).await?;
         reaction.start().await?;
         let port = reaction.bound_port();
         let owners = reaction.shutdown_tx.receiver_count();

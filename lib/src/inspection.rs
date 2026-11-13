@@ -19,8 +19,9 @@ use futures::stream::{self, Stream};
 use crate::channels::ComponentEvent;
 use crate::computation::runtime::Runtime;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
-use crate::error::DrasiError;
+use crate::error::{DrasiError, OperationSubject};
 use crate::state_guard::StateGuard;
+use crate::{ComponentId, ComponentName};
 
 /// Classify an `anyhow::Error` from a manager call: if it wraps a
 /// `ComponentNotFoundError`, return `ComponentNotFound`; otherwise preserve
@@ -28,14 +29,19 @@ use crate::state_guard::StateGuard;
 fn classify_component_error(
     e: anyhow::Error,
     component_type: &str,
-    component_id: &str,
+    component_id: &ComponentId,
     operation: &str,
 ) -> DrasiError {
     if let Some(not_found) = e.downcast_ref::<crate::error::ComponentNotFoundError>() {
-        DrasiError::component_not_found(not_found.component_type, &not_found.component_id)
+        DrasiError::component_not_found_by_id(not_found.component_type, &not_found.component_id)
     } else {
-        DrasiError::operation_failed(component_type, component_id, operation, e.to_string())
-            .with_cause(e)
+        DrasiError::operation_failed(
+            component_type,
+            OperationSubject::Id(component_id.clone()),
+            operation,
+            e.to_string(),
+        )
+        .with_cause(e)
     }
 }
 
@@ -74,15 +80,15 @@ impl InspectionAPI {
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let sources = core.list_sources().await?;
-    /// for (id, status) in sources {
-    ///     println!("Source {}: {:?}", id, status);
+    /// for component in sources {
+    ///     println!("Source {}: {:?}", component.id, component.status);
     /// }
     /// # Ok(())
     /// # }
     /// ```
     pub async fn list_sources(
         &self,
-    ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
+    ) -> crate::error::Result<Vec<crate::config::ComponentListEntry>> {
         self.state_guard.require_initialized()?;
         Ok(self.computation.list_components("source").await?)
     }
@@ -93,15 +99,15 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let source_info = core.get_source_info("my-source").await?;
+    /// let source_info = core.get_source_info_by_name(&drasi_lib::ComponentName::try_new("my-source")?).await?;
     /// println!("Source type: {}", source_info.source_type);
     /// println!("Status: {:?}", source_info.status);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_source_info(
+    pub async fn get_source_info_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<crate::config::SourceRuntime> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -116,14 +122,14 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let status = core.get_source_status("my-source").await?;
+    /// let status = core.get_source_status_by_name(&drasi_lib::ComponentName::try_new("my-source")?).await?;
     /// println!("Source status: {:?}", status);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_source_status(
+    pub async fn get_source_status_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -133,9 +139,9 @@ impl InspectionAPI {
     }
 
     /// Get best-effort schema information for a specific source.
-    pub async fn get_source_schema(
+    pub async fn get_source_schema_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<Option<crate::schema::SourceSchema>> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -161,15 +167,15 @@ impl InspectionAPI {
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let queries = core.list_queries().await?;
-    /// for (id, status) in queries {
-    ///     println!("Query {}: {:?}", id, status);
+    /// for component in queries {
+    ///     println!("Query {}: {:?}", component.id, component.status);
     /// }
     /// # Ok(())
     /// # }
     /// ```
     pub async fn list_queries(
         &self,
-    ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
+    ) -> crate::error::Result<Vec<crate::config::ComponentListEntry>> {
         self.state_guard.require_initialized()?;
         Ok(self.computation.list_components("query").await?)
     }
@@ -180,16 +186,16 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let query_info = core.get_query_info("my-query").await?;
+    /// let query_info = core.get_query_info_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// println!("Query: {}", query_info.query);
     /// println!("Status: {:?}", query_info.status);
     /// println!("Inputs: {:?}", query_info.inputs);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_info(
+    pub async fn get_query_info_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<crate::config::QueryRuntime> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -204,14 +210,14 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let status = core.get_query_status("my-query").await?;
+    /// let status = core.get_query_status_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// println!("Query status: {:?}", status);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_status(
+    pub async fn get_query_status_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -226,20 +232,20 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let results = core.get_query_results("my-query").await?;
+    /// let results = core.get_query_results_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// println!("Current results: {} items", results.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_results(
+    pub async fn get_query_results_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<Vec<serde_json::Value>> {
         self.state_guard.require_initialized()?;
 
         // Check preconditions explicitly instead of parsing error strings.
         // First verify the query exists via its status.
-        let status = self.get_query_status(id).await?;
+        let status = self.get_query_status_by_id(id).await?;
 
         if status != crate::channels::ComponentStatus::Running {
             return Err(DrasiError::invalid_state(format!(
@@ -256,29 +262,34 @@ impl InspectionAPI {
             .await
             .map(|snapshot| snapshot.to_vec())
             .map_err(|e| {
-                DrasiError::operation_failed("query", id, "get_results", e.to_string())
-                    .with_cause(e)
+                DrasiError::operation_failed(
+                    "query",
+                    OperationSubject::Id(id.clone()),
+                    "get_results",
+                    e.to_string(),
+                )
+                .with_cause(e)
             })
     }
 
     /// Get the full configuration for a specific query
     ///
     /// This returns the complete query configuration including all fields like auto_start and joins,
-    /// unlike `get_query_info()` which only returns runtime information.
+    /// unlike `get_query_info_by_id()` which only returns runtime information.
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = core.get_query_config("my-query").await?;
+    /// let config = core.get_query_config_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// println!("Auto-start: {}", config.auto_start);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_config(
+    pub async fn get_query_config_by_id(
         &self,
-        id: &str,
-    ) -> crate::error::Result<crate::config::QueryConfig> {
+        id: &ComponentId,
+    ) -> crate::error::Result<crate::config::AssignedQueryConfig> {
         self.state_guard.require_initialized()?;
         self.computation
             .query_configuration(id)
@@ -297,15 +308,15 @@ impl InspectionAPI {
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let reactions = core.list_reactions().await?;
-    /// for (id, status) in reactions {
-    ///     println!("Reaction {}: {:?}", id, status);
+    /// for component in reactions {
+    ///     println!("Reaction {}: {:?}", component.id, component.status);
     /// }
     /// # Ok(())
     /// # }
     /// ```
     pub async fn list_reactions(
         &self,
-    ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
+    ) -> crate::error::Result<Vec<crate::config::ComponentListEntry>> {
         self.state_guard.require_initialized()?;
         Ok(self.computation.list_components("reaction").await?)
     }
@@ -316,16 +327,16 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let reaction_info = core.get_reaction_info("my-reaction").await?;
+    /// let reaction_info = core.get_reaction_info_by_name(&drasi_lib::ComponentName::try_new("my-reaction")?).await?;
     /// println!("Reaction type: {}", reaction_info.reaction_type);
     /// println!("Status: {:?}", reaction_info.status);
     /// println!("Queries: {:?}", reaction_info.queries);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_reaction_info(
+    pub async fn get_reaction_info_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<crate::config::ReactionRuntime> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -340,14 +351,14 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let status = core.get_reaction_status("my-reaction").await?;
+    /// let status = core.get_reaction_status_by_name(&drasi_lib::ComponentName::try_new("my-reaction")?).await?;
     /// println!("Reaction status: {:?}", status);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_reaction_status(
+    pub async fn get_reaction_status_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -380,6 +391,7 @@ impl InspectionAPI {
 
         Ok(DrasiLibConfig {
             id: self.config.id.clone(),
+            allow_external_component_ids: self.config.allow_external_component_ids,
             priority_queue_capacity: self.config.global_priority_queue_capacity,
             dispatch_buffer_capacity: self.config.global_dispatch_buffer_capacity,
             activation_timeout_secs: self.config.activation_timeout_secs,
@@ -389,7 +401,13 @@ impl InspectionAPI {
             resource_construction_timeout_secs: self.config.resource_construction_timeout_secs,
             cleanup_timeout_secs: self.config.cleanup_timeout_secs,
             storage_backends: self.config.storage_backends.clone(),
-            queries: self.computation.query_configurations().await?,
+            queries: self
+                .computation
+                .query_configurations()
+                .await?
+                .into_iter()
+                .map(crate::config::AssignedQueryConfig::into_authoring)
+                .collect(),
         })
     }
 
@@ -406,16 +424,16 @@ impl InspectionAPI {
     /// # use drasi_lib::DrasiLib;
     /// # use futures::StreamExt;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut events = core.get_source_events("my-source").await?;
+    /// let mut events = core.get_source_events_by_name(&drasi_lib::ComponentName::try_new("my-source")?).await?;
     /// while let Some(event) = events.next().await {
     ///     println!("Event: {:?} - {:?}", event.status, event.message);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_source_events(
+    pub async fn get_source_events_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
         Ok(stream::iter(self.computation.component_events(id).await))
@@ -430,16 +448,16 @@ impl InspectionAPI {
     /// # use drasi_lib::DrasiLib;
     /// # use futures::StreamExt;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut events = core.get_query_events("my-query").await?;
+    /// let mut events = core.get_query_events_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// while let Some(event) = events.next().await {
     ///     println!("Event: {:?} - {:?}", event.status, event.message);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_events(
+    pub async fn get_query_events_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
         Ok(stream::iter(self.computation.component_events(id).await))
@@ -454,16 +472,16 @@ impl InspectionAPI {
     /// # use drasi_lib::DrasiLib;
     /// # use futures::StreamExt;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut events = core.get_reaction_events("my-reaction").await?;
+    /// let mut events = core.get_reaction_events_by_name(&drasi_lib::ComponentName::try_new("my-reaction")?).await?;
     /// while let Some(event) = events.next().await {
     ///     println!("Event: {:?} - {:?}", event.status, event.message);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_reaction_events(
+    pub async fn get_reaction_events_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
         self.state_guard.require_initialized()?;
         Ok(stream::iter(self.computation.component_events(id).await))
@@ -584,7 +602,7 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let (history, mut receiver) = core.subscribe_source_logs("my-source").await?;
+    /// let (history, mut receiver) = core.subscribe_source_logs_by_name(&drasi_lib::ComponentName::try_new("my-source")?).await?;
     ///
     /// // Print historical logs
     /// for log in history {
@@ -598,9 +616,9 @@ impl InspectionAPI {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn subscribe_source_logs(
+    pub async fn subscribe_source_logs_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
@@ -616,9 +634,9 @@ impl InspectionAPI {
     ///
     /// Returns the log history and a broadcast receiver for new logs.
     /// The receiver will receive new log messages as they are emitted by the query.
-    pub async fn subscribe_query_logs(
+    pub async fn subscribe_query_logs_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
@@ -634,9 +652,9 @@ impl InspectionAPI {
     ///
     /// Returns the log history and a broadcast receiver for new logs.
     /// The receiver will receive new log messages as they are emitted by the reaction.
-    pub async fn subscribe_reaction_logs(
+    pub async fn subscribe_reaction_logs_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
@@ -658,7 +676,7 @@ impl InspectionAPI {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
-    /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
+    /// let (history, mut receiver) = core.subscribe_source_events_by_name(&drasi_lib::ComponentName::try_new("my-source")?).await?;
     ///
     /// // Print historical events
     /// for event in history {
@@ -672,9 +690,9 @@ impl InspectionAPI {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn subscribe_source_events(
+    pub async fn subscribe_source_events_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
@@ -690,9 +708,9 @@ impl InspectionAPI {
     ///
     /// Returns the event history and a broadcast receiver for new events.
     /// The receiver will receive new lifecycle events as they occur (e.g., status changes).
-    pub async fn subscribe_query_events(
+    pub async fn subscribe_query_events_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
@@ -708,9 +726,9 @@ impl InspectionAPI {
     ///
     /// Returns the event history and a broadcast receiver for new events.
     /// The receiver will receive new lifecycle events as they occur (e.g., status changes).
-    pub async fn subscribe_reaction_events(
+    pub async fn subscribe_reaction_events_by_id(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> crate::error::Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
@@ -732,9 +750,9 @@ impl InspectionAPI {
     /// Returns `DrasiError::ComponentNotFound` if the query does not exist or
     /// has no metrics attached.
     /// Returns `DrasiError::InvalidState` if the system is not initialized.
-    pub async fn get_query_output_metrics(
+    pub async fn get_query_output_metrics_by_id(
         &self,
-        query_id: &str,
+        query_id: &ComponentId,
     ) -> crate::error::Result<crate::metrics::QueryOutputMetricsSnapshot> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -758,11 +776,11 @@ impl InspectionAPI {
     /// # Errors
     /// Returns `DrasiError::ComponentNotFound` if the reaction does not exist.
     /// Returns `DrasiError::InvalidState` if the system is not initialized.
-    pub async fn get_reaction_metrics(
+    pub async fn get_reaction_metrics_by_id(
         &self,
-        reaction_id: &str,
+        reaction_id: &ComponentId,
     ) -> crate::error::Result<
-        std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>,
+        std::collections::HashMap<ComponentId, crate::metrics::ReactionMetricsSnapshot>,
     > {
         self.state_guard.require_initialized()?;
         self.computation
@@ -783,6 +801,230 @@ impl InspectionAPI {
         self.state_guard.require_initialized()?;
         Ok(self.computation.lifecycle_metrics.snapshot())
     }
+
+    pub async fn get_source_info_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<crate::config::SourceRuntime> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("source"))?;
+        self.get_source_info_by_id(&id).await
+    }
+
+    pub async fn get_source_status_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<crate::channels::ComponentStatus> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("source"))?;
+        self.get_source_status_by_id(&id).await
+    }
+
+    pub async fn get_source_schema_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<Option<crate::schema::SourceSchema>> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("source"))?;
+        self.get_source_schema_by_id(&id).await
+    }
+
+    pub async fn get_query_info_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<crate::config::QueryRuntime> {
+        self.state_guard.require_initialized()?;
+        let id = self.computation.component_id_by_name(name, Some("query"))?;
+        self.get_query_info_by_id(&id).await
+    }
+
+    pub async fn get_query_status_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<crate::channels::ComponentStatus> {
+        self.state_guard.require_initialized()?;
+        let id = self.computation.component_id_by_name(name, Some("query"))?;
+        self.get_query_status_by_id(&id).await
+    }
+
+    pub async fn get_query_results_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<Vec<serde_json::Value>> {
+        self.state_guard.require_initialized()?;
+        let id = self.computation.component_id_by_name(name, Some("query"))?;
+        self.get_query_results_by_id(&id).await
+    }
+
+    pub async fn get_query_config_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<crate::config::AssignedQueryConfig> {
+        self.state_guard.require_initialized()?;
+        let id = self.computation.component_id_by_name(name, Some("query"))?;
+        self.get_query_config_by_id(&id).await
+    }
+
+    pub async fn get_reaction_info_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<crate::config::ReactionRuntime> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_info_by_id(&id).await
+    }
+
+    pub async fn get_reaction_status_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<crate::channels::ComponentStatus> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_status_by_id(&id).await
+    }
+
+    pub async fn get_source_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("source"))?;
+        self.get_source_events_by_id(&id).await
+    }
+
+    pub async fn get_query_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized()?;
+        let id = self.computation.component_id_by_name(name, Some("query"))?;
+        self.get_query_events_by_id(&id).await
+    }
+
+    pub async fn get_reaction_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_events_by_id(&id).await
+    }
+
+    pub async fn subscribe_source_logs_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("source"))?;
+        self.subscribe_source_logs_by_id(&id).await
+    }
+
+    pub async fn subscribe_query_logs_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        self.state_guard.require_initialized()?;
+        let id = self.computation.component_id_by_name(name, Some("query"))?;
+        self.subscribe_query_logs_by_id(&id).await
+    }
+
+    pub async fn subscribe_reaction_logs_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("reaction"))?;
+        self.subscribe_reaction_logs_by_id(&id).await
+    }
+
+    pub async fn subscribe_source_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("source"))?;
+        self.subscribe_source_events_by_id(&id).await
+    }
+
+    pub async fn subscribe_query_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.state_guard.require_initialized()?;
+        let id = self.computation.component_id_by_name(name, Some("query"))?;
+        self.subscribe_query_events_by_id(&id).await
+    }
+
+    pub async fn subscribe_reaction_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("reaction"))?;
+        self.subscribe_reaction_events_by_id(&id).await
+    }
+
+    pub async fn get_query_output_metrics_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<crate::metrics::QueryOutputMetricsSnapshot> {
+        self.state_guard.require_initialized()?;
+        let id = self.computation.component_id_by_name(name, Some("query"))?;
+        self.get_query_output_metrics_by_id(&id).await
+    }
+
+    pub async fn get_reaction_metrics_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> crate::error::Result<
+        std::collections::HashMap<ComponentId, crate::metrics::ReactionMetricsSnapshot>,
+    > {
+        self.state_guard.require_initialized()?;
+        let id = self
+            .computation
+            .component_id_by_name(name, Some("reaction"))?;
+        self.get_reaction_metrics_by_id(&id).await
+    }
 }
 
 #[cfg(test)]
@@ -792,7 +1034,7 @@ mod tests {
     use crate::error::DrasiError;
     use crate::lib_core::DrasiLib;
     use crate::sources::tests::TestMockSource;
-    use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
+    use crate::test_helpers::creation::{BuilderFixtures, CoreFixtures};
 
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -802,15 +1044,49 @@ mod tests {
     // ========================================================================
 
     struct TestMockReaction {
-        id: String,
-        queries: Vec<String>,
+        id: drasi_core_types::ComponentId,
+        queries: Vec<drasi_computation_contracts::ComponentReference>,
         auto_start: bool,
         status_handle: crate::component_graph::ComponentStatusHandle,
     }
 
     impl TestMockReaction {
-        fn new(id: String, queries: Vec<String>, auto_start: bool) -> Self {
-            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+        fn fixture(
+            name: drasi_core_types::ComponentName,
+            queries: Vec<String>,
+            auto_start: bool,
+        ) -> crate::test_helpers::creation::ReactionFixture<Self> {
+            crate::test_helpers::creation::ReactionFixture::new(
+                name,
+                queries
+                    .into_iter()
+                    .map(|name| {
+                        crate::config::ComponentReference::by_name(
+                            drasi_core_types::ComponentName::try_new(name)
+                                .expect("fixture component name"),
+                        )
+                    })
+                    .collect(),
+                auto_start,
+                move |id, inputs| {
+                    Ok(Self::new(
+                        id,
+                        inputs
+                            .into_iter()
+                            .map(crate::config::ComponentReference::by_id)
+                            .collect(),
+                        auto_start,
+                    ))
+                },
+            )
+        }
+
+        fn new(
+            id: drasi_core_types::ComponentId,
+            queries: Vec<drasi_computation_contracts::ComponentReference>,
+            auto_start: bool,
+        ) -> Self {
+            let status_handle = crate::component_graph::ComponentStatusHandle::new(id.clone());
             Self {
                 id,
                 queries,
@@ -822,7 +1098,7 @@ mod tests {
 
     #[async_trait]
     impl crate::reactions::Reaction for TestMockReaction {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             &self.id
         }
 
@@ -834,7 +1110,7 @@ mod tests {
             HashMap::new()
         }
 
-        fn query_ids(&self) -> Vec<String> {
+        fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
             self.queries.clone()
         }
 
@@ -842,7 +1118,7 @@ mod tests {
             self.auto_start
         }
 
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
 
@@ -914,7 +1190,7 @@ mod tests {
     }
 
     async fn build_with_source_and_query() -> DrasiLib {
-        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let source = TestMockSource::fixture("test-source", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -929,13 +1205,19 @@ mod tests {
                     .clone(),
             )
             .with_id("test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
-                Query::cypher("q1")
-                    .query("MATCH (n:Test) RETURN n")
-                    .from_input("test-source")
-                    .auto_start(false)
-                    .build(),
+                Query::cypher(
+                    drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+                )
+                .query("MATCH (n:Test) RETURN n")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("test-source")
+                        .expect("fixture component name"),
+                )
+                .auto_start(false)
+                .build()
+                .unwrap(),
             )
             .build()
             .await
@@ -952,29 +1234,25 @@ mod tests {
     async fn list_sources_empty() {
         let core = build_and_start().await;
         let sources = core.list_sources().await.unwrap();
-        let user_sources: Vec<_> = sources
-            .iter()
-            .filter(|(id, _)| id != COMPONENT_GRAPH_SOURCE_ID)
-            .collect();
-        assert!(user_sources.is_empty(), "No user sources initially");
+        assert!(sources.is_empty(), "No sources initially");
     }
 
     #[tokio::test]
     async fn list_sources_after_adding() {
         let core = build_and_start().await;
-        let s1 = TestMockSource::with_auto_start("src-a".to_string(), false).unwrap();
-        let s2 = TestMockSource::with_auto_start("src-b".to_string(), false).unwrap();
-        core.add_source(s1).await.unwrap();
-        core.add_source(s2).await.unwrap();
+        let s1 = TestMockSource::fixture("src-a", false);
+        let s2 = TestMockSource::fixture("src-b", false);
+        core.add_source_fixture(s1).await.unwrap();
+        core.add_source_fixture(s2).await.unwrap();
 
         let sources = core.list_sources().await.unwrap();
-        let user_sources: Vec<_> = sources
+        assert_eq!(sources.len(), 2);
+        assert!(sources
             .iter()
-            .filter(|(id, _)| id != COMPONENT_GRAPH_SOURCE_ID)
-            .collect();
-        assert_eq!(user_sources.len(), 2);
-        assert!(user_sources.iter().any(|(id, _)| id == "src-a"));
-        assert!(user_sources.iter().any(|(id, _)| id == "src-b"));
+            .any(|entry| entry.name == crate::ComponentName::try_new("src-a").unwrap()));
+        assert!(sources
+            .iter()
+            .any(|entry| entry.name == crate::ComponentName::try_new("src-b").unwrap()));
     }
 
     // ========================================================================
@@ -984,17 +1262,29 @@ mod tests {
     #[tokio::test]
     async fn get_source_status_found() {
         let core = build_and_start().await;
-        let source = TestMockSource::with_auto_start("status-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("status-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
-        let status = core.get_source_status("status-src").await.unwrap();
+        let status = core
+            .get_source_status_by_name(
+                &drasi_core_types::ComponentName::try_new("status-src")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
     async fn get_source_status_not_found() {
         let core = build_and_start().await;
-        let err = core.get_source_status("nonexistent").await.unwrap_err();
+        let err = core
+            .get_source_status_by_name(
+                &drasi_core_types::ComponentName::try_new("nonexistent")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, DrasiError::ComponentNotFound { .. }),
             "Expected ComponentNotFound, got: {err:?}"
@@ -1017,7 +1307,10 @@ mod tests {
         let core = build_with_source_and_query().await;
         let queries = core.list_queries().await.unwrap();
         assert_eq!(queries.len(), 1);
-        assert_eq!(queries[0].0, "q1");
+        assert_eq!(
+            queries[0].name,
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name")
+        );
     }
 
     // ========================================================================
@@ -1027,14 +1320,25 @@ mod tests {
     #[tokio::test]
     async fn get_query_status_found() {
         let core = build_with_source_and_query().await;
-        let status = core.get_query_status("q1").await.unwrap();
+        let status = core
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
     async fn get_query_status_not_found() {
         let core = build_and_start().await;
-        let err = core.get_query_status("nonexistent").await.unwrap_err();
+        let err = core
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("nonexistent")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, DrasiError::ComponentNotFound { .. }),
             "Expected ComponentNotFound, got: {err:?}"
@@ -1055,12 +1359,19 @@ mod tests {
     #[tokio::test]
     async fn list_reactions_after_adding() {
         let core = build_with_source_and_query().await;
-        let reaction = TestMockReaction::new("r1".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture(
+            drasi_core_types::ComponentName::try_new("r1").expect("fixture component name"),
+            vec!["q1".into()],
+            false,
+        );
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         let reactions = core.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 1);
-        assert_eq!(reactions[0].0, "r1");
+        assert_eq!(
+            reactions[0].name,
+            drasi_core_types::ComponentName::try_new("r1").expect("fixture component name")
+        );
     }
 
     // ========================================================================
@@ -1070,17 +1381,32 @@ mod tests {
     #[tokio::test]
     async fn get_reaction_status_found() {
         let core = build_with_source_and_query().await;
-        let reaction = TestMockReaction::new("r1".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture(
+            drasi_core_types::ComponentName::try_new("r1").expect("fixture component name"),
+            vec!["q1".into()],
+            false,
+        );
+        core.add_reaction_fixture(reaction).await.unwrap();
 
-        let status = core.get_reaction_status("r1").await.unwrap();
+        let status = core
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("r1").expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
     async fn get_reaction_status_not_found() {
         let core = build_and_start().await;
-        let err = core.get_reaction_status("nonexistent").await.unwrap_err();
+        let err = core
+            .get_reaction_status_by_name(
+                &drasi_core_types::ComponentName::try_new("nonexistent")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, DrasiError::ComponentNotFound { .. }),
             "Expected ComponentNotFound, got: {err:?}"
@@ -1097,7 +1423,21 @@ mod tests {
         let config = core.get_current_config().await.unwrap();
         assert_eq!(config.id, "test");
         assert_eq!(config.queries.len(), 1);
-        assert_eq!(config.queries[0].id, "q1");
+        assert_eq!(
+            config.queries[0].id.as_ref(),
+            Some(
+                core.component_by_name(
+                    &drasi_core_types::ComponentName::try_new("q1")
+                        .expect("fixture component name")
+                )
+                .unwrap()
+                .id()
+            )
+        );
+        assert_eq!(
+            config.queries[0].name,
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name")
+        );
     }
 
     #[tokio::test]
@@ -1115,10 +1455,16 @@ mod tests {
     #[tokio::test]
     async fn subscribe_source_logs_returns_history_and_receiver() {
         let core = build_and_start().await;
-        let source = TestMockSource::with_auto_start("log-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("log-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
-        let (history, _receiver) = core.subscribe_source_logs("log-src").await.unwrap();
+        let (history, _receiver) = core
+            .subscribe_source_logs_by_name(
+                &drasi_core_types::ComponentName::try_new("log-src")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         // Freshly added source should have no log history yet
         assert!(history.is_empty(), "No logs emitted yet");
     }
@@ -1126,7 +1472,12 @@ mod tests {
     #[tokio::test]
     async fn subscribe_source_logs_not_found() {
         let core = build_and_start().await;
-        let err = core.subscribe_source_logs("ghost").await.unwrap_err();
+        let err = core
+            .subscribe_source_logs_by_name(
+                &drasi_core_types::ComponentName::try_new("ghost").expect("fixture component name"),
+            )
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, DrasiError::ComponentNotFound { .. }),
             "Expected ComponentNotFound, got: {err:?}"
@@ -1140,10 +1491,16 @@ mod tests {
     #[tokio::test]
     async fn subscribe_source_events_returns_history_and_receiver() {
         let core = build_and_start().await;
-        let source = TestMockSource::with_auto_start("event-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("event-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
-        let (history, _receiver) = core.subscribe_source_events("event-src").await.unwrap();
+        let (history, _receiver) = core
+            .subscribe_source_events_by_name(
+                &drasi_core_types::ComponentName::try_new("event-src")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         // Newly added source should have at least a Stopped event from registration
         // (or could be empty depending on implementation). Just verify it returns successfully.
         let _ = history;
@@ -1152,7 +1509,12 @@ mod tests {
     #[tokio::test]
     async fn subscribe_source_events_not_found() {
         let core = build_and_start().await;
-        let err = core.subscribe_source_events("ghost").await.unwrap_err();
+        let err = core
+            .subscribe_source_events_by_name(
+                &drasi_core_types::ComponentName::try_new("ghost").expect("fixture component name"),
+            )
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, DrasiError::ComponentNotFound { .. }),
             "Expected ComponentNotFound, got: {err:?}"

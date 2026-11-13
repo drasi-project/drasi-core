@@ -132,16 +132,13 @@ fn size(value: usize) -> NonZeroUsize {
 }
 
 async fn runner(path: &Path) -> Result<DeliveryRunner> {
+    let consumer = ComponentId::try_new("37641756-f153-59eb-9b39-88b3f90fe5f9")?;
     let indexes =
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false)))
-            .create_indexes("delivery", "consumer")
+            .create_indexes("delivery", &consumer)
             .await?;
     DeliveryRunner::new(
-        DeliveryScope::new(
-            "scope".into(),
-            "graph".into(),
-            ComponentId::try_new("sink")?,
-        )?,
+        DeliveryScope::new("scope".into(), "graph".into(), consumer)?,
         indexes,
         codec()?,
         DeliveryOptions {
@@ -159,7 +156,7 @@ fn codec() -> Result<EnvelopeCodec> {
     Ok(codec)
 }
 fn input(sequence: u64, count: usize) -> Result<InputEnvelope> {
-    let component = ComponentId::try_new("query")?;
+    let component = ComponentId::try_new("64ae0536-16da-5306-9137-453be5793209")?;
     let changes = (0..count)
         .map(|index| QueryPartEvaluationContext::Adding {
             after: BTreeMap::new(),
@@ -173,8 +170,8 @@ fn input(sequence: u64, count: usize) -> Result<InputEnvelope> {
         &ResultNodeProjector::try_new("test/storedproc-postgres-delivery/query/out", None)?,
         &changes,
         QueryOutputMetadata {
-            query_id: "query".into(),
-            source_id: None,
+            query_id: component.clone(),
+            input_origin: None,
             timestamp: chrono::DateTime::from_timestamp(1, 0).expect("timestamp"),
             metadata: Default::default(),
             profiling: None,
@@ -258,6 +255,7 @@ impl DeliveryHandler for LostResponse {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn committed_effect_is_deduplicated_after_lost_response_and_local_reconstruction(
 ) -> Result<()> {
     let mut database = Database::new().await?;
@@ -293,6 +291,7 @@ async fn committed_effect_is_deduplicated_after_lost_response_and_local_reconstr
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn failed_and_cancelled_effects_roll_back_with_their_destination_cursor() -> Result<()> {
     let mut database = Database::new().await?;
     let observer = database.connect().await?;
@@ -345,6 +344,7 @@ async fn failed_and_cancelled_effects_roll_back_with_their_destination_cursor() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn concurrent_retries_commit_one_effect_per_operation() -> Result<()> {
     let mut database = Database::new().await?;
     let observer = database.connect().await?;
@@ -377,6 +377,7 @@ async fn concurrent_retries_commit_one_effect_per_operation() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn full_width_sequences_and_bounded_destination_history_reject_old_or_changed_input(
 ) -> Result<()> {
     let mut database = Database::new().await?;
@@ -406,6 +407,7 @@ async fn full_width_sequences_and_bounded_destination_history_reject_old_or_chan
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn exact_stream_capacity_rejects_before_effects_and_keeps_existing_streams_usable(
 ) -> Result<()> {
     let mut database = Database::new().await?;
@@ -459,6 +461,7 @@ impl DeliveryHandler for Gap {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn gaps_unfinished_batches_and_corrupt_cursors_never_become_new_effects() -> Result<()> {
     let mut database = Database::new().await?;
     let observer = database.connect().await?;
@@ -502,6 +505,7 @@ async fn gaps_unfinished_batches_and_corrupt_cursors_never_become_new_effects() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn database_sigkill_retains_committed_effects_and_deduplicates_unconfirmed_delivery(
 ) -> Result<()> {
     let mut database = Database::new().await?;

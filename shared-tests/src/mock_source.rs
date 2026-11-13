@@ -23,7 +23,7 @@ use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::profiling::ProfilingMetadata;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-use drasi_lib::Source;
+use drasi_lib::{ComponentId, Source};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -37,7 +37,7 @@ use ordered_float::OrderedFloat;
 #[derive(Clone)]
 pub struct MockSourceHandle {
     tx: mpsc::Sender<SourceChange>,
-    source_id: String,
+    source_id: ComponentId,
 }
 
 impl MockSourceHandle {
@@ -62,7 +62,7 @@ impl MockSourceHandle {
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(self.source_id.as_str()),
+                    namespace: Arc::from(self.source_id.as_str()),
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
@@ -75,7 +75,7 @@ impl MockSourceHandle {
     }
 
     /// Get the source ID
-    pub fn source_id(&self) -> &str {
+    pub fn source_id(&self) -> &ComponentId {
         &self.source_id
     }
 }
@@ -94,8 +94,7 @@ pub struct MockSource {
 
 impl MockSource {
     /// Create a new mock source and its handle
-    pub fn new(id: impl Into<String>) -> Result<(Self, MockSourceHandle)> {
-        let id = id.into();
+    pub fn new(id: ComponentId) -> Result<(Self, MockSourceHandle)> {
         let params = SourceBaseParams::new(id.clone());
         let (app_tx, app_rx) = mpsc::channel(1000);
 
@@ -153,7 +152,7 @@ impl MockSource {
 
 #[async_trait]
 impl Source for MockSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &ComponentId {
         &self.base.id
     }
 
@@ -217,8 +216,8 @@ impl Source for MockSource {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(

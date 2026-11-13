@@ -624,8 +624,8 @@ impl SystemMetadataExtensions {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SystemMetadata {
-    source_id: Option<Arc<str>>,
-    query_id: Option<Arc<str>>,
+    input_origin: Option<crate::QueryInputOrigin>,
+    query_id: Option<crate::ComponentId>,
     sequence: Option<u64>,
     source_position: Option<Bytes>,
     timestamp: DateTime<Utc>,
@@ -638,8 +638,8 @@ pub(crate) struct SystemMetadata {
 impl SystemMetadata {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        source_id: Option<Arc<str>>,
-        query_id: Option<Arc<str>>,
+        input_origin: Option<crate::QueryInputOrigin>,
+        query_id: Option<crate::ComponentId>,
         sequence: Option<u64>,
         source_position: Option<Bytes>,
         timestamp: DateTime<Utc>,
@@ -647,7 +647,7 @@ impl SystemMetadata {
         extensions: SystemMetadataExtensions,
     ) -> Self {
         Self {
-            source_id,
+            input_origin,
             query_id,
             sequence,
             source_position,
@@ -660,12 +660,15 @@ impl SystemMetadata {
     }
 
     #[cfg(test)]
-    pub(crate) fn source_id(&self) -> Option<&str> {
-        self.source_id.as_deref()
+    pub(crate) fn source_id(&self) -> Option<&crate::ComponentId> {
+        match self.input_origin.as_ref()? {
+            crate::QueryInputOrigin::Source(id) => Some(id),
+            crate::QueryInputOrigin::Stream(_) | crate::QueryInputOrigin::Scheduled(_) => None,
+        }
     }
 
-    pub(crate) fn query_id(&self) -> Option<&str> {
-        self.query_id.as_deref()
+    pub(crate) fn query_id(&self) -> Option<&crate::ComponentId> {
+        self.query_id.as_ref()
     }
 
     pub(crate) const fn sequence(&self) -> Option<u64> {
@@ -714,23 +717,20 @@ pub(crate) enum ContextContributorKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ContextContributor {
     kind: ContextContributorKind,
-    component_id: Arc<str>,
+    component_id: crate::ComponentId,
 }
 
 #[cfg(test)]
 impl ContextContributor {
-    pub(crate) fn new(kind: ContextContributorKind, component_id: impl Into<Arc<str>>) -> Self {
-        Self {
-            kind,
-            component_id: component_id.into(),
-        }
+    pub(crate) fn new(kind: ContextContributorKind, component_id: crate::ComponentId) -> Self {
+        Self { kind, component_id }
     }
 
     pub(crate) const fn kind(&self) -> ContextContributorKind {
         self.kind
     }
 
-    pub(crate) fn component_id(&self) -> &str {
+    pub(crate) fn component_id(&self) -> &crate::ComponentId {
         &self.component_id
     }
 }
@@ -1005,8 +1005,14 @@ impl StableIdBuilder {
 
     #[cfg(test)]
     fn system(&mut self, system: &SystemMetadata) {
-        self.optional_string("source-id", system.source_id());
-        self.optional_string("query-id", system.query_id());
+        self.optional_string(
+            "source-id",
+            system.source_id().map(crate::ComponentId::as_str),
+        );
+        self.optional_string(
+            "query-id",
+            system.query_id().map(crate::ComponentId::as_str),
+        );
         self.optional_u64("sequence", system.sequence());
         self.optional_bytes(
             "source-position",
@@ -1106,7 +1112,7 @@ impl StableIdBuilder {
         self.string("context-kind", kind);
         self.string(
             "context-component",
-            contribution.contributor().component_id(),
+            contribution.contributor().component_id().as_str(),
         );
         self.string("context-key", contribution.key());
         match contribution.value() {

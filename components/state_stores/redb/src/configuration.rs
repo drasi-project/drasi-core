@@ -17,8 +17,9 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use drasi_lib::management::{
-    AcceptanceReceipt, CommittedConfiguration, ConfigurationSession, ConfigurationSnapshotSummary,
-    ConfigurationStore, DesiredInstance, ManagementError,
+    AcceptanceReceipt, AcceptedComponentCreation, AcceptedComponentUpdate, CommittedConfiguration,
+    ComponentUpdateCompletion, ConfigurationSession, ConfigurationSnapshotSummary,
+    ConfigurationStore, ConfigurationStoreGuarantees, DesiredInstance, ManagementError,
 };
 use redb::{Database, Durability, ReadableTable, TableDefinition};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -30,11 +31,15 @@ const SNAPSHOTS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("drasi.configuration.snapshots");
 const METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("drasi.configuration.metadata");
 const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
+const UUID_CONFIGURATION_FORMAT: u32 = 7;
+const UUID_EXPIRING_CONFIGURATION_FORMAT: u32 = 8;
 
 mod housekeeping;
 pub use housekeeping::ConfigurationStoreOptions;
 #[cfg(test)]
 mod reliability_tests;
+#[cfg(test)]
+mod update_tests;
 
 struct DatabaseOwner {
     database: Database,
@@ -65,10 +70,13 @@ impl RedbConfigurationStore {
         tokio::task::spawn_blocking(move || {
             let transaction = owner.database.begin_read()?;
             let table = transaction.open_table(CURRENT)?;
-            table.iter()?.map(|entry| {
-                let (id, _) = entry?;
-                Ok(id.value().to_owned())
-            }).collect()
+            table
+                .iter()?
+                .map(|entry| {
+                    let (id, _) = entry?;
+                    Ok(id.value().to_owned())
+                })
+                .collect()
         })
         .await
         .context("configuration identity discovery worker failed")?
@@ -112,7 +120,10 @@ impl RedbConfigurationStore {
             Ok(false)
         } else {
             let desired = seed()?.normalized()?;
-            session.commit(0, request_id, &desired).await.map(|_| true)
+            session
+                .commit(0, request_id, &desired, None, &[])
+                .await
+                .map(|_| true)
         };
         session.close().await?;
         result
@@ -150,14 +161,21 @@ impl RedbConfigurationStore {
             if let Some(bytes) = existing {
                 let version: u32 = unseal(&owner, "drasi.configuration.key-check", &bytes)?;
                 anyhow::ensure!(
-                    matches!(version, 1 | 2),
-                    "unsupported configuration database format"
+                    matches!(
+                        version,
+                        UUID_CONFIGURATION_FORMAT | UUID_EXPIRING_CONFIGURATION_FORMAT
+                    ),
+                    "unsupported configuration database format {version}; use a fresh database for UUID identities and accepted update recovery"
                 );
                 version
             } else {
-                let bytes = seal(&owner, "drasi.configuration.key-check", &1u32)?;
+                let bytes = seal(
+                    &owner,
+                    "drasi.configuration.key-check",
+                    &UUID_CONFIGURATION_FORMAT,
+                )?;
                 metadata.insert("key-check", bytes.as_slice())?;
-                1
+                UUID_CONFIGURATION_FORMAT
             }
         };
         housekeeping::initialize_policy(&owner, &transaction, version)?;
@@ -309,8 +327,12 @@ struct RequestRecord {
 
 #[async_trait]
 impl ConfigurationStore for RedbConfigurationStore {
+    fn guarantees(&self) -> ConfigurationStoreGuarantees {
+        ConfigurationStoreGuarantees::DURABLE
+    }
+
     async fn open(&self, instance_id: &str) -> Result<Arc<dyn ConfigurationSession>> {
-        drasi_lib::computation::v1::ComponentId::try_new(instance_id)?;
+        drasi_lib::computation::v1::validate_identifier("instance", instance_id)?;
         let session = {
             let mut leases = self
                 .owner
@@ -367,9 +389,13 @@ impl ConfigurationSession for Session {
         expected_revision: u64,
         request_id: &str,
         desired: &DesiredInstance,
+        creation: Option<&AcceptedComponentCreation>,
+        updates: &[AcceptedComponentUpdate],
     ) -> Result<AcceptanceReceipt> {
         let request_id = request_id.to_owned();
         let desired = desired.clone();
+        let creation = creation.cloned();
+        let updates = updates.to_vec();
         self.run(move |lease| {
             let record_key = key(&lease.instance, &request_id)?;
             let mut transaction = lease.owner.database.begin_write()?;
@@ -388,7 +414,10 @@ impl ConfigurationSession for Session {
                         &format!("request:{record_key}"),
                         value.value(),
                     )?;
-                    if prior.desired != desired {
+                    if prior.desired != desired
+                        || prior.receipt.creation != creation
+                        || prior.receipt.updates != updates
+                    {
                         return Err(ManagementError::RequestConflict.into());
                     }
                     return Ok(prior.receipt);
@@ -412,10 +441,23 @@ impl ConfigurationSession for Session {
                         .checked_add(1)
                         .context("configuration revision exhausted")?
                 };
+                let mut pending = old.pending_updates;
+                for update in &updates {
+                    anyhow::ensure!(
+                        !pending
+                            .iter()
+                            .any(|previous| previous.component_id == update.component_id),
+                        "component already has an incomplete accepted update"
+                    );
+                    pending.push(update.clone());
+                }
+                pending.sort_by(|left, right| left.component_id.cmp(&right.component_id));
                 receipt = AcceptanceReceipt {
                     request_id,
                     revision,
                     durable: true,
+                    creation,
+                    updates,
                 };
                 let bytes = seal(
                     &lease.owner,
@@ -423,6 +465,7 @@ impl ConfigurationSession for Session {
                     &CommittedConfiguration {
                         revision,
                         desired: desired.clone(),
+                        pending_updates: pending,
                     },
                 )?;
                 configurations.insert(lease.instance.as_str(), bytes.as_slice())?;
@@ -443,6 +486,63 @@ impl ConfigurationSession for Session {
                 .commit()
                 .context("commit graph configuration; resolve request ID before retrying")?;
             Ok(receipt)
+        })
+        .await
+    }
+
+    async fn complete_updates(
+        &self,
+        expected_revision: u64,
+        updates: &[ComponentUpdateCompletion],
+    ) -> Result<CommittedConfiguration> {
+        let updates = updates.to_vec();
+        self.run(move |lease| {
+            let mut transaction = lease.owner.database.begin_write()?;
+            transaction.set_durability(Durability::Immediate);
+            let configuration;
+            {
+                let mut table = transaction.open_table(CURRENT)?;
+                let mut record = current(&lease.owner, &table, &lease.instance)?;
+                anyhow::ensure!(
+                    record.revision == expected_revision,
+                    ManagementError::RevisionConflict {
+                        expected: expected_revision,
+                        actual: record.revision
+                    }
+                );
+                for update in &updates {
+                    if let Some(pending) = record
+                        .pending_updates
+                        .iter()
+                        .find(|pending| pending.component_id == update.component_id)
+                    {
+                        anyhow::ensure!(
+                            pending.operation_id == update.operation_id,
+                            ManagementError::RequestConflict
+                        );
+                    }
+                }
+                let before = record.pending_updates.len();
+                record.pending_updates.retain(|pending| {
+                    !updates.iter().any(|update| {
+                        update.component_id == pending.component_id
+                            && update.operation_id == pending.operation_id
+                    })
+                });
+                if record.pending_updates.len() != before {
+                    let bytes = seal(
+                        &lease.owner,
+                        &format!("current:{}", lease.instance),
+                        &record,
+                    )?;
+                    table.insert(lease.instance.as_str(), bytes.as_slice())?;
+                }
+                configuration = record;
+            }
+            transaction.commit().context(
+                "confirm component update completion; reload before resuming graph processing",
+            )?;
+            Ok(configuration)
         })
         .await
     }
@@ -546,6 +646,252 @@ impl ConfigurationSession for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drasi_lib::computation::v1::{
+        ComponentAddition, ComponentDescriptor, ComponentId, ComponentName, ComponentRole,
+        ComponentSpecification, ImplementationIdentity,
+    };
+    use drasi_lib::management::{AcceptedComponentIdentity, ComponentIdAllocation};
+
+    fn creation(id: ComponentId, digest: [u8; 32]) -> AcceptedComponentCreation {
+        AcceptedComponentCreation {
+            components: vec![AcceptedComponentIdentity {
+                id: id.clone(),
+                name: ComponentName::try_new("orders").unwrap(),
+            }],
+            allocations: vec![ComponentIdAllocation {
+                requested: None,
+                assigned: id,
+            }],
+            request_digest: digest,
+        }
+    }
+
+    fn component_definition(id: ComponentId) -> Result<DesiredInstance> {
+        let specification = ComponentSpecification {
+            descriptor: ComponentDescriptor::try_new(id, Vec::new())?,
+            role: ComponentRole::Service,
+            completion: None,
+            implementation: ImplementationIdentity::try_new("identity/service", "1")?,
+            configuration_version: 1,
+            configuration: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+        };
+        let mut desired = DesiredInstance::default();
+        desired.topology.components.push(
+            ComponentAddition::declaration(ComponentName::try_new("orders")?, specification)
+                .auto_start(false)
+                .definition,
+        );
+        desired.normalized()
+    }
+
+    #[tokio::test]
+    async fn creation_receipt_preserves_assigned_uuid_after_deletion_and_reopen() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("creation.redb");
+        let creation = creation(ComponentId::generate(), [1; 32]);
+        let desired = component_definition(creation.components[0].id.clone())?;
+        let replacement = component_definition(ComponentId::generate())?;
+        let receipt = {
+            let store = RedbConfigurationStore::new(&path, [18; 32])?;
+            let session = store.open("instance").await?;
+            let receipt = session
+                .commit(0, "create", &desired, Some(&creation), &[])
+                .await?;
+            assert_eq!(receipt.creation.as_ref(), Some(&creation));
+            assert_eq!(session.load().await?.desired, desired);
+            session.snapshot("original").await?;
+            let deletion = session
+                .commit(
+                    receipt.revision,
+                    "delete",
+                    &DesiredInstance::default(),
+                    None,
+                    &[],
+                )
+                .await?;
+            session
+                .commit(deletion.revision, "replacement", &replacement, None, &[])
+                .await?;
+            session.close().await?;
+            receipt
+        };
+        let store = RedbConfigurationStore::new(&path, [18; 32])?;
+        let session = store.open("instance").await?;
+        assert_eq!(session.receipt("create").await?, Some(receipt.clone()));
+        assert_eq!(
+            session
+                .commit(0, "create", &desired, Some(&creation), &[])
+                .await?,
+            receipt
+        );
+        assert_eq!(session.load().await?.desired, replacement);
+        assert_eq!(
+            session.load_snapshot("original").await?.unwrap().desired,
+            desired
+        );
+        for changed in [
+            None,
+            Some(AcceptedComponentCreation {
+                components: vec![AcceptedComponentIdentity {
+                    id: ComponentId::generate(),
+                    name: ComponentName::try_new("orders")?,
+                }],
+                ..creation.clone()
+            }),
+            Some(AcceptedComponentCreation {
+                allocations: vec![ComponentIdAllocation {
+                    requested: None,
+                    assigned: ComponentId::generate(),
+                }],
+                ..creation.clone()
+            }),
+            Some(AcceptedComponentCreation {
+                request_digest: [2; 32],
+                ..creation.clone()
+            }),
+        ] {
+            let error = session
+                .commit(0, "create", &desired, changed.as_ref(), &[])
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<ManagementError>(),
+                Some(ManagementError::RequestConflict)
+            ));
+        }
+        assert_eq!(session.load().await?.desired, replacement);
+        session.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_receipt_preserves_all_assignments_after_removal_and_reopen() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("batch-creation.redb");
+        let owner = ComponentId::generate();
+        let second = ComponentId::generate();
+        let helper = ComponentId::derive_owned(&owner, "timer")?;
+        let mut desired = DesiredInstance::default();
+        let mut components = Vec::new();
+        for (id, name) in [
+            (owner.clone(), "orders"),
+            (second.clone(), "alerts"),
+            (helper, "timer"),
+        ] {
+            let mut member = component_definition(id.clone())?;
+            member.topology.components[0].name = ComponentName::try_new(name)?;
+            desired
+                .topology
+                .components
+                .extend(member.topology.components);
+            components.push(AcceptedComponentIdentity {
+                id,
+                name: ComponentName::try_new(name)?,
+            });
+        }
+        let desired = desired.normalized()?;
+        let creation = AcceptedComponentCreation {
+            components,
+            allocations: vec![
+                ComponentIdAllocation {
+                    requested: None,
+                    assigned: owner,
+                },
+                ComponentIdAllocation {
+                    requested: None,
+                    assigned: second,
+                },
+            ],
+            request_digest: [3; 32],
+        };
+        let receipt = {
+            let store = RedbConfigurationStore::new(&path, [20; 32])?;
+            assert_eq!(store.guarantees(), ConfigurationStoreGuarantees::DURABLE);
+            let session = store.open("instance").await?;
+            let receipt = session
+                .commit(0, "batch", &desired, Some(&creation), &[])
+                .await?;
+            session
+                .commit(
+                    receipt.revision,
+                    "remove",
+                    &DesiredInstance::default(),
+                    None,
+                    &[],
+                )
+                .await?;
+            session.close().await?;
+            receipt
+        };
+        let store = RedbConfigurationStore::new(&path, [20; 32])?;
+        let session = store.open("instance").await?;
+        assert_eq!(session.receipt("batch").await?, Some(receipt.clone()));
+        assert_eq!(
+            session
+                .commit(0, "batch", &desired, Some(&creation), &[])
+                .await?,
+            receipt
+        );
+        assert!(session.load().await?.desired.topology.components.is_empty());
+        assert_eq!(receipt.creation.as_ref().unwrap().components.len(), 3);
+        assert_eq!(receipt.creation.as_ref().unwrap().allocations.len(), 2);
+        session.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn previous_configuration_formats_are_rejected_without_rewriting_records() -> Result<()> {
+        for version in [1u32, 2, 3, 4, 5, 6] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("old-format.redb");
+            let (marker, current_bytes) = {
+                let store = RedbConfigurationStore::new(&path, [19; 32])?;
+                let session = store.open("instance").await?;
+                session
+                    .commit(0, "original", &DesiredInstance::default(), None, &[])
+                    .await?;
+                session.close().await?;
+                let marker = seal(&store.owner, "drasi.configuration.key-check", &version)?;
+                let transaction = store.owner.database.begin_write()?;
+                transaction
+                    .open_table(METADATA)?
+                    .insert("key-check", marker.as_slice())?;
+                transaction.commit()?;
+                let transaction = store.owner.database.begin_read()?;
+                let current_bytes = transaction
+                    .open_table(CURRENT)?
+                    .get("instance")?
+                    .unwrap()
+                    .value()
+                    .to_vec();
+                (marker, current_bytes)
+            };
+            let error = RedbConfigurationStore::new(&path, [19; 32])
+                .err()
+                .expect("old identity format must reject");
+            assert!(error.to_string().contains("use a fresh database"));
+            let database = Database::create(&path)?;
+            let transaction = database.begin_read()?;
+            assert_eq!(
+                transaction
+                    .open_table(METADATA)?
+                    .get("key-check")?
+                    .unwrap()
+                    .value(),
+                marker
+            );
+            assert_eq!(
+                transaction
+                    .open_table(CURRENT)?
+                    .get("instance")?
+                    .unwrap()
+                    .value(),
+                current_bytes
+            );
+        }
+        Ok(())
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn initialization_preserves_accepted_empty_revision_zero_across_reopen() -> Result<()> {
@@ -582,12 +928,21 @@ mod tests {
             session.close().await?;
             let external = store.open("external").await?;
             external
-                .commit(0, "accepted-elsewhere", &DesiredInstance::default())
+                .commit(
+                    0,
+                    "accepted-elsewhere",
+                    &DesiredInstance::default(),
+                    None,
+                    &[],
+                )
                 .await?;
             external.close().await?;
         }
         let store = RedbConfigurationStore::new(&path, [17; 32])?;
-        assert_eq!(store.configured_instance_ids().await?, ["external", "first"]);
+        assert_eq!(
+            store.configured_instance_ids().await?,
+            ["external", "first"]
+        );
         for instance in ["first", "external"] {
             assert!(
                 !store
@@ -614,7 +969,7 @@ mod tests {
         assert_eq!(session.load().await?.desired, changed);
         session.close().await?;
         let mut invalid = changed.clone();
-        invalid.version = 2;
+        invalid.version = 3;
         assert!(store
             .initialize_if_absent("third", "invalid", &invalid)
             .await

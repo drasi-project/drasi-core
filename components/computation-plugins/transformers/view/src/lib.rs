@@ -95,7 +95,7 @@ impl Factory for ViewFactory {
             capabilities: Capabilities {
                 output_snapshots: vec![PortId::try_new("out").expect("constant port")],
                 output_progress: Some(OutputProgress::Origin),
-                deprovision: true,
+                delete_owned_resources: true,
                 ..Capabilities::default()
             },
         }

@@ -1732,8 +1732,15 @@ mod tests {
             ("drasi-reaction-rabbitmq", "integration_test"),
             ("drasi-reaction-aws-sqs", "sqs_tests"),
             ("drasi-reaction-azure-storage", "integration_tests"),
+            ("drasi-reaction-storedproc-postgres", "delivery"),
             ("drasi-index-garnet", "outbox_live_results_tests"),
             ("drasi-index-garnet", "scenario_tests"),
+            ("drasi-index-garnet", "computation_resources"),
+            ("drasi-host-sdk", "native_mysql_components"),
+            ("drasi-host-sdk", "native_postgres_http_bootstrap"),
+            ("drasi-source-postgres", "native_transactions"),
+            ("lib-integration-tests", "computation_postgres_recovery"),
+            ("lib-integration-tests", "computation_garnet_recovery"),
         ] {
             assert!(
                 keys.contains(&(expected.0.to_string(), expected.1.to_string())),
@@ -1743,7 +1750,8 @@ mod tests {
             );
         }
 
-        assert!(!keys.iter().any(|(package, _)| package == "drasi-host-sdk"));
+        assert!(!keys.contains(&("drasi-host-sdk".into(), "native_mssql_components".into())));
+        assert!(!keys.contains(&("drasi-instance-host".into(), "processes".into())));
         assert!(!keys
             .iter()
             .any(|(package, test)| package.contains("storedproc") && test == "recovery_e2e"));

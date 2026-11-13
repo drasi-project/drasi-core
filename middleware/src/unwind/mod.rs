@@ -226,7 +226,7 @@ impl SourceMiddleware for Unwind {
                             Some(rel_label) => Some(Element::Relation {
                                 metadata: ElementMetadata {
                                     reference: ElementReference::new(
-                                        &new_metadata.reference.source_id,
+                                        &new_metadata.reference.namespace,
                                         &format_relation_id(&new_metadata.reference.element_id),
                                     ),
                                     labels: Arc::new([Arc::from(rel_label.as_str())]),
@@ -330,7 +330,7 @@ impl SourceMiddleware for Unwind {
                         item_source_changes.push(SourceChange::Delete {
                             metadata: ElementMetadata {
                                 reference: ElementReference::new(
-                                    &metadata.reference.source_id,
+                                    &metadata.reference.namespace,
                                     &child_id,
                                 ),
                                 labels: Arc::new([Arc::from(mapping.label.clone())]),
@@ -342,7 +342,7 @@ impl SourceMiddleware for Unwind {
                             item_source_changes.push(SourceChange::Delete {
                                 metadata: ElementMetadata {
                                     reference: ElementReference::new(
-                                        &metadata.reference.source_id,
+                                        &metadata.reference.namespace,
                                         &format_relation_id(&child_id),
                                     ),
                                     labels: Arc::new([Arc::from(rel_label.as_str())]),

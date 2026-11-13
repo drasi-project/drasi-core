@@ -213,7 +213,7 @@ impl SourcePluginDescriptor for HereTrafficSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -254,7 +254,7 @@ impl SourcePluginDescriptor for HereTrafficSourceDescriptor {
         config.incident_match_distance_meters = incident_match_distance_meters;
         config.start_from = start_from.into();
 
-        let source = HereTrafficSourceBuilder::from_config(id, config)
+        let source = HereTrafficSourceBuilder::from_config(id.clone(), config)
             .with_auto_start(auto_start)
             .build()?;
 

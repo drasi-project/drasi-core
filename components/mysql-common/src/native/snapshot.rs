@@ -406,7 +406,7 @@ impl MySqlSnapshot {
             anyhow::ensure!(
                 !progress
                     .checkpoints
-                    .contains_key(&SourceProgressKey::Source(self.source.to_string())),
+                    .contains_key(&SourceProgressKey::Source(self.source.clone())),
                 "unfinished volatile MySQL initialization has committed source progress"
             );
             *self
@@ -466,7 +466,7 @@ impl MySqlSnapshot {
                 anyhow::ensure!(
                     !progress
                         .checkpoints
-                        .contains_key(&SourceProgressKey::Source(self.source.to_string())),
+                        .contains_key(&SourceProgressKey::Source(self.source.clone())),
                     "unfinished MySQL snapshot has committed source progress"
                 );
             }
@@ -475,7 +475,7 @@ impl MySqlSnapshot {
                 !progress.bootstrap_complete
                     && !progress
                         .checkpoints
-                        .contains_key(&SourceProgressKey::Source(self.source.to_string())),
+                        .contains_key(&SourceProgressKey::Source(self.source.clone())),
                 "MySQL snapshot ownership metadata is missing"
             );
         }
@@ -624,7 +624,7 @@ impl MySqlSnapshot {
         Ok(vec![BootstrapWatermark {
             producer: None,
             stream: self.stream.clone(),
-            source_id: Some(self.source.to_string()),
+            source_id: Some(self.source.clone()),
             sequence,
             position: Some(position),
         }])

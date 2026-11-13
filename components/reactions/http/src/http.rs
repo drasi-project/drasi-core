@@ -46,7 +46,7 @@ pub struct HttpReaction {
 
 impl HttpReaction {
     /// Create a builder for HttpReaction.
-    pub fn builder(id: impl Into<String>) -> HttpReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> HttpReactionBuilder {
         HttpReactionBuilder::new(id)
     }
 
@@ -57,8 +57,12 @@ impl HttpReaction {
     /// that fails fast on misconfiguration. Config passed here is still
     /// re-validated at [`start`](HttpReaction::start), which sets the reaction
     /// to `Error` rather than running when it is invalid.
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: HttpReactionConfig) -> Self {
-        let params = ReactionBaseParams::new(id.into(), queries);
+    pub fn new(
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
+        config: HttpReactionConfig,
+    ) -> Self {
+        let params = ReactionBaseParams::new(id.clone(), queries);
         Self {
             base: ReactionBase::new(params),
             config,
@@ -67,8 +71,8 @@ impl HttpReaction {
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: HttpReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -120,7 +124,7 @@ pub(crate) fn to_runtime_adaptive(cfg: &AdaptiveBatchConfig) -> AdaptiveBatcherC
 
 #[async_trait]
 impl Reaction for HttpReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -133,7 +137,7 @@ impl Reaction for HttpReaction {
         self.base.properties_or_serialize(&dto)
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -141,8 +145,8 @@ impl Reaction for HttpReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -163,7 +167,10 @@ impl Reaction for HttpReaction {
             self.base.id, self.config.base_url
         );
 
-        if let Err(e) = self.config.validate(&self.base.queries, None) {
+        if let Err(e) = self.config.validate(
+            &drasi_lib::reactions::common::input_aliases(&self.base.queries),
+            None,
+        ) {
             error!("[{}] Invalid HTTP reaction config: {e:#}", self.base.id);
             self.base
                 .set_status(
@@ -196,7 +203,7 @@ impl Reaction for HttpReaction {
         };
 
         let shutdown_rx = self.base.create_shutdown_channel().await;
-        let reaction_name = self.base.id.clone();
+        let reaction_id = self.base.id.clone();
         let checkpoint_state = CheckpointState::load(&self.base).await;
         let policy = self
             .base
@@ -209,7 +216,7 @@ impl Reaction for HttpReaction {
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
             if let Some(runtime_adaptive) = runtime_adaptive {
                 run_adaptive_loop(
-                    reaction_name,
+                    reaction_id,
                     base,
                     config,
                     runtime_adaptive,
@@ -222,7 +229,7 @@ impl Reaction for HttpReaction {
             } else {
                 let handlebars = build_handlebars();
                 run_standard_loop(
-                    reaction_name,
+                    reaction_id,
                     base,
                     config,
                     client,

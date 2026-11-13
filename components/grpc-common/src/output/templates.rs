@@ -24,7 +24,8 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use drasi_computation_contracts::exchange::ResultDiff;
+use drasi_computation_contracts::exchange::{QueryResult, ResultDiff};
+use drasi_computation_contracts::{ComponentId, ComponentName};
 use drasi_reaction_common::{OperationType, QueryConfig, TemplateRouting, TemplateSpec};
 use handlebars::{Handlebars, Helper, HelperResult, Output, RenderContext};
 use log::warn;
@@ -214,10 +215,25 @@ fn register_json_helper(handlebars: &mut Handlebars<'static>) {
 /// Query-level context assembled once per dequeued `QueryResult` and shared
 /// across every item rendered from it.
 pub struct QueryEmissionContext<'a> {
-    pub query_id: &'a str,
+    pub query_id: &'a ComponentId,
+    pub query_name: Option<&'a ComponentName>,
+    pub input_alias: Option<&'a str>,
     pub sequence: u64,
     pub timestamp: DateTime<Utc>,
     pub metadata: &'a HashMap<String, Value>,
+}
+
+impl<'a> From<&'a QueryResult> for QueryEmissionContext<'a> {
+    fn from(result: &'a QueryResult) -> Self {
+        Self {
+            query_id: &result.query_id,
+            query_name: result.query_name.as_ref(),
+            input_alias: result.input_alias.as_deref(),
+            sequence: result.sequence,
+            timestamp: result.timestamp,
+            metadata: &result.metadata,
+        }
+    }
 }
 
 struct ItemContext<'a> {
@@ -232,7 +248,8 @@ struct ItemContext<'a> {
 fn build_template_context(item: &ItemContext<'_>) -> Map<String, Value> {
     let mut ctx = Map::new();
     ctx.insert("query_id".into(), json!(item.emission.query_id));
-    ctx.insert("query_name".into(), json!(item.emission.query_id));
+    ctx.insert("query_name".into(), json!(item.emission.query_name));
+    ctx.insert("input_alias".into(), json!(item.emission.input_alias));
     ctx.insert("operation".into(), json!(op_as_str(item.operation)));
     ctx.insert(
         "timestamp".into(),
@@ -262,15 +279,15 @@ fn build_template_context(item: &ItemContext<'_>) -> Map<String, Value> {
 
 pub(crate) fn resolve_spec<'a>(
     cfg: &'a GrpcReactionConfig,
-    query_id: &str,
+    output_alias: &str,
     op: OperationType,
 ) -> Option<&'a TemplateSpec<GrpcTemplateExtension>> {
     let routes = cfg.routes();
-    if let Some(spec) = routes.get(query_id).and_then(|qc| spec_for_op(qc, op)) {
+    if let Some(spec) = routes.get(output_alias).and_then(|qc| spec_for_op(qc, op)) {
         return Some(spec);
     }
-    if let Some(segment) = query_id.rsplit('.').next() {
-        if segment != query_id {
+    if let Some(segment) = output_alias.rsplit('.').next() {
+        if segment != output_alias {
             if let Some(spec) = routes.get(segment).and_then(|qc| spec_for_op(qc, op)) {
                 return Some(spec);
             }
@@ -431,7 +448,12 @@ pub fn build_proto_item(
         after: raw_after.as_ref(),
         data: raw_data.as_ref(),
     };
-    let spec = resolve_spec(cfg, emission.query_id, op);
+    let spec = match drasi_reaction_common::input_alias(emission.input_alias, emission.query_name) {
+        Some(alias) => resolve_spec(cfg, alias, op),
+        None => cfg
+            .default_template()
+            .and_then(|config| spec_for_op(config, op)),
+    };
     let request_metadata = match (engine, spec) {
         (Some(engine), Some(spec)) => engine.render_extension_metadata(&item_context, spec),
         _ => HashMap::new(),
@@ -528,16 +550,19 @@ mod tests {
     }
 
     struct TestEmission {
-        query_id: String,
+        query_id: ComponentId,
+        query_name: ComponentName,
         timestamp: DateTime<Utc>,
         metadata: HashMap<String, Value>,
         sequence: u64,
     }
 
     impl TestEmission {
-        fn new(query_id: &str) -> Self {
+        fn new(query_name: &str) -> Self {
             Self {
-                query_id: query_id.to_string(),
+                query_id: ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                    .expect("fixture UUID"),
+                query_name: ComponentName::try_new(query_name).expect("fixture query name"),
                 timestamp: DateTime::parse_from_rfc3339("2026-06-16T00:00:00Z")
                     .unwrap()
                     .with_timezone(&Utc),
@@ -549,6 +574,8 @@ mod tests {
         fn ctx(&self) -> QueryEmissionContext<'_> {
             QueryEmissionContext {
                 query_id: &self.query_id,
+                query_name: Some(&self.query_name),
+                input_alias: None,
                 sequence: self.sequence,
                 timestamp: self.timestamp,
                 metadata: &self.metadata,
@@ -559,10 +586,10 @@ mod tests {
     fn item_for(
         cfg: &GrpcReactionConfig,
         engine: Option<&TemplateEngine>,
-        query_id: &str,
+        query_name: &str,
         diff: &ResultDiff,
     ) -> BuiltProtoItem {
-        let emission = TestEmission::new(query_id);
+        let emission = TestEmission::new(query_name);
         build_proto_item(cfg, engine, &emission.ctx(), diff).expect("non-noop diff yields an item")
     }
 
@@ -612,7 +639,7 @@ mod tests {
         assert_eq!(
             struct_field(&built.item.payload),
             Some(json!({
-                "queryId": "q",
+                "queryId": "00000000-0000-0000-0000-000000000071",
                 "sequenceId": 4242,
                 "timestamp": "2026-06-16T00:00:00+00:00",
                 "operation": "ADD",
@@ -667,7 +694,7 @@ mod tests {
         assert_eq!(
             struct_field(&built.item.payload),
             Some(json!({
-                "queryId": "q",
+                "queryId": "00000000-0000-0000-0000-000000000071",
                 "sequenceId": 4242,
                 "timestamp": "2026-06-16T00:00:00+00:00",
                 "operation": "ADD",
@@ -697,7 +724,8 @@ mod tests {
     #[test]
     fn extension_metadata_is_rendered_from_standard_context() {
         let mut metadata = HashMap::new();
-        metadata.insert("x-query".into(), "{{query_id}}".into());
+        metadata.insert("x-query".into(), "{{query_name}}".into());
+        metadata.insert("x-query-id".into(), "{{query_id}}".into());
         metadata.insert("x-op".into(), "{{operation}}".into());
         let cfg = config_with(
             Some(query_config(
@@ -712,6 +740,10 @@ mod tests {
         assert_eq!(
             built.request_metadata.get("x-query").map(String::as_str),
             Some("orders")
+        );
+        assert_eq!(
+            built.request_metadata.get("x-query-id").map(String::as_str),
+            Some("00000000-0000-0000-0000-000000000071")
         );
         assert_eq!(
             built.request_metadata.get("x-op").map(String::as_str),

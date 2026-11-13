@@ -40,13 +40,12 @@ mod tests {
 
     use crate::channels::*;
     use crate::computation::v1::{
-        query_reset_key, ComponentBatch, ComponentId, ComputationQueryLanguage,
-        ContinuousQueryDefinition, QueryExecutionSettings, StreamId, QUERY_CONFIGURATION,
+        query_reset_key, ComponentBatch, ComputationQueryLanguage, ContinuousQueryDefinition,
+        QueryExecutionSettings, StreamId, QUERY_CONFIGURATION,
     };
     use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::sources::base::{SourceBase, SourceBaseParams};
     use crate::sources::Source;
-    use crate::test_helpers::wait_for_component_status;
     use drasi_core::middleware::MiddlewareTypeRegistry;
 
     // ========================================================================
@@ -69,7 +68,17 @@ mod tests {
     }
 
     impl CheckpointTestSource {
-        fn new(id: &str) -> anyhow::Result<Self> {
+        fn new(
+            name: drasi_core_types::ComponentName,
+        ) -> anyhow::Result<crate::test_helpers::creation::SourceFixture<Self>> {
+            Ok(crate::test_helpers::creation::SourceFixture::new(
+                name,
+                true,
+                Self::from_id,
+            ))
+        }
+
+        fn from_id(id: drasi_core_types::ComponentId) -> anyhow::Result<Self> {
             let base = SourceBase::new(SourceBaseParams::new(id))?;
             Ok(Self {
                 base,
@@ -91,7 +100,7 @@ mod tests {
             position: Option<Bytes>,
         ) -> anyhow::Result<()> {
             let mut draft = SourceEventWrapper::new(
-                self.base.get_id().to_string(),
+                self.base.get_id().clone(),
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
                 self.base.next_sequence(),
@@ -114,9 +123,15 @@ mod tests {
         }
     }
 
+    impl crate::test_helpers::creation::SourceFixture<CheckpointTestSource> {
+        fn with_position_handle(self) -> Self {
+            self.map(CheckpointTestSource::with_position_handle)
+        }
+    }
+
     #[async_trait::async_trait]
     impl Source for CheckpointTestSource {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             self.base.get_id()
         }
 
@@ -169,7 +184,7 @@ mod tests {
             let receiver = self.base.create_streaming_receiver().await?;
             Ok(SubscriptionResponse {
                 query_id: settings.query_id,
-                source_id: self.id().to_string(),
+                source_id: self.id().clone(),
                 receiver,
                 bootstrap_receiver: None,
                 position_handle: if self.provide_position_handle {
@@ -185,8 +200,8 @@ mod tests {
             self
         }
 
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-            self.base.initialize(context).await;
+        async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+            self.base.bind_runtime_context(context).await;
         }
     }
 
@@ -194,9 +209,13 @@ mod tests {
     // Test infrastructure helpers
     // ========================================================================
 
-    fn create_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
+    fn create_query_config(
+        id: drasi_core_types::ComponentName,
+        sources: Vec<crate::ComponentName>,
+    ) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id,
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -205,7 +224,7 @@ mod tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id),
                     pipeline: vec![],
                     port: None,
                 })
@@ -247,17 +266,21 @@ mod tests {
     async fn add_source(
         source_manager: &crate::test_helpers::managers::SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl Source + 'static,
-    ) -> anyhow::Result<()> {
-        source_manager.add(source).await
+        source: crate::test_helpers::creation::SourceFixture<impl Source + 'static>,
+    ) -> anyhow::Result<crate::ComponentId> {
+        let name = source.name().clone();
+        source_manager.add(source).await?;
+        Ok(source_manager.get_source_by_name(&name).await?.id)
     }
 
     async fn add_query(
         manager: &crate::test_helpers::managers::QueryManager,
         _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
-    ) -> anyhow::Result<()> {
-        manager.declare(config).await
+    ) -> anyhow::Result<crate::ComponentId> {
+        let name = config.name.clone();
+        manager.declare(config).await?;
+        Ok(manager.0.component_by_name(&name)?.id().clone())
     }
 
     // ========================================================================
@@ -266,54 +289,68 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_wakeup_bypasses_source_checkpoint_dedup() {
-        use crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
         use std::time::Duration;
 
-        for source_id in ["ordinary-source", FUTURE_QUEUE_SOURCE_ID] {
+        for source_name in ["ordinary-source", "__future_queue__"] {
+            let source_name = crate::ComponentName::try_new(source_name).unwrap();
             let (query_manager, source_manager, graph) = create_test_env().await;
             let mut event_rx = graph.subscribe().unwrap();
-            let source = CheckpointTestSource::new(source_id)
+            let source = CheckpointTestSource::new(source_name.clone())
                 .unwrap()
                 .with_position_handle();
-            source.base.set_next_sequence(100_000);
+            let source = source.map(|source| {
+                source.base.set_next_sequence(100_000);
+                source
+            });
             add_source(&source_manager, &graph, source).await.unwrap();
             source_manager
-                .start_source(source_id.to_string())
+                .start_source_by_name(&source_name)
                 .await
                 .unwrap();
-            wait_for_component_status(
+            crate::test_helpers::wait_for_component_status_by_name(
                 &mut event_rx,
-                source_id,
+                &graph,
+                &source_name,
                 ComponentStatus::Running,
                 Duration::from_secs(5),
             )
             .await;
 
-            let query_id = "future-checkpoint-query";
-            let mut config = create_query_config(query_id, vec![source_id.to_string()]);
+            let query_name = crate::ComponentName::try_new("future-checkpoint-query").unwrap();
+            let mut config = create_query_config(query_name.clone(), vec![source_name.clone()]);
             config.query = "MATCH (n:Person) \
                 WHERE drasi.trueFor(n.name = 'ready', duration({ milliseconds: 100 })) \
                 RETURN n.name AS name"
                 .to_string();
             add_query(&query_manager, &graph, config).await.unwrap();
             query_manager
-                .start_query(query_id.to_string())
+                .start_query_by_name(&query_name)
                 .await
                 .unwrap();
-            wait_for_component_status(
+            crate::test_helpers::wait_for_component_status_by_name(
                 &mut event_rx,
-                query_id,
+                &graph,
+                &query_name,
                 ComponentStatus::Running,
                 Duration::from_secs(5),
             )
             .await;
 
-            let query = query_manager.get_query_instance(query_id).await.unwrap();
-            let mut subscription = query
-                .subscribe("future-observer".to_string())
+            let query = query_manager
+                .get_query_instance_by_name(&query_name)
                 .await
                 .unwrap();
-            let source_instance = source_manager.get_source_instance(source_id).await.unwrap();
+            let mut subscription = query
+                .subscribe(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036d")
+                        .expect("fixture UUID"),
+                )
+                .await
+                .unwrap();
+            let source_instance = source_manager
+                .get_source_instance_by_name(&source_name)
+                .await
+                .unwrap();
             let source = source_instance
                 .as_any()
                 .downcast_ref::<CheckpointTestSource>()
@@ -321,7 +358,10 @@ mod tests {
             let change = drasi_core::models::SourceChange::Insert {
                 element: drasi_core::models::Element::Node {
                     metadata: drasi_core::models::ElementMetadata {
-                        reference: drasi_core::models::ElementReference::new(source_id, "person"),
+                        reference: drasi_core::models::ElementReference::new(
+                            source_name.as_str(),
+                            "person",
+                        ),
                         labels: Arc::new([Arc::from("Person")]),
                         effective_from: chrono::Utc::now().timestamp_millis() as u64,
                     },
@@ -347,18 +387,15 @@ mod tests {
             })
             .await;
             let confirmed_sequence = source.get_position_handle_value();
-            query_manager
-                .stop_query(query_id.to_string())
-                .await
-                .unwrap();
+            query_manager.stop_query_by_name(&query_name).await.unwrap();
             source_manager
-                .stop_source(source_id.to_string())
+                .stop_source_by_name(&source_name)
                 .await
                 .unwrap();
 
             assert!(
                 wakeup.is_ok(),
-                "future wakeup suppressed for source {source_id}"
+                "future wakeup suppressed for source {source_name}"
             );
             assert_eq!(
                 confirmed_sequence, 100_001,
@@ -371,12 +408,12 @@ mod tests {
     /// to events dispatched through SourceBase, independent of source_position.
     #[tokio::test]
     async fn test_sequence_assignment_monotonic() {
-        let source = CheckpointTestSource::new("seq-src").unwrap();
+        let source = CheckpointTestSource::from_id(crate::config::ComponentId::generate()).unwrap();
         let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(crate::context::SourceRuntimeContext {
+            .bind_runtime_context(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
-                source_id: "seq-src".to_string(),
+                source_id: source.id().clone(),
                 update_tx: update_tx.into(),
                 state_store: None,
                 identity_provider: None,
@@ -388,9 +425,12 @@ mod tests {
 
         // Subscribe to get events
         let settings = crate::config::SourceSubscriptionSettings {
-            source_id: "seq-src".to_string(),
+            source_id: source.id().clone(),
             enable_bootstrap: false,
-            query_id: "q1".to_string(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
@@ -439,12 +479,15 @@ mod tests {
     /// full dispatch pipeline and are accessible on the receiving end.
     #[tokio::test]
     async fn test_source_position_preserved_through_dispatch() {
-        let source = CheckpointTestSource::new("pos-src").unwrap();
+        let source = CheckpointTestSource::from_id(crate::config::ComponentId::generate()).unwrap();
         let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(crate::context::SourceRuntimeContext {
+            .bind_runtime_context(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
-                source_id: "pos-src".to_string(),
+                source_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-0000000001fb",
+                )
+                .expect("fixture UUID"),
                 update_tx: update_tx.into(),
                 state_store: None,
                 identity_provider: None,
@@ -455,9 +498,15 @@ mod tests {
         source.start().await.unwrap();
 
         let settings = crate::config::SourceSubscriptionSettings {
-            source_id: "pos-src".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-0000000001fb",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap: false,
-            query_id: "q1".to_string(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
@@ -498,34 +547,49 @@ mod tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Create and register source
-        let source = CheckpointTestSource::new("e2e-source").unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("e2e-source").expect("fixture component name"),
+        )
+        .unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
 
         // Start source
         source_manager
-            .start_source("e2e-source".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("e2e-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "e2e-source",
+            &graph,
+            &crate::ComponentName::try_new("e2e-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         // Create query subscribed to this source
-        let config = create_query_config("e2e-query", vec!["e2e-source".to_string()]);
+        let config = create_query_config(
+            drasi_core_types::ComponentName::try_new("e2e-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("e2e-source")
+                .expect("fixture component name")],
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
 
         // Start the query
         query_manager
-            .start_query("e2e-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("e2e-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "e2e-query",
+            &graph,
+            &crate::ComponentName::try_new("e2e-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -536,7 +600,10 @@ mod tests {
 
         // Get source instance to inject events
         let source_instance = source_manager
-            .get_source_instance("e2e-source")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("e2e-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_source = source_instance
@@ -575,12 +642,16 @@ mod tests {
 
         // Stop the query
         query_manager
-            .stop_query("e2e-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("e2e-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "e2e-query",
+            &graph,
+            &crate::ComponentName::try_new("e2e-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
@@ -588,12 +659,16 @@ mod tests {
 
         // Restart the query — it should read the checkpoint and pass resume_from to source
         query_manager
-            .start_query("e2e-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("e2e-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "e2e-query",
+            &graph,
+            &crate::ComponentName::try_new("e2e-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -620,13 +695,22 @@ mod tests {
 
         // However, the checkpoint SHOULD still be stored in the checkpoint store.
         // Verify by reading it directly.
-        let query_instance = query_manager.get_query_instance("e2e-query").await.unwrap();
+        let query_instance = query_manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("e2e-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await;
         if let Some(store) = cp_store {
             let checkpoints = store.read_all_checkpoints().await.unwrap();
-            if let Some(cp) = checkpoints.get("e2e-source") {
+            if let Some(cp) = checkpoints.get(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001fc")
+                    .expect("fixture UUID"),
+            )) {
                 assert_eq!(
                     cp.source_position.as_ref(),
                     Some(&cosmos_position),
@@ -645,21 +729,45 @@ mod tests {
         // Postgres-like: 8 bytes (WAL LSN)
         let pg_pos = Bytes::copy_from_slice(&42u64.to_le_bytes());
         store
-            .stage_checkpoint("pg-source", 1, Some(&pg_pos))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000009a")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                Some(&pg_pos),
+            )
             .await
             .unwrap();
-        let cp = store.read_checkpoint("pg-source").await.unwrap().unwrap();
+        let cp = store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000009a")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 1);
         assert_eq!(cp.source_position.as_ref(), Some(&pg_pos));
 
         // MSSQL-like: 20 bytes
         let mssql_pos = Bytes::from(vec![0xAA; 20]);
         store
-            .stage_checkpoint("mssql-source", 2, Some(&mssql_pos))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000032a")
+                        .expect("fixture UUID"),
+                ),
+                2,
+                Some(&mssql_pos),
+            )
             .await
             .unwrap();
         let cp = store
-            .read_checkpoint("mssql-source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000032a")
+                    .expect("fixture UUID"),
+            ))
             .await
             .unwrap()
             .unwrap();
@@ -667,16 +775,34 @@ mod tests {
         assert_eq!(cp.source_position.as_ref(), Some(&mssql_pos));
         // Previous source's position should still be stored
         let all = store.read_all_checkpoints().await.unwrap();
-        assert_eq!(all["pg-source"].source_position.as_ref(), Some(&pg_pos));
+        assert_eq!(
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000009a")
+                    .expect("fixture UUID")
+            )]
+                .source_position
+                .as_ref(),
+            Some(&pg_pos)
+        );
 
         // MongoDB-like: 80 bytes
         let mongo_pos = Bytes::from(vec![0xBB; 80]);
         store
-            .stage_checkpoint("mongo-source", 3, Some(&mongo_pos))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036e")
+                        .expect("fixture UUID"),
+                ),
+                3,
+                Some(&mongo_pos),
+            )
             .await
             .unwrap();
         let cp = store
-            .read_checkpoint("mongo-source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036e")
+                    .expect("fixture UUID"),
+            ))
             .await
             .unwrap()
             .unwrap();
@@ -686,11 +812,21 @@ mod tests {
         // Cosmos DB-like: 120 bytes (resume token)
         let cosmos_pos = Bytes::from(vec![0xCC; 120]);
         store
-            .stage_checkpoint("cosmos-source", 4, Some(&cosmos_pos))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036f")
+                        .expect("fixture UUID"),
+                ),
+                4,
+                Some(&cosmos_pos),
+            )
             .await
             .unwrap();
         let cp = store
-            .read_checkpoint("cosmos-source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036f")
+                    .expect("fixture UUID"),
+            ))
             .await
             .unwrap()
             .unwrap();
@@ -699,11 +835,21 @@ mod tests {
 
         // Volatile source: None position
         store
-            .stage_checkpoint("volatile-source", 5, None)
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000370")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                None,
+            )
             .await
             .unwrap();
         let cp = store
-            .read_checkpoint("volatile-source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000370")
+                    .expect("fixture UUID"),
+            ))
             .await
             .unwrap()
             .unwrap();
@@ -712,7 +858,12 @@ mod tests {
         // Others still present
         let all = store.read_all_checkpoints().await.unwrap();
         assert_eq!(
-            all["cosmos-source"].source_position.as_ref(),
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000036f")
+                    .expect("fixture UUID")
+            )]
+                .source_position
+                .as_ref(),
             Some(&cosmos_pos)
         );
     }
@@ -725,17 +876,48 @@ mod tests {
         // Write a checkpoint with position
         let pos = Bytes::from_static(b"test-position");
         store
-            .stage_checkpoint("src-a", 42, Some(&pos))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e3")
+                        .expect("fixture UUID"),
+                ),
+                42,
+                Some(&pos),
+            )
             .await
             .unwrap();
 
-        let cp = store.read_checkpoint("src-a").await.unwrap().unwrap();
+        let cp = store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e3")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 42);
         assert_eq!(cp.source_position.as_ref(), Some(&pos));
 
         // Write checkpoint without position
-        store.stage_checkpoint("src-b", 99, None).await.unwrap();
-        let cp = store.read_checkpoint("src-b").await.unwrap().unwrap();
+        store
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e4")
+                        .expect("fixture UUID"),
+                ),
+                99,
+                None,
+            )
+            .await
+            .unwrap();
+        let cp = store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e4")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 99);
         assert_eq!(cp.source_position, None);
     }
@@ -748,29 +930,46 @@ mod tests {
 
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("fresh-source").unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("fresh-source")
+                .expect("fixture component name"),
+        )
+        .unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("fresh-source".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("fresh-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "fresh-source",
+            &graph,
+            &crate::ComponentName::try_new("fresh-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let config = create_query_config("fresh-query", vec!["fresh-source".to_string()]);
+        let config = create_query_config(
+            drasi_core_types::ComponentName::try_new("fresh-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("fresh-source")
+                .expect("fixture component name")],
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("fresh-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("fresh-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "fresh-query",
+            &graph,
+            &crate::ComponentName::try_new("fresh-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -778,7 +977,10 @@ mod tests {
 
         // Source should have received a subscribe call with resume_from: None
         let source_instance = source_manager
-            .get_source_instance("fresh-source")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("fresh-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_source = source_instance
@@ -804,29 +1006,46 @@ mod tests {
         let (query_manager, source_manager, graph) = create_test_env().await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("dedup-source").unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("dedup-source")
+                .expect("fixture component name"),
+        )
+        .unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("dedup-source".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("dedup-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "dedup-source",
+            &graph,
+            &crate::ComponentName::try_new("dedup-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let config = create_query_config("dedup-query", vec!["dedup-source".to_string()]);
+        let config = create_query_config(
+            drasi_core_types::ComponentName::try_new("dedup-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("dedup-source")
+                .expect("fixture component name")],
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("dedup-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("dedup-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "dedup-query",
+            &graph,
+            &crate::ComponentName::try_new("dedup-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -834,7 +1053,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let source_instance = source_manager
-            .get_source_instance("dedup-source")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("dedup-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_source = source_instance
@@ -877,24 +1099,32 @@ mod tests {
 
         // Stop and restart the query
         query_manager
-            .stop_query("dedup-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("dedup-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "dedup-query",
+            &graph,
+            &crate::ComponentName::try_new("dedup-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         query_manager
-            .start_query("dedup-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("dedup-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "dedup-query",
+            &graph,
+            &crate::ComponentName::try_new("dedup-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -931,7 +1161,10 @@ mod tests {
 
         // Verify the checkpoint advanced to sequence 4 (the new event was processed)
         let query_instance = query_manager
-            .get_query_instance("dedup-query")
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("dedup-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let drasi_query = crate::test_helpers::checkpoints::query(&query_instance);
@@ -956,12 +1189,15 @@ mod tests {
     /// Positions at or above MAX_SOURCE_POSITION_BYTES (65536) should be stripped.
     #[tokio::test]
     async fn test_source_position_size_validation() {
-        let source = CheckpointTestSource::new("size-src").unwrap();
+        let source = CheckpointTestSource::from_id(crate::config::ComponentId::generate()).unwrap();
         let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(crate::context::SourceRuntimeContext {
+            .bind_runtime_context(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
-                source_id: "size-src".to_string(),
+                source_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-000000000202",
+                )
+                .expect("fixture UUID"),
                 update_tx: update_tx.into(),
                 state_store: None,
                 identity_provider: None,
@@ -972,9 +1208,15 @@ mod tests {
         source.start().await.unwrap();
 
         let settings = crate::config::SourceSubscriptionSettings {
-            source_id: "size-src".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000202",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap: false,
-            query_id: "q1".to_string(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
@@ -1076,28 +1318,42 @@ mod tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Create two sources
-        let source_a = CheckpointTestSource::new("src-alpha").unwrap();
-        let source_b = CheckpointTestSource::new("src-beta").unwrap();
-        add_source(&source_manager, &graph, source_a).await.unwrap();
-        add_source(&source_manager, &graph, source_b).await.unwrap();
+        let source_a = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("src-alpha").expect("fixture component name"),
+        )
+        .unwrap();
+        let source_b = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("src-beta").expect("fixture component name"),
+        )
+        .unwrap();
+        let source_a_id = add_source(&source_manager, &graph, source_a).await.unwrap();
+        let source_b_id = add_source(&source_manager, &graph, source_b).await.unwrap();
         source_manager
-            .start_source("src-alpha".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("src-alpha")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "src-alpha",
+            &graph,
+            &crate::ComponentName::try_new("src-alpha").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
         source_manager
-            .start_source("src-beta".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("src-beta")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "src-beta",
+            &graph,
+            &crate::ComponentName::try_new("src-beta").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1105,17 +1361,27 @@ mod tests {
 
         // Create one query subscribed to both sources
         let config = create_query_config(
-            "multi-query",
-            vec!["src-alpha".to_string(), "src-beta".to_string()],
+            drasi_core_types::ComponentName::try_new("multi-query")
+                .expect("fixture component name"),
+            vec![
+                drasi_core_types::ComponentName::try_new("src-alpha")
+                    .expect("fixture component name"),
+                drasi_core_types::ComponentName::try_new("src-beta")
+                    .expect("fixture component name"),
+            ],
         );
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("multi-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("multi-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "multi-query",
+            &graph,
+            &crate::ComponentName::try_new("multi-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1124,7 +1390,10 @@ mod tests {
 
         // Inject events from source A with position "alpha-pos-final"
         let src_a = source_manager
-            .get_source_instance("src-alpha")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("src-alpha")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_src_a = src_a
@@ -1158,7 +1427,10 @@ mod tests {
 
         // Inject events from source B with position "beta-pos-final"
         let src_b = source_manager
-            .get_source_instance("src-beta")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("src-beta")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_src_b = src_b
@@ -1195,24 +1467,32 @@ mod tests {
 
         // Stop and restart the query
         query_manager
-            .stop_query("multi-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("multi-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "multi-query",
+            &graph,
+            &crate::ComponentName::try_new("multi-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         query_manager
-            .start_query("multi-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("multi-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "multi-query",
+            &graph,
+            &crate::ComponentName::try_new("multi-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1251,7 +1531,10 @@ mod tests {
 
         // But checkpoint isolation should still be verified at the store level
         let query_instance = query_manager
-            .get_query_instance("multi-query")
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("multi-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
@@ -1261,11 +1544,11 @@ mod tests {
             let checkpoints = store.read_all_checkpoints().await.unwrap();
             // Each source should have its own checkpoint
             assert!(
-                checkpoints.contains_key("src-alpha"),
+                checkpoints.contains_key(&drasi_core_types::CheckpointKey::Source(source_a_id)),
                 "Source A should have a checkpoint"
             );
             assert!(
-                checkpoints.contains_key("src-beta"),
+                checkpoints.contains_key(&drasi_core_types::CheckpointKey::Source(source_b_id)),
                 "Source B should have a checkpoint"
             );
         }
@@ -1283,31 +1566,47 @@ mod tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Create source with position handle enabled
-        let source = CheckpointTestSource::new("handle-source")
-            .unwrap()
-            .with_position_handle();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("handle-source")
+                .expect("fixture component name"),
+        )
+        .unwrap()
+        .with_position_handle();
         add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("handle-source".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("handle-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "handle-source",
+            &graph,
+            &crate::ComponentName::try_new("handle-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let config = create_query_config("handle-query", vec!["handle-source".to_string()]);
+        let config = create_query_config(
+            drasi_core_types::ComponentName::try_new("handle-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("handle-source")
+                .expect("fixture component name")],
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("handle-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("handle-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "handle-query",
+            &graph,
+            &crate::ComponentName::try_new("handle-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1315,7 +1614,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let source_instance = source_manager
-            .get_source_instance("handle-source")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("handle-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_source = source_instance
@@ -1465,7 +1767,7 @@ mod tests {
 
         async fn stage_checkpoint(
             &self,
-            source_id: &str,
+            source_id: &drasi_core_types::CheckpointKey,
             sequence: u64,
             source_position: Option<&Bytes>,
         ) -> Result<(), drasi_core::interface::IndexError> {
@@ -1476,7 +1778,7 @@ mod tests {
 
         async fn read_checkpoint(
             &self,
-            source_id: &str,
+            source_id: &drasi_core_types::CheckpointKey,
         ) -> Result<
             Option<drasi_core::interface::SourceCheckpoint>,
             drasi_core::interface::IndexError,
@@ -1487,7 +1789,10 @@ mod tests {
         async fn read_all_checkpoints(
             &self,
         ) -> Result<
-            std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>,
+            std::collections::HashMap<
+                drasi_core_types::CheckpointKey,
+                drasi_core::interface::SourceCheckpoint,
+            >,
             drasi_core::interface::IndexError,
         > {
             self.inner.read_all_checkpoints().await
@@ -1510,7 +1815,7 @@ mod tests {
 
         async fn stage_result_sequence(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
             sequence: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.inner.stage_result_sequence(query_id, sequence).await
@@ -1518,14 +1823,14 @@ mod tests {
 
         async fn read_result_sequence(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
         ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             self.inner.read_result_sequence(query_id).await
         }
 
         async fn write_output_generation(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
             generation: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.inner
@@ -1535,14 +1840,19 @@ mod tests {
 
         async fn read_output_generation(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
         ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             self.inner.read_output_generation(query_id).await
         }
     }
 
     pub(super) struct MockPersistentPlugin {
-        indexes: RwLock<std::collections::HashMap<String, Arc<RetainedIndexes>>>,
+        indexes: RwLock<
+            std::collections::HashMap<
+                (crate::StorageScope, crate::ComponentId),
+                Arc<RetainedIndexes>,
+            >,
+        >,
     }
 
     impl MockPersistentPlugin {
@@ -1557,12 +1867,22 @@ mod tests {
     impl crate::indexes::IndexBackendPlugin for MockPersistentPlugin {
         async fn create_indexes(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::ComponentId,
+        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
+        {
+            self.create_scoped_indexes(&crate::StorageScope::default(), query_id)
+                .await
+        }
+
+        async fn create_scoped_indexes(
+            &self,
+            scope: &crate::StorageScope,
+            query_id: &crate::ComponentId,
         ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
         {
             let mut indexes = self.indexes.write().await;
             Ok(indexes
-                .entry(query_id.to_owned())
+                .entry((scope.clone(), query_id.clone()))
                 .or_insert_with(|| {
                     Arc::new(RetainedIndexes::new(Arc::new(
                         PersistentInMemoryCheckpointStore::new(),
@@ -1602,10 +1922,14 @@ mod tests {
     }
 
     /// Create a query config that uses a persistent storage backend.
-    fn create_persistent_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
+    fn create_persistent_query_config(
+        id: drasi_core_types::ComponentName,
+        sources: Vec<crate::ComponentName>,
+    ) -> QueryConfig {
         use crate::indexes::config::StorageBackendRef;
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id,
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -1614,7 +1938,7 @@ mod tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id),
                     pipeline: vec![],
                     port: None,
                 })
@@ -1633,22 +1957,40 @@ mod tests {
         }
     }
 
-    async fn change_stored_configuration(store: &dyn CheckpointStore, query: &str, source: &str) {
-        let mut config = create_persistent_query_config(query, vec![source.to_owned()]);
+    async fn change_stored_configuration(
+        store: &dyn CheckpointStore,
+        query_id: drasi_core_types::ComponentId,
+        query: drasi_core_types::ComponentName,
+        source: drasi_core_types::ComponentId,
+    ) {
+        let mut config = create_persistent_query_config(query.clone(), vec![]);
+        config.inputs.push(QueryInputConfig {
+            nodes: vec![],
+            relations: vec![],
+            component: crate::config::ComponentReference::by_id(source),
+            pipeline: vec![],
+            port: None,
+        });
         config.query = "MATCH (n:Person) RETURN n.age".into();
         let definition = ContinuousQueryDefinition {
             graph_id: ComponentBatch::GRAPH_ID.into(),
-            id: ComponentId::try_new(query).unwrap(),
+            id: query_id,
             query: config.query.clone(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new(format!("{query}/out")).unwrap(),
             outbox_capacity: std::num::NonZeroUsize::new(config.outbox_capacity).unwrap(),
         };
+        let config = config.with_assigned_id(definition.id.clone());
         let bytes = definition
-            .configuration_bytes(&QueryExecutionSettings::from_legacy_config(&config))
+            .configuration_bytes(
+                &QueryExecutionSettings::from_configuration(&config)
+                    .expect("fixture execution settings"),
+            )
             .unwrap();
+        let configuration_key =
+            drasi_core_types::CheckpointKey::Metadata(QUERY_CONFIGURATION.into());
         store
-            .stage_checkpoint(QUERY_CONFIGURATION, 1, Some(&bytes))
+            .stage_checkpoint(&configuration_key, 1, Some(&bytes))
             .await
             .unwrap();
     }
@@ -1662,30 +2004,45 @@ mod tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Add and start source
-        let source = CheckpointTestSource::new("hash-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("hash-src").expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("hash-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("hash-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "hash-src",
+            &graph,
+            &crate::ComponentName::try_new("hash-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         // Create + start query with persistent backend
-        let config = create_persistent_query_config("hash-query", vec!["hash-src".to_string()]);
+        let config = create_persistent_query_config(
+            drasi_core_types::ComponentName::try_new("hash-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("hash-src")
+                .expect("fixture component name")],
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("hash-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("hash-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "hash-query",
+            &graph,
+            &crate::ComponentName::try_new("hash-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1694,7 +2051,10 @@ mod tests {
 
         // Inject an event
         let source_instance = source_manager
-            .get_source_instance("hash-src")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("hash-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_source = source_instance
@@ -1730,14 +2090,20 @@ mod tests {
 
         // Verify checkpoint was written
         let query_instance = query_manager
-            .get_query_instance("hash-query")
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("hash-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await
             .expect("Should have checkpoint store");
-        let cp = cp_store.read_checkpoint("hash-src").await.unwrap();
+        let cp = cp_store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id.clone()))
+            .await
+            .unwrap();
         assert!(
             cp.is_some(),
             "Checkpoint should exist after processing event"
@@ -1746,12 +2112,16 @@ mod tests {
 
         // Stop query
         query_manager
-            .stop_query("hash-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("hash-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "hash-query",
+            &graph,
+            &crate::ComponentName::try_new("hash-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
@@ -1759,12 +2129,16 @@ mod tests {
 
         // Restart with same config — checkpoints should be preserved
         query_manager
-            .start_query("hash-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("hash-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "hash-query",
+            &graph,
+            &crate::ComponentName::try_new("hash-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1784,7 +2158,10 @@ mod tests {
 
         // Verify checkpoint persisted across restart
         let query_instance = query_manager
-            .get_query_instance("hash-query")
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("hash-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
@@ -1792,7 +2169,7 @@ mod tests {
             .await
             .expect("Should have checkpoint store");
         let cp = cp_store
-            .read_checkpoint("hash-src")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id.clone()))
             .await
             .unwrap()
             .expect("Checkpoint should still exist");
@@ -1811,31 +2188,48 @@ mod tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Add and start source
-        let source = CheckpointTestSource::new("mismatch-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("mismatch-src")
+                .expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("mismatch-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "mismatch-src",
+            &graph,
+            &crate::ComponentName::try_new("mismatch-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         // Create + start query with persistent backend
-        let config =
-            create_persistent_query_config("mismatch-query", vec!["mismatch-src".to_string()]);
-        add_query(&query_manager, &graph, config).await.unwrap();
+        let mut config = create_persistent_query_config(
+            drasi_core_types::ComponentName::try_new("mismatch-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("mismatch-src")
+                .expect("fixture component name")],
+        );
+        config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
+        let query_id = add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("mismatch-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "mismatch-query",
+            &graph,
+            &crate::ComponentName::try_new("mismatch-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1844,7 +2238,10 @@ mod tests {
 
         // Inject an event so a checkpoint is written
         let source_instance = source_manager
-            .get_source_instance("mismatch-src")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_source = source_instance
@@ -1880,20 +2277,28 @@ mod tests {
 
         // Verify checkpoint was written
         let query_instance = query_manager
-            .get_query_instance("mismatch-query")
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await
             .expect("Should have checkpoint store");
-        let cp = cp_store.read_checkpoint("mismatch-src").await.unwrap();
+        let cp = cp_store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id.clone()))
+            .await
+            .unwrap();
         assert!(cp.is_some(), "Checkpoint should exist before config change");
 
+        let configuration_key =
+            drasi_core_types::CheckpointKey::Metadata(QUERY_CONFIGURATION.into());
         let configuration_before = crate::test_helpers::checkpoints::raw_store(&query_instance)
             .await
             .unwrap()
-            .read_checkpoint(QUERY_CONFIGURATION)
+            .read_checkpoint(&configuration_key)
             .await
             .unwrap()
             .and_then(|record| record.source_position);
@@ -1904,59 +2309,43 @@ mod tests {
 
         // Stop query
         query_manager
-            .stop_query("mismatch-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "mismatch-query",
+            &graph,
+            &crate::ComponentName::try_new("mismatch-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        // Change the query config by updating the query text
-        query_manager
-            .update_query(
-                "mismatch-query".to_string(),
-                QueryConfig {
-                    id: "mismatch-query".to_string(),
-                    query: "MATCH (n:Person) RETURN n.name, n.age".to_string(),
-                    query_language: QueryLanguage::Cypher,
-                    middleware: vec![],
-                    inputs: vec![QueryInputConfig {
-                        nodes: vec![],
-                        relations: vec![],
-                        component: "mismatch-src".to_string(),
-                        pipeline: vec![],
-                        port: None,
-                    }],
-                    auto_start: true,
-                    joins: None,
-                    enable_bootstrap: false,
-                    priority_queue_capacity: None,
-                    dispatch_buffer_capacity: None,
-                    dispatch_mode: None,
-                    storage_backend: Some(crate::indexes::config::StorageBackendRef::Named(
-                        "persistent".to_string(),
-                    )),
-                    recovery_policy: None,
-                    outbox_capacity: 1000,
-                    bootstrap_timeout_secs: 300,
-                    result: Default::default(),
-                },
-            )
-            .await
-            .unwrap();
+        // Simulate a retained configuration from a different deployment.
+        change_stored_configuration(
+            &*cp_store,
+            query_id,
+            drasi_core_types::ComponentName::try_new("mismatch-query")
+                .expect("fixture component name"),
+            source_id.clone(),
+        )
+        .await;
 
         // Restart with changed config — checkpoints should be cleared
         query_manager
-            .start_query("mismatch-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "mismatch-query",
+            &graph,
+            &crate::ComponentName::try_new("mismatch-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1975,7 +2364,10 @@ mod tests {
 
         // Verify checkpoints were cleared
         let query_instance = query_manager
-            .get_query_instance("mismatch-query")
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
@@ -1991,7 +2383,7 @@ mod tests {
         let configuration_after = crate::test_helpers::checkpoints::raw_store(&query_instance)
             .await
             .unwrap()
-            .read_checkpoint(QUERY_CONFIGURATION)
+            .read_checkpoint(&configuration_key)
             .await
             .unwrap()
             .and_then(|record| record.source_position);
@@ -1999,9 +2391,9 @@ mod tests {
             configuration_after.is_some(),
             "New configuration must be written"
         );
-        assert_ne!(
+        assert_eq!(
             configuration_before, configuration_after,
-            "Stored configuration must differ after the query changes"
+            "AutoReset must replace the stale retained configuration with the current definition"
         );
     }
 
@@ -2017,29 +2409,46 @@ mod tests {
         let (query_manager, source_manager, graph) = create_test_env().await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("recov-source").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("recov-source")
+                .expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("recov-source".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("recov-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "recov-source",
+            &graph,
+            &crate::ComponentName::try_new("recov-source").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let config = create_query_config("recov-query", vec!["recov-source".to_string()]);
+        let config = create_query_config(
+            drasi_core_types::ComponentName::try_new("recov-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("recov-source")
+                .expect("fixture component name")],
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("recov-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("recov-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "recov-query",
+            &graph,
+            &crate::ComponentName::try_new("recov-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -2047,7 +2456,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let source_instance = source_manager
-            .get_source_instance("recov-source")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("recov-source")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let test_source = source_instance
@@ -2090,13 +2502,16 @@ mod tests {
 
         // Verify checkpoint is at seq 3
         let query_instance = query_manager
-            .get_query_instance("recov-query")
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("recov-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let drasi_query = crate::test_helpers::checkpoints::query(&query_instance);
         let checkpoint_store = drasi_query.get_checkpoint_store().await.unwrap();
         let cp_before = checkpoint_store
-            .read_checkpoint("recov-source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id.clone()))
             .await
             .unwrap()
             .unwrap();
@@ -2104,24 +2519,32 @@ mod tests {
 
         // Stop and restart
         query_manager
-            .stop_query("recov-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("recov-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "recov-query",
+            &graph,
+            &crate::ComponentName::try_new("recov-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         query_manager
-            .start_query("recov-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("recov-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "recov-query",
+            &graph,
+            &crate::ComponentName::try_new("recov-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -2175,7 +2598,7 @@ mod tests {
 
         // Verify checkpoint was written for the new event.
         let cp_after = checkpoint_store
-            .read_checkpoint("recov-source")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id))
             .await
             .unwrap();
         assert!(
@@ -2242,7 +2665,7 @@ mod tests {
 
         async fn stage_checkpoint(
             &self,
-            source_id: &str,
+            source_id: &drasi_core_types::CheckpointKey,
             sequence: u64,
             source_position: Option<&Bytes>,
         ) -> Result<(), drasi_core::interface::IndexError> {
@@ -2253,12 +2676,12 @@ mod tests {
 
         async fn read_checkpoint(
             &self,
-            source_id: &str,
+            source_id: &drasi_core_types::CheckpointKey,
         ) -> Result<
             Option<drasi_core::interface::SourceCheckpoint>,
             drasi_core::interface::IndexError,
         > {
-            if source_id == QUERY_CONFIGURATION
+            if source_id.metadata_name() == Some(QUERY_CONFIGURATION)
                 && self
                     .fail_read_configuration
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -2273,7 +2696,10 @@ mod tests {
         async fn read_all_checkpoints(
             &self,
         ) -> Result<
-            std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>,
+            std::collections::HashMap<
+                drasi_core_types::CheckpointKey,
+                drasi_core::interface::SourceCheckpoint,
+            >,
             drasi_core::interface::IndexError,
         > {
             self.inner.read_all_checkpoints().await
@@ -2304,7 +2730,7 @@ mod tests {
 
         async fn stage_result_sequence(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
             sequence: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.check_result_sequence_write()?;
@@ -2313,7 +2739,7 @@ mod tests {
 
         async fn write_result_sequence(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
             sequence: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.check_result_sequence_write()?;
@@ -2322,14 +2748,14 @@ mod tests {
 
         async fn read_result_sequence(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
         ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             self.inner.read_result_sequence(query_id).await
         }
 
         async fn write_output_generation(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
             generation: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.inner
@@ -2339,7 +2765,7 @@ mod tests {
 
         async fn read_output_generation(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::OutputPartition,
         ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             self.inner.read_output_generation(query_id).await
         }
@@ -2488,7 +2914,12 @@ mod tests {
     }
 
     struct FailablePlugin {
-        indexes: RwLock<std::collections::HashMap<String, Arc<FailableIndexes>>>,
+        indexes: RwLock<
+            std::collections::HashMap<
+                (crate::StorageScope, crate::ComponentId),
+                Arc<FailableIndexes>,
+            >,
+        >,
     }
 
     impl FailablePlugin {
@@ -2498,9 +2929,24 @@ mod tests {
             }
         }
 
-        async fn get_indexes(&self, query_id: &str) -> Arc<FailableIndexes> {
+        async fn get_indexes(
+            &self,
+            query_id: &drasi_core_types::ComponentId,
+        ) -> Arc<FailableIndexes> {
+            self.scoped_indexes(
+                &crate::test_helpers::checkpoints::storage_scope(query_id),
+                query_id,
+            )
+            .await
+        }
+
+        async fn scoped_indexes(
+            &self,
+            scope: &crate::StorageScope,
+            query_id: &crate::ComponentId,
+        ) -> Arc<FailableIndexes> {
             let mut map = self.indexes.write().await;
-            map.entry(crate::test_helpers::checkpoints::storage_id(query_id))
+            map.entry((scope.clone(), query_id.clone()))
                 .or_insert_with(|| {
                     let checkpoint = Arc::new(FailableCheckpointStore::new());
                     let element = Arc::new(ClearFailingElementIndex::new());
@@ -2516,15 +2962,21 @@ mod tests {
                 .clone()
         }
 
-        async fn get_store(&self, query_id: &str) -> Arc<FailableCheckpointStore> {
+        async fn get_store(&self, query_id: &crate::ComponentId) -> Arc<FailableCheckpointStore> {
             self.get_indexes(query_id).await.checkpoint.clone()
         }
 
-        async fn get_element_index(&self, query_id: &str) -> Arc<ClearFailingElementIndex> {
+        async fn get_element_index(
+            &self,
+            query_id: &crate::ComponentId,
+        ) -> Arc<ClearFailingElementIndex> {
             self.get_indexes(query_id).await.element.clone()
         }
 
-        async fn reset_marker(&self, query_id: &str) -> serde_json::Value {
+        async fn reset_marker(
+            &self,
+            query_id: &drasi_core_types::ComponentId,
+        ) -> serde_json::Value {
             let rows = self
                 .get_indexes(query_id)
                 .await
@@ -2543,10 +2995,20 @@ mod tests {
     impl crate::indexes::IndexBackendPlugin for FailablePlugin {
         async fn create_indexes(
             &self,
-            query_id: &str,
+            query_id: &drasi_core_types::ComponentId,
         ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
         {
-            Ok(self.get_indexes(query_id).await.retained.create())
+            self.create_scoped_indexes(&crate::StorageScope::default(), query_id)
+                .await
+        }
+
+        async fn create_scoped_indexes(
+            &self,
+            scope: &crate::StorageScope,
+            query_id: &crate::ComponentId,
+        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
+        {
+            Ok(self.scoped_indexes(scope, query_id).await.retained.create())
         }
 
         fn is_volatile(&self) -> bool {
@@ -2590,72 +3052,107 @@ mod tests {
             create_test_env_with_failable_backend(plugin.clone()).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("fail-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("fail-src").expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("fail-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("fail-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "fail-src",
+            &graph,
+            &crate::ComponentName::try_new("fail-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let config = create_persistent_query_config("fail-query", vec!["fail-src".to_string()]);
-        add_query(&query_manager, &graph, config).await.unwrap();
+        let config = create_persistent_query_config(
+            drasi_core_types::ComponentName::try_new("fail-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("fail-src")
+                .expect("fixture component name")],
+        );
+        let query_id = add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("fail-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("fail-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "fail-query",
+            &graph,
+            &crate::ComponentName::try_new("fail-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
         query_manager
-            .stop_query("fail-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("fail-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "fail-query",
+            &graph,
+            &crate::ComponentName::try_new("fail-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let store = plugin.get_store("fail-query").await;
+        let store = plugin.get_store(&query_id).await;
+        let configuration_key =
+            drasi_core_types::CheckpointKey::Metadata(QUERY_CONFIGURATION.into());
         let configuration = store
-            .read_checkpoint(QUERY_CONFIGURATION)
+            .read_checkpoint(&configuration_key)
             .await
             .unwrap()
             .and_then(|record| record.source_position)
             .expect("first start persists the current configuration");
-        store.stage_checkpoint("fail-src", 42, None).await.unwrap();
+        store
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(source_id.clone()),
+                42,
+                None,
+            )
+            .await
+            .unwrap();
 
         store.set_fail_read_configuration(true);
         let error = query_manager
-            .start_query("fail-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("fail-query")
+                    .expect("fixture component name"),
+            )
             .await
             .expect_err("an unreadable configuration record must fail start");
+        let error_text = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("fail-query cannot read its configuration"),
-            "start must report the storage fault, got: {error:#}"
+            error_text.contains(query_id.as_str())
+                && error_text.contains("cannot read its configuration"),
+            "start must report the storage fault against the query ID, got: {error_text}"
         );
         store.set_fail_read_configuration(false);
 
         let preserved = |label: &'static str| {
             let store = store.clone();
             let configuration = configuration.clone();
+            let configuration_key = configuration_key.clone();
+            let source_id = source_id.clone();
             async move {
                 assert_eq!(
                     store
-                        .read_checkpoint("fail-src")
+                        .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id))
                         .await
                         .unwrap()
                         .map(|checkpoint| checkpoint.sequence),
@@ -2664,7 +3161,7 @@ mod tests {
                 );
                 assert_eq!(
                     store
-                        .read_checkpoint(QUERY_CONFIGURATION)
+                        .read_checkpoint(&configuration_key)
                         .await
                         .unwrap()
                         .and_then(|record| record.source_position),
@@ -2676,12 +3173,16 @@ mod tests {
         preserved("after the failed start").await;
 
         query_manager
-            .start_query("fail-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("fail-query")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("start is retryable once storage recovers");
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "fail-query",
+            &graph,
+            &crate::ComponentName::try_new("fail-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -2699,36 +3200,66 @@ mod tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Add and start source
-        let source = CheckpointTestSource::new("clear-fail-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("clear-fail-src")
+                .expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("clear-fail-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("clear-fail-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "clear-fail-src",
+            &graph,
+            &crate::ComponentName::try_new("clear-fail-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let store = plugin.get_store("clear-fail-query").await;
-        change_stored_configuration(&*store, "clear-fail-query", "clear-fail-src").await;
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000406")
+                .expect("fixture UUID");
+        let store = plugin.get_store(&query_id).await;
+        change_stored_configuration(
+            &*store,
+            query_id.clone(),
+            drasi_core_types::ComponentName::try_new("clear-fail-query")
+                .expect("fixture component name"),
+            source_id.clone(),
+        )
+        .await;
         store
-            .stage_checkpoint("clear-fail-src", 10, None)
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(source_id),
+                10,
+                None,
+            )
             .await
             .unwrap();
 
         // Make clear_checkpoints fail
         store.set_fail_clear_checkpoints(true);
 
-        let mut config =
-            create_persistent_query_config("clear-fail-query", vec!["clear-fail-src".to_string()]);
+        let mut config = create_persistent_query_config(
+            drasi_core_types::ComponentName::try_new("clear-fail-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("clear-fail-src")
+                .expect("fixture component name")],
+        );
+        config.id = Some(query_id.clone());
         config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         add_query(&query_manager, &graph, config).await.unwrap();
         let result = query_manager
-            .start_query_and_wait("clear-fail-query".to_string())
+            .start_query_and_wait_by_name(
+                &drasi_core_types::ComponentName::try_new("clear-fail-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -2736,7 +3267,7 @@ mod tests {
         );
 
         assert_eq!(
-            plugin.reset_marker("clear-fail-query").await["in_progress"],
+            plugin.reset_marker(&query_id).await["in_progress"],
             true,
             "incomplete rebuilds must remain fenced by the current reset marker"
         );
@@ -2751,34 +3282,64 @@ mod tests {
             create_test_env_with_failable_backend(plugin.clone()).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("wipe-fail-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("wipe-fail-src")
+                .expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("wipe-fail-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("wipe-fail-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "wipe-fail-src",
+            &graph,
+            &crate::ComponentName::try_new("wipe-fail-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let store = plugin.get_store("wipe-fail-query").await;
-        change_stored_configuration(&*store, "wipe-fail-query", "wipe-fail-src").await;
+        let query_id =
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000434")
+                .expect("fixture UUID");
+        let store = plugin.get_store(&query_id).await;
+        change_stored_configuration(
+            &*store,
+            query_id.clone(),
+            drasi_core_types::ComponentName::try_new("wipe-fail-query")
+                .expect("fixture component name"),
+            source_id.clone(),
+        )
+        .await;
         store
-            .stage_checkpoint("wipe-fail-src", 10, None)
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(source_id),
+                10,
+                None,
+            )
             .await
             .unwrap();
         store.set_fail_write_result_sequence(true);
 
-        let mut config =
-            create_persistent_query_config("wipe-fail-query", vec!["wipe-fail-src".to_string()]);
+        let mut config = create_persistent_query_config(
+            drasi_core_types::ComponentName::try_new("wipe-fail-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("wipe-fail-src")
+                .expect("fixture component name")],
+        );
+        config.id = Some(query_id);
         config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
         add_query(&query_manager, &graph, config).await.unwrap();
         let result = query_manager
-            .start_query_and_wait("wipe-fail-query".to_string())
+            .start_query_and_wait_by_name(
+                &drasi_core_types::ComponentName::try_new("wipe-fail-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -2800,37 +3361,53 @@ mod tests {
             create_test_env_with_failable_backend(plugin.clone()).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("stale-idx-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("stale-idx-src")
+                .expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("stale-idx-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("stale-idx-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "stale-idx-src",
+            &graph,
+            &crate::ComponentName::try_new("stale-idx-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let mut config =
-            create_persistent_query_config("stale-idx-query", vec!["stale-idx-src".to_string()]);
+        let mut config = create_persistent_query_config(
+            drasi_core_types::ComponentName::try_new("stale-idx-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("stale-idx-src")
+                .expect("fixture component name")],
+        );
         config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
-        add_query(&query_manager, &graph, config).await.unwrap();
+        let query_id = add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query_and_wait("stale-idx-query".to_string())
+            .start_query_and_wait_by_name(
+                &drasi_core_types::ComponentName::try_new("stale-idx-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "stale-idx-query",
+            &graph,
+            &crate::ComponentName::try_new("stale-idx-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let element_index = plugin.get_element_index("stale-idx-query").await;
+        let element_index = plugin.get_element_index(&query_id).await;
         let element = drasi_core::models::Element::Node {
             metadata: drasi_core::models::ElementMetadata {
                 reference: drasi_core::models::ElementReference::new("stale-idx-src", "leftover"),
@@ -2841,33 +3418,51 @@ mod tests {
         };
         element_index.set_element(&element, &vec![]).await.unwrap();
         query_manager
-            .stop_query("stale-idx-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("stale-idx-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "stale-idx-query",
+            &graph,
+            &crate::ComponentName::try_new("stale-idx-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let store = plugin.get_store("stale-idx-query").await;
-        change_stored_configuration(&*store, "stale-idx-query", "stale-idx-src").await;
+        let store = plugin.get_store(&query_id).await;
+        change_stored_configuration(
+            &*store,
+            query_id,
+            drasi_core_types::ComponentName::try_new("stale-idx-query")
+                .expect("fixture component name"),
+            source_id,
+        )
+        .await;
         store.set_fail_write_result_sequence(true);
         let failed = query_manager
-            .start_query_and_wait("stale-idx-query".to_string())
+            .start_query_and_wait_by_name(
+                &drasi_core_types::ComponentName::try_new("stale-idx-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(failed.is_err(), "wipe failure should abort start");
 
         store.set_fail_write_result_sequence(false);
         query_manager
-            .start_query_and_wait("stale-idx-query".to_string())
+            .start_query_and_wait_by_name(
+                &drasi_core_types::ComponentName::try_new("stale-idx-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "stale-idx-query",
+            &graph,
+            &crate::ComponentName::try_new("stale-idx-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -2891,39 +3486,53 @@ mod tests {
             create_test_env_with_failable_backend(plugin.clone()).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("mismatch-idx-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("mismatch-idx-src")
+                .expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("mismatch-idx-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-idx-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "mismatch-idx-src",
+            &graph,
+            &crate::ComponentName::try_new("mismatch-idx-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let mut config = create_persistent_query_config(
-            "mismatch-idx-query",
-            vec!["mismatch-idx-src".to_string()],
+            drasi_core_types::ComponentName::try_new("mismatch-idx-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("mismatch-idx-src")
+                .expect("fixture component name")],
         );
         config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
-        add_query(&query_manager, &graph, config).await.unwrap();
+        let query_id = add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query_and_wait("mismatch-idx-query".to_string())
+            .start_query_and_wait_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-idx-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "mismatch-idx-query",
+            &graph,
+            &crate::ComponentName::try_new("mismatch-idx-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let element_index = plugin.get_element_index("mismatch-idx-query").await;
+        let element_index = plugin.get_element_index(&query_id).await;
         let element = drasi_core::models::Element::Node {
             metadata: drasi_core::models::ElementMetadata {
                 reference: drasi_core::models::ElementReference::new(
@@ -2937,46 +3546,63 @@ mod tests {
         };
         element_index.set_element(&element, &vec![]).await.unwrap();
         query_manager
-            .stop_query("mismatch-idx-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-idx-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "mismatch-idx-query",
+            &graph,
+            &crate::ComponentName::try_new("mismatch-idx-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let store = plugin.get_store("mismatch-idx-query").await;
+        let store = plugin.get_store(&query_id).await;
+        let configuration_key =
+            drasi_core_types::CheckpointKey::Metadata(QUERY_CONFIGURATION.into());
         assert!(store
-            .read_checkpoint(QUERY_CONFIGURATION)
+            .read_checkpoint(&configuration_key)
             .await
             .unwrap()
             .is_some());
-        change_stored_configuration(&*store, "mismatch-idx-query", "mismatch-idx-src").await;
+        change_stored_configuration(
+            &*store,
+            query_id.clone(),
+            drasi_core_types::ComponentName::try_new("mismatch-idx-query")
+                .expect("fixture component name"),
+            source_id,
+        )
+        .await;
         element_index.set_fail_clear(true);
 
         let failed = query_manager
-            .start_query_and_wait("mismatch-idx-query".to_string())
+            .start_query_and_wait_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-idx-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             failed.is_err(),
             "index clear failure on mismatch should abort start"
         );
-        assert_eq!(
-            plugin.reset_marker("mismatch-idx-query").await["in_progress"],
-            true
-        );
+        assert_eq!(plugin.reset_marker(&query_id).await["in_progress"], true);
 
         element_index.set_fail_clear(false);
         query_manager
-            .start_query_and_wait("mismatch-idx-query".to_string())
+            .start_query_and_wait_by_name(
+                &drasi_core_types::ComponentName::try_new("mismatch-idx-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "mismatch-idx-query",
+            &graph,
+            &crate::ComponentName::try_new("mismatch-idx-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -3001,61 +3627,82 @@ mod tests {
             create_test_env_with_failable_backend(plugin.clone()).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("autoreset-gen-src").unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("autoreset-gen-src")
+                .expect("fixture component name"),
+        )
+        .unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("autoreset-gen-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("autoreset-gen-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "autoreset-gen-src",
+            &graph,
+            &crate::ComponentName::try_new("autoreset-gen-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let mut config = create_persistent_query_config(
-            "autoreset-gen-query",
-            vec!["autoreset-gen-src".to_string()],
+            drasi_core_types::ComponentName::try_new("autoreset-gen-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("autoreset-gen-src")
+                .expect("fixture component name")],
         );
         config.recovery_policy = Some(crate::RecoveryPolicy::AutoReset);
-        add_query(&query_manager, &graph, config).await.unwrap();
+        let query_id = add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("autoreset-gen-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("autoreset-gen-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "autoreset-gen-query",
+            &graph,
+            &crate::ComponentName::try_new("autoreset-gen-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
         query_manager
-            .stop_query("autoreset-gen-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("autoreset-gen-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "autoreset-gen-query",
+            &graph,
+            &crate::ComponentName::try_new("autoreset-gen-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let store = plugin.get_store("autoreset-gen-query").await;
+        let store = plugin.get_store(&query_id).await;
         store
-            .write_output_generation("autoreset-gen-query", 5)
+            .write_output_generation(
+                &drasi_core_types::OutputPartition::Component(query_id.clone()),
+                5,
+            )
             .await
             .unwrap();
         plugin
-            .get_indexes("autoreset-gen-query")
+            .get_indexes(&query_id)
             .await
             .retained
             .outbox
             .append(
-                &query_reset_key("autoreset-gen-query"),
+                &query_reset_key(&query_id),
                 1,
                 &serde_json::to_vec(&serde_json::json!({
                     "sequence": 0, "in_progress": true, "generation": 5,
@@ -3067,7 +3714,10 @@ mod tests {
         store.set_fail_clear_checkpoints(true);
 
         let failed = query_manager
-            .start_query("autoreset-gen-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("autoreset-gen-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             failed.is_err(),
@@ -3075,7 +3725,7 @@ mod tests {
         );
 
         let generation = store
-            .read_output_generation("autoreset-gen-query")
+            .read_output_generation(&drasi_core_types::OutputPartition::Component(query_id))
             .await
             .unwrap();
         assert_eq!(
@@ -3094,46 +3744,67 @@ mod tests {
             create_test_env_with_failable_backend(plugin.clone()).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("teardown-fail-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("teardown-fail-src")
+                .expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("teardown-fail-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("teardown-fail-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "teardown-fail-src",
+            &graph,
+            &crate::ComponentName::try_new("teardown-fail-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let config = create_persistent_query_config(
-            "teardown-fail-query",
-            vec!["teardown-fail-src".to_string()],
+            drasi_core_types::ComponentName::try_new("teardown-fail-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("teardown-fail-src")
+                .expect("fixture component name")],
         );
-        add_query(&query_manager, &graph, config).await.unwrap();
+        let query_id = add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("teardown-fail-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("teardown-fail-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "teardown-fail-query",
+            &graph,
+            &crate::ComponentName::try_new("teardown-fail-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let store = plugin.get_store("teardown-fail-query").await;
+        let store = plugin.get_store(&query_id).await;
         store
-            .stage_checkpoint("teardown-fail-src", 7, None)
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(source_id.clone()),
+                7,
+                None,
+            )
             .await
             .unwrap();
         store.set_fail_clear_checkpoints(true);
 
         let result = query_manager
-            .teardown_query("teardown-fail-query".to_string())
+            .teardown_query_by_name(
+                &drasi_core_types::ComponentName::try_new("teardown-fail-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -3146,11 +3817,14 @@ mod tests {
         );
 
         assert_eq!(
-            plugin.reset_marker("teardown-fail-query").await["in_progress"],
+            plugin.reset_marker(&query_id).await["in_progress"],
             true,
             "Removal must persist reset-in-progress before checkpoint clear"
         );
-        let cp = store.read_checkpoint("teardown-fail-src").await.unwrap();
+        let cp = store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id))
+            .await
+            .unwrap();
         assert!(
             cp.is_some(),
             "Source checkpoint must remain when checkpoint clear fails on removal"
@@ -3167,49 +3841,70 @@ mod tests {
             create_test_env_with_failable_backend(plugin.clone()).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = CheckpointTestSource::new("archive-fail-src").unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
+        let source = CheckpointTestSource::new(
+            drasi_core_types::ComponentName::try_new("archive-fail-src")
+                .expect("fixture component name"),
+        )
+        .unwrap();
+        let source_id = add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
-            .start_source("archive-fail-src".to_string())
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("archive-fail-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "archive-fail-src",
+            &graph,
+            &crate::ComponentName::try_new("archive-fail-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let config = create_persistent_query_config(
-            "archive-fail-query",
-            vec!["archive-fail-src".to_string()],
+            drasi_core_types::ComponentName::try_new("archive-fail-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("archive-fail-src")
+                .expect("fixture component name")],
         );
-        add_query(&query_manager, &graph, config).await.unwrap();
+        let query_id = add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("archive-fail-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("archive-fail-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "archive-fail-query",
+            &graph,
+            &crate::ComponentName::try_new("archive-fail-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let store = plugin.get_store("archive-fail-query").await;
+        let store = plugin.get_store(&query_id).await;
         store
-            .stage_checkpoint("archive-fail-src", 7, None)
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(source_id.clone()),
+                7,
+                None,
+            )
             .await
             .unwrap();
         plugin
-            .get_element_index("archive-fail-query")
+            .get_element_index(&query_id)
             .await
             .set_fail_clear_archive(true);
 
         let result = query_manager
-            .teardown_query("archive-fail-query".to_string())
+            .teardown_query_by_name(
+                &drasi_core_types::ComponentName::try_new("archive-fail-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -3217,11 +3912,14 @@ mod tests {
         );
 
         assert_eq!(
-            plugin.reset_marker("archive-fail-query").await["in_progress"],
+            plugin.reset_marker(&query_id).await["in_progress"],
             true,
             "archive-clear failure must leave reset-in-progress"
         );
-        let cp = store.read_checkpoint("archive-fail-src").await.unwrap();
+        let cp = store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(source_id))
+            .await
+            .unwrap();
         assert!(
             cp.is_some(),
             "source checkpoint must remain until removal cleanup finishes"
@@ -3245,7 +3943,7 @@ mod orchestration_tests {
     use crate::recovery::RecoveryPolicy;
     use crate::sources::base::{SourceBase, SourceBaseParams};
     use crate::sources::Source;
-    use crate::test_helpers::wait_for_component_status;
+    use crate::test_helpers::wait_for_component_status_by_name;
 
     // ========================================================================
     // Test Sources
@@ -3257,16 +3955,24 @@ mod orchestration_tests {
     }
 
     impl VolatileTestSource {
-        fn new(id: &str) -> anyhow::Result<Self> {
-            Ok(Self {
-                base: SourceBase::new(SourceBaseParams::new(id))?,
-            })
+        fn new(
+            name: drasi_core_types::ComponentName,
+        ) -> anyhow::Result<crate::test_helpers::creation::SourceFixture<Self>> {
+            Ok(crate::test_helpers::creation::SourceFixture::new(
+                name,
+                true,
+                |id| {
+                    Ok(Self {
+                        base: SourceBase::new(SourceBaseParams::new(id.clone()))?,
+                    })
+                },
+            ))
         }
     }
 
     #[async_trait::async_trait]
     impl Source for VolatileTestSource {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             self.base.get_id()
         }
         fn type_name(&self) -> &str {
@@ -3306,7 +4012,7 @@ mod orchestration_tests {
             let receiver = self.base.create_streaming_receiver().await?;
             Ok(SubscriptionResponse {
                 query_id: settings.query_id,
-                source_id: self.id().to_string(),
+                source_id: self.id().clone(),
                 receiver,
                 bootstrap_receiver: None,
                 position_handle: None,
@@ -3316,8 +4022,8 @@ mod orchestration_tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-            self.base.initialize(context).await;
+        async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+            self.base.bind_runtime_context(context).await;
         }
     }
 
@@ -3329,10 +4035,30 @@ mod orchestration_tests {
         subscribe_count: Arc<std::sync::atomic::AtomicU32>,
     }
 
-    impl DurableTestSource {
-        fn new(id: &str) -> anyhow::Result<Self> {
+    struct DurableSourceFixture {
+        name: drasi_core_types::ComponentName,
+        remaining_failures: Arc<std::sync::atomic::AtomicU32>,
+        subscribe_count: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl From<DurableSourceFixture>
+        for crate::test_helpers::creation::SourceFixture<DurableTestSource>
+    {
+        fn from(fixture: DurableSourceFixture) -> Self {
+            Self::new(fixture.name, true, move |id| {
+                Ok(DurableTestSource {
+                    base: SourceBase::new(SourceBaseParams::new(id.clone()))?,
+                    remaining_failures: fixture.remaining_failures,
+                    subscribe_count: fixture.subscribe_count,
+                })
+            })
+        }
+    }
+
+    impl DurableSourceFixture {
+        fn new(name: &str) -> anyhow::Result<Self> {
             Ok(Self {
-                base: SourceBase::new(SourceBaseParams::new(id))?,
+                name: crate::config::ComponentName::try_new(name)?,
                 remaining_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 subscribe_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             })
@@ -3353,7 +4079,7 @@ mod orchestration_tests {
 
     #[async_trait::async_trait]
     impl Source for DurableTestSource {
-        fn id(&self) -> &str {
+        fn id(&self) -> &drasi_core_types::ComponentId {
             self.base.get_id()
         }
         fn type_name(&self) -> &str {
@@ -3400,7 +4126,7 @@ mod orchestration_tests {
                 .is_ok()
             {
                 return Err(crate::sources::SourceError::PositionUnavailable {
-                    source_id: self.id().to_string(),
+                    source_id: self.id().clone(),
                     requested: settings.resume_from.unwrap_or_default(),
                     earliest_available: None,
                 }
@@ -3410,7 +4136,7 @@ mod orchestration_tests {
             let receiver = self.base.create_streaming_receiver().await?;
             Ok(SubscriptionResponse {
                 query_id: settings.query_id,
-                source_id: self.id().to_string(),
+                source_id: self.id().clone(),
                 receiver,
                 bootstrap_receiver: None,
                 position_handle: None,
@@ -3420,10 +4146,10 @@ mod orchestration_tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-            self.base.initialize(context).await;
+        async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+            self.base.bind_runtime_context(context).await;
         }
-        async fn remove_position_handle(&self, query_id: &str) {
+        async fn remove_position_handle(&self, query_id: &drasi_core_types::ComponentId) {
             self.base.remove_position_handle(query_id).await;
         }
     }
@@ -3432,9 +4158,13 @@ mod orchestration_tests {
     // Helpers
     // ========================================================================
 
-    fn create_volatile_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
+    fn create_volatile_query_config(
+        id: drasi_core_types::ComponentName,
+        sources: Vec<String>,
+    ) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id,
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -3443,7 +4173,10 @@ mod orchestration_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(
+                        crate::config::ComponentName::try_new(source_id)
+                            .expect("fixture component name"),
+                    ),
                     pipeline: vec![],
                     port: None,
                 })
@@ -3463,13 +4196,14 @@ mod orchestration_tests {
     }
 
     fn create_persistent_query_config(
-        id: &str,
+        id: drasi_core_types::ComponentName,
         sources: Vec<String>,
         recovery_policy: Option<RecoveryPolicy>,
     ) -> QueryConfig {
         use crate::indexes::config::StorageBackendRef;
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id,
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -3478,7 +4212,10 @@ mod orchestration_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(
+                        crate::config::ComponentName::try_new(source_id)
+                            .expect("fixture component name"),
+                    ),
                     pipeline: vec![],
                     port: None,
                 })
@@ -3497,14 +4234,15 @@ mod orchestration_tests {
         }
     }
 
-    async fn add_source(
+    async fn add_source<S: Source + 'static>(
         source_manager: &crate::test_helpers::managers::SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl Source + 'static,
+        source: impl Into<crate::test_helpers::creation::SourceFixture<S>>,
     ) -> anyhow::Result<()> {
-        let source_id = source.id().to_string();
+        let source = source.into();
+        let name = source.name().to_owned();
         source_manager.add(source).await?;
-        source_manager.start_source(source_id).await
+        source_manager.start_source_by_name(&name).await
     }
 
     async fn add_query(
@@ -3555,34 +4293,50 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(None, None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = VolatileTestSource::new("vol-src").unwrap();
+        let source = VolatileTestSource::new(
+            drasi_core_types::ComponentName::try_new("vol-src").expect("fixture component name"),
+        )
+        .unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "vol-src",
+            &graph,
+            &crate::ComponentName::try_new("vol-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let config = create_volatile_query_config("vol-query", vec!["vol-src".to_string()]);
+        let config = create_volatile_query_config(
+            drasi_core_types::ComponentName::try_new("vol-query").expect("fixture component name"),
+            vec!["vol-src".to_string()],
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
 
-        let result = query_manager.start_query("vol-query".to_string()).await;
+        let result = query_manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("vol-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_ok(),
             "Volatile query + volatile source should succeed: {result:?}"
         );
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "vol-query",
+            &graph,
+            &crate::ComponentName::try_new("vol-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
         query_manager
-            .stop_query("vol-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("vol-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
     }
@@ -3594,35 +4348,49 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("dur-src").unwrap();
+        let source = DurableSourceFixture::new("dur-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        wait_for_component_status_by_name(
             &mut event_rx,
-            "dur-src",
+            &graph,
+            &drasi_core_types::ComponentName::try_new("dur-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let config =
-            create_persistent_query_config("persist-query", vec!["dur-src".to_string()], None);
+        let config = create_persistent_query_config(
+            drasi_core_types::ComponentName::try_new("persist-query")
+                .expect("fixture component name"),
+            vec!["dur-src".to_string()],
+            None,
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
 
-        let result = query_manager.start_query("persist-query".to_string()).await;
+        let result = query_manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("persist-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_ok(),
             "Persistent + durable should succeed: {result:?}"
         );
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "persist-query",
+            &graph,
+            &crate::ComponentName::try_new("persist-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
         query_manager
-            .stop_query("persist-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("persist-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
     }
@@ -3634,22 +4402,33 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = VolatileTestSource::new("vol-src").unwrap();
+        let source = VolatileTestSource::new(
+            drasi_core_types::ComponentName::try_new("vol-src").expect("fixture component name"),
+        )
+        .unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "vol-src",
+            &graph,
+            &crate::ComponentName::try_new("vol-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let config =
-            create_persistent_query_config("incompat-query", vec!["vol-src".to_string()], None);
+        let config = create_persistent_query_config(
+            drasi_core_types::ComponentName::try_new("incompat-query")
+                .expect("fixture component name"),
+            vec!["vol-src".to_string()],
+            None,
+        );
         add_query(&query_manager, &graph, config).await.unwrap();
 
         let result = query_manager
-            .start_query("incompat-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("incompat-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(result.is_err(), "Persistent + volatile should fail");
 
@@ -3659,9 +4438,10 @@ mod orchestration_tests {
             "Error should mention incompatible source: {err_msg}"
         );
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "incompat-query",
+            &graph,
+            &crate::ComponentName::try_new("incompat-query").expect("fixture component name"),
             ComponentStatus::Error,
             std::time::Duration::from_secs(5),
         )
@@ -3675,25 +4455,33 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("strict-src").unwrap();
+        let source = DurableSourceFixture::new("strict-src").unwrap();
         source.set_fail_count(u32::MAX);
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        wait_for_component_status_by_name(
             &mut event_rx,
-            "strict-src",
+            &graph,
+            &drasi_core_types::ComponentName::try_new("strict-src")
+                .expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let config = create_persistent_query_config(
-            "strict-query",
+            drasi_core_types::ComponentName::try_new("strict-query")
+                .expect("fixture component name"),
             vec!["strict-src".to_string()],
             Some(RecoveryPolicy::Strict),
         );
         add_query(&query_manager, &graph, config).await.unwrap();
 
-        let result = query_manager.start_query("strict-query".to_string()).await;
+        let result = query_manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("strict-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_err(), "Strict + PositionUnavailable should fail");
 
         let err_msg = format!("{:#}", result.unwrap_err());
@@ -3702,9 +4490,10 @@ mod orchestration_tests {
             "Error should mention PositionUnavailable or Strict: {err_msg}"
         );
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "strict-query",
+            &graph,
+            &crate::ComponentName::try_new("strict-query").expect("fixture component name"),
             ComponentStatus::Error,
             std::time::Duration::from_secs(5),
         )
@@ -3718,26 +4507,33 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("reset-src").unwrap();
+        let source = DurableSourceFixture::new("reset-src").unwrap();
         source.set_fail_count(1); // fail once, succeed on retry
         let sub_count = source.subscribe_count_handle();
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        wait_for_component_status_by_name(
             &mut event_rx,
-            "reset-src",
+            &graph,
+            &drasi_core_types::ComponentName::try_new("reset-src").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let config = create_persistent_query_config(
-            "reset-query",
+            drasi_core_types::ComponentName::try_new("reset-query")
+                .expect("fixture component name"),
             vec!["reset-src".to_string()],
             Some(RecoveryPolicy::AutoReset),
         );
         add_query(&query_manager, &graph, config).await.unwrap();
 
-        let result = query_manager.start_query("reset-query".to_string()).await;
+        let result = query_manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("reset-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_ok(),
             "AutoReset should retry and succeed: {result:?}"
@@ -3749,15 +4545,19 @@ mod orchestration_tests {
             "Source should be subscribed twice (first fail, then retry)"
         );
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "reset-query",
+            &graph,
+            &crate::ComponentName::try_new("reset-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
         query_manager
-            .stop_query("reset-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("reset-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
     }
@@ -3769,26 +4569,32 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("default-src").unwrap();
+        let source = DurableSourceFixture::new("default-src").unwrap();
         source.set_fail_count(u32::MAX);
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        wait_for_component_status_by_name(
             &mut event_rx,
-            "default-src",
+            &graph,
+            &drasi_core_types::ComponentName::try_new("default-src")
+                .expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let config = create_persistent_query_config(
-            "default-policy-query",
+            drasi_core_types::ComponentName::try_new("default-policy-query")
+                .expect("fixture component name"),
             vec!["default-src".to_string()],
             None,
         );
         add_query(&query_manager, &graph, config).await.unwrap();
 
         let result = query_manager
-            .start_query("default-policy-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("default-policy-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -3804,27 +4610,33 @@ mod orchestration_tests {
             create_test_env(Some(plugin), Some(RecoveryPolicy::AutoReset)).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("global-src").unwrap();
+        let source = DurableSourceFixture::new("global-src").unwrap();
         source.set_fail_count(1); // fail once, succeed on retry
         let sub_count = source.subscribe_count_handle();
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        wait_for_component_status_by_name(
             &mut event_rx,
-            "global-src",
+            &graph,
+            &drasi_core_types::ComponentName::try_new("global-src")
+                .expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let config = create_persistent_query_config(
-            "global-policy-query",
+            drasi_core_types::ComponentName::try_new("global-policy-query")
+                .expect("fixture component name"),
             vec!["global-src".to_string()],
             None, // No per-query → uses global AutoReset
         );
         add_query(&query_manager, &graph, config).await.unwrap();
 
         let result = query_manager
-            .start_query("global-policy-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("global-policy-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             result.is_ok(),
@@ -3832,15 +4644,19 @@ mod orchestration_tests {
         );
         assert_eq!(sub_count.load(std::sync::atomic::Ordering::Acquire), 2);
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "global-policy-query",
+            &graph,
+            &crate::ComponentName::try_new("global-policy-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
         query_manager
-            .stop_query("global-policy-query".to_string())
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("global-policy-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
     }
@@ -3854,26 +4670,32 @@ mod orchestration_tests {
             create_test_env(Some(plugin), Some(RecoveryPolicy::AutoReset)).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("override-src").unwrap();
+        let source = DurableSourceFixture::new("override-src").unwrap();
         source.set_fail_count(u32::MAX);
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        wait_for_component_status_by_name(
             &mut event_rx,
-            "override-src",
+            &graph,
+            &drasi_core_types::ComponentName::try_new("override-src")
+                .expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let config = create_persistent_query_config(
-            "override-query",
+            drasi_core_types::ComponentName::try_new("override-query")
+                .expect("fixture component name"),
             vec!["override-src".to_string()],
             Some(RecoveryPolicy::Strict),
         );
         add_query(&query_manager, &graph, config).await.unwrap();
 
         let result = query_manager
-            .start_query("override-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("override-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -3888,27 +4710,33 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("double-fail-src").unwrap();
+        let source = DurableSourceFixture::new("double-fail-src").unwrap();
         source.set_fail_count(u32::MAX);
         let sub_count = source.subscribe_count_handle();
         add_source(&source_manager, &graph, source).await.unwrap();
-        wait_for_component_status(
+        wait_for_component_status_by_name(
             &mut event_rx,
-            "double-fail-src",
+            &graph,
+            &drasi_core_types::ComponentName::try_new("double-fail-src")
+                .expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         let config = create_persistent_query_config(
-            "double-fail-query",
+            drasi_core_types::ComponentName::try_new("double-fail-query")
+                .expect("fixture component name"),
             vec!["double-fail-src".to_string()],
             Some(RecoveryPolicy::AutoReset),
         );
         add_query(&query_manager, &graph, config).await.unwrap();
 
         let result = query_manager
-            .start_query("double-fail-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("double-fail-query")
+                    .expect("fixture component name"),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -3918,9 +4746,10 @@ mod orchestration_tests {
         // Source should have been subscribed exactly twice
         assert_eq!(sub_count.load(std::sync::atomic::Ordering::Acquire), 2);
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "double-fail-query",
+            &graph,
+            &crate::ComponentName::try_new("double-fail-query").expect("fixture component name"),
             ComponentStatus::Error,
             std::time::Duration::from_secs(5),
         )

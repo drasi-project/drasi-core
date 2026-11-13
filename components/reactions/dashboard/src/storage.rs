@@ -16,6 +16,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use drasi_lib::ComponentId;
 use drasi_lib::StateStoreProvider;
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -134,14 +135,14 @@ impl DashboardConfig {
 /// State-store backed CRUD operations for dashboard configs.
 #[derive(Clone)]
 pub struct DashboardStorage {
-    reaction_id: String,
+    reaction_id: ComponentId,
     state_store: Arc<dyn StateStoreProvider>,
 }
 
 impl DashboardStorage {
-    pub fn new(reaction_id: impl Into<String>, state_store: Arc<dyn StateStoreProvider>) -> Self {
+    pub fn new(reaction_id: ComponentId, state_store: Arc<dyn StateStoreProvider>) -> Self {
         Self {
-            reaction_id: reaction_id.into(),
+            reaction_id,
             state_store,
         }
     }
@@ -158,7 +159,9 @@ impl DashboardStorage {
     pub async fn list_dashboards(&self) -> Result<Vec<DashboardConfig>> {
         let keys = self
             .state_store
-            .list_keys(&self.reaction_id)
+            .list_keys(&drasi_lib::StorePartition::component(
+                self.reaction_id.clone(),
+            ))
             .await
             .with_context(|| {
                 format!(
@@ -171,7 +174,10 @@ impl DashboardStorage {
         for key in keys.into_iter().filter(|key| Self::is_dashboard_key(key)) {
             let Some(bytes) = self
                 .state_store
-                .get(&self.reaction_id, &key)
+                .get(
+                    &drasi_lib::StorePartition::component(self.reaction_id.clone()),
+                    &key,
+                )
                 .await
                 .with_context(|| format!("failed reading dashboard key '{key}'"))?
             else {
@@ -195,7 +201,10 @@ impl DashboardStorage {
         let key = Self::key_for(dashboard_id);
         let maybe_bytes = self
             .state_store
-            .get(&self.reaction_id, &key)
+            .get(
+                &drasi_lib::StorePartition::component(self.reaction_id.clone()),
+                &key,
+            )
             .await
             .with_context(|| format!("failed reading dashboard '{dashboard_id}'"))?;
 
@@ -225,7 +234,11 @@ impl DashboardStorage {
             .with_context(|| format!("failed serializing dashboard '{}'", dashboard.id))?;
 
         self.state_store
-            .set(&self.reaction_id, &key, bytes)
+            .set(
+                &drasi_lib::StorePartition::component(self.reaction_id.clone()),
+                &key,
+                bytes,
+            )
             .await
             .with_context(|| format!("failed writing dashboard '{}'", dashboard.id))?;
 
@@ -236,7 +249,10 @@ impl DashboardStorage {
     pub async fn delete_dashboard(&self, dashboard_id: &str) -> Result<bool> {
         let key = Self::key_for(dashboard_id);
         self.state_store
-            .delete(&self.reaction_id, &key)
+            .delete(
+                &drasi_lib::StorePartition::component(self.reaction_id.clone()),
+                &key,
+            )
             .await
             .with_context(|| format!("failed deleting dashboard '{dashboard_id}'"))
     }
@@ -260,7 +276,11 @@ mod tests {
     #[tokio::test]
     async fn test_dashboard_storage_crud() {
         let state_store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
-        let storage = DashboardStorage::new("reaction-1", state_store);
+        let storage = DashboardStorage::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008a")
+                .expect("fixture UUID"),
+            state_store,
+        );
 
         let dashboard = DashboardConfig::new(
             "Sensors".to_string(),
@@ -311,10 +331,21 @@ mod tests {
     #[tokio::test]
     async fn test_list_filters_non_dashboard_keys() {
         let state_store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
-        let storage = DashboardStorage::new("reaction-2", Arc::clone(&state_store));
+        let storage = DashboardStorage::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008b")
+                .expect("fixture UUID"),
+            Arc::clone(&state_store),
+        );
 
         state_store
-            .set("reaction-2", "not-a-dashboard", vec![1, 2, 3])
+            .set(
+                &drasi_core::interface::StorePartition::component(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008b")
+                        .expect("fixture UUID"),
+                ),
+                "not-a-dashboard",
+                vec![1, 2, 3],
+            )
             .await
             .expect("seed should succeed");
 
@@ -336,10 +367,21 @@ mod tests {
     #[tokio::test]
     async fn test_list_skips_corrupted_dashboard_entries() {
         let state_store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
-        let storage = DashboardStorage::new("reaction-3", Arc::clone(&state_store));
+        let storage = DashboardStorage::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008c")
+                .expect("fixture UUID"),
+            Arc::clone(&state_store),
+        );
 
         state_store
-            .set("reaction-3", "dashboard:corrupted", b"not-json".to_vec())
+            .set(
+                &drasi_core::interface::StorePartition::component(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000008c")
+                        .expect("fixture UUID"),
+                ),
+                "dashboard:corrupted",
+                b"not-json".to_vec(),
+            )
             .await
             .expect("seed corrupted entry should succeed");
 

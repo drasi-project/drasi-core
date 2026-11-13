@@ -63,7 +63,7 @@ impl Default for SqliteSourceConfig {
 
 /// Builder for [`SqliteSource`].
 pub struct SqliteSourceBuilder {
-    pub(crate) id: String,
+    pub(crate) id: drasi_lib::ComponentId,
     path: Option<String>,
     tables: Option<Vec<String>>,
     table_keys: Vec<TableKeyConfig>,
@@ -77,9 +77,9 @@ pub struct SqliteSourceBuilder {
 
 impl SqliteSourceBuilder {
     /// Create a new builder with defaults.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             path: None,
             tables: None,
             table_keys: Vec::new(),
@@ -196,22 +196,25 @@ mod tests {
 
     #[test]
     fn builder_applies_rest_and_dispatch_configuration() {
-        let source = SqliteSource::builder("test-source")
-            .with_path("/tmp/test.db")
-            .with_tables(vec!["sensors".to_string()])
-            .with_table_keys(vec![TableKeyConfig {
-                table: "sensors".to_string(),
-                key_columns: vec!["id".to_string()],
-            }])
-            .with_rest_api(RestApiConfig {
-                host: "127.0.0.1".to_string(), // DevSkim: ignore DS137138
-                port: 9001,
-            })
-            .with_dispatch_mode(DispatchMode::Channel)
-            .with_dispatch_buffer_capacity(42)
-            .auto_start(false)
-            .build()
-            .expect("failed to build sqlite source");
+        let source = SqliteSource::builder(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .with_path("/tmp/test.db")
+        .with_tables(vec!["sensors".to_string()])
+        .with_table_keys(vec![TableKeyConfig {
+            table: "sensors".to_string(),
+            key_columns: vec!["id".to_string()],
+        }])
+        .with_rest_api(RestApiConfig {
+            host: "127.0.0.1".to_string(), // DevSkim: ignore DS137138
+            port: 9001,
+        })
+        .with_dispatch_mode(DispatchMode::Channel)
+        .with_dispatch_buffer_capacity(42)
+        .auto_start(false)
+        .build()
+        .expect("failed to build sqlite source");
 
         let properties = source.properties();
         assert_eq!(

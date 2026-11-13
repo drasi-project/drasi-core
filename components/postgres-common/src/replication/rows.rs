@@ -200,7 +200,7 @@ pub fn row_position(
 ) -> Result<Option<RowPosition>> {
     let Some(checkpoint) = snapshot
         .checkpoints
-        .get(&SourceProgressKey::Source(source.to_string()))
+        .get(&SourceProgressKey::Source(source.clone()))
     else {
         return Ok(None);
     };

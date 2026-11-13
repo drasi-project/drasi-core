@@ -231,30 +231,38 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
         }
     });
 
-    let source = SuiDeepBookSource::builder(SOURCE_ID)
-        .with_transport(Transport::JsonRpc)
-        .with_rpc_endpoint(format!("http://{address}"))
-        .with_deepbook_package_id("0xdeepbook")
-        .with_poll_interval_ms(150)
-        .with_request_limit(25)
-        .with_start_from_beginning()
-        .build()
-        .context("Failed to build Sui DeepBook source")?;
+    let source = SuiDeepBookSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000330")
+            .expect("fixture UUID"),
+    )
+    .with_transport(Transport::JsonRpc)
+    .with_rpc_endpoint(format!("http://{address}"))
+    .with_deepbook_package_id("0xdeepbook")
+    .with_poll_interval_ms(150)
+    .with_request_limit(25)
+    .with_start_from_beginning()
+    .build()
+    .context("Failed to build Sui DeepBook source")?;
 
-    let query = Query::cypher(QUERY_ID)
+    let query = Query::cypher(drasi_core::ComponentName::try_new("deepbook-query").expect("fixture component name"))
         .query(
             r#"
             MATCH (e:DeepBookEvent)
             RETURN e.entity_id AS entity_id, e.change_type AS change_type, e.event_type AS event_type
         "#,
         )
-        .from_input(SOURCE_ID)
+        .from_input_by_name(drasi_core::ComponentName::try_new("deepbook-source").expect("fixture component name"))
         .auto_start(true)
-        .build();
+        .build().expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReaction::builder("app-reaction")
-        .with_query(QUERY_ID)
-        .build();
+    let (reaction, handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000001")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("deepbook-query").expect("fixture component name"),
+    )
+    .build();
 
     let drasi = DrasiLib::builder()
         .with_query_factory(
@@ -270,9 +278,15 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
                 .clone(),
         )
         .with_id("sui-deepbook-integration")
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("deepbook-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("app-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .context("Failed to build DrasiLib")?;
@@ -340,18 +354,23 @@ async fn test_grpc_transport_receives_events() -> Result<()> {
         .try_init()
         .ok();
 
-    let source = SuiDeepBookSource::builder(SOURCE_ID)
-        .with_transport(Transport::Grpc)
-        .with_start_from_now()
-        .with_enable_pool_nodes(true)
-        .with_enable_trader_nodes(true)
-        .with_enable_order_nodes(false)
-        .build()
-        .context("Failed to build gRPC source")?;
+    let source = SuiDeepBookSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000330")
+            .expect("fixture UUID"),
+    )
+    .with_transport(Transport::Grpc)
+    .with_start_from_now()
+    .with_enable_pool_nodes(true)
+    .with_enable_trader_nodes(true)
+    .with_enable_order_nodes(false)
+    .build()
+    .context("Failed to build gRPC source")?;
 
-    let query = Query::cypher(QUERY_ID)
-        .query(
-            r#"
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("deepbook-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (e:DeepBookEvent)
             RETURN
               e.entity_id    AS entity_id,
@@ -359,14 +378,22 @@ async fn test_grpc_transport_receives_events() -> Result<()> {
               e.sender       AS sender,
               e.timestamp_ms AS timestamp_ms
             "#,
-        )
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("deepbook-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReaction::builder("grpc-test-reaction")
-        .with_query(QUERY_ID)
-        .build();
+    let (reaction, handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("deepbook-query").expect("fixture component name"),
+    )
+    .build();
 
     let mut drasi = DrasiLib::builder()
         .with_query_factory(
@@ -382,9 +409,16 @@ async fn test_grpc_transport_receives_events() -> Result<()> {
                 .clone(),
         )
         .with_id("sui-deepbook-grpc-test")
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("deepbook-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("grpc-test-reaction")
+                .expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .context("Failed to build DrasiLib")?;

@@ -104,7 +104,7 @@ pub fn convert_http_to_source_change(
         } => {
             let metadata = ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(source_id),
+                    namespace: Arc::from(source_id),
                     element_id: Arc::from(id.as_str()),
                 },
                 labels: Arc::from(
@@ -138,7 +138,7 @@ fn create_element_from_http(
         } => {
             let metadata = ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(source_id),
+                    namespace: Arc::from(source_id),
                     element_id: Arc::from(id.as_str()),
                 },
                 labels: Arc::from(
@@ -169,7 +169,7 @@ fn create_element_from_http(
         } => {
             let metadata = ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(source_id),
+                    namespace: Arc::from(source_id),
                     element_id: Arc::from(id.as_str()),
                 },
                 labels: Arc::from(
@@ -190,11 +190,11 @@ fn create_element_from_http(
                 metadata,
                 properties: prop_map,
                 in_node: ElementReference {
-                    source_id: Arc::from(source_id),
+                    namespace: Arc::from(source_id),
                     element_id: Arc::from(from.as_str()),
                 },
                 out_node: ElementReference {
-                    source_id: Arc::from(source_id),
+                    namespace: Arc::from(source_id),
                     element_id: Arc::from(to.as_str()),
                 },
             })

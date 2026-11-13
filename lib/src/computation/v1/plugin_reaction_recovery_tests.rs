@@ -34,41 +34,78 @@ impl StateStoreProvider for DurableCapabilityStore {
     fn is_durable(&self) -> bool {
         true
     }
-    async fn get(&self, _: &str, _: &str) -> crate::StateStoreResult<Option<Vec<u8>>> {
+    async fn get(
+        &self,
+        _: &drasi_core_types::StorePartition,
+        _: &str,
+    ) -> crate::StateStoreResult<Option<Vec<u8>>> {
         Ok(None)
     }
-    async fn set(&self, _: &str, _: &str, _: Vec<u8>) -> crate::StateStoreResult<()> {
+    async fn set(
+        &self,
+        _: &drasi_core_types::StorePartition,
+        _: &str,
+        _: Vec<u8>,
+    ) -> crate::StateStoreResult<()> {
         Ok(())
     }
-    async fn delete(&self, _: &str, _: &str) -> crate::StateStoreResult<bool> {
+    async fn delete(
+        &self,
+        _: &drasi_core_types::StorePartition,
+        _: &str,
+    ) -> crate::StateStoreResult<bool> {
         Ok(false)
     }
-    async fn contains_key(&self, _: &str, _: &str) -> crate::StateStoreResult<bool> {
+    async fn contains_key(
+        &self,
+        _: &drasi_core_types::StorePartition,
+        _: &str,
+    ) -> crate::StateStoreResult<bool> {
         Ok(false)
     }
     async fn get_many(
         &self,
-        _: &str,
+        _: &drasi_core_types::StorePartition,
         _: &[&str],
     ) -> crate::StateStoreResult<HashMap<String, Vec<u8>>> {
         Ok(HashMap::new())
     }
-    async fn set_many(&self, _: &str, _: &[(&str, &[u8])]) -> crate::StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        _: &drasi_core_types::StorePartition,
+        _: &[(&str, &[u8])],
+    ) -> crate::StateStoreResult<()> {
         Ok(())
     }
-    async fn delete_many(&self, _: &str, _: &[&str]) -> crate::StateStoreResult<usize> {
+    async fn delete_many(
+        &self,
+        _: &drasi_core_types::StorePartition,
+        _: &[&str],
+    ) -> crate::StateStoreResult<usize> {
         Ok(0)
     }
-    async fn clear_store(&self, _: &str) -> crate::StateStoreResult<usize> {
+    async fn clear_store(
+        &self,
+        _: &drasi_core_types::StorePartition,
+    ) -> crate::StateStoreResult<usize> {
         Ok(0)
     }
-    async fn list_keys(&self, _: &str) -> crate::StateStoreResult<Vec<String>> {
+    async fn list_keys(
+        &self,
+        _: &drasi_core_types::StorePartition,
+    ) -> crate::StateStoreResult<Vec<String>> {
         Ok(Vec::new())
     }
-    async fn store_exists(&self, _: &str) -> crate::StateStoreResult<bool> {
+    async fn store_exists(
+        &self,
+        _: &drasi_core_types::StorePartition,
+    ) -> crate::StateStoreResult<bool> {
         Ok(false)
     }
-    async fn key_count(&self, _: &str) -> crate::StateStoreResult<usize> {
+    async fn key_count(
+        &self,
+        _: &drasi_core_types::StorePartition,
+    ) -> crate::StateStoreResult<usize> {
         Ok(0)
     }
 }
@@ -80,13 +117,13 @@ struct Gate {
 }
 
 struct TestReaction {
-    queries: Vec<String>,
+    queries: Vec<drasi_computation_contracts::ComponentReference>,
     durable: bool,
     snapshot: bool,
     policy: ReactionRecoveryPolicy,
     status: ComponentStatusHandle,
     delivered: Mutex<Vec<QueryResult>>,
-    bootstraps: Mutex<Vec<(String, bool, u64)>>,
+    bootstraps: Mutex<Vec<(ComponentId, bool, u64)>>,
     fail_bootstrap: AtomicBool,
     start_gate: Option<Arc<Gate>>,
     bootstrap_gate: Mutex<Option<Arc<Gate>>>,
@@ -97,11 +134,21 @@ struct TestReaction {
 impl TestReaction {
     fn new(queries: &[&str], snapshot: bool, policy: ReactionRecoveryPolicy) -> Self {
         Self {
-            queries: queries.iter().map(|id| id.to_string()).collect(),
+            queries: queries
+                .iter()
+                .map(|name| {
+                    drasi_computation_contracts::ComponentReference::by_name(
+                        ComponentName::try_new(*name).expect("fixture component name"),
+                    )
+                })
+                .collect(),
             durable: false,
             snapshot,
             policy,
-            status: ComponentStatusHandle::new("reaction"),
+            status: ComponentStatusHandle::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                    .expect("fixture UUID"),
+            ),
             delivered: Mutex::new(Vec::new()),
             bootstraps: Mutex::new(Vec::new()),
             fail_bootstrap: AtomicBool::new(false),
@@ -115,8 +162,13 @@ impl TestReaction {
 
 #[async_trait]
 impl Reaction for TestReaction {
-    fn id(&self) -> &str {
-        "reaction"
+    fn id(&self) -> &drasi_core_types::ComponentId {
+        static ID: std::sync::LazyLock<drasi_core_types::ComponentId> =
+            std::sync::LazyLock::new(|| {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                    .expect("fixture UUID")
+            });
+        &ID
     }
     fn type_name(&self) -> &str {
         "recovery-test"
@@ -124,7 +176,7 @@ impl Reaction for TestReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()
     }
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_computation_contracts::ComponentReference> {
         self.queries.clone()
     }
     fn is_durable(&self) -> bool {
@@ -139,7 +191,7 @@ impl Reaction for TestReaction {
     fn auto_start(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
@@ -196,22 +248,34 @@ struct Harness {
     store: Arc<MemoryStateStoreProvider>,
 }
 
+fn fixture_id(name: &str) -> ComponentId {
+    match name {
+        "q1" => crate::test_helpers::component_id(0x2b),
+        "q2" => crate::test_helpers::component_id(0x2c),
+        "missing" => crate::test_helpers::component_id(0x2e2),
+        other => panic!("missing explicit fixture component ID for {other}"),
+    }
+}
+
 impl Harness {
     async fn new(ids: &[&str], capacity: usize) -> Self {
         let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
         let mut queries = BTreeMap::new();
         for id in ids {
-            let mut configuration = crate::Query::cypher(*id)
-                .query("MATCH (n:Person) RETURN n.name AS name")
-                .with_outbox_capacity(capacity)
-                .enable_bootstrap(false)
-                .build();
+            let mut configuration =
+                crate::Query::cypher(ComponentName::try_new(*id).expect("fixture component name"))
+                    .query("MATCH (n:Person) RETURN n.name AS name")
+                    .with_outbox_capacity(capacity)
+                    .enable_bootstrap(false)
+                    .build()
+                    .unwrap()
+                    .with_assigned_id(fixture_id(id));
             configuration.dispatch_mode = Some(crate::DispatchMode::Broadcast);
             configuration.dispatch_buffer_capacity = Some(1);
             let mut query = ContinuousQueryTransformer::new(
                 ContinuousQueryDefinition {
                     graph_id: "reaction-recovery".into(),
-                    id: ComponentId::try_new(*id).unwrap(),
+                    id: fixture_id(id),
                     query: "MATCH (n:Person) RETURN n.name AS name".into(),
                     language: ComputationQueryLanguage::Cypher,
                     output_stream: StreamId::try_new(format!("{id}/out")).unwrap(),
@@ -225,6 +289,7 @@ impl Harness {
             .unwrap()
             .with_result_catalog(&catalog)
             .unwrap();
+            query.initialize().await.unwrap();
             query.start().await.unwrap();
             queries.insert(id.to_string(), query);
         }
@@ -244,6 +309,11 @@ impl Harness {
         reaction: Arc<TestReaction>,
         store: Option<Arc<dyn StateStoreProvider>>,
     ) -> Arc<ReactionPluginHost> {
+        let query_ids: Vec<_> = reaction
+            .queries
+            .iter()
+            .map(|reference| fixture_id(reference.as_name().expect("fixture query name").as_str()))
+            .collect();
         ReactionPluginHost::for_runtime(
             reaction.clone(),
             LegacyPluginServices {
@@ -256,13 +326,21 @@ impl Harness {
                 ..Default::default()
             },
             RuntimeReactionMetrics {
-                queries: reaction
-                    .queries
+                queries: query_ids
                     .iter()
                     .map(|id| (id.clone(), Arc::new(ReactionMetrics::new())))
                     .collect(),
                 lifecycle: Arc::new(LifecycleMetrics::new()),
             },
+            query_ids.clone(),
+            reaction
+                .queries
+                .iter()
+                .map(|reference| {
+                    let name = reference.as_name().expect("fixture query name");
+                    (fixture_id(name.as_str()), name.as_str().to_owned())
+                })
+                .collect(),
         )
         .unwrap()
     }
@@ -300,10 +378,18 @@ impl Harness {
             .envelope
     }
 
-    async fn checkpoint(&self, query: &str) -> Option<ReactionCheckpoint> {
-        crate::reactions::checkpoint::read_checkpoint(self.store.as_ref(), "reaction", query)
-            .await
-            .unwrap()
+    async fn checkpoint(
+        &self,
+        query: &drasi_core_types::ComponentId,
+    ) -> Option<ReactionCheckpoint> {
+        crate::reactions::checkpoint::read_checkpoint(
+            self.store.as_ref(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                .expect("fixture UUID"),
+            query,
+        )
+        .await
+        .unwrap()
     }
 
     async fn shutdown(mut self, host: &ReactionPluginHost) {
@@ -412,8 +498,19 @@ async fn fresh_start_no_snapshot_starts_at_seq_zero() {
         false,
         ReactionRecoveryPolicy::Strict,
     )));
+    host.initialize_component().await.unwrap();
     host.start_component().await.unwrap();
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 0);
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        0
+    );
     harness.shutdown(&host).await;
 }
 
@@ -428,10 +525,21 @@ async fn fresh_trigger_does_not_enqueue_retained_outbox() {
         ReactionRecoveryPolicy::Strict,
     ));
     let host = harness.host(reaction.clone());
+    host.initialize_component().await.unwrap();
     host.start_component().await.unwrap();
     assert!(reaction.delivered.lock().unwrap().is_empty());
     assert!(reaction.bootstraps.lock().unwrap().is_empty());
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 2);
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        2
+    );
     harness.shutdown(&host).await;
 }
 
@@ -444,6 +552,7 @@ async fn subscribe_head_is_not_raised_by_later_outbox() {
     reaction.start_gate = Some(gate.clone());
     let reaction = Arc::new(reaction);
     let host = harness.host(reaction.clone());
+    host.initialize_component().await.unwrap();
     let start = tokio::spawn({
         let host = host.clone();
         async move { host.start_component().await }
@@ -454,11 +563,28 @@ async fn subscribe_head_is_not_raised_by_later_outbox() {
     let later = harness.emit("q1", 2).await;
     gate.release.notify_one();
     start.await.unwrap().unwrap();
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 1);
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        1
+    );
     host.handle_envelope(&later).await.unwrap();
     assert_eq!(reaction.delivered.lock().unwrap()[0].sequence, 2);
     assert_eq!(
-        harness.checkpoint("q1").await.unwrap().sequence,
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
         1,
         "enqueue acceptance is not completed side effects"
     );
@@ -473,8 +599,15 @@ async fn fresh_trigger_does_not_persist_zero_when_query_unavailable() {
         false,
         ReactionRecoveryPolicy::Strict,
     )));
+    host.initialize_component().await.unwrap();
     assert!(host.start_component().await.is_err());
-    assert!(harness.checkpoint("missing").await.is_none());
+    assert!(harness
+        .checkpoint(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002e2")
+                .expect("fixture UUID")
+        )
+        .await
+        .is_none());
     harness.shutdown(&host).await;
 }
 
@@ -486,8 +619,20 @@ async fn fresh_trigger_broadcast_gap_during_gate_wait_recovers_after_subscriptio
     reaction.start_gate = Some(gate.clone());
     let reaction = Arc::new(reaction);
     let host = harness.host(reaction.clone());
-    let mut subscription = harness.catalog.subscribe_query("q1").await.unwrap();
-    let heads = BTreeMap::from([("q1".into(), subscription.head().unwrap())]);
+    host.initialize_component().await.unwrap();
+    let mut subscription = harness
+        .catalog
+        .subscribe_query(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
+    let heads = BTreeMap::from([(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        subscription.head().unwrap(),
+    )]);
     let start = tokio::spawn({
         let host = host.clone();
         async move { host.start_component_with_heads(heads).await }
@@ -505,7 +650,12 @@ async fn fresh_trigger_broadcast_gap_during_gate_wait_recovers_after_subscriptio
         subscription.receive().await.is_err(),
         "one-slot broadcast must report overflow"
     );
-    host.recover_gap("q1").await.unwrap();
+    host.recover_gap(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         reaction
             .delivered
@@ -516,7 +666,17 @@ async fn fresh_trigger_broadcast_gap_during_gate_wait_recovers_after_subscriptio
             .collect::<Vec<_>>(),
         vec![1, 2, 3, 4]
     );
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 0);
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        0
+    );
     harness.shutdown(&host).await;
 }
 
@@ -529,6 +689,7 @@ async fn outbox_catchup_replays_entries_to_reaction_without_acknowledging_side_e
         ReactionRecoveryPolicy::Strict,
     ));
     let host = harness.host(reaction.clone());
+    host.initialize_component().await.unwrap();
     host.start_component().await.unwrap();
     host.stop_component().await.unwrap();
     harness.emit("q1", 1).await;
@@ -544,7 +705,17 @@ async fn outbox_catchup_replays_entries_to_reaction_without_acknowledging_side_e
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 0);
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        0
+    );
     harness.shutdown(&host).await;
 }
 
@@ -555,10 +726,13 @@ async fn config_hash_mismatch_obeys_strict_and_auto_reset() {
         harness.emit("q1", 1).await;
         let reaction = Arc::new(TestReaction::new(&["q1"], true, policy));
         let host = harness.host(reaction.clone());
+        host.initialize_component().await.unwrap();
         crate::reactions::checkpoint::write_checkpoint(
             harness.store.as_ref(),
-            "reaction",
-            "q1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                .expect("fixture UUID"),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &ReactionCheckpoint {
                 sequence: 0,
                 config_hash: 999,
@@ -569,14 +743,38 @@ async fn config_hash_mismatch_obeys_strict_and_auto_reset() {
         let result = host.start_component().await;
         if policy == ReactionRecoveryPolicy::Strict {
             assert!(result.unwrap_err().to_string().contains("Strict"));
-            assert_eq!(harness.checkpoint("q1").await.unwrap().config_hash, 999);
+            assert_eq!(
+                harness
+                    .checkpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b"
+                        )
+                        .expect("fixture UUID")
+                    )
+                    .await
+                    .unwrap()
+                    .config_hash,
+                999
+            );
         } else {
             result.unwrap();
             assert_eq!(
                 reaction.bootstraps.lock().unwrap().as_slice(),
-                &[("q1".into(), true, 1)]
+                &[(fixture_id("q1"), true, 1)]
             );
-            assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 1);
+            assert_eq!(
+                harness
+                    .checkpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b"
+                        )
+                        .expect("fixture UUID")
+                    )
+                    .await
+                    .unwrap()
+                    .sequence,
+                1
+            );
         }
         harness.shutdown(&host).await;
     }
@@ -596,21 +794,51 @@ async fn broadcast_gap_obeys_strict_auto_reset_and_auto_skip_gap() {
             policy,
         ));
         let host = harness.host(reaction.clone());
+        host.initialize_component().await.unwrap();
         host.start_component().await.unwrap();
         harness.emit("q1", 1).await;
         harness.emit("q1", 2).await;
-        let result = host.recover_gap("q1").await;
+        let result = host
+            .recover_gap(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
         if policy == ReactionRecoveryPolicy::Strict {
             assert!(result.unwrap_err().to_string().contains("Strict"));
-            assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 0);
+            assert_eq!(
+                harness
+                    .checkpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b"
+                        )
+                        .expect("fixture UUID")
+                    )
+                    .await
+                    .unwrap()
+                    .sequence,
+                0
+            );
         } else {
             result.unwrap();
-            assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 2);
+            assert_eq!(
+                harness
+                    .checkpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000002b"
+                        )
+                        .expect("fixture UUID")
+                    )
+                    .await
+                    .unwrap()
+                    .sequence,
+                2
+            );
         }
         if policy == ReactionRecoveryPolicy::AutoReset {
             assert_eq!(
                 reaction.bootstraps.lock().unwrap().last(),
-                Some(&("q1".into(), true, 2))
+                Some(&(fixture_id("q1"), true, 2))
             );
         }
         assert!(reaction.delivered.lock().unwrap().is_empty());
@@ -628,6 +856,7 @@ async fn forwarder_filters_stale_events_after_gate_opens() {
         ReactionRecoveryPolicy::Strict,
     ));
     let host = harness.host(reaction.clone());
+    host.initialize_component().await.unwrap();
     host.start_component().await.unwrap();
     host.handle_envelope(&old).await.unwrap();
     let new = harness.emit("q1", 2).await;
@@ -647,20 +876,49 @@ async fn auto_reset_bootstrap_hook_failure_preserves_checkpoint_and_retries() {
         ReactionRecoveryPolicy::AutoReset,
     ));
     let host = harness.host(reaction.clone());
+    host.initialize_component().await.unwrap();
     host.start_component().await.unwrap();
     harness.emit("q1", 1).await;
     harness.emit("q1", 2).await;
     reaction.fail_bootstrap.store(true, Ordering::Release);
     assert!(host
-        .recover_gap("q1")
+        .recover_gap(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        )
         .await
         .unwrap_err()
         .to_string()
         .contains("bootstrap hook failed"));
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 0);
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        0
+    );
     reaction.fail_bootstrap.store(false, Ordering::Release);
-    host.recover_gap("q1").await.unwrap();
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 2);
+    host.recover_gap(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        2
+    );
     harness.shutdown(&host).await;
 }
 
@@ -673,6 +931,7 @@ async fn concurrent_gap_recovery_serialized_by_mutex() {
         ReactionRecoveryPolicy::AutoReset,
     ));
     let host = harness.host(reaction.clone());
+    host.initialize_component().await.unwrap();
     host.start_component().await.unwrap();
     for id in ["q1", "q2"] {
         harness.emit(id, 1).await;
@@ -682,14 +941,26 @@ async fn concurrent_gap_recovery_serialized_by_mutex() {
     *reaction.bootstrap_gate.lock().unwrap() = Some(gate.clone());
     let first = tokio::spawn({
         let host = host.clone();
-        async move { host.recover_gap("q1").await }
+        async move {
+            host.recover_gap(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await
+        }
     });
     tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
         .await
         .unwrap();
     let second = tokio::spawn({
         let host = host.clone();
-        async move { host.recover_gap("q2").await }
+        async move {
+            host.recover_gap(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+            )
+            .await
+        }
     });
     tokio::task::yield_now().await;
     assert_eq!(reaction.bootstrap_active.load(Ordering::Acquire), 1);
@@ -697,8 +968,28 @@ async fn concurrent_gap_recovery_serialized_by_mutex() {
     first.await.unwrap().unwrap();
     second.await.unwrap().unwrap();
     assert_eq!(reaction.bootstrap_max.load(Ordering::Acquire), 1);
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 2);
-    assert_eq!(harness.checkpoint("q2").await.unwrap().sequence, 2);
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        2
+    );
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        2
+    );
     harness.shutdown(&host).await;
 }
 
@@ -711,6 +1002,7 @@ async fn auto_reset_bootstrap_snapshot_failure_propagates_without_advancing_chec
         ReactionRecoveryPolicy::AutoReset,
     ));
     let host = harness.host(reaction);
+    host.initialize_component().await.unwrap();
     host.start_component().await.unwrap();
     harness.emit("q1", 1).await;
     harness.emit("q1", 2).await;
@@ -728,7 +1020,23 @@ async fn auto_reset_bootstrap_snapshot_failure_propagates_without_advancing_chec
         .unwrap()
         .rows
         .insert(wrong.identity().clone(), wrong);
-    assert!(host.recover_gap("q1").await.is_err());
-    assert_eq!(harness.checkpoint("q1").await.unwrap().sequence, 0);
+    assert!(host
+        .recover_gap(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        harness
+            .checkpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .sequence,
+        0
+    );
     harness.shutdown(&host).await;
 }

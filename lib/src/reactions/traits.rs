@@ -72,15 +72,16 @@ use crate::recovery::ReactionRecoveryPolicy;
 /// it does not supply a processing worker or claim completed destination effects.
 ///
 /// ```no_run
-/// use drasi_lib::Reaction;
+/// use drasi_lib::{ComponentId, Reaction};
+/// use drasi_lib::config::ComponentReference;
 /// use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
 /// use drasi_lib::context::ReactionRuntimeContext;
 /// # use anyhow::Result;
 /// # use async_trait::async_trait;
 /// # use drasi_lib::channels::{ComponentStatus, QueryResult};
 /// # pub struct MyReactionConfig {
-/// #     id: String,
-/// #     queries: Vec<String>,
+/// #     id: ComponentId,
+/// #     queries: Vec<ComponentReference>,
 /// #     queue_capacity: usize,
 /// # }
 ///
@@ -91,7 +92,7 @@ use crate::recovery::ReactionRecoveryPolicy;
 ///
 /// impl MyReaction {
 ///     pub fn new(config: MyReactionConfig) -> Self {
-///         let params = ReactionBaseParams::new(&config.id, config.queries.clone())
+///         let params = ReactionBaseParams::new(config.id, config.queries.clone())
 ///             .with_priority_queue_capacity(config.queue_capacity);
 ///
 ///         Self {
@@ -102,7 +103,7 @@ use crate::recovery::ReactionRecoveryPolicy;
 ///
 /// #[async_trait]
 /// impl Reaction for MyReaction {
-///     fn id(&self) -> &str {
+///     fn id(&self) -> &ComponentId {
 ///         &self.base.id
 ///     }
 ///
@@ -110,12 +111,12 @@ use crate::recovery::ReactionRecoveryPolicy;
 ///         "my-reaction"
 ///     }
 ///
-///     fn query_ids(&self) -> Vec<String> {
+///     fn query_inputs(&self) -> Vec<ComponentReference> {
 ///         self.base.queries.clone()
 ///     }
 ///
-///     async fn initialize(&self, context: ReactionRuntimeContext) {
-///         self.base.initialize(context).await;
+///     async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+///         self.base.bind_runtime_context(context).await;
 ///     }
 ///
 ///     async fn start(&self) -> Result<()> {
@@ -139,7 +140,7 @@ use crate::recovery::ReactionRecoveryPolicy;
 #[async_trait]
 pub trait Reaction: Send + Sync {
     /// Get the reaction's unique identifier
-    fn id(&self) -> &str;
+    fn id(&self) -> &crate::ComponentId;
 
     /// Get the reaction type name (e.g., "http", "log", "sse")
     fn type_name(&self) -> &str;
@@ -166,8 +167,12 @@ pub trait Reaction: Send + Sync {
     /// config file on disk; this method is not an external-facing API.
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value>;
 
-    /// Get the list of query IDs this reaction subscribes to
-    fn query_ids(&self) -> Vec<String>;
+    /// Get explicit authoring references for the queries this reaction subscribes to.
+    ///
+    /// DrasiLib resolves these references once when the reaction declaration is
+    /// admitted. Subsequent rename or name reuse cannot retarget the running
+    /// reaction.
+    fn query_inputs(&self) -> Vec<crate::config::ComponentReference>;
 
     /// Whether this reaction should auto-start when DrasiLib starts
     ///
@@ -177,7 +182,7 @@ pub trait Reaction: Send + Sync {
         true
     }
 
-    /// Initialize the reaction with runtime context.
+    /// Bind mandatory framework services before optional initialization.
     ///
     /// This method is called automatically by DrasiLib when the reaction is added
     /// via `add_reaction()`. Plugin developers do not need to call this directly.
@@ -187,8 +192,38 @@ pub trait Reaction: Send + Sync {
     /// - `event_tx`: Channel for reporting component lifecycle events
     /// - `state_store`: Optional persistent state storage
     ///
-    /// Implementation should delegate to `self.base.initialize(context).await`.
-    async fn initialize(&self, context: ReactionRuntimeContext);
+    /// Implementations using ReactionBase delegate to `bind_runtime_context`.
+    /// This required hook is separate from the optional no-op initializer.
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext);
+
+    /// Optional instance-lifetime initialization after mandatory context binding.
+    async fn initialize(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Final instance-lifetime release, including after failed initialization.
+    /// This does not delete persistent state or external artifacts.
+    async fn dispose(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Pause independently owned processing at a host-established data boundary.
+    async fn pause_processing(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Resume a temporary pause without starting a new activation.
+    async fn resume_processing(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Execute a registered factory's accepted retained-object update.
+    async fn apply_update(
+        &self,
+        _context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> Result<()> {
+        anyhow::bail!("this reaction does not support retained-object updates")
+    }
 
     /// Start the reaction
     ///
@@ -198,10 +233,14 @@ pub trait Reaction: Send + Sync {
     ///
     /// Query subscriptions are managed by the host after start() returns.
     /// Results are forwarded via `enqueue_query_result()`.
-    async fn start(&self) -> Result<()>;
+    async fn start(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Stop the reaction, cleaning up all subscriptions and tasks
-    async fn stop(&self) -> Result<()>;
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Get the current status of the reaction
     async fn status(&self) -> ComponentStatus;
@@ -221,12 +260,10 @@ pub trait Reaction: Send + Sync {
     /// Use this to release external resources that should not persist after
     /// the reaction is deleted (e.g., delete output topics, remove external subscriptions).
     ///
-    /// The default implementation is a no-op. Override only if your reaction
-    /// manages external state that needs explicit teardown.
-    ///
-    /// Errors are logged but do not prevent the reaction from being removed.
-    async fn deprovision(&self) -> Result<()> {
-        Ok(())
+    /// Support is explicit. Failure retains the cleanup owner and prevents
+    /// final release; ordinary disposal never invokes this destructive hook.
+    async fn delete_owned_resources(&self) -> Result<()> {
+        anyhow::bail!("this reaction does not support deleting owned resources")
     }
 
     /// Set the identity provider for this reaction.
@@ -299,7 +336,7 @@ pub trait Reaction: Send + Sync {
 /// This allows boxed trait objects to be used with methods expecting `impl Reaction`.
 #[async_trait]
 impl Reaction for Box<dyn Reaction + 'static> {
-    fn id(&self) -> &str {
+    fn id(&self) -> &crate::ComponentId {
         (**self).id()
     }
 
@@ -311,16 +348,39 @@ impl Reaction for Box<dyn Reaction + 'static> {
         (**self).properties()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        (**self).query_ids()
+    fn query_inputs(&self) -> Vec<crate::config::ComponentReference> {
+        (**self).query_inputs()
     }
 
     fn auto_start(&self) -> bool {
         (**self).auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        (**self).initialize(context).await
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        (**self).bind_runtime_context(context).await
+    }
+
+    async fn initialize(&self) -> Result<()> {
+        (**self).initialize().await
+    }
+
+    async fn dispose(&self) -> Result<()> {
+        (**self).dispose().await
+    }
+
+    async fn pause_processing(&self) -> Result<()> {
+        (**self).pause_processing().await
+    }
+
+    async fn resume_processing(&self) -> Result<()> {
+        (**self).resume_processing().await
+    }
+
+    async fn apply_update(
+        &self,
+        context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> Result<()> {
+        (**self).apply_update(context).await
     }
 
     async fn start(&self) -> Result<()> {
@@ -339,8 +399,8 @@ impl Reaction for Box<dyn Reaction + 'static> {
         (**self).enqueue_query_result(result).await
     }
 
-    async fn deprovision(&self) -> Result<()> {
-        (**self).deprovision().await
+    async fn delete_owned_resources(&self) -> Result<()> {
+        (**self).delete_owned_resources().await
     }
 
     async fn set_identity_provider(

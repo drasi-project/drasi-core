@@ -299,7 +299,7 @@ mod tests {
         };
         let retained = unsafe { RetainedTransaction::new(&raw) }.unwrap();
         let codec = wire::codec(&[GraphChangeCodec::schema()]).unwrap();
-        let step = ComponentId::try_new("step").unwrap();
+        let step = ComponentId::try_new("5f6b6bd3-1794-4ba5-8fc4-a65f2e12dfbd").unwrap();
         let context = NativeTransactionContext::new(&step, &retained, &codec);
         assert_eq!(context.step_id(), &step);
         assert_eq!(context.get("key").await.unwrap(), None);

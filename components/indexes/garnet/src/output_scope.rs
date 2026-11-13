@@ -12,62 +12,77 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_core::{
+    interface::{OutputPartition, StorageScope},
+    ComponentId,
+};
+
 pub(crate) struct OutputScope {
-    storage_scope: String,
-    query_id: String,
+    storage_key: String,
+    component_id: ComponentId,
 }
 
 impl OutputScope {
-    pub(crate) fn new(storage_scope: &str) -> Self {
+    pub(crate) fn new(scope: &StorageScope, component_id: &ComponentId) -> Self {
         Self {
-            storage_scope: storage_scope.to_owned(),
-            query_id: storage_scope.to_owned(),
+            storage_key: scope.component_key(component_id),
+            component_id: component_id.clone(),
         }
     }
 
-    pub(crate) fn bind_query_id(&mut self, query_id: &str) {
-        self.query_id = query_id.to_owned();
+    pub(crate) fn storage_key(&self) -> &str {
+        &self.storage_key
     }
 
-    pub(crate) fn key(&self, prefix: &str, query_id: &str) -> String {
-        let primary = format!("{prefix}:{{{}}}", self.storage_scope);
-        if query_id == self.query_id {
+    pub(crate) fn key(&self, prefix: &str, output: &OutputPartition) -> String {
+        let primary = format!("{prefix}:{{{}}}", self.storage_key);
+        if matches!(output, OutputPartition::Component(id) if id == &self.component_id) {
             primary
         } else {
-            let encoded: String = query_id.bytes().map(|byte| format!("{byte:02x}")).collect();
+            let encoded: String = output
+                .storage_key()
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
             format!("{primary}:query:{encoded}")
         }
+    }
+
+    pub(crate) fn component_key(&self, prefix: &str, component: &ComponentId) -> String {
+        self.key(prefix, &OutputPartition::Component(component.clone()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::OutputScope;
+    use drasi_core::{
+        interface::{OutputPartition, StorageScope},
+        ComponentId,
+    };
 
     #[test]
     fn primary_output_keys_preserve_the_storage_scope() {
-        let mut scope = OutputScope::new("storage-scope");
-        assert_eq!(
-            scope.key("outbox", "storage-scope"),
-            "outbox:{storage-scope}"
-        );
-        scope.bind_query_id("logical-query");
-        assert_eq!(
-            scope.key("outbox", "logical-query"),
-            "outbox:{storage-scope}"
-        );
-        assert_eq!(
-            scope.key("outbox_data", "logical-query"),
-            "outbox_data:{storage-scope}"
-        );
-        assert_eq!(scope.key("live", "logical-query"), "live:{storage-scope}");
+        let owner = ComponentId::generate();
+        let storage = StorageScope::new("storage-scope");
+        let scope = OutputScope::new(&storage, &owner);
+        let primary = OutputPartition::Component(owner.clone());
+        for prefix in ["outbox", "outbox_data", "live"] {
+            assert_eq!(
+                scope.key(prefix, &primary),
+                format!("{prefix}:{{{}}}", storage.component_key(&owner)),
+            );
+        }
     }
 
     #[test]
     fn auxiliary_ids_are_distinct_and_preserve_the_primary_hash_tag() {
-        let mut scope = OutputScope::new("storage-scope");
-        scope.bind_query_id("logical-query");
+        let owner = ComponentId::generate();
+        let storage = StorageScope::new("storage-scope");
+        let scope = OutputScope::new(&storage, &owner);
+        let primary = scope.key("outbox", &OutputPartition::Component(owner));
         let mut keys = std::collections::HashSet::new();
+        keys.insert(primary.clone());
         for id in [
             "logical-query",
             "storage-scope",
@@ -78,8 +93,8 @@ mod tests {
             "{other}",
             "☃",
         ] {
-            let key = scope.key("outbox", id);
-            assert!(key.starts_with("outbox:{storage-scope}"));
+            let key = scope.key("outbox", &OutputPartition::Journal(id.into()));
+            assert!(key.starts_with(&primary));
             assert_eq!(key.matches('{').count(), 1);
             assert_eq!(key.matches('}').count(), 1);
             assert!(keys.insert(key));
@@ -88,12 +103,14 @@ mod tests {
 
     #[test]
     fn identical_logical_ids_in_different_storage_scopes_are_isolated() {
-        let mut first = OutputScope::new("first");
-        let mut second = OutputScope::new("second");
-        first.bind_query_id("query");
-        second.bind_query_id("query");
-        for id in ["query", "auxiliary"] {
-            assert_ne!(first.key("outbox", id), second.key("outbox", id));
+        let owner = ComponentId::generate();
+        let first = OutputScope::new(&StorageScope::new("first"), &owner);
+        let second = OutputScope::new(&StorageScope::new("second"), &owner);
+        for output in [
+            OutputPartition::Component(owner),
+            OutputPartition::Journal("auxiliary".into()),
+        ] {
+            assert_ne!(first.key("outbox", &output), second.key("outbox", &output));
         }
     }
 }

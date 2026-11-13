@@ -56,27 +56,31 @@ async fn snapshot_then_live(
     let path = directory.path().join("source.db");
     rusqlite::Connection::open(&path)?.execute_batch(seed)?;
     let core = lib_integration_tests::query_builder()
+        .with_allow_external_component_ids(true)
         .with_id(format!("sqlite-file-{name}"))
         .build()
         .await?;
     let result = async {
-        let source_id = ComponentId::try_new("source")?;
+        let source_id = ComponentId::try_new("112d9eea-2f2c-5bdd-b4cb-39779bace319")?;
         let stream = StreamId::try_new("source/out")?;
         let config = settings(&path, keys);
         let source = SqliteSource::new(source_id.clone(), stream.clone(), config.clone())?;
         let input = source.handle();
         let output = Endpoint::new(source_id.clone(), PortId::try_new("out")?);
-        let added = core
-            .add_components(
-                ComponentBatch::builder()
-                    .source(Box::new(source))
-                    .bind_stream(output.clone(), stream.clone())
-                    .build()?,
-            )
-            .await?;
-        assert!(added.committed, "{added:?}");
+        core.add_components(
+            ComponentBatch::builder()
+                .source(
+                    drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                        .expect("fixture component name"),
+                    Box::new(source),
+                )
+                .bind_stream(output.clone(), stream.clone())
+                .build()?,
+        )
+        .await?;
         let mut pipeline = core.computation_pipeline()?.native_source(output)?;
         for query in ["primary", "observer"] {
+            let query_name = ComponentName::try_new(query)?;
             let bootstrap = Arc::new(SqliteBootstrapProvider::new(
                 source_id.clone(),
                 stream.clone(),
@@ -91,38 +95,45 @@ async fn snapshot_then_live(
                     shutdown_timeout_ms: millis(5000),
                 },
             )?);
-            pipeline = pipeline.query_bootstrap(query, bootstrap)?.query(
-                Query::cypher(query)
-                    .query("MATCH (n:items) RETURN n.id AS id,n.value AS value")
-                    .from_input("source")
-                    .enable_bootstrap(true)
-                    .build(),
-            );
+            let query_id = ComponentId::derive_owned(&source_id, &format!("query/{query}"))?;
+            let mut query_config = Query::cypher(query_name)
+                .query("MATCH (n:items) RETURN n.id AS id,n.value AS value")
+                .from_input_by_name(
+                    drasi_core::ComponentName::try_new("source").expect("fixture component name"),
+                )
+                .enable_bootstrap(true)
+                .build()?;
+            query_config.inputs[0].component =
+                drasi_lib::config::ComponentReference::by_id(source_id.clone());
+            pipeline = pipeline
+                .query_bootstrap(&query_id, bootstrap)?
+                .query(query_config.with_assigned_id(query_id));
         }
-        let added = core.add_components(pipeline.build()?).await?;
-        assert!(added.committed, "{added:?}");
+        core.add_components(pipeline.build()?).await?;
         core.start().await?;
         let mut subscriptions = Vec::new();
         for query in ["primary", "observer"] {
+            let query_name = ComponentName::try_new(query)?;
+            let query_id = core.component_by_name(&query_name)?.id().clone();
             tokio::time::timeout(
                 Duration::from_secs(5),
-                core.computation_component(query)?.wait_started(),
+                core.component_by_id(&query_id)?.wait_started(),
             )
             .await??;
-            let subscription = core.subscribe_query_results(query).await?;
+            let subscription = core.subscribe_query_results_by_name(&query_name).await?;
             assert_eq!(
                 subscription.snapshot.to_vec(),
                 initial,
                 "{name}/{query} bootstrap"
             );
-            subscriptions.push((query, subscription));
+            subscriptions.push((query_name, subscription));
         }
         for (sql, expected) in [(mutation, vec![updated]), ("DELETE FROM items", Vec::new())] {
             input.execute(sql).await?;
-            for (query, subscription) in &mut subscriptions {
+            for (query_name, subscription) in &mut subscriptions {
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
-                        let actual = core.get_query_results(query).await?;
+                        let actual = core.get_query_results_by_name(query_name).await?;
                         if actual == expected {
                             return Ok::<_, anyhow::Error>(());
                         }
@@ -134,15 +145,34 @@ async fn snapshot_then_live(
                     }
                 })
                 .await
-                .with_context(|| format!("{name}/{query} did not reach {expected:?}"))??;
+                .with_context(|| format!("{name}/{query_name} did not reach {expected:?}"))??;
             }
         }
-        core.remove_query("observer").await?;
+        let source = core.component_by_name(
+            &drasi_core::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+        )?;
+        let source_generation = source.observed()?.generation;
+        core.remove_query_by_name(
+            &drasi_core::ComponentName::try_new("observer").expect("fixture component name"),
+        )
+        .await?;
+        tokio::time::timeout(Duration::from_secs(5), source.wait_started()).await??;
+        assert_eq!(source.observed()?.generation, source_generation);
         assert_eq!(
-            core.computation_component("source")?.observed()?.lifecycle,
+            core.component_by_name(
+                &drasi_core::ComponentName::try_new("fixture-source-1")
+                    .expect("fixture component name")
+            )?
+            .observed()?
+            .lifecycle,
             ComponentLifecycle::Running
         );
-        assert!(core.computation_component("primary").is_ok());
+        assert!(core
+            .component_by_name(
+                &drasi_core::ComponentName::try_new("primary").expect("fixture component name")
+            )
+            .is_ok());
         let journals: u64 = rusqlite::Connection::open_with_flags(
             &path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

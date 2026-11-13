@@ -6,13 +6,16 @@ use drasi_lib::context::workers::WorkerCleanupError;
 use tokio::time::timeout;
 
 fn source(port: u16) -> Result<MySqlReplicationSource> {
-    MySqlReplicationSource::builder("mysql-lifecycle")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_database("test")
-        .with_user("test")
-        .with_ssl_mode(SslMode::Disabled)
-        .build()
+    MySqlReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000064")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_database("test")
+    .with_user("test")
+    .with_ssl_mode(SslMode::Disabled)
+    .build()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -81,7 +84,8 @@ async fn failed_and_panicked_replication_require_cleanup_even_in_error_status() 
         let source = source(3306)?;
         *source.cleanup_required.lock().await = true;
         source.subscriber_resume_positions.write().await.insert(
-            "old-query".into(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000032c")
+                .expect("fixture UUID"),
             ReplicationState::new("mysql-bin.000001", 100, None, 0),
         );
         source

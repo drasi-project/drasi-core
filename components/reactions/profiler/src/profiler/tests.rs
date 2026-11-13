@@ -20,7 +20,8 @@ use std::time::Duration;
 
 async fn enqueue_sample(reaction: &ProfilerReaction, sequence: u64) -> Result<()> {
     let mut result = QueryResult::new(
-        "q1".into(),
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         sequence,
         chrono::Utc::now(),
         vec![ResultDiff::Noop],
@@ -39,9 +40,12 @@ async fn enqueue_sample(reaction: &ProfilerReaction, sequence: u64) -> Result<()
 
 #[tokio::test(flavor = "current_thread")]
 async fn pending_sample_survives_cancelled_and_timed_out_stop() -> Result<()> {
-    let reaction = ProfilerReaction::builder("held-sample")
-        .with_query("q1")
-        .build()?;
+    let reaction = ProfilerReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000019e")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()?;
     let held = reaction.stats.read().await;
     reaction.start().await?;
     enqueue_sample(&reaction, 1).await?;
@@ -80,9 +84,12 @@ async fn pending_sample_survives_cancelled_and_timed_out_stop() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn profiler_stops_promptly_and_collects_samples_after_each_restart() -> Result<()> {
-    let reaction = ProfilerReaction::builder("restarted-samples")
-        .with_query("q1")
-        .build()?;
+    let reaction = ProfilerReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000019f")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()?;
     reaction.stop().await?;
     for sequence in 1..=3 {
         reaction.start().await?;
@@ -106,7 +113,11 @@ async fn profiler_stops_promptly_and_collects_samples_after_each_restart() -> Re
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_profiler_start_and_worker_panic_block_replacement() -> Result<()> {
-    let reaction = ProfilerReaction::builder("cancelled-profiler").build()?;
+    let reaction = ProfilerReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001a0")
+            .expect("fixture UUID"),
+    )
+    .build()?;
     let shutdown = reaction.base.shutdown_tx.write().await;
     assert!(
         tokio::time::timeout(Duration::from_millis(20), reaction.start())

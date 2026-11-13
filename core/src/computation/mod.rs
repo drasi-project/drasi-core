@@ -60,7 +60,6 @@ use crate::{
 
 pub struct ComputationFutureResult {
     pub results: Vec<crate::evaluation::context::QueryPartEvaluationContext>,
-    pub source_id: std::sync::Arc<str>,
     pub future: FutureElementRef,
 }
 

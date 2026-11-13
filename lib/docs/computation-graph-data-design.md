@@ -2387,7 +2387,7 @@ query's local preprocessing.
 ### 16.6 Native wire and port format selection
 
 The native plugin boundary carries binary envelope frames with native wire
-version 1 and ABI layout 1.0. There is no reader for an earlier native wire or
+version 2 and ABI layout 2.0. There is no reader for an earlier native wire or
 earlier query-row records: build the host and native libraries from matching
 sources. These are deployment compatibility constraints, not another record schema.
 

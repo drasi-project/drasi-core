@@ -15,11 +15,16 @@
 //! Public inspection and plugin status contracts retained after the mutable
 //! ComponentGraph implementation was removed.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureDrasiLibBuilderExt as _;
+
 mod mock_source;
 
 use drasi_lib::{
     channels::{ComponentStatusHandle, ComponentUpdate},
     component_graph::{ComponentKind, RelationshipKind},
+    computation::v1::GraphEntityId,
     ComponentGraphView, ComponentStatus, DrasiLib, Query,
 };
 use std::time::Duration;
@@ -27,7 +32,10 @@ use tokio::{sync::mpsc, time::timeout};
 
 #[tokio::test]
 async fn status_handle_defaults_to_stopped_and_clones_share_updates() {
-    let handle = ComponentStatusHandle::new("source");
+    let handle = ComponentStatusHandle::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
     let clone = handle.clone();
     assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
     assert_eq!(clone.get_status().await, ComponentStatus::Stopped);
@@ -43,21 +51,28 @@ async fn status_handle_defaults_to_stopped_and_clones_share_updates() {
 #[tokio::test]
 async fn wired_status_handle_preserves_id_status_and_error_message() {
     let (sender, mut receiver) = mpsc::channel(1);
-    let handle = ComponentStatusHandle::new_wired("source", sender);
+    let handle = ComponentStatusHandle::new_wired(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        sender,
+    );
     handle
         .set_status(ComponentStatus::Error, Some("injected failure".into()))
         .await;
     assert!(matches!(
         receiver.recv().await,
         Some(ComponentUpdate::Status { component_id, status: ComponentStatus::Error, message })
-            if component_id == "source" && message.as_deref() == Some("injected failure")
+            if component_id == drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID") && message.as_deref() == Some("injected failure")
     ));
     assert_eq!(handle.get_status().await, ComponentStatus::Error);
 }
 
 #[tokio::test]
 async fn unwired_status_changes_are_local_and_late_wiring_only_takes_effect_once() {
-    let handle = ComponentStatusHandle::new("source");
+    let handle = ComponentStatusHandle::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
     handle.set_status(ComponentStatus::Starting, None).await;
     assert_eq!(handle.get_status().await, ComponentStatus::Starting);
     let (first, mut first_receiver) = mpsc::channel(2);
@@ -79,7 +94,11 @@ async fn unwired_status_changes_are_local_and_late_wiring_only_takes_effect_once
 #[tokio::test]
 async fn plugin_status_reporting_waits_for_capacity_without_losing_updates() {
     let (sender, mut receiver) = mpsc::channel(1);
-    let handle = ComponentStatusHandle::new_wired("source", sender);
+    let handle = ComponentStatusHandle::new_wired(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        sender,
+    );
     handle.set_status(ComponentStatus::Starting, None).await;
     let next = handle.set_status(ComponentStatus::Running, None);
     tokio::pin!(next);
@@ -106,6 +125,7 @@ async fn graph_snapshots_and_events_follow_the_controller_without_a_mutable_shad
     timeout(Duration::from_secs(10), async {
         let (source, _input) = mock_source::MockSource::new("source").unwrap();
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -119,13 +139,23 @@ async fn graph_snapshots_and_events_follow_the_controller_without_a_mutable_shad
                     .clone(),
             )
             .with_id("inspection-contract")
-            .with_source(source)
+            .with_fixture_source(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+                source,
+            )
             .with_query(
-                Query::cypher("query")
-                    .query("MATCH (n:Item) RETURN n.name AS name")
-                    .from_input("source")
-                    .enable_bootstrap(false)
-                    .build(),
+                Query::cypher(
+                    drasi_core_types::ComponentName::try_new("query")
+                        .expect("fixture component name"),
+                )
+                .query("MATCH (n:Item) RETURN n.name AS name")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("source")
+                        .expect("fixture component name"),
+                )
+                .enable_bootstrap(false)
+                .build()
+                .expect("valid query"),
             )
             .build()
             .await
@@ -137,83 +167,147 @@ async fn graph_snapshots_and_events_follow_the_controller_without_a_mutable_shad
         let before = view.snapshot().await.unwrap();
         assert_eq!(before.instance_id, "inspection-contract");
         assert_eq!(
-            before.get_component("inspection-contract").unwrap().kind,
+            before
+                .get_entity(&GraphEntityId::Instance("inspection-contract".into()))
+                .unwrap()
+                .kind,
             ComponentKind::Instance
         );
-        assert!(!before.contains("absent"));
-        assert!(before.get_dependencies("absent").is_empty());
-        assert!(before.get_dependents("absent").is_empty());
-        assert!(view.get_events("absent").await.unwrap().is_empty());
-        let query = core.computation_component("query").unwrap();
+        let absent =
+            drasi_core_types::ComponentName::try_new("absent").expect("fixture component name");
+        assert!(!before.contains_by_name(&absent));
+        assert!(before
+            .get_dependencies_by_name(&absent)
+            .is_none_or(|nodes| nodes.is_empty()));
+        assert!(before
+            .get_dependents_by_name(&absent)
+            .is_none_or(|nodes| nodes.is_empty()));
+        assert!(view
+            .get_events_by_id(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001d3")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_empty());
+        let query = core
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .unwrap();
         query.wait_created().await.unwrap();
         core.start().await.unwrap();
         query.wait_started().await.unwrap();
         for receiver in [&mut events, &mut other_events] {
             loop {
                 let event = receiver.recv().await.unwrap();
-                if event.component_id == "query" && event.status == ComponentStatus::Running {
+                if &event.component_id == query.id() && event.status == ComponentStatus::Running {
                     break;
                 }
             }
         }
         let running = clone.snapshot().await.unwrap();
         assert_eq!(
-            running.get_component("query").unwrap().status,
+            running.get_component_by_id(query.id()).unwrap().status,
             ComponentStatus::Running
         );
         assert_ne!(
-            before.get_component("query").unwrap().status,
+            before.get_component_by_id(query.id()).unwrap().status,
             ComponentStatus::Running
         );
+        let query_name =
+            drasi_core_types::ComponentName::try_new("query").expect("fixture component name");
+        let source_name =
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name");
         assert_eq!(
             running
-                .get_dependencies("query")
+                .get_dependencies_by_name(&query_name)
+                .unwrap()
                 .iter()
-                .map(|node| node.id.as_str())
+                .map(|node| node.name.as_ref().unwrap().as_str())
                 .collect::<Vec<_>>(),
             vec!["source"]
         );
         assert_eq!(
             running
-                .get_dependents("source")
+                .get_dependents_by_name(&source_name)
+                .unwrap()
                 .iter()
-                .map(|node| node.id.as_str())
+                .map(|node| node.name.as_ref().unwrap().as_str())
                 .collect::<Vec<_>>(),
             vec!["query"]
         );
+        let source_id = running
+            .get_component_by_name(&source_name)
+            .unwrap()
+            .id
+            .clone();
         assert_eq!(
             running
-                .get_neighbors("source", &RelationshipKind::Feeds)
+                .get_neighbors(&source_id, &RelationshipKind::Feeds)
                 .len(),
             1
         );
         let serialized = serde_json::to_value(&running).unwrap();
         assert_eq!(serialized["instance_id"], "inspection-contract");
         assert!(view
-            .get_events("query")
+            .get_events_by_id(query.id())
             .await
             .unwrap()
             .iter()
             .any(|event| { event.status == ComponentStatus::Running }));
         assert!(!view.get_all_events().await.unwrap().is_empty());
-        assert!(core.remove_source("source", false).await.is_err());
-        assert!(view.snapshot().await.unwrap().contains("source"));
-        core.remove_query("query").await.unwrap();
-        assert!(!view.snapshot().await.unwrap().contains("query"));
         assert!(core
-            .query_manager()
-            .get_query_instance("query")
+            .remove_source_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+                false
+            )
             .await
             .is_err());
         assert!(view
             .snapshot()
             .await
             .unwrap()
-            .get_dependents("source")
-            .is_empty());
-        core.remove_source("source", false).await.unwrap();
-        assert!(!view.snapshot().await.unwrap().contains("source"));
-        assert!(core.remove_source("source", false).await.is_err());
+            .contains_by_name(&source_name));
+        core.remove_query_by_name(
+            &drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
+        assert!(!view.snapshot().await.unwrap().contains_by_name(&query_name));
+        assert!(core
+            .query_manager()
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("query").expect("fixture component name")
+            )
+            .await
+            .is_err());
+        assert!(view
+            .snapshot()
+            .await
+            .unwrap()
+            .get_dependents_by_name(&source_name)
+            .is_none_or(|nodes| nodes.is_empty()));
+        core.remove_source_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!view
+            .snapshot()
+            .await
+            .unwrap()
+            .contains_by_name(&source_name));
+        assert!(core
+            .remove_source_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+                false
+            )
+            .await
+            .is_err());
         core.shutdown().await.unwrap();
     })
     .await
@@ -243,7 +337,13 @@ async fn read_only_graph_handles_do_not_keep_the_runtime_alive() {
     core.shutdown().await.unwrap();
     drop(core);
     assert!(view.snapshot().await.is_err());
-    assert!(clone.get_events("source").await.is_err());
+    assert!(clone
+        .get_events_by_id(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")
+        )
+        .await
+        .is_err());
     assert!(view.get_all_events().await.is_err());
     assert!(clone.subscribe().is_err());
     assert!(view.inspector().is_err());
@@ -256,11 +356,8 @@ async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results
     timeout(Duration::from_secs(10), async {
         let (source1, _input1) = mock_source::MockSource::new("source-1").unwrap();
         let (source2, _input2) = mock_source::MockSource::new("source-2").unwrap();
-        let (reaction, _output) = drasi_reaction_application::ApplicationReaction::new(
-            "reaction-1",
-            vec!["query-1".into(), "query-2".into()],
-        );
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -274,36 +371,80 @@ async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results
                     .clone(),
             )
             .with_id("test-instance")
-            .with_source(source1)
-            .with_source(source2)
-            .with_query(
-                Query::cypher("query-1")
-                    .query("MATCH (n:Item) RETURN n.name AS name")
-                    .from_input("source-1")
-                    .from_input("source-2")
-                    .enable_bootstrap(false)
-                    .build(),
+            .with_fixture_source(
+                drasi_core_types::ComponentName::try_new("source-1")
+                    .expect("fixture component name"),
+                source1,
+            )
+            .with_fixture_source(
+                drasi_core_types::ComponentName::try_new("source-2")
+                    .expect("fixture component name"),
+                source2,
             )
             .with_query(
-                Query::cypher("query-2")
-                    .query("MATCH (n:Item) RETURN n")
-                    .from_input("source-1")
-                    .enable_bootstrap(false)
-                    .build(),
+                Query::cypher(
+                    drasi_core_types::ComponentName::try_new("query-1")
+                        .expect("fixture component name"),
+                )
+                .query("MATCH (n:Item) RETURN n.name AS name")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("source-1")
+                        .expect("fixture component name"),
+                )
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("source-2")
+                        .expect("fixture component name"),
+                )
+                .enable_bootstrap(false)
+                .build()
+                .expect("valid query"),
             )
-            .with_reaction(reaction)
+            .with_query(
+                Query::cypher(
+                    drasi_core_types::ComponentName::try_new("query-2")
+                        .expect("fixture component name"),
+                )
+                .query("MATCH (n:Item) RETURN n")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("source-1")
+                        .expect("fixture component name"),
+                )
+                .enable_bootstrap(false)
+                .build()
+                .expect("valid query"),
+            )
             .build()
             .await
             .unwrap();
-        core.remove_source(drasi_lib::sources::COMPONENT_GRAPH_SOURCE_ID, false)
+        let inputs = ["query-1", "query-2"]
+            .into_iter()
+            .map(|name| {
+                drasi_computation_contracts::ComponentReference::by_id(
+                    core.component_by_name(&drasi_lib::ComponentName::try_new(name).unwrap())
+                        .unwrap()
+                        .id()
+                        .clone(),
+                )
+            })
+            .collect();
+        let (reaction, _output) = drasi_reaction_application::ApplicationReaction::new(
+            fixture_support::component_id(138),
+            inputs,
+        );
+        core.add_reaction(
+            drasi_lib::ComponentName::try_new("reaction-1").unwrap(),
+            reaction,
+        )
+        .await
+        .unwrap();
+        for id in ["source-1", "source-2", "query-1", "query-2", "reaction-1"] {
+            core.component_by_name(
+                &drasi_core_types::ComponentName::try_new(id).expect("fixture component name"),
+            )
+            .unwrap()
+            .wait_created()
             .await
             .unwrap();
-        for id in ["source-1", "source-2", "query-1", "query-2", "reaction-1"] {
-            core.computation_component(id)
-                .unwrap()
-                .wait_created()
-                .await
-                .unwrap();
         }
         let view = core.component_graph();
         let snapshot = view.snapshot().await.unwrap();
@@ -312,7 +453,16 @@ async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results
         let kinds: BTreeSet<_> = snapshot
             .nodes
             .iter()
-            .map(|node| format!("{}:{:?}", node.id, node.kind))
+            .map(|node| {
+                let name = match &node.id {
+                    GraphEntityId::Instance(id) => id.as_str(),
+                    GraphEntityId::Component(_) => {
+                        node.name.as_ref().expect("component name").as_str()
+                    }
+                    other => panic!("unexpected inspection entity: {other:?}"),
+                };
+                format!("{name}:{:?}", node.kind)
+            })
             .collect();
         assert_eq!(
             kinds,
@@ -325,17 +475,35 @@ async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results
                 "reaction-1:Reaction".into(),
             ])
         );
+        let label = |entity: &GraphEntityId| match entity {
+            GraphEntityId::Instance(id) => id.clone(),
+            GraphEntityId::Component(id) => snapshot
+                .get_component_by_id(id)
+                .and_then(|node| node.name.as_ref())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| id.to_string()),
+            other => other.to_string(),
+        };
         let edges: BTreeSet<_> = snapshot
             .edges
             .iter()
-            .map(|edge| format!("{}:{:?}:{}", edge.from, edge.relationship, edge.to))
+            .map(|edge| {
+                format!(
+                    "{}:{:?}:{}",
+                    label(&edge.from),
+                    edge.relationship,
+                    label(&edge.to)
+                )
+            })
             .collect();
         let mut expected = BTreeSet::new();
         for id in ["source-1", "source-2", "query-1", "query-2", "reaction-1"] {
+            let name =
+                drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
             expected.insert(format!("test-instance:Owns:{id}"));
             expected.insert(format!("{id}:OwnedBy:test-instance"));
             assert_eq!(
-                snapshot.get_component(id).unwrap().status,
+                snapshot.get_component_by_name(&name).unwrap().status,
                 ComponentStatus::Added
             );
         }
@@ -356,33 +524,92 @@ async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results
             serde_json::from_value(serialized.clone()).unwrap();
         assert_eq!(serde_json::to_value(roundtrip).unwrap(), serialized);
         for id in ["source-1", "source-2"] {
-            assert_eq!(snapshot.get_component(id).unwrap().metadata["kind"], "mock");
+            let name =
+                drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
+            assert_eq!(
+                snapshot.get_component_by_name(&name).unwrap().metadata["kind"],
+                "mock"
+            );
         }
         assert_eq!(
-            snapshot.get_component("query-1").unwrap().metadata["query"],
+            snapshot
+                .get_component_by_name(&drasi_lib::ComponentName::try_new("query-1").unwrap())
+                .unwrap()
+                .metadata["query"],
             "MATCH (n:Item) RETURN n.name AS name"
         );
 
-        assert!(core.remove_source("test-instance", false).await.is_err());
-        assert!(core.remove_query("test-instance").await.is_err());
-        assert!(core.remove_reaction("test-instance", false).await.is_err());
-        assert!(core.remove_source("source-1", false).await.is_err());
-        assert!(core.remove_query("query-1").await.is_err());
+        assert!(core
+            .remove_source_by_name(
+                &drasi_core_types::ComponentName::try_new("test-instance")
+                    .expect("fixture component name"),
+                false
+            )
+            .await
+            .is_err());
+        assert!(core
+            .remove_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-instance")
+                    .expect("fixture component name")
+            )
+            .await
+            .is_err());
+        assert!(core
+            .remove_reaction_by_name(
+                &drasi_core_types::ComponentName::try_new("test-instance")
+                    .expect("fixture component name"),
+                false
+            )
+            .await
+            .is_err());
+        assert!(core
+            .remove_source_by_name(
+                &drasi_core_types::ComponentName::try_new("source-1")
+                    .expect("fixture component name"),
+                false
+            )
+            .await
+            .is_err());
+        assert!(core
+            .remove_query_by_name(
+                &drasi_core_types::ComponentName::try_new("query-1")
+                    .expect("fixture component name")
+            )
+            .await
+            .is_err());
         assert_eq!(
             serde_json::to_value(view.snapshot().await.unwrap()).unwrap(),
             serialized,
             "rejected removals cannot change membership, status, or relationships"
         );
-        core.remove_reaction("reaction-1", false).await.unwrap();
+        core.remove_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("reaction-1")
+                .expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
         for id in ["query-1", "query-2"] {
-            core.remove_query(id).await.unwrap();
+            core.remove_query_by_name(
+                &drasi_core_types::ComponentName::try_new(id).expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         }
         for id in ["source-1", "source-2"] {
-            core.remove_source(id, false).await.unwrap();
+            core.remove_source_by_name(
+                &drasi_core_types::ComponentName::try_new(id).expect("fixture component name"),
+                false,
+            )
+            .await
+            .unwrap();
         }
         let empty = view.snapshot().await.unwrap();
         assert_eq!(empty.nodes.len(), 1);
-        assert_eq!(empty.nodes[0].id, "test-instance");
+        assert_eq!(
+            empty.nodes[0].id,
+            GraphEntityId::Instance("test-instance".into())
+        );
         assert!(empty.edges.is_empty());
         assert_eq!(snapshot.nodes.len(), 6, "old snapshots remain detached");
         assert_eq!(snapshot.edges.len(), 20);

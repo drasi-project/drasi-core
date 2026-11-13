@@ -214,9 +214,23 @@ impl MsSqlStoredProcReactionConfig {
     /// 1. `routes[query_id]` for the operation (full wire id).
     /// 2. `routes[last dotted segment of query_id]` for the operation.
     /// 3. `default_template` for the operation.
-    pub fn get_command_template(&self, query_id: &str, operation: OperationType) -> Option<String> {
-        self.resolve_template_spec(query_id, operation)
-            .map(|spec| spec.template.clone())
+    pub fn get_command_template(
+        &self,
+        result: &drasi_lib::channels::QueryResult,
+        operation: OperationType,
+    ) -> Option<String> {
+        let alias = drasi_lib::reactions::common::input_alias(
+            result.input_alias.as_deref(),
+            result.query_name.as_ref(),
+        );
+        match alias {
+            Some(alias) => self.resolve_template_spec(alias, operation),
+            None => self
+                .default_template
+                .as_ref()
+                .and_then(|config| Self::get_spec_from_config(config, operation)),
+        }
+        .map(|spec| spec.template.clone())
     }
 
     /// Resolve the [`TemplateSpec`] for a `(query_id, operation)` pair following

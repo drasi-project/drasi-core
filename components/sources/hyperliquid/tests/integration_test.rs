@@ -17,48 +17,66 @@ async fn test_hyperliquid_source_live() -> Result<()> {
     let bootstrap_config = drasi_source_hyperliquid::HyperliquidSourceConfig::default();
     let bootstrap = HyperliquidBootstrapProvider::new(bootstrap_config.clone());
 
-    let source = HyperliquidSource::builder(SOURCE_ID)
-        .with_network(HyperliquidNetwork::Mainnet)
-        .with_coins(vec!["BTC"])
-        .with_trades(true)
-        .with_order_book(true)
-        .with_mid_prices(true)
-        .with_liquidations(true)
-        .with_funding_rates(false)
-        .start_from_beginning()
-        .with_bootstrap_provider(bootstrap)
-        .build()?;
+    let source = HyperliquidSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000325")
+            .expect("fixture UUID"),
+    )
+    .with_network(HyperliquidNetwork::Mainnet)
+    .with_coins(vec!["BTC"])
+    .with_trades(true)
+    .with_order_book(true)
+    .with_mid_prices(true)
+    .with_liquidations(true)
+    .with_funding_rates(false)
+    .start_from_beginning()
+    .with_bootstrap_provider(bootstrap)
+    .build()?;
 
-    let price_query = Query::cypher(PRICE_QUERY)
-        .query(
-            r#"
+    let price_query = Query::cypher(
+        drasi_core::ComponentName::try_new("price-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (m:MidPrice)-[:PRICE_OF]->(c:Coin)
             WHERE c.name = 'BTC'
             RETURN c.name AS coin, c.max_leverage AS max_leverage, m.price AS price
             "#,
-        )
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("hl-test").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .build()?;
 
-    let trade_query = Query::cypher(TRADE_QUERY)
-        .query(
-            r#"
+    let trade_query = Query::cypher(
+        drasi_core::ComponentName::try_new("latest-trade").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (t:Trade)
             WHERE t.coin = 'BTC'
             RETURN t.tid AS tid, t.price AS price
             "#,
-        )
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("hl-test").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .build()?;
 
-    let (reaction, handle) = ApplicationReaction::builder("app-reaction")
-        .with_query(PRICE_QUERY)
-        .with_query(TRADE_QUERY)
-        .build();
+    let (reaction, handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000001")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("price-query").expect("fixture component name"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("latest-trade").expect("fixture component name"),
+    )
+    .build();
 
     let core = DrasiLib::builder()
         .with_query_factory(
@@ -74,10 +92,16 @@ async fn test_hyperliquid_source_live() -> Result<()> {
                 .clone(),
         )
         .with_id("hl-integration-test")
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("hl-test").expect("fixture component name"),
+            source,
+        )
         .with_query(price_query)
         .with_query(trade_query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("app-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 
@@ -97,7 +121,10 @@ async fn test_hyperliquid_source_live() -> Result<()> {
 
     while start.elapsed() < timeout {
         if let Some(result) = subscription.recv().await {
-            if result.query_id == PRICE_QUERY {
+            if result.query_id
+                == drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000382")
+                    .expect("fixture UUID")
+            {
                 for entry in &result.results {
                     match entry {
                         ResultDiff::Add { data, .. } if data.get("coin").is_some() => {
@@ -116,7 +143,10 @@ async fn test_hyperliquid_source_live() -> Result<()> {
                 }
             }
 
-            if result.query_id == TRADE_QUERY {
+            if result.query_id
+                == drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000383")
+                    .expect("fixture UUID")
+            {
                 for entry in &result.results {
                     if matches!(
                         entry,

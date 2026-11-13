@@ -16,6 +16,7 @@
 
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
+use drasi_core_types::{ComponentId, StorageScope};
 
 use super::{WalError, WriteAheadLogConfig};
 
@@ -52,7 +53,12 @@ pub trait WalProvider: Send + Sync {
     ///
     /// Implementations validate the config via
     /// [`WriteAheadLogConfig::validate`] before opening any storage.
-    async fn register(&self, source_id: &str, config: WriteAheadLogConfig) -> Result<(), WalError>;
+    async fn register(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        config: WriteAheadLogConfig,
+    ) -> Result<(), WalError>;
 
     /// Append an event to the source's WAL; returns the assigned
     /// monotonic-increasing sequence number.
@@ -63,7 +69,12 @@ pub trait WalProvider: Send + Sync {
     ///
     /// On capacity exhaustion, behavior depends on the registered
     /// [`CapacityPolicy`](super::CapacityPolicy).
-    async fn append(&self, source_id: &str, event: &SourceChange) -> Result<u64, WalError>;
+    async fn append(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        event: &SourceChange,
+    ) -> Result<u64, WalError>;
 
     /// Read events from `sequence` (inclusive) to the head, in sequence order.
     ///
@@ -71,30 +82,52 @@ pub trait WalProvider: Send + Sync {
     /// the oldest retained event (i.e., has been pruned).
     async fn read_from(
         &self,
-        source_id: &str,
+        scope: &StorageScope,
+        source_id: &ComponentId,
         sequence: u64,
     ) -> Result<Vec<(u64, SourceChange)>, WalError>;
 
     /// Remove all events with `seq <= sequence`. Returns the number of
     /// events pruned.
-    async fn prune_up_to(&self, source_id: &str, sequence: u64) -> Result<u64, WalError>;
+    async fn prune_up_to(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+        sequence: u64,
+    ) -> Result<u64, WalError>;
 
     /// Returns the highest allocated sequence number (in-memory counter).
     ///
     /// May be higher than the highest persisted sequence if a prior write
     /// transaction failed after the counter was incremented. Callers needing
     /// authoritative data should use [`read_from`](WalProvider::read_from).
-    async fn head_sequence(&self, source_id: &str) -> Result<u64, WalError>;
+    async fn head_sequence(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<u64, WalError>;
 
     /// Returns the oldest retained sequence number, or `None` if the WAL is empty.
-    async fn oldest_sequence(&self, source_id: &str) -> Result<Option<u64>, WalError>;
+    async fn oldest_sequence(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<Option<u64>, WalError>;
 
     /// Returns the number of events currently retained in the WAL.
-    async fn event_count(&self, source_id: &str) -> Result<u64, WalError>;
+    async fn event_count(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<u64, WalError>;
 
     /// Delete all WAL data for a source and unregister it from the provider.
     ///
     /// Called on source removal with cleanup enabled. Best-effort: does not
     /// error if the source was never registered.
-    async fn delete_wal(&self, source_id: &str) -> Result<(), WalError>;
+    async fn delete_wal(
+        &self,
+        scope: &StorageScope,
+        source_id: &ComponentId,
+    ) -> Result<(), WalError>;
 }

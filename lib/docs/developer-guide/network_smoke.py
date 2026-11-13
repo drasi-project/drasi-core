@@ -19,6 +19,7 @@ import time
 
 BOOK = Path(__file__).resolve().parent
 DEADLINE = 15
+INVENTORY_ID = "00000000-0000-0000-0000-0000000002f6"
 
 
 def row(quantity):
@@ -173,14 +174,18 @@ class Receiver:
         return message
 
 
-LOW_STOCK_OUTPUT = {"alias": "low-stock", "component": "low-stock", "port": "out"}
+LOW_STOCK_OUTPUT = {
+    "alias": "low-stock",
+    "component": "00000000-0000-0000-0000-0000000002f5",
+    "port": "out",
+}
 
 
 def post_event(port, event):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=DEADLINE)
     try:
         connection.request(
-            "POST", "/sources/inventory/events", json.dumps(event),
+            "POST", f"/sources/{INVENTORY_ID}/events", json.dumps(event),
             {"Content-Type": "application/json"},
         )
         response = connection.getresponse()

@@ -19,6 +19,7 @@ use crate::{
     state_store::{StateStoreProvider, StateStoreResult},
     wal::{WalError, WalProvider, WriteAheadLogConfig},
 };
+use crate::{ComponentId, StorageScope, StorePartition};
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
 use std::{
@@ -36,22 +37,25 @@ pub struct LegacyBootstrapResource(pub Arc<dyn crate::bootstrap::BootstrapProvid
 #[derive(Debug, thiserror::Error)]
 pub enum PluginObservationError {
     #[error("plugin {expected} reported another component's status: {reported}")]
-    ForeignComponent { expected: String, reported: String },
+    ForeignComponent {
+        expected: ComponentId,
+        reported: ComponentId,
+    },
     #[error("plugin {component_id} failed: {message}")]
     ReportedFailure {
-        component_id: String,
+        component_id: ComponentId,
         message: String,
     },
 }
 
 pub(crate) struct PluginObservations {
-    id: String,
+    id: ComponentId,
     updates: tokio::sync::Mutex<Option<crate::channels::ComponentUpdateObserver>>,
     status: tokio::sync::watch::Sender<(crate::ComponentStatus, Option<String>)>,
     running: tokio::sync::watch::Sender<bool>,
 }
 impl PluginObservations {
-    pub(crate) fn new(id: &str) -> Self {
+    pub(crate) fn new(id: &ComponentId) -> Self {
         Self {
             id: id.to_owned(),
             updates: tokio::sync::Mutex::new(None),
@@ -197,8 +201,19 @@ mod observation_tests {
     use crate::{channels::ComponentUpdate, ComponentStatus};
 
     fn update(id: &str, status: ComponentStatus, message: &str) -> ComponentUpdate {
+        let component_id = match id {
+            "plugin" => {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001da")
+                    .expect("fixture UUID")
+            }
+            "wrong" => {
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001db")
+                    .expect("fixture UUID")
+            }
+            other => panic!("missing explicit fixture component ID for {other}"),
+        };
         ComponentUpdate::Status {
-            component_id: id.into(),
+            component_id,
             status,
             message: Some(message.into()),
         }
@@ -206,7 +221,10 @@ mod observation_tests {
 
     #[tokio::test]
     async fn completed_operation_catches_up_to_failure_after_callback_flood() {
-        let observations = PluginObservations::new("plugin");
+        let observations = PluginObservations::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001da")
+                .expect("fixture UUID"),
+        );
         let sender = observations.channel().await;
         let error = observations
             .drive(
@@ -235,7 +253,10 @@ mod observation_tests {
 
     #[tokio::test]
     async fn cleanup_finishes_after_observing_a_reported_failure() {
-        let observations = PluginObservations::new("plugin");
+        let observations = PluginObservations::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001da")
+                .expect("fixture UUID"),
+        );
         let sender = observations.channel().await;
         sender
             .try_send(update("plugin", ComponentStatus::Error, "cleanup failure"))
@@ -258,7 +279,10 @@ mod observation_tests {
 
     #[tokio::test]
     async fn reset_clears_readiness_and_channel_replacement_revokes_old_callbacks() {
-        let observations = PluginObservations::new("plugin");
+        let observations = PluginObservations::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001da")
+                .expect("fixture UUID"),
+        );
         let old = observations.channel().await;
         old.try_send(update("plugin", ComponentStatus::Running, "old"))
             .unwrap();
@@ -285,7 +309,10 @@ mod observation_tests {
 
     #[tokio::test]
     async fn foreign_component_failure_stays_typed_after_coalescing() {
-        let observations = PluginObservations::new("plugin");
+        let observations = PluginObservations::new(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001da")
+                .expect("fixture UUID"),
+        );
         let sender = observations.channel().await;
         sender
             .try_send(update("wrong", ComponentStatus::Starting, "invalid"))
@@ -300,7 +327,16 @@ mod observation_tests {
         assert!(matches!(
             error.downcast_ref::<PluginObservationError>(),
             Some(PluginObservationError::ForeignComponent { expected, reported })
-                if expected == "plugin" && reported == "wrong"
+                if expected
+                    == &drasi_core_types::ComponentId::try_new(
+                        "00000000-0000-0000-0000-0000000001da"
+                    )
+                    .expect("fixture UUID")
+                    && reported
+                        == &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-0000000001db"
+                        )
+                        .expect("fixture UUID")
         ));
     }
 }
@@ -344,11 +380,16 @@ impl LegacyPluginServices {
             state_store: state_store.map(|inner| {
                 Arc::new(ScopedStateStore {
                     inner,
-                    prefix: prefix.clone(),
+                    scope: StorageScope::new(prefix.clone()),
                 }) as Arc<dyn StateStoreProvider>
             }),
             identity,
-            wal: wal.map(|inner| Arc::new(ScopedWal { inner, prefix }) as Arc<dyn WalProvider>),
+            wal: wal.map(|inner| {
+                Arc::new(ScopedWal {
+                    inner,
+                    scope: StorageScope::new(prefix),
+                }) as Arc<dyn WalProvider>
+            }),
             secrets: None,
         })
     }
@@ -546,51 +587,55 @@ pub(crate) fn validate_service<T: Any + Send + Sync, S: ?Sized>(
 
 struct ScopedStateStore {
     inner: Arc<dyn StateStoreProvider>,
-    prefix: String,
+    scope: StorageScope,
 }
 impl ScopedStateStore {
-    fn partition(&self, id: &str) -> String {
-        format!("{}_{}", self.prefix, encode(id))
+    fn partition(&self, partition: &StorePartition) -> StorePartition {
+        partition.in_scope(&self.scope)
     }
 }
 
 #[async_trait]
 impl StateStoreProvider for ScopedStateStore {
-    async fn get(&self, id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+    async fn get(&self, id: &StorePartition, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
         self.inner.get(&self.partition(id), key).await
     }
-    async fn set(&self, id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+    async fn set(&self, id: &StorePartition, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
         self.inner.set(&self.partition(id), key, value).await
     }
-    async fn delete(&self, id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn delete(&self, id: &StorePartition, key: &str) -> StateStoreResult<bool> {
         self.inner.delete(&self.partition(id), key).await
     }
-    async fn contains_key(&self, id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn contains_key(&self, id: &StorePartition, key: &str) -> StateStoreResult<bool> {
         self.inner.contains_key(&self.partition(id), key).await
     }
     async fn get_many(
         &self,
-        id: &str,
+        id: &StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
         self.inner.get_many(&self.partition(id), keys).await
     }
-    async fn set_many(&self, id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        id: &StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()> {
         self.inner.set_many(&self.partition(id), entries).await
     }
-    async fn delete_many(&self, id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+    async fn delete_many(&self, id: &StorePartition, keys: &[&str]) -> StateStoreResult<usize> {
         self.inner.delete_many(&self.partition(id), keys).await
     }
-    async fn clear_store(&self, id: &str) -> StateStoreResult<usize> {
+    async fn clear_store(&self, id: &StorePartition) -> StateStoreResult<usize> {
         self.inner.clear_store(&self.partition(id)).await
     }
-    async fn list_keys(&self, id: &str) -> StateStoreResult<Vec<String>> {
+    async fn list_keys(&self, id: &StorePartition) -> StateStoreResult<Vec<String>> {
         self.inner.list_keys(&self.partition(id)).await
     }
-    async fn store_exists(&self, id: &str) -> StateStoreResult<bool> {
+    async fn store_exists(&self, id: &StorePartition) -> StateStoreResult<bool> {
         self.inner.store_exists(&self.partition(id)).await
     }
-    async fn key_count(&self, id: &str) -> StateStoreResult<usize> {
+    async fn key_count(&self, id: &StorePartition) -> StateStoreResult<usize> {
         self.inner.key_count(&self.partition(id)).await
     }
     async fn sync(&self) -> StateStoreResult<()> {
@@ -599,50 +644,89 @@ impl StateStoreProvider for ScopedStateStore {
     fn is_durable(&self) -> bool {
         self.inner.is_durable()
     }
+
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.inner.durability()
+    }
 }
 
 struct ScopedWal {
     inner: Arc<dyn WalProvider>,
-    prefix: String,
-}
-impl ScopedWal {
-    fn partition(&self, id: &str) -> String {
-        format!("{}_{}", self.prefix, encode(id))
-    }
+    scope: StorageScope,
 }
 
 #[async_trait]
 impl WalProvider for ScopedWal {
     async fn register(
         &self,
-        id: &str,
+        scope: &StorageScope,
+        id: &ComponentId,
         config: WriteAheadLogConfig,
     ) -> std::result::Result<(), WalError> {
-        self.inner.register(&self.partition(id), config).await
+        self.inner
+            .register(&self.scope.nested(scope), id, config)
+            .await
     }
-    async fn append(&self, id: &str, event: &SourceChange) -> std::result::Result<u64, WalError> {
-        self.inner.append(&self.partition(id), event).await
+    async fn append(
+        &self,
+        scope: &StorageScope,
+        id: &ComponentId,
+        event: &SourceChange,
+    ) -> std::result::Result<u64, WalError> {
+        self.inner
+            .append(&self.scope.nested(scope), id, event)
+            .await
     }
     async fn read_from(
         &self,
-        id: &str,
+        scope: &StorageScope,
+        id: &ComponentId,
         sequence: u64,
     ) -> std::result::Result<Vec<(u64, SourceChange)>, WalError> {
-        self.inner.read_from(&self.partition(id), sequence).await
+        self.inner
+            .read_from(&self.scope.nested(scope), id, sequence)
+            .await
     }
-    async fn prune_up_to(&self, id: &str, sequence: u64) -> std::result::Result<u64, WalError> {
-        self.inner.prune_up_to(&self.partition(id), sequence).await
+    async fn prune_up_to(
+        &self,
+        scope: &StorageScope,
+        id: &ComponentId,
+        sequence: u64,
+    ) -> std::result::Result<u64, WalError> {
+        self.inner
+            .prune_up_to(&self.scope.nested(scope), id, sequence)
+            .await
     }
-    async fn head_sequence(&self, id: &str) -> std::result::Result<u64, WalError> {
-        self.inner.head_sequence(&self.partition(id)).await
+    async fn head_sequence(
+        &self,
+        scope: &StorageScope,
+        id: &ComponentId,
+    ) -> std::result::Result<u64, WalError> {
+        self.inner
+            .head_sequence(&self.scope.nested(scope), id)
+            .await
     }
-    async fn oldest_sequence(&self, id: &str) -> std::result::Result<Option<u64>, WalError> {
-        self.inner.oldest_sequence(&self.partition(id)).await
+    async fn oldest_sequence(
+        &self,
+        scope: &StorageScope,
+        id: &ComponentId,
+    ) -> std::result::Result<Option<u64>, WalError> {
+        self.inner
+            .oldest_sequence(&self.scope.nested(scope), id)
+            .await
     }
-    async fn event_count(&self, id: &str) -> std::result::Result<u64, WalError> {
-        self.inner.event_count(&self.partition(id)).await
+    async fn event_count(
+        &self,
+        scope: &StorageScope,
+        id: &ComponentId,
+    ) -> std::result::Result<u64, WalError> {
+        self.inner.event_count(&self.scope.nested(scope), id).await
     }
-    async fn delete_wal(&self, id: &str) -> std::result::Result<(), WalError> {
-        self.inner.delete_wal(&self.partition(id)).await
+    async fn delete_wal(
+        &self,
+        scope: &StorageScope,
+        id: &ComponentId,
+    ) -> std::result::Result<(), WalError> {
+        self.inner.delete_wal(&self.scope.nested(scope), id).await
     }
 }

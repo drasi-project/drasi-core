@@ -69,6 +69,7 @@ drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 env_logger = "0.11"
 tempfile = "3"
 rcgen = "0.13"
+shared-tests = { path = "../../../shared-tests" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure

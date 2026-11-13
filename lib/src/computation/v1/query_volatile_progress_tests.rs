@@ -24,7 +24,8 @@ fn event(logical: u64, transport: u64, position: &'static [u8]) -> anyhow::Resul
         properties: ElementPropertyMap::from(serde_json::json!({"name": format!("row-{logical}")})),
     };
     let source = SourceEventWrapper::new(
-        "source".into(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
         SourceEvent::Change(SourceChange::Insert { element }),
         Utc::now(),
         logical,
@@ -34,7 +35,7 @@ fn event(logical: u64, transport: u64, position: &'static [u8]) -> anyhow::Resul
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(source),
-            &ComponentId::try_new("source")?,
+            &crate::test_helpers::component_id(77),
             StreamId::try_new("source/out")?,
             transport,
             None,
@@ -45,12 +46,12 @@ fn event(logical: u64, transport: u64, position: &'static [u8]) -> anyhow::Resul
 async fn query() -> anyhow::Result<(ContinuousQueryTransformer, Arc<QuerySourceProgress>)> {
     let owner = Arc::new(QuerySourceProgress::new(
         "volatile",
-        ComponentId::try_new("query")?,
+        crate::test_helpers::component_id(46),
     )?);
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "volatile".into(),
-            id: ComponentId::try_new("query")?,
+            id: crate::test_helpers::component_id(46),
             query: "MATCH (n:Person) RETURN n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -68,7 +69,7 @@ async fn failed_input_does_not_bind_a_volatile_producer_epoch() -> anyhow::Resul
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "volatile".into(),
-            id: ComponentId::try_new("query")?,
+            id: crate::test_helpers::component_id(46),
             query: "MATCH (n:Person) RETURN abs(n.name) AS invalid".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -82,7 +83,7 @@ async fn failed_input_does_not_bind_a_volatile_producer_epoch() -> anyhow::Resul
     let producer = crate::computation::v1::GraphProducerIdentity::volatile(
         "volatile".into(),
         "volatile".into(),
-        ComponentId::try_new("source")?,
+        crate::test_helpers::component_id(77),
         input.envelope.system().stream().clone(),
     )?;
     crate::computation::v1::GraphProducerProgress::annotate(&mut input.envelope, &producer, 1)?;
@@ -102,7 +103,10 @@ async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transp
     let (mut query, owner) = query().await?;
     query.start().await?;
     query.transform(event(1, 10, &[0, 255, 1])?).await?;
-    let key = SourceProgressKey::Source("source".into());
+    let key = SourceProgressKey::Source(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
     let stream = StreamId::try_new("source/out")?;
     assert!(!owner.snapshot().persistent);
     assert_eq!(
@@ -133,7 +137,7 @@ async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transp
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new("foreign")?,
+            &crate::test_helpers::component_id(771),
             SystemMetadata::new(StreamId::try_new("foreign/out")?, 100),
             &crate::computation::v1::ResultNodeProjector::try_new("test/foreign/out", None)?,
             &[drasi_core::evaluation::context::QueryPartEvaluationContext::Adding {
@@ -141,8 +145,11 @@ async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transp
                 row_signature: 1,
             }],
             QueryOutputMetadata {
-                query_id: "foreign".into(),
-                source_id: None,
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-000000000303",
+                )
+                .expect("fixture UUID"),
+                input_origin: None,
                 timestamp: Utc::now(),
                 metadata: Default::default(),
                 profiling: None,
@@ -174,18 +181,21 @@ async fn position_replay_keeps_handled_cursor_and_rejects_new_position_sequence_
 ) -> anyhow::Result<()> {
     let (mut query, owner) = query().await?;
     let policy = Arc::new(InputPositionPolicy::new(
-        SourceProgressKey::Source("source".into()),
+        SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        ),
         Arc::new(OneBytePosition),
     )?);
     owner.bind_input_boundary(
-        &ComponentId::try_new("source")?,
+        &crate::test_helpers::component_id(77),
         crate::computation::v1::ProducerBoundary::Origin,
         Some(policy.clone()),
         vec![StreamId::try_new("source/out")?],
     )?;
     assert!(owner
         .bind_input_boundary(
-            &ComponentId::try_new("another-producer")?,
+            &crate::test_helpers::component_id(1026),
             crate::computation::v1::ProducerBoundary::Origin,
             Some(policy),
             vec![StreamId::try_new("source/out")?],
@@ -194,7 +204,10 @@ async fn position_replay_keeps_handled_cursor_and_rejects_new_position_sequence_
     query.start().await?;
     query.transform(event(5, 10, &[5])?).await?;
     assert!(query.transform(event(100, 11, &[5])?).await?.is_empty());
-    let key = SourceProgressKey::Source("source".into());
+    let key = SourceProgressKey::Source(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
     let stream = StreamId::try_new("source/out")?;
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 5);
     assert_eq!(owner.snapshot().transport_sequences[&stream], 11);
@@ -217,10 +230,13 @@ async fn position_replay_keeps_handled_cursor_and_rejects_new_position_sequence_
 async fn malformed_initial_position_fails_before_becoming_handled() -> anyhow::Result<()> {
     let (mut query, owner) = query().await?;
     owner.bind_input_boundary(
-        &ComponentId::try_new("source")?,
+        &crate::test_helpers::component_id(77),
         crate::computation::v1::ProducerBoundary::Origin,
         Some(Arc::new(InputPositionPolicy::new(
-            SourceProgressKey::Source("source".into()),
+            SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             Arc::new(OneBytePosition),
         )?)),
         vec![StreamId::try_new("source/out")?],
@@ -262,7 +278,10 @@ impl ComputationBootstrapProvider for Snapshot {
             watermarks: vec![BootstrapWatermark {
                 producer: None,
                 stream: StreamId::try_new("source/out")?,
-                source_id: Some("source".into()),
+                source_id: Some(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                ),
                 sequence: 7,
                 position: Some(Bytes::from_static(b"actual-bootstrap-boundary")),
             }],
@@ -276,7 +295,10 @@ async fn volatile_bootstrap_cursor_is_published_only_after_complete_snapshot() -
     let (query, owner) = query().await?;
     let mut query = query.with_bootstrap(Arc::new(Snapshot(End::Complete)));
     query.start().await?;
-    let key = SourceProgressKey::Source("source".into());
+    let key = SourceProgressKey::Source(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
     assert!(owner.snapshot().ready && owner.snapshot().bootstrap_complete);
     assert!(!owner.snapshot().persistent);
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 7);

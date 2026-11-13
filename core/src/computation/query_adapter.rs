@@ -45,7 +45,7 @@ pub struct ComputationQuery {
 pub struct QueryInputBatch {
     changes: Vec<SourceChange>,
     ordering: ChangeOrdering,
-    input_scope: Option<Arc<str>>,
+    input_scope: Option<crate::ComponentId>,
 }
 
 impl QueryInputBatch {
@@ -63,18 +63,18 @@ impl QueryInputBatch {
     /// lookup changes: element references, data and timestamps are untouched.
     /// A scope with no registered pipeline runs no middleware. Without a scope
     /// the element namespace selects the pipeline, as before.
-    pub fn with_input_scope(mut self, scope: impl Into<Arc<str>>) -> Self {
-        self.input_scope = Some(scope.into());
+    pub fn with_input_scope(mut self, scope: crate::ComponentId) -> Self {
+        self.input_scope = Some(scope);
         self
     }
 
-    pub fn with_optional_input_scope(mut self, scope: Option<Arc<str>>) -> Self {
+    pub fn with_optional_input_scope(mut self, scope: Option<crate::ComponentId>) -> Self {
         self.input_scope = scope;
         self
     }
 
-    pub fn input_scope(&self) -> Option<&str> {
-        self.input_scope.as_deref()
+    pub fn input_scope(&self) -> Option<&crate::ComponentId> {
+        self.input_scope.as_ref()
     }
 }
 
@@ -106,7 +106,6 @@ impl QueryEvaluator {
         let Some(future_ref) = self.future_queue().pop().await? else {
             return Ok(None);
         };
-        let source_id = future_ref.element_ref.source_id.clone();
         Ok(Some(Arc::new(ComputationFutureResult {
             results: self
                 .evaluate_input_batch::<false>(
@@ -116,7 +115,6 @@ impl QueryEvaluator {
                     .into(),
                 )
                 .await?,
-            source_id,
             future: future_ref,
         })))
     }

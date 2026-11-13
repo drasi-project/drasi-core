@@ -107,10 +107,16 @@ impl ContinuousQueryTransformer {
             .resources()
             .checkpoint_store()
             .expect("persistent output");
-        let delivered = store.read_checkpoint(DELIVERED).await?;
+        let delivered = store
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                DELIVERED.to_owned(),
+            ))
+            .await?;
         let bindings = super::super::OutputBindings::load(
             store
-                .read_checkpoint(super::super::output_bindings::CHECKPOINT)
+                .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                    super::super::output_bindings::CHECKPOINT.to_owned(),
+                ))
                 .await?
                 .as_ref(),
         )?;
@@ -142,7 +148,11 @@ impl ContinuousQueryTransformer {
                 .expect("persistent output");
             let head = self.results.snapshot()?.as_of_sequence;
             let (bindings, delivered) = self.load_delivery_bindings().await?;
-            let emission = store.read_checkpoint(DELIVERY_SEQUENCE).await?;
+            let emission = store
+                .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                    DELIVERY_SEQUENCE.to_owned(),
+                ))
+                .await?;
             if delivered
                 .as_ref()
                 .is_some_and(|saved| saved.sequence > head)
@@ -162,7 +172,11 @@ impl ContinuousQueryTransformer {
             query
                 .resource_transaction(|| async {
                     store
-                        .stage_checkpoint(DELIVERED, delivered, bindings.fingerprint())
+                        .stage_checkpoint(
+                            &drasi_core::interface::CheckpointKey::Metadata(DELIVERED.to_owned()),
+                            delivered,
+                            bindings.fingerprint(),
+                        )
                         .await
                 })
                 .await?;
@@ -226,11 +240,17 @@ impl ContinuousQueryTransformer {
         query
             .resource_transaction(|| async {
                 checkpoint
-                    .stage_checkpoint(super::super::output_bindings::CHECKPOINT, 1, Some(&bytes))
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(
+                            super::super::output_bindings::CHECKPOINT.to_owned(),
+                        ),
+                        1,
+                        Some(&bytes),
+                    )
                     .await?;
                 checkpoint
                     .stage_checkpoint(
-                        DELIVERED,
+                        &drasi_core::interface::CheckpointKey::Metadata(DELIVERED.to_owned()),
                         self.delivered_output.load(Ordering::Acquire),
                         bindings.fingerprint(),
                     )
@@ -274,7 +294,11 @@ impl ContinuousQueryTransformer {
                 .resources()
                 .checkpoint_store()
                 .expect("persistent output")
-                .stage_checkpoint(DELIVERY_SEQUENCE, sequence, None)
+                .stage_checkpoint(
+                    &drasi_core::interface::CheckpointKey::Metadata(DELIVERY_SEQUENCE.to_owned()),
+                    sequence,
+                    None,
+                )
                 .await?;
         }
         Ok(())
@@ -325,7 +349,13 @@ impl ContinuousQueryTransformer {
         query
             .resource_transaction(|| async {
                 checkpoint
-                    .stage_checkpoint(DELIVERY_SEQUENCE, sequence, None)
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(
+                            DELIVERY_SEQUENCE.to_owned(),
+                        ),
+                        sequence,
+                        None,
+                    )
                     .await
             })
             .await?;
@@ -365,7 +395,11 @@ impl ContinuousQueryTransformer {
         query
             .resource_transaction(|| async {
                 checkpoint
-                    .stage_checkpoint(DELIVERED, confirmed, self.output_bindings.fingerprint())
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(DELIVERED.to_owned()),
+                        confirmed,
+                        self.output_bindings.fingerprint(),
+                    )
                     .await
             })
             .await?;

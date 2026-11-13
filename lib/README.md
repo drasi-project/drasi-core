@@ -97,6 +97,7 @@ Start with the guide for your task:
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
 | [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
+| [Native plugin developer-experience review](docs/native-plugin-developer-experience-review.md) | External database-plugin authoring: onboarding blockers, integration risks and prioritized improvements |
 | [ComputationGraph remaining work](docs/computation-graph-remaining-work.md) | Single active list of validated issues, investigations, qualification gaps and improvements, with priorities, scope and completion criteria |
 | [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and interpretation of qualification evidence |
 | [Managed-query test controls](docs/query-test-control.md) | Opt-in independent physical clocks and actual due-work/output frontiers; no production clock or downstream completion substitution |
@@ -457,6 +458,13 @@ RETURN t.id, t.title, t.assignee
 
 ## Runtime Management
 
+String component selectors in the ordinary `DrasiLib` facade are exact current
+names. This includes names whose text looks like a UUID; no string method parses,
+falls back to, or guesses an identity. The name is resolved once when the
+operation is admitted, so a later rename or reuse of that name does not retarget
+the operation. Use the paired `*_by_id(&ComponentId)` method for explicit
+identity-based access.
+
 ### Lifecycle
 
 ```rust
@@ -490,6 +498,10 @@ core.start_query("my-query").await?;
 core.stop_query("my-query").await?;
 core.start_reaction("my-reaction").await?;
 core.stop_reaction("my-reaction").await?;
+
+// Explicit identity access uses a typed ComponentId, not a UUID string selector.
+let source_id = core.component_by_name("my-source")?.id().clone();
+core.start_source_by_id(&source_id).await?;
 ```
 
 `stop_query()` also cleans up queries in `Error`, including failures during
@@ -531,6 +543,10 @@ let info = core.get_reaction_info("my-reaction").await?;   // -> ReactionRuntime
 
 // Get current query result set as a JSON snapshot
 let results: Vec<serde_json::Value> = core.get_query_results("my-query").await?;
+
+// Use the typed identity variant when a ComponentId is already available
+let query_id = core.component_by_name("my-query")?.id().clone();
+let results = core.get_query_results_by_id(&query_id).await?;
 
 // Get query configuration
 let config: QueryConfig = core.get_query_config("my-query").await?;
@@ -1287,22 +1303,39 @@ makes retrying an external effect safe.
 
 ---
 
-## Testing and qualification
+## Testing
 
-The [requirement ledger](tests/runtime_parity/requirements.tsv) tracks all 48
-replacement-confidence scenarios. A passing test is evidence for its asserted
-contract, not proof that the entire replacement is qualified. `partial`,
-`blocked` and `unqualified` rows remain unsatisfied even when their existing tests
-pass.
-
-From the repository root, with Docker available and the pinned Rust toolchain:
+From the repository root, with the pinned Rust toolchain, build prerequisites
+and a Redis-compatible service available:
 
 ```bash
-make build-native-network-plugins build-test-plugins
-python3 lib/tests/runtime_parity/test_requirements.py
-bash lib/tests/runtime_parity/check-runner.sh
-bash lib/tests/run-runtime-parity.sh target/runtime-conformance
+make test
 ```
+
+This is the primary CI command too: foundational crate tests, shared plugin
+preparation, workspace tests and all Host SDK targets. Cargo discovers the
+tests; no separate profile runner or test-name ledger is required.
+
+For focused library or loaded-plugin development:
+
+```bash
+cargo test --locked -p drasi-lib --lib --tests
+make build-test-plugins
+cargo test --locked -p drasi-host-sdk --test native_query_plugin -- --test-threads=1
+```
+
+The shared preparation script stages matched native libraries under Cargo's
+`debug/plugins/`, and fixture libraries under `debug/plugins/examples/`.
+Do not point tests at ordinary `debug/` libraries, which Cargo can rebuild
+without native entry points. Leave `RUST_LOG` unset for logging assertions.
+
+Supported feature configurations are explicit Cargo commands in
+[test.yml](../.github/workflows/test.yml). Container-backed tests are ignored
+by default and discovered separately by
+[test-integration.yml](../.github/workflows/test-integration.yml).
+SQL Server and cross-OS peers require their documented explicit configuration;
+default-suite success does not claim they ran. See the
+[contributor testing guide](../docs/contributing/contributing-code/contributing-code-tests/).
 
 The cross-platform native FFI and coverage jobs use the shared
 [protoc setup action](../.github/actions/setup-protoc/action.yml). Its
@@ -1313,58 +1346,10 @@ silently reuse artifacts generated by an older compiler. Updating the pin
 requires matching release digests and the native build/wire matrix on all
 supported runners; installer unit tests alone do not qualify that matrix.
 
-The runner checks historical case mappings, named requirements, discovery and
-actual results across default, no-default, additional recovery/middleware,
-integration, plugin-factory, Host SDK and Redis-compatible backend profiles.
-The matrix has 35 profiles: the original 32, including the source/database
-profiles, plus explicit unit-test profiles for extracted PostgreSQL/MySQL code:
-
-| Profile | Package | Selection |
-| --- | --- | --- |
-| `postgres-common` | `drasi-postgres-common` | `--no-default-features --features replication --lib` |
-| `postgres-native` | `drasi-computation-source-postgres` | `--no-default-features --lib` |
-| `mysql-common` | `drasi-mysql-common` | `--no-default-features --features native --lib` |
-
-These profiles run serially within each test binary. `mysql-common` includes
-ignored tests so its real MySQL authentication/TLS/connection-retirement case
-must execute, not count as a quarantine. A source crate's `--lib` does not execute
-its dependencies' unit tests. Keep each contract bound to its actual owning
-package, binary, case and profile when moving code.
-
-Backend cases are explicitly selected, not silently left ignored. Ignored
-subprocess workers require a passing parent driver. The sole existing DLL stress
-quarantine has an owner and expiry and cannot qualify resource-lifetime safety.
-Quarantine validation uses the local calendar date at startup, during profile
-checks and at final reporting. An expiry remains valid on that date, but a run
-crossing into the following day fails validation; a separate successful manual
-execution does not renew it or qualify other platforms.
-Redis compatibility is not a claim of retained-volume Garnet product recovery.
-
-The integration profile includes live replacement with full persistent multicast
-queues, failed handlers/construction, cancelled waits and independent branch
-traffic. Real HTTP/gRPC receivers record effects to a synced journal before
-replying; partial replies and abrupt runtime death must leave the complete
-unacknowledged query result replayable. The PostgreSQL case kills and restarts
-an owned container at a stable port, using a pinned multi-architecture image and
-a retained Docker volume, then compares recovered query rows and source
-checkpoints with the database. These bounded scenarios do not replace longer
-soak tests or qualify every connector/backend. Scheduled-query coverage also
-combines cancelled/rescheduled timers with a full durable output pipe: recovery
-must replay the original result without recalculation or advancing the live
-source's checkpoint for timer notifications.
-
-Per-profile discovery, execution logs and `qualification.json` are retained in
-the output directory. To enforce the stronger replacement gate:
-
-```bash
-python3 lib/tests/runtime_parity/check_requirements.py \
-  --evidence-dir target/runtime-conformance --require-qualified
-```
-
-This command intentionally fails while any requirement lacks complete passing
-evidence. Native durable ingress/consumer services, the Server managed API,
-real-product restart matrices and sustained-operation qualification are still
-explicit gaps; volatile/lossy configurations remain supported as such.
+Run subprocess crash scenarios through their parent drivers. A passing test is
+evidence for the behavior it asserts, not complete replacement, platform or
+production-duration qualification. Redis compatibility is not retained-volume
+Garnet product recovery; storage selection alone does not prove restart safety.
 
 Coverage CI enables the extra persistent test features and backend targets and
 includes Host SDK unit tests. Source coverage does not by itself measure

@@ -117,11 +117,8 @@ impl ReplayState {
     ) -> Result<(), PipeError> {
         self.options.validate(definition)?;
         let count = head.min(self.options.receipt_capacity.get() as u64);
-        let valid_version = match (self.version, self.identity) {
-            (1, None) => true,
-            (2, Some(identity)) => !identity.is_nil(),
-            _ => false,
-        };
+        let valid_version =
+            matches!((self.version, self.identity), (2, Some(identity)) if !identity.is_nil());
         if !valid_version
             || (head == 0) != self.producer.is_none()
             || self.receipts.len() as u64 != count
@@ -203,14 +200,13 @@ impl QosChannel {
         }
 
         if let Some(replay) = &state.metadata.replay {
+            replay.validate(&self.definition, state.metadata.head)?;
             if replay.options != options {
                 return Err(backend(
                     "output replay options differ from persisted settings",
                 ));
             }
-            if replay.identity.is_some() {
-                return Ok(());
-            }
+            return Ok(());
         } else if state.metadata.head != 0 {
             return Err(backend(
                 "output replay tracking must be configured before the first event",
@@ -219,7 +215,7 @@ impl QosChannel {
         let _setup = self.begin_replay_setup()?;
         let mut metadata = state.metadata.clone();
         let identity = uuid::Uuid::new_v4();
-        let replay = metadata.replay.get_or_insert_with(|| ReplayState {
+        metadata.replay = Some(ReplayState {
             version: 2,
             identity: Some(identity),
             options,
@@ -227,8 +223,6 @@ impl QosChannel {
             sequence: 0,
             receipts: BTreeMap::new(),
         });
-        replay.version = 2;
-        replay.identity = Some(identity);
         self.persist(&metadata, None).await?;
         state.metadata = metadata;
         self.replay_identity

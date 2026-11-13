@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use crate::{ChangeEnvelope, StreamId};
+use crate::{ChangeEnvelope, ComponentId, StreamId};
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core_types::interface::StorageDurability;
@@ -38,7 +38,7 @@ pub trait BootstrapState: Send + Sync {
 
 pub struct BootstrapWatermark {
     pub stream: StreamId,
-    pub source_id: Option<String>,
+    pub source_id: Option<ComponentId>,
     pub sequence: u64,
     pub position: Option<Bytes>,
     /// The output epoch observed with a generic producer snapshot. Source-driver
@@ -60,7 +60,7 @@ impl BootstrapWatermark {
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_bootstrap_watermark(
             &self.stream,
-            self.source_id.as_deref(),
+            self.source_id.as_ref(),
             self.position.as_deref(),
             self.producer.as_ref(),
         )
@@ -69,7 +69,7 @@ impl BootstrapWatermark {
 
 pub fn validate_bootstrap_watermark(
     stream: &StreamId,
-    source_id: Option<&str>,
+    source_id: Option<&ComponentId>,
     position: Option<&[u8]>,
     producer: Option<&crate::GraphProducerIdentity>,
 ) -> anyhow::Result<()> {

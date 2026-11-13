@@ -142,7 +142,7 @@ pub fn validate_parameterized_template(source: &str) -> Result<()> {
 }
 
 pub fn build_context(
-    query_id: &str,
+    emission: &drasi_computation_contracts::exchange::QueryResult,
     operation: &str,
     timestamp: &str,
     metadata: &std::collections::HashMap<String, Value>,
@@ -151,8 +151,12 @@ pub fn build_context(
     data: Option<&Value>,
 ) -> Value {
     let mut context = serde_json::Map::from_iter([
-        ("query_id".into(), Value::from(query_id)),
-        ("query_name".into(), Value::from(query_id)),
+        ("query_id".into(), serde_json::json!(emission.query_id)),
+        ("query_name".into(), serde_json::json!(emission.query_name)),
+        (
+            "input_alias".into(),
+            serde_json::json!(emission.input_alias),
+        ),
         ("operation".into(), Value::from(operation)),
         ("timestamp".into(), Value::from(timestamp)),
         ("metadata".into(), serde_json::json!(metadata)),

@@ -46,7 +46,11 @@ fn envelope_codec_preserves_records_opaque_ids_metadata_lineage_and_annotations(
             .with_source_position(Bytes::from_static(&[0xff, 0, 1])),
     );
     original
-        .append_annotation(annotation("source"))
+        .append_annotation(annotation(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+        ))
         .expect("source annotation");
     let mut envelope = original.derive(
         emission_id(&stream("transform"), 1).expect("id"),
@@ -62,7 +66,7 @@ fn envelope_codec_preserves_records_opaque_ids_metadata_lineage_and_annotations(
     ] {
         envelope
             .append_annotation(
-                ContextEntry::try_new(component("transform"), "same-key", value).expect("entry"),
+                ContextEntry::try_new(component(429), "same-key", value).expect("entry"),
             )
             .expect("append");
     }
@@ -88,7 +92,11 @@ fn envelope_codec_preserves_records_opaque_ids_metadata_lineage_and_annotations(
     assert_eq!(ancestor.system().as_ref(), original.system().as_ref());
     let mut branch = decoded.clone();
     branch
-        .append_annotation(annotation("sink"))
+        .append_annotation(annotation(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+            "sink",
+        ))
         .expect("branch annotation");
     assert!(Arc::ptr_eq(branch.event(), decoded.event()));
     assert_eq!(branch.annotations().len(), decoded.annotations().len() + 1);
@@ -98,7 +106,15 @@ fn envelope_codec_preserves_records_opaque_ids_metadata_lineage_and_annotations(
 #[test]
 fn decoding_cannot_bypass_schema_identity_image_or_ordinal_validation() {
     let codec = codec(16_384);
-    let encoded = codec.encode(&root("source", 1, &[2, 4])).expect("encode");
+    let encoded = codec
+        .encode(&root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[2, 4],
+        ))
+        .expect("encode");
     for fault in [
         "version",
         "schema",
@@ -136,7 +152,13 @@ fn decoding_cannot_bypass_schema_identity_image_or_ordinal_validation() {
 
 #[test]
 fn encode_and_decode_limits_are_enforced_without_silent_truncation() {
-    let envelope = root("source", 1, &[1, 2]);
+    let envelope = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        1,
+        &[1, 2],
+    );
     assert!(matches!(
         codec(8).encode(&envelope),
         Err(EnvelopeCodecError::SizeLimit { .. })

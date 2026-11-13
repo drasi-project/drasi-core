@@ -26,6 +26,8 @@ use tokio::sync::Notify;
 
 use crate::ViewFactory;
 
+const VIEW_ID: &str = "d71f7900-57c4-4625-b0fa-1f91cd78faf7";
+
 fn identity_configuration() -> Value {
     json!({"stream": "view/out", "middleware": [], "pipeline": []})
 }
@@ -50,7 +52,7 @@ fn create(configuration: Value) -> Result<View> {
     View::new(
         ViewFactory
             .metadata()
-            .descriptor(ComponentId::try_new("view")?)?,
+            .descriptor(ComponentId::try_new(VIEW_ID)?)?,
         configuration,
         Some(&Scope {
             instance_id: "instance".into(),
@@ -117,7 +119,7 @@ async fn emit(view: &mut View, changes: &[SourceChange]) -> Result<Vec<SourceCha
         GraphProducerProgress::from_envelope(&output.envelope)?.context("missing view progress")?;
     assert!(!progress.identity().persistent());
     assert_eq!(progress.sequence(), output.envelope.system().sequence());
-    assert_eq!(progress.identity().component_id().as_str(), "view");
+    assert_eq!(progress.identity().component_id().as_str(), VIEW_ID);
     GraphChangeCodec::decode_changes(&output.envelope).map_err(Into::into)
 }
 
@@ -965,7 +967,7 @@ async fn lifecycle_retains_same_instance_state_but_never_claims_reconstruction_r
     assert_eq!(before.cursor().producer().construction_scope(), "instance");
     assert_eq!(before.cursor().producer().graph_id(), "graph");
     assert!(!before.cursor().producer().persistent());
-    assert!(view.deprovision().await.is_err());
+    assert!(view.delete_owned_resources().await.is_err());
     view.stop().await?;
     assert!(matches!(
         snapshot_reader.snapshot().await,
@@ -982,8 +984,8 @@ async fn lifecycle_retains_same_instance_state_but_never_claims_reconstruction_r
         reader(&fresh)?.snapshot().await?.cursor().epoch()
     );
     view.stop().await?;
-    view.deprovision().await?;
-    view.deprovision().await?;
+    view.delete_owned_resources().await?;
+    view.delete_owned_resources().await?;
     assert!(view.start().await.is_err());
     assert!(matches!(
         snapshot_reader.snapshot().await,
@@ -1011,7 +1013,7 @@ async fn provenance_and_configuration_remain_unchanged_while_output_owns_volatil
         90,
     )?;
     incoming.envelope.append_annotation(ContextEntry::try_new(
-        ComponentId::try_new("upstream")?,
+        ComponentId::try_new("8d6d6a64-fd82-4da5-8e15-32009b24ee1d")?,
         "test.provenance",
         ContextValue::String("original".into()),
     )?)?;
@@ -1079,7 +1081,7 @@ async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Resul
         metadata.capabilities.output_snapshots,
         vec![PortId::try_new("out")?]
     );
-    assert!(metadata.capabilities.deprovision);
+    assert!(metadata.capabilities.delete_owned_resources);
     assert!(!metadata.capabilities.transactional);
     assert!(!metadata.capabilities.durable_output);
     assert!(!metadata.capabilities.indexed_processing);
@@ -1090,19 +1092,20 @@ async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Resul
     assert!(metadata.capabilities.durable_bootstrap.is_none());
     assert!(!metadata.capabilities.wakeups);
     let request = CreateRequest {
-        id: ComponentId::try_new("factory-view")?,
+        id: ComponentId::try_new("7425fe17-d02b-47dc-9d8a-5de525b4b1f1")?,
         implementation: metadata.implementation.clone(),
         configuration_version: 1,
         configuration: identity_configuration(),
         scope: None,
         inputs: Vec::new(),
         activation_credentials_bound: false,
+        update_directive: None,
     };
     let created = ViewFactory.create(&request, ControlSender::default())?;
     let Component::Transformer(mut transformer) = created.component else {
         anyhow::bail!("view factory returned a different role")
     };
-    assert!(transformer.supports_deprovision());
+    assert!(transformer.supports_delete_owned_resources());
     assert_eq!(transformer.configuration()?, request.configuration);
     let readers = transformer.output_readers();
     readers.validate(transformer.descriptor())?;
@@ -1110,7 +1113,7 @@ async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Resul
     assert!(transformer.resume_delivery().is_err());
     transformer.start().await?;
     transformer.stop().await?;
-    transformer.deprovision().await?;
+    transformer.delete_owned_resources().await?;
     let exported = ExportedPlugin::new(crate::plugin()?)?;
     assert!(!exported.metadata().is_null());
     Ok(())

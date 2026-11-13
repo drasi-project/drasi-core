@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
     // Use the DrasiLib API to add the source. This demonstrates dynamic
     // component management rather than builder-based configuration.
 
-    core.add_source(http_source).await?;
+    core.add_source(drasi_lib::Source::id(&http_source).to_owned(), http_source).await?;
     println!("Added HTTP source: stock-prices");
 
     // =========================================================================
@@ -233,7 +233,7 @@ async fn main() -> Result<()> {
     // =========================================================================
     // Use the DrasiLib API to add the reaction.
 
-    core.add_reaction(log_reaction).await?;
+    core.add_reaction(drasi_lib::Reaction::id(&log_reaction).to_owned(), log_reaction).await?;
     println!("Added reaction: console-logger\n");
 
     // =========================================================================

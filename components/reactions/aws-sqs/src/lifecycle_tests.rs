@@ -61,22 +61,25 @@ async fn receiver(count: usize) -> Receiver {
 }
 
 fn reaction(endpoint: &str, fifo: bool) -> SqsReaction {
-    SqsReaction::builder("sqs-lifecycle")
-        .with_query("q1")
-        .with_queue_url(format!(
-            "{endpoint}/queue{}",
-            if fifo { ".fifo" } else { "" }
-        ))
-        .with_endpoint_url(endpoint)
-        .with_region("us-east-1")
-        .with_credentials("test", "test")
-        .with_fifo_queue(fifo)
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("{{json after}}")),
-            ..Default::default()
-        })
-        .build()
-        .unwrap()
+    SqsReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006d")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_queue_url(format!(
+        "{endpoint}/queue{}",
+        if fifo { ".fifo" } else { "" }
+    ))
+    .with_endpoint_url(endpoint)
+    .with_region("us-east-1")
+    .with_credentials("test", "test")
+    .with_fifo_queue(fifo)
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("{{json after}}")),
+        ..Default::default()
+    })
+    .build()
+    .unwrap()
 }
 
 async fn arrived(server: &mut Receiver, fifo: bool, sequence: u64) -> Option<String> {
@@ -89,7 +92,7 @@ async fn arrived(server: &mut Receiver, fifo: bool, sequence: u64) -> Option<Str
     assert_eq!(body["generation"], sequence);
     assert_eq!(
         payload["MessageAttributes"]["drasi-query-id"]["StringValue"],
-        "q1"
+        support::result(sequence).query_id.to_string()
     );
     assert_eq!(
         payload["MessageAttributes"]["drasi-operation"]["StringValue"],
@@ -100,7 +103,10 @@ async fn arrived(server: &mut Receiver, fifo: bool, sequence: u64) -> Option<Str
         format!("{}/queue{}", server.url, if fifo { ".fifo" } else { "" })
     );
     if fifo {
-        assert_eq!(payload["MessageGroupId"], "q1");
+        assert_eq!(
+            payload["MessageGroupId"],
+            support::result(sequence).query_id.to_string()
+        );
         let id = payload["MessageDeduplicationId"].as_str().unwrap();
         uuid::Uuid::parse_str(id).unwrap();
         Some(id.to_owned())

@@ -43,7 +43,7 @@ use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState,
 type BatcherItem = (BatchKey, ProtoQueryResultItem, bool);
 
 pub(crate) struct AdaptiveRunnerParams {
-    pub reaction_name: String,
+    pub reaction_id: drasi_lib::ComponentId,
     pub adaptive: AdaptiveBatchConfig,
     pub base: ReactionBase,
     pub config: GrpcReactionConfig,
@@ -54,7 +54,7 @@ pub(crate) struct AdaptiveRunnerParams {
 
 pub(crate) async fn run(params: AdaptiveRunnerParams) {
     let AdaptiveRunnerParams {
-        reaction_name,
+        reaction_id,
         adaptive,
         base,
         config,
@@ -93,7 +93,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
     );
 
     let batcher_endpoint = endpoint.clone();
-    let batcher_name = reaction_name.clone();
+    let batcher_name = reaction_id.clone();
     let batcher_base = base.clone_shared();
     let batcher_errored = errored.clone();
 
@@ -173,7 +173,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
 
             // Queries that had a dropped sub-batch under AutoSkipGap. Under
             // Strict the loop returns on the first failure, so this stays empty.
-            let mut failed_queries: std::collections::HashSet<String> =
+            let mut failed_queries: std::collections::HashSet<drasi_lib::ComponentId> =
                 std::collections::HashSet::new();
 
             for (key, items) in batches_by_key.into_iter() {
@@ -273,39 +273,34 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             let query_result = tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => {
-                    debug!("[{reaction_name}] Received shutdown signal, exiting adaptive processing loop");
+                    debug!("[{reaction_id}] Received shutdown signal, exiting adaptive processing loop");
                     break;
                 }
                 // The batcher dropping its receiver (e.g. a fail-stop) closes this
                 // sender; break promptly instead of blocking on the next dequeue.
                 _ = batch_tx.closed() => {
-                    debug!("[{reaction_name}] Batcher exited; exiting adaptive processing loop");
+                    debug!("[{reaction_id}] Batcher exited; exiting adaptive processing loop");
                     break;
                 }
                 result = priority_queue.dequeue() => result,
             };
 
             if query_result.results.is_empty() {
-                debug!("[{reaction_name}] Received empty result set from query");
+                debug!("[{reaction_id}] Received empty result set from query");
                 continue;
             }
 
             let query_id = query_result.query_id.clone();
             let seq = query_result.sequence;
 
-            let emission = QueryEmissionContext {
-                query_id: &query_id,
-                sequence: seq,
-                timestamp: query_result.timestamp,
-                metadata: &query_result.metadata,
-            };
+            let emission = QueryEmissionContext::from(query_result.as_ref());
 
             // Build all items first so the last one can be flagged terminal; the
             // checkpoint only advances once a result's terminal item is acked.
             let mut built_items: Vec<(BatchKey, ProtoQueryResultItem)> = Vec::new();
             for diff in &query_result.results {
                 if matches!(diff, drasi_lib::channels::ResultDiff::Noop) {
-                    debug!("[{reaction_name}] Ignoring noop result");
+                    debug!("[{reaction_id}] Ignoring noop result");
                     continue;
                 }
                 let Some(built) =
@@ -323,7 +318,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 let is_terminal = i == last_idx;
                 if batch_tx.send((key, item, is_terminal)).await.is_err() {
                     let msg = "failed to send item to adaptive batcher".to_string();
-                    error!("[{reaction_name}] {msg}");
+                    error!("[{reaction_id}] {msg}");
                     status_handle
                         .set_status(ComponentStatus::Error, Some(msg))
                         .await;
@@ -338,11 +333,11 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
 
     // Preserve the `Error` status set by a fail-stopping batcher.
     if errored.load(Ordering::SeqCst) {
-        info!("[{reaction_name}] Adaptive gRPC reaction stopped after a delivery failure");
+        info!("[{reaction_id}] Adaptive gRPC reaction stopped after a delivery failure");
         return;
     }
 
-    info!("[{reaction_name}] Adaptive gRPC reaction completed");
+    info!("[{reaction_id}] Adaptive gRPC reaction completed");
     status_handle
         .set_status(
             ComponentStatus::Stopped,
@@ -353,8 +348,13 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
 
 /// Set the reaction to `Error` and record that a fail-stop occurred so the main
 /// loop does not overwrite the status with `Stopped`.
-async fn fail_stop(base: &ReactionBase, errored: &Arc<AtomicBool>, reaction_name: &str, msg: &str) {
-    error!("[{reaction_name}] {msg}");
+async fn fail_stop(
+    base: &ReactionBase,
+    errored: &Arc<AtomicBool>,
+    reaction_id: &drasi_lib::ComponentId,
+    msg: &str,
+) {
+    error!("[{reaction_id}] {msg}");
     errored.store(true, Ordering::SeqCst);
     base.status_handle()
         .set_status(ComponentStatus::Error, Some(msg.to_string()))
@@ -371,7 +371,7 @@ async fn deliver_sub_batch(
     max_retries: u32,
     endpoint: &str,
     timeout_ms: u64,
-    reaction_name: &str,
+    reaction_id: &drasi_lib::ComponentId,
 ) -> bool {
     let mut retry_swaps = 0u32;
     loop {
@@ -401,7 +401,7 @@ async fn deliver_sub_batch(
                         *client = None;
                     }
                     warn!(
-                        "[{reaction_name}] Failed to deliver adaptive batch of {} item(s) for \
+                        "[{reaction_id}] Failed to deliver adaptive batch of {} item(s) for \
                          query '{}' after retries",
                         items.len(),
                         key.query_id
@@ -412,7 +412,7 @@ async fn deliver_sub_batch(
             }
             Err(e) => {
                 error!(
-                    "[{reaction_name}] Failed to deliver adaptive batch for query '{}': {e}",
+                    "[{reaction_id}] Failed to deliver adaptive batch for query '{}': {e}",
                     key.query_id
                 );
                 return false;

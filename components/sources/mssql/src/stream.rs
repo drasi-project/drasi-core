@@ -48,11 +48,11 @@ fn classify_error(error: &anyhow::Error) -> MsSqlErrorKind {
 /// If the connection is lost, it will automatically attempt to reconnect with
 /// exponential backoff. The loop can be gracefully stopped using the shutdown receiver.
 pub async fn run_cdc_stream(
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     config: MsSqlSourceConfig,
     base: SourceBase,
     mut shutdown_rx: watch::Receiver<bool>,
-    subscriber_resume_lsns: Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
+    subscriber_resume_lsns: Arc<RwLock<std::collections::HashMap<drasi_lib::ComponentId, Lsn>>>,
 ) -> Result<()> {
     info!("Starting CDC stream for source '{source_id}'");
 
@@ -134,11 +134,11 @@ pub async fn run_cdc_stream(
 
 /// Internal CDC polling loop that handles a single connection session
 async fn run_cdc_polling_loop(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &MsSqlSourceConfig,
     base: &SourceBase,
     shutdown_rx: &mut watch::Receiver<bool>,
-    subscriber_resume_lsns: &Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
+    subscriber_resume_lsns: &Arc<RwLock<std::collections::HashMap<drasi_lib::ComponentId, Lsn>>>,
 ) -> Result<()> {
     // Connect to MS SQL
     info!("Connecting to MS SQL Server for source '{source_id}'");
@@ -285,7 +285,7 @@ async fn run_cdc_polling_loop(
 
 /// Poll CDC for changes since last LSN
 async fn poll_cdc_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &MsSqlSourceConfig,
     client: &mut tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>,
     pk_cache: &PrimaryKeyCache,
@@ -403,7 +403,7 @@ async fn poll_cdc_changes(
                     SourceChange::Insert {
                         element: Element::Node {
                             metadata: ElementMetadata {
-                                reference: ElementReference::new(source_id, &element_id),
+                                reference: ElementReference::new(source_id.as_str(), &element_id),
                                 labels: Arc::from([Arc::from(label)]),
                                 effective_from,
                             },
@@ -415,7 +415,7 @@ async fn poll_cdc_changes(
                     let properties = extract_properties_from_cdc_row(&row)?;
                     SourceChange::update(Element::Node {
                         metadata: ElementMetadata {
-                            reference: ElementReference::new(source_id, &element_id),
+                            reference: ElementReference::new(source_id.as_str(), &element_id),
                             labels: Arc::from([Arc::from(label)]),
                             effective_from,
                         },
@@ -424,7 +424,7 @@ async fn poll_cdc_changes(
                 }
                 CdcOperation::Delete => SourceChange::Delete {
                     metadata: ElementMetadata {
-                        reference: ElementReference::new(source_id, &element_id),
+                        reference: ElementReference::new(source_id.as_str(), &element_id),
                         labels: Arc::from([Arc::from(label)]),
                         effective_from,
                     },
@@ -439,7 +439,7 @@ async fn poll_cdc_changes(
             profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
             let mut wrapper = SourceEventWrapper::with_profiling(
-                source_id.to_string(),
+                source_id.clone(),
                 drasi_lib::channels::SourceEvent::Change(change),
                 chrono::Utc::now(),
                 profiling,

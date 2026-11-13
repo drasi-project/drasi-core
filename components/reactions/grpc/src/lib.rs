@@ -53,8 +53,8 @@ use std::collections::HashMap;
 
 /// Builder for [`GrpcReaction`].
 pub struct GrpcReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     config: GrpcReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
@@ -62,9 +62,9 @@ pub struct GrpcReactionBuilder {
 }
 
 impl GrpcReactionBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             config: GrpcReactionConfig::default(),
             priority_queue_capacity: None,
@@ -73,20 +73,56 @@ impl GrpcReactionBuilder {
         }
     }
 
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
         self
     }
 
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
+    }
+
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
         self
     }
 
-    /// Alias of [`with_query`](Self::with_query); reads naturally at call
-    /// sites (e.g. `…from_query("orders")…`).
-    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
+        self
+    }
+
+    /// Add a query input by its current name.
+    pub fn from_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
+        self
+    }
+
+    /// Add a query input by its immutable ID.
+    pub fn from_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
     }
 
@@ -249,7 +285,8 @@ impl GrpcReactionBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<GrpcReaction> {
-        self.config.validate(&self.queries)?;
+        self.config
+            .validate(&drasi_lib::reactions::common::input_aliases(&self.queries))?;
         Ok(GrpcReaction::from_builder(
             self.id,
             self.queries,

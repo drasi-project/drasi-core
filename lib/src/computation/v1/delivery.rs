@@ -415,6 +415,11 @@ impl DeliveryRunner {
             .await?)
     }
 
+    fn metadata_key(&self) -> drasi_core::interface::OutputPartition {
+        drasi_core::interface::OutputPartition::Component(self.scope.consumer().clone())
+            .metadata(METADATA_KEY)
+    }
+
     async fn load(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.transaction.recovery_required(),
@@ -431,9 +436,9 @@ impl DeliveryRunner {
         let (head, records) = self
             .transaction
             .run(async {
-                let head = outbox.read_latest_sequence(METADATA_KEY).await?;
+                let head = outbox.read_latest_sequence(&self.metadata_key()).await?;
                 let records = if head == Some(1) {
-                    outbox.read_from(METADATA_KEY, 0).await?
+                    outbox.read_from(&self.metadata_key(), 0).await?
                 } else {
                     Vec::new()
                 };
@@ -481,7 +486,7 @@ impl DeliveryRunner {
             .expect("validated outbox");
         self.transaction
             .run(async {
-                outbox.append(METADATA_KEY, 1, &bytes).await?;
+                outbox.append(&self.metadata_key(), 1, &bytes).await?;
                 Ok(())
             })
             .await?;
@@ -536,7 +541,7 @@ impl DeliveryRunner {
             .run(async {
                 handler.handle(item, &context).await.map_err(failed)?;
                 context.validate().map_err(failed)?;
-                outbox.append(METADATA_KEY, 1, &bytes).await?;
+                outbox.append(&self.metadata_key(), 1, &bytes).await?;
                 Ok(())
             })
             .await;

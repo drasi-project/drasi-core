@@ -55,7 +55,7 @@ struct InjectableSource {
 }
 
 impl InjectableSource {
-    fn new(id: &str) -> anyhow::Result<(Self, SourceInjector)> {
+    fn new(id: drasi_core::ComponentId) -> anyhow::Result<(Self, SourceInjector)> {
         let params = SourceBaseParams::new(id);
         let base = Arc::new(SourceBase::new(params)?);
         let injector = SourceInjector { base: base.clone() };
@@ -65,7 +65,7 @@ impl InjectableSource {
 
 #[async_trait]
 impl Source for InjectableSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -105,7 +105,7 @@ impl Source for InjectableSource {
             .await
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -113,8 +113,8 @@ impl Source for InjectableSource {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     fn dispatch_mode(&self) -> drasi_lib::DispatchMode {
@@ -133,7 +133,10 @@ struct CapturingReaction {
 }
 
 impl CapturingReaction {
-    fn new(id: &str, query_ids: Vec<String>) -> Self {
+    fn new(
+        id: drasi_core::ComponentId,
+        query_ids: Vec<drasi_lib::config::ComponentReference>,
+    ) -> Self {
         let params = drasi_lib::ReactionBaseParams::new(id, query_ids);
         Self {
             base: drasi_lib::ReactionBase::new(params),
@@ -153,7 +156,7 @@ impl CapturingReaction {
 
 #[async_trait]
 impl Reaction for CapturingReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -165,16 +168,16 @@ impl Reaction for CapturingReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -214,7 +217,7 @@ impl Reaction for CapturingReaction {
         self.base.get_status().await
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -227,13 +230,18 @@ impl Reaction for CapturingReaction {
 // Helper functions
 // ============================================================================
 
-async fn wait_for_status(drasi: &DrasiLib, component: &str, id: &str, expected: ComponentStatus) {
+async fn wait_for_status(
+    drasi: &DrasiLib,
+    component: &str,
+    id: drasi_core::ComponentId,
+    expected: ComponentStatus,
+) {
     let mut rx = drasi.subscribe_all_component_events();
     let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()
-        .any(|n| n.id == id && n.status == expected)
+        .any(|n| n.id.component_id() == Some(&id) && n.status == expected)
     {
         return;
     }
@@ -266,7 +274,7 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
-    use drasi_lib::computation::v1::{ComponentId, DependencyWait, RealizationState};
+    use drasi_lib::computation::v1::{DependencyWait, RealizationState};
 
     let drasi = lib_integration_tests::query_builder()
         .build()
@@ -275,52 +283,118 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
     if !declare_before_start {
         drasi.start().await.expect("start instance");
     }
-    let reaction = CapturingReaction::new("late-reaction", vec!["late-query".into()]);
-    let captured = reaction.captured();
-    let notify = reaction.notify();
+    let captured = Arc::new(RwLock::new(Vec::new()));
+    let notify = Arc::new(Notify::new());
+    let capture = captured.clone();
+    let wake = notify.clone();
     let reaction = drasi
-        .add_reaction_with_handle(reaction)
+        .create_reaction(
+            drasi_core::ComponentName::try_new("late-reaction").expect("fixture component name"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("late-query").expect("fixture component name"),
+            )],
+            true,
+            move |id, inputs| {
+                let mut reaction = CapturingReaction::new(
+                    id.clone(),
+                    inputs
+                        .iter()
+                        .cloned()
+                        .map(drasi_lib::config::ComponentReference::by_id)
+                        .collect(),
+                );
+                reaction.captured = capture.clone();
+                reaction.notify = wake.clone();
+                Ok(reaction)
+            },
+        )
         .await
         .expect("declare reaction");
+    let reaction_id = reaction.id().clone();
+    let reaction_wait = DependencyWait::ComponentName {
+        name: drasi_core::ComponentName::try_new("late-query").expect("fixture component name"),
+    };
+    let mut changes = drasi
+        .computation_control()
+        .expect("control")
+        .subscribe_observed();
+    let _ = timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|state| {
+            state
+                .components
+                .get(reaction.id())
+                .is_some_and(|component| {
+                    component.failure.is_some() || component.waiting_for.contains(&reaction_wait)
+                })
+        }),
+    )
+    .await
+    .expect("reaction dependency observation deadline")
+    .expect("reaction observations closed");
     let observed = reaction.observed().expect("reaction observation");
     assert_eq!(
         observed.realization,
         RealizationState::Blocked,
         "{observed:#?}"
     );
-    assert_eq!(
-        observed.waiting_for,
-        [DependencyWait::Component {
-            id: ComponentId::try_new("late-query").expect("query ID"),
-        }]
-    );
+    assert_eq!(observed.waiting_for, [reaction_wait]);
     assert!(observed.failure.is_none());
 
     let query = drasi
         .add_query_with_handle(
-            Query::cypher("late-query")
-                .query("MATCH (s:Sensor) RETURN s.temperature AS temperature")
-                .from_input("late-source")
-                .enable_bootstrap(false)
-                .build(),
+            Query::cypher(
+                drasi_core::ComponentName::try_new("late-query").expect("fixture component name"),
+            )
+            .query("MATCH (s:Sensor) RETURN s.temperature AS temperature")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("late-source").expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .build()
+            .expect("valid late query"),
         )
         .await
         .expect("declare query");
+    let query_id = query.id().clone();
+    let source_wait = DependencyWait::ComponentName {
+        name: drasi_core::ComponentName::try_new("late-source").expect("fixture component name"),
+    };
+    let _ = timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|state| {
+            state.components.get(&query_id).is_some_and(|component| {
+                component.failure.is_some() || component.waiting_for.contains(&source_wait)
+            })
+        }),
+    )
+    .await
+    .expect("query dependency observation deadline")
+    .expect("query observations closed");
     let observed = query.observed().expect("query observation");
     assert_eq!(
         observed.realization,
         RealizationState::Blocked,
         "{observed:#?}"
     );
-    assert!(observed.waiting_for.contains(&DependencyWait::Component {
-        id: ComponentId::try_new("late-source").expect("source ID"),
-    }));
+    assert!(observed.waiting_for.contains(&source_wait));
     assert!(observed.failure.is_none());
     let saved = drasi
-        .snapshot_computation_configuration()
-        .await
-        .expect("save waiting instance");
-    assert_eq!(saved.instance.queries.len(), 1);
+        .desired_configuration()
+        .expect("accepted waiting configuration");
+    let queries: Vec<_> = saved
+        .desired
+        .ordinary
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.component,
+                drasi_lib::management::OrdinaryComponent::Query { .. }
+            )
+        })
+        .collect();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].id, query_id);
     if declare_before_start {
         timeout(Duration::from_secs(5), drasi.start())
             .await
@@ -329,21 +403,45 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
     }
     if stop_before_source {
         drasi
-            .stop_query("late-query")
+            .stop_query_by_name(
+                &drasi_core::ComponentName::try_new("late-query").expect("fixture component name"),
+            )
             .await
             .expect("withdraw pending startup");
     }
 
-    let (source, injector) = InjectableSource::new("late-source").expect("source");
+    let (source, injector) = InjectableSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003df")
+            .expect("fixture UUID"),
+    )
+    .expect("source");
     drasi
-        .add_source_with_handle(source)
+        .add_source_with_handle(
+            drasi_core::ComponentName::try_new("late-source").expect("fixture component name"),
+            source,
+        )
         .await
         .expect("declare source");
     if stop_before_source {
-        timeout(Duration::from_secs(5), query.wait_created())
-            .await
-            .expect("creation deadline")
-            .expect("query constructs without activation");
+        let query = timeout(Duration::from_secs(5), async {
+            let _ = changes
+                .wait_for(|state| {
+                    state.components.get(&query_id).is_some_and(|component| {
+                        component.realization == RealizationState::Created
+                            || component.failure.is_some()
+                    })
+                })
+                .await
+                .expect("query observations closed");
+            let query = drasi.component_by_id(&query_id).expect("current query");
+            query
+                .wait_created()
+                .await
+                .expect("query constructs without activation");
+            query
+        })
+        .await
+        .expect("creation deadline");
         let control = drasi.computation_control().expect("control");
         timeout(Duration::from_secs(3), async {
             loop {
@@ -364,11 +462,33 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
             drasi_lib::computation::v1::ComponentLifecycle::Stopped
         );
         drasi
-            .start_query("late-query")
+            .start_query_by_name(
+                &drasi_core::ComponentName::try_new("late-query").expect("fixture component name"),
+            )
             .await
             .expect("explicitly activate the stopped query");
     }
-    timeout(Duration::from_secs(5), async {
+    let (query, reaction) = timeout(Duration::from_secs(5), async {
+        // Binding late names replaces the waiting generation, not its declaration ID.
+        let _ = changes
+            .wait_for(|state| {
+                let components = [
+                    state.components.get(&query_id),
+                    state.components.get(&reaction_id),
+                ];
+                components
+                    .iter()
+                    .any(|component| component.is_some_and(|value| value.failure.is_some()))
+                    || components
+                        .iter()
+                        .all(|component| component.is_some_and(|value| value.started))
+            })
+            .await
+            .expect("pipeline observations closed");
+        let query = drasi.component_by_id(&query_id).expect("current query");
+        let reaction = drasi
+            .component_by_id(&reaction_id)
+            .expect("current reaction");
         query
             .wait_started()
             .await
@@ -377,11 +497,12 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
             .wait_started()
             .await
             .expect("reaction automatically starts");
+        (query, reaction)
     })
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "dependency arrival did not activate the original handles: {:#?}",
+            "dependency arrival did not activate the original declarations: {:#?}",
             drasi.computation_control().expect("control").observed()
         )
     });
@@ -440,7 +561,10 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
             .collect();
         assert_eq!(
             drasi
-                .get_query_results("late-query")
+                .get_query_results_by_name(
+                    &drasi_core::ComponentName::try_new("late-query")
+                        .expect("fixture component name")
+                )
                 .await
                 .expect("query snapshot"),
             expected
@@ -450,7 +574,7 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
     assert_eq!(results.len(), 3);
     assert!(results
         .iter()
-        .all(|result| result.query_id == "late-query" && result.results.len() == 1));
+        .all(|result| result.query_id == query_id && result.results.len() == 1));
     assert!(matches!(results[0].results[0], ResultDiff::Add { .. }));
     assert!(matches!(results[1].results[0], ResultDiff::Update { .. }));
     assert!(matches!(results[2].results[0], ResultDiff::Delete { .. }));
@@ -482,33 +606,69 @@ async fn late_dependencies_activate_query_and_reaction_multi_thread() {
 /// 5. Reaction's processing task receives and processes the results
 #[tokio::test]
 async fn test_source_to_query_to_reaction_data_flow() {
-    let (source, injector) = InjectableSource::new("test-source").unwrap();
+    let (source, injector) = InjectableSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    )
+    .unwrap();
 
-    let reaction = CapturingReaction::new("test-reaction", vec!["test-query".to_string()]);
+    let reaction = CapturingReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        )],
+    );
     let captured = reaction.captured();
     let notify = reaction.notify();
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
-        .with_query(
-            Query::cypher("test-query")
-                .query("MATCH (s:Sensor) RETURN s")
-                .from_input("test-source")
-                .build(),
+        .with_source(
+            drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+            source,
         )
-        .with_reaction(reaction)
+        .with_query(
+            Query::cypher(
+                drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+            )
+            .query("MATCH (s:Sensor) RETURN s")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+            )
+            .build()
+            .expect("valid test query"),
+        )
+        .with_reaction(
+            drasi_core::ComponentName::try_new("test-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
 
-    wait_for_status(&drasi, "source", "test-source", ComponentStatus::Running).await;
-    wait_for_status(&drasi, "query", "test-query", ComponentStatus::Running).await;
+    wait_for_status(
+        &drasi,
+        "source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+        ComponentStatus::Running,
+    )
+    .await;
+    let query_id = drasi
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        )
+        .expect("declared query")
+        .id()
+        .clone();
+    wait_for_status(&drasi, "query", query_id.clone(), ComponentStatus::Running).await;
     wait_for_status(
         &drasi,
         "reaction",
-        "test-reaction",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
         ComponentStatus::Running,
     )
     .await;
@@ -549,7 +709,7 @@ async fn test_source_to_query_to_reaction_data_flow() {
     // Verify the reaction received the correct data
     assert_eq!(received.len(), 1, "Should receive exactly one QueryResult");
     let result = &received[0];
-    assert_eq!(result.query_id, "test-query");
+    assert_eq!(result.query_id, query_id);
     assert_eq!(result.results.len(), 1, "Should have one result diff");
 
     match &result.results[0] {
@@ -568,30 +728,72 @@ async fn test_source_to_query_to_reaction_data_flow() {
 /// Test that multiple events flow through correctly.
 #[tokio::test]
 async fn test_multiple_events_flow_through() {
-    let (source, injector) = InjectableSource::new("multi-src").unwrap();
+    let (source, injector) = InjectableSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e0")
+            .expect("fixture UUID"),
+    )
+    .unwrap();
 
-    let reaction = CapturingReaction::new("multi-rx", vec!["multi-query".to_string()]);
+    let reaction = CapturingReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e1")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("multi-query").expect("fixture component name"),
+        )],
+    );
     let captured = reaction.captured();
     let notify = reaction.notify();
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
-        .with_query(
-            Query::cypher("multi-query")
-                .query("MATCH (s:Sensor) RETURN s")
-                .from_input("multi-src")
-                .build(),
+        .with_source(
+            drasi_core::ComponentName::try_new("multi-src").expect("fixture component name"),
+            source,
         )
-        .with_reaction(reaction)
+        .with_query(
+            Query::cypher(
+                drasi_core::ComponentName::try_new("multi-query").expect("fixture component name"),
+            )
+            .query("MATCH (s:Sensor) RETURN s")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("multi-src").expect("fixture component name"),
+            )
+            .build()
+            .expect("valid multi-source query"),
+        )
+        .with_reaction(
+            drasi_core::ComponentName::try_new("multi-rx").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
 
-    wait_for_status(&drasi, "source", "multi-src", ComponentStatus::Running).await;
-    wait_for_status(&drasi, "query", "multi-query", ComponentStatus::Running).await;
-    wait_for_status(&drasi, "reaction", "multi-rx", ComponentStatus::Running).await;
+    wait_for_status(
+        &drasi,
+        "source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e0")
+            .expect("fixture UUID"),
+        ComponentStatus::Running,
+    )
+    .await;
+    let query_id = drasi
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("multi-query").expect("fixture component name"),
+        )
+        .expect("declared query")
+        .id()
+        .clone();
+    wait_for_status(&drasi, "query", query_id.clone(), ComponentStatus::Running).await;
+    wait_for_status(
+        &drasi,
+        "reaction",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e1")
+            .expect("fixture UUID"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Inject 3 sensor nodes
     for i in 1..=3 {
@@ -633,7 +835,7 @@ async fn test_multiple_events_flow_through() {
 
     assert_eq!(received.len(), 3, "Should receive 3 QueryResults");
     for result in &received {
-        assert_eq!(result.query_id, "multi-query");
+        assert_eq!(result.query_id, query_id);
         assert!(!result.results.is_empty());
     }
 
@@ -647,32 +849,74 @@ async fn test_multiple_events_flow_through() {
 /// they are stored in the query's result set — not silently discarded.
 #[tokio::test]
 async fn test_aggregation_results_stored_in_current_results() {
-    let (source, injector) = InjectableSource::new("agg-src").unwrap();
+    let (source, injector) = InjectableSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e2")
+            .expect("fixture UUID"),
+    )
+    .unwrap();
 
-    let reaction = CapturingReaction::new("agg-rx", vec!["agg-query".to_string()]);
+    let reaction = CapturingReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e4")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+        )],
+    );
     let captured = reaction.captured();
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
-        .with_query(
-            Query::cypher("agg-query")
-                .query(
-                    "MATCH (p:Product)<-[:REVIEWED]-(r:Review) \
-                     RETURN p.name AS product_name, count(r) AS review_count",
-                )
-                .from_input("agg-src")
-                .build(),
+        .with_source(
+            drasi_core::ComponentName::try_new("agg-src").expect("fixture component name"),
+            source,
         )
-        .with_reaction(reaction)
+        .with_query(
+            Query::cypher(
+                drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+            )
+            .query(
+                "MATCH (p:Product)<-[:REVIEWED]-(r:Review) \
+                     RETURN p.name AS product_name, count(r) AS review_count",
+            )
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("agg-src").expect("fixture component name"),
+            )
+            .build()
+            .expect("valid aggregate query"),
+        )
+        .with_reaction(
+            drasi_core::ComponentName::try_new("agg-rx").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
 
-    wait_for_status(&drasi, "source", "agg-src", ComponentStatus::Running).await;
-    wait_for_status(&drasi, "query", "agg-query", ComponentStatus::Running).await;
-    wait_for_status(&drasi, "reaction", "agg-rx", ComponentStatus::Running).await;
+    wait_for_status(
+        &drasi,
+        "source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e2")
+            .expect("fixture UUID"),
+        ComponentStatus::Running,
+    )
+    .await;
+    let query_id = drasi
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+        )
+        .expect("declared query")
+        .id()
+        .clone();
+    wait_for_status(&drasi, "query", query_id, ComponentStatus::Running).await;
+    wait_for_status(
+        &drasi,
+        "reaction",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e4")
+            .expect("fixture UUID"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Insert a Product node
     let product = drasi_core::models::Element::Node {
@@ -744,7 +988,12 @@ async fn test_aggregation_results_stored_in_current_results() {
 
     // Now verify that get_query_results() returns the aggregation data.
     // This is the key assertion: aggregation results must be stored in current_results.
-    let query_results = drasi.get_query_results("agg-query").await.unwrap();
+    let query_results = drasi
+        .get_query_results_by_name(
+            &drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
 
     assert!(
         !query_results.is_empty(),

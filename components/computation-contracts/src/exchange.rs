@@ -4,6 +4,7 @@
 //! Shared source/query exchange data; no subscription or component ownership.
 
 use crate::profiling::ProfilingMetadata;
+use crate::{ComponentId, ComponentName};
 use bytes::Bytes;
 use drasi_core_types::models::SourceChange;
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,9 @@ use std::{collections::HashMap, sync::Arc};
 pub enum SourceControl {
     /// Query subscription control event
     Subscription {
-        query_id: String,
-        query_node_id: String,
+        query_id: ComponentId,
+        /// Platform query-container instance, not a component identity.
+        query_instance_id: String,
         node_labels: Vec<String>,
         rel_labels: Vec<String>,
         operation: ControlOperation,
@@ -49,7 +51,7 @@ pub enum SourceEvent {
 ///
 #[derive(Debug, Clone)]
 pub struct SourceEventWrapper {
-    pub source_id: String,
+    pub source_id: ComponentId,
     pub event: SourceEvent,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Optional profiling metadata for performance tracking.
@@ -69,7 +71,7 @@ pub struct SourceEventWrapper {
 impl SourceEventWrapper {
     /// Create an event with an explicit sequence and without profiling.
     pub fn new(
-        source_id: String,
+        source_id: ComponentId,
         event: SourceEvent,
         timestamp: chrono::DateTime<chrono::Utc>,
         sequence: u64,
@@ -86,7 +88,7 @@ impl SourceEventWrapper {
 
     /// Create an event with an explicit sequence and profiling metadata.
     pub fn with_profiling(
-        source_id: String,
+        source_id: ComponentId,
         event: SourceEvent,
         timestamp: chrono::DateTime<chrono::Utc>,
         profiling: ProfilingMetadata,
@@ -104,7 +106,7 @@ impl SourceEventWrapper {
 
     /// Create an event with a required sequence and optional profiling metadata.
     pub fn with_sequence(
-        source_id: String,
+        source_id: ComponentId,
         event: SourceEvent,
         timestamp: chrono::DateTime<chrono::Utc>,
         sequence: u64,
@@ -136,7 +138,7 @@ impl SourceEventWrapper {
 /// field reordering and easier to evolve with new fields.
 #[derive(Debug)]
 pub struct SourceEventParts {
-    pub source_id: String,
+    pub source_id: ComponentId,
     pub event: SourceEvent,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub profiling: Option<ProfilingMetadata>,
@@ -148,7 +150,7 @@ impl SourceEventWrapper {
     /// Reconstruct an event from serialized plugin FFI payload parts.
     #[allow(clippy::too_many_arguments)]
     pub fn from_ffi_parts(
-        source_id: String,
+        source_id: ComponentId,
         event: SourceEvent,
         timestamp: chrono::DateTime<chrono::Utc>,
         profiling: Option<ProfilingMetadata>,
@@ -237,7 +239,13 @@ pub enum ResultDiff {
 /// optional profiling information. Dispatched to reactions via the priority queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
-    pub query_id: String,
+    pub query_id: ComponentId,
+    /// Current graph-owned name, when attached by a host with name authority.
+    #[serde(default)]
+    pub query_name: Option<ComponentName>,
+    /// Configured presentation route; never a query identity or checkpoint key.
+    #[serde(default)]
+    pub input_alias: Option<String>,
     /// Monotonic per-query sequence number identifying this emission.
     /// Reactions persist this in their checkpoint, the outbox is keyed by it,
     /// and the bootstrap APIs return it as `as_of_sequence`.
@@ -247,14 +255,13 @@ pub struct QueryResult {
     pub results: Vec<ResultDiff>,
     pub metadata: HashMap<String, serde_json::Value>,
     /// Optional profiling metadata for performance tracking
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub profiling: Option<ProfilingMetadata>,
 }
 
 impl QueryResult {
     /// Create a new QueryResult without profiling
     pub fn new(
-        query_id: String,
+        query_id: ComponentId,
         sequence: u64,
         timestamp: chrono::DateTime<chrono::Utc>,
         results: Vec<ResultDiff>,
@@ -262,6 +269,8 @@ impl QueryResult {
     ) -> Self {
         Self {
             query_id,
+            query_name: None,
+            input_alias: None,
             sequence,
             timestamp,
             results,
@@ -272,7 +281,7 @@ impl QueryResult {
 
     /// Create a new QueryResult with profiling metadata
     pub fn with_profiling(
-        query_id: String,
+        query_id: ComponentId,
         sequence: u64,
         timestamp: chrono::DateTime<chrono::Utc>,
         results: Vec<ResultDiff>,
@@ -281,6 +290,8 @@ impl QueryResult {
     ) -> Self {
         Self {
             query_id,
+            query_name: None,
+            input_alias: None,
             sequence,
             timestamp,
             results,

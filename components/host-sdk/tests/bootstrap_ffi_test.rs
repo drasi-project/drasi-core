@@ -135,15 +135,23 @@ async fn test_ffi_streaming_bootstrap() {
     // --- Create a reaction instance via the FFI descriptor ---
     let reaction = descriptor
         .create_reaction(
-            "test-reaction-1",
-            vec!["test-query".to_string()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000124")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )],
             &serde_json::json!({}),
             false,
         )
         .await
         .expect("Failed to create reaction via FFI");
 
-    assert_eq!(reaction.id(), "test-reaction-1");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000124")
+            .expect("fixture UUID")
+    );
     assert_eq!(reaction.type_name(), "snapshot-test");
     assert!(reaction.is_durable());
     assert!(reaction.needs_snapshot_on_fresh_start());
@@ -167,8 +175,12 @@ async fn test_ffi_streaming_bootstrap() {
         written_checkpoint: written_checkpoint.clone(),
     };
 
-    let ctx =
-        BootstrapContext::from_backend("test-query".to_string(), false, Box::new(mock_backend));
+    let ctx = BootstrapContext::from_backend(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+            .expect("fixture UUID"),
+        false,
+        Box::new(mock_backend),
+    );
 
     // --- Call bootstrap() through FFI — exercises the full streaming path ---
     reaction.bootstrap(ctx).await.expect("bootstrap() failed");
@@ -205,8 +217,12 @@ async fn test_ffi_streaming_bootstrap_with_outbox() {
 
     let reaction = descriptor
         .create_reaction(
-            "test-reaction-2",
-            vec!["test-query".to_string()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000125")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )],
             &serde_json::json!({}),
             false,
         )
@@ -218,7 +234,8 @@ async fn test_ffi_streaming_bootstrap_with_outbox() {
 
     let outbox_entries: Vec<Arc<drasi_lib::channels::QueryResult>> =
         vec![Arc::new(drasi_lib::channels::QueryResult::new(
-            "test-query".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             43,
             chrono::Utc::now(),
             vec![drasi_lib::channels::ResultDiff::Add {
@@ -240,8 +257,12 @@ async fn test_ffi_streaming_bootstrap_with_outbox() {
         written_checkpoint: written_checkpoint.clone(),
     };
 
-    let ctx =
-        BootstrapContext::from_backend("test-query".to_string(), false, Box::new(mock_backend));
+    let ctx = BootstrapContext::from_backend(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+            .expect("fixture UUID"),
+        false,
+        Box::new(mock_backend),
+    );
 
     // --- Call bootstrap() — exercises both snapshot AND outbox streaming ---
     reaction
@@ -272,7 +293,10 @@ struct MockSnapshotFetcher {
 
 #[async_trait]
 impl SnapshotFetcher for MockSnapshotFetcher {
-    async fn fetch_snapshot(&self, query_id: &str) -> Result<SnapshotStream, FetchError> {
+    async fn fetch_snapshot(
+        &self,
+        query_id: &drasi_core_types::ComponentId,
+    ) -> Result<SnapshotStream, FetchError> {
         self.fetch_count.fetch_add(1, Ordering::SeqCst);
         {
             let mut guard = self.captured_query_id.lock().await;
@@ -325,8 +349,12 @@ async fn test_ffi_snapshot_fetcher_vtable() {
 
     let reaction = descriptor
         .create_reaction(
-            "vtable-test-1",
-            vec!["test-query".to_string()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000126")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )],
             &serde_json::json!({}),
             false,
         )
@@ -354,14 +382,23 @@ async fn test_ffi_snapshot_fetcher_vtable() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "vtable-test-instance".to_string(),
-        reaction_id: "vtable-test-1".to_string(),
+        reaction_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000126")
+            .expect("fixture UUID"),
+        query_ids: vec![drasi_core_types::ComponentId::try_new(
+            "00000000-0000-0000-0000-000000000050",
+        )
+        .expect("fixture UUID")],
         update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: Some(mock_fetcher.clone()),
         resource_observer: None,
     };
-    reaction.initialize(context).await;
+    reaction.bind_runtime_context(context).await;
+    reaction
+        .initialize()
+        .await
+        .expect("reaction initialization");
 
     // --- Start the reaction — this triggers vtable fetch_snapshot ---
     reaction.start().await.expect("Reaction start() failed");
@@ -380,8 +417,8 @@ async fn test_ffi_snapshot_fetcher_vtable() {
     let captured_qid = mock_fetcher.captured_query_id.lock().await;
     assert_eq!(
         captured_qid.as_deref(),
-        Some("test-query"),
-        "Plugin should have fetched snapshot for 'test-query'"
+        Some("00000000-0000-0000-0000-000000000050"),
+        "plugin should fetch the resolved query component ID"
     );
 
     // Clean up

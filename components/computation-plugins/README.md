@@ -106,7 +106,8 @@ field/type-only metadata.
 For example, gRPC sink `batchSize` is bounded to `1..=65536`, while gRPC source
 adaptive ingress is restricted to `false`. These descriptions do not enable
 missing features. Rebuild the component library to publish the new details;
-loading an older native ABI 1.0 library remains supported.
+host and plugins must use native ABI 2.0.0 and the UUID wire-version-2 contract.
+Native ABI-1 and wire-version-1 libraries are rejected.
 
 ## Shared code and contracts
 
@@ -124,12 +125,25 @@ loading an older native ABI 1.0 library remains supported.
 Existing implementation names, implementation version `"1"` and configuration
 version `1` remain stable. New factory modes have distinct identities; consult
 each family guide for its schemas, resource requirements and recovery boundaries.
-The native plugin ABI remains **1.0.0**, with optional batching, query-snapshot,
-consumer-progress/cursor-policy, source-schema, source/bootstrap coordination and
-activation-credential extensions rather than changes to its base tables.
+The native plugin ABI is **2.0.0**, including lifecycle operations and the factory
+update planner. Batching, query-snapshot, consumer-progress/cursor-policy,
+source-schema, source/bootstrap coordination and activation credentials remain
+separately negotiated extensions.
 Source/bootstrap coordination exposes no application SQL API. The native ABI
 version is independent of the workspace package version and the legacy
 Source/Reaction ABI.
+
+Lifecycle hooks do not automatically make a component updateable. A factory
+must opt into update planning, and the host must validate the requested data
+handling against the actual graph. The counter supports interval changes that
+preserve its emitted values and sequence. The query plugin can increase output
+retention without replacing its evaluator or discarding history. It reports
+`Recreate`/`Rebootstrap` for changed query semantics, but Core currently rejects
+every such managed update: provider availability alone does not establish a safe
+snapshot/live boundary or downstream reset. Initial bootstrap is unaffected.
+The missing coordination is tracked in
+[CW-92](../../lib/docs/computation-graph-remaining-work.md#cw-92). See the
+[Host lifecycle contract](../host-sdk/README.md#component-lifecycle-and-managed-updates).
 
 Recovery-aware fan-out binds every actual required consumer independently.
 Native producers using `consumer_progress_v1` receive the exact read-only set,

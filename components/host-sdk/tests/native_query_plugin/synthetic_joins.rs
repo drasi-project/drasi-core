@@ -92,16 +92,17 @@ async fn matches_builtin() -> Result<()> {
     ] {
         let joins = join_settings();
         let mut query = plugin_factory("drasi.experimental/volatile-query")?.create_component(
-            ComponentId::try_new("joined")?,
+            ComponentId::try_new("62180e0c-6690-5dff-9c21-c145e9a23680")?,
             json!({
                 "query": JOIN_QUERY, "language": language,
                 "volatile": true, "joins": joins,
             }),
         )?;
+        query.initialize().await?;
         let mut reference = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: "synthetic-join-reference".into(),
-                id: ComponentId::try_new("reference")?,
+                id: ComponentId::try_new("60ac25b9-0f08-58ce-8525-aa526d46f2d6")?,
                 query: JOIN_QUERY.into(),
                 language: core_language,
                 output_stream: StreamId::try_new("reference/out")?,
@@ -326,7 +327,8 @@ async fn bootstrap_live_and_reopen() -> Result<()> {
             assert_eq!(snapshot.cursor().producer(), &producer);
             assert_eq!(snapshot.cursor().sequence(), 7);
             assert_eq!(
-                graph.progress.snapshot().checkpoints[&SourceProgressKey::Source("sqlite".into())]
+                graph.progress.snapshot().checkpoints
+                    [&SourceProgressKey::Source(graph.source.id().clone())]
                     .sequence,
                 7
             );
@@ -443,12 +445,7 @@ fn file_bootstrap(database: &Path, generation: u64) -> Result<Arc<NativeBootstra
         .context("missing file bootstrap factory")?;
     let mut configuration = sqlite::provider_configuration(database);
     configuration["settings"]["tables"] = json!(["orders", "customers"]);
-    factory.create_query_provider(
-        ComponentId::try_new(COMPONENT)?,
-        configuration,
-        scope(generation),
-        None,
-    )
+    factory.create_query_provider(component_id()?, configuration, scope(generation), None)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -458,11 +455,12 @@ async fn synthetic_join_file_provider_uses_the_same_core_builder() -> Result<()>
     create_database(&database)?;
     let mut query = plugin_factory("drasi.experimental/provider-query")?
         .create_component_with_bootstrap(
-            ComponentId::try_new(COMPONENT)?,
+            component_id()?,
             json!({"query":JOIN_QUERY, "volatile":true, "joins":join_settings()}),
             scope(1),
             Arc::new(NativeBootstrapResource(file_bootstrap(&database, 1)?)),
         )?;
+    query.initialize().await?;
     query.start().await?;
     assert_eq!(
         component_rows(&query).await?,
@@ -480,11 +478,12 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
     create_database(&database)?;
     let factory = plugin_factory("drasi.experimental/indexed-query")?;
     let mut original = factory.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query":JOIN_QUERY, "bootstrap":true, "joins":join_settings()}),
         scope(1),
         provider(&indexes)?,
     )?;
+    original.initialize().await?;
     original.bind_bootstrap(Arc::new(NativeBootstrapResource(file_bootstrap(
         &database, 1,
     )?)))?;
@@ -500,7 +499,7 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
     let mut changed = join_settings();
     changed[0].keys[0].property = "amount".into();
     let mut query = factory.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({
             "query":JOIN_QUERY, "bootstrap":true,
             "joins":changed, "recovery":"auto_reset",
@@ -508,6 +507,7 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
         scope(2),
         provider(&indexes)?,
     )?;
+    query.initialize().await?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(file_bootstrap(
         &database, 2,
     )?)))?;
@@ -578,7 +578,7 @@ fn synthetic_join_validation_rejects_invalid_settings_at_construction() -> Resul
     for joins in invalid {
         assert!(indexed
             .create_component_with_processing(
-                ComponentId::try_new(COMPONENT)?,
+                component_id()?,
                 json!({"query":JOIN_QUERY, "joins":joins}),
                 scope(1),
                 provider(&indexes)?,
@@ -586,7 +586,7 @@ fn synthetic_join_validation_rejects_invalid_settings_at_construction() -> Resul
             .is_err());
         assert!(volatile
             .create_component(
-                ComponentId::try_new(COMPONENT)?,
+                component_id()?,
                 json!({"query":JOIN_QUERY, "volatile":true, "joins":joins}),
             )
             .is_err());
@@ -601,11 +601,12 @@ async fn synthetic_join_empty_and_omitted_settings_share_retained_identity() -> 
     let factory = plugin_factory("drasi.experimental/indexed-query")?;
     let mut configuration = json!({"query":"MATCH (n:Item) RETURN n.value AS value"});
     let mut query = factory.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         configuration.clone(),
         scope(1),
         provider(directory.path())?,
     )?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -624,11 +625,12 @@ async fn synthetic_join_empty_and_omitted_settings_share_retained_identity() -> 
 
     configuration["joins"] = json!([]);
     let mut query = factory.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         configuration,
         scope(2),
         provider(directory.path())?,
     )?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.continue_transform().await?.is_empty());
     let output = query

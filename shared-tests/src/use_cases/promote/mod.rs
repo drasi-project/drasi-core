@@ -125,7 +125,7 @@ async fn setup_query(
 
     builder = builder.with_source_middleware(mw_config);
     builder =
-        builder.with_source_pipeline("test_source", &queries::source_pipeline(middleware_name));
+        builder.with_namespace_pipeline("test_source", &queries::source_pipeline(middleware_name));
 
     builder.build().await
 }

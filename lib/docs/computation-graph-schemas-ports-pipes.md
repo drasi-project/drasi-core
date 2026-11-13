@@ -665,7 +665,7 @@ to follow the actual owners and completion boundaries.
 
 Known gaps and proposed changes belong only in the
 [remaining-work document](computation-graph-remaining-work.md). The
-[requirement ledger](../tests/runtime_parity/requirements.tsv) records evidence;
+[testing guide](../../docs/contributing/contributing-code/contributing-code-tests/) describes execution;
 foundation coverage is not whole-system qualification.
 
 ## 9. Where the implementation lives

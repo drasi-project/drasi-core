@@ -35,7 +35,7 @@ use tokio::{
 
 pub struct DueFutureResult {
     pub results: Vec<QueryPartEvaluationContext>,
-    pub source_id: Arc<str>,
+    pub namespace: Arc<str>,
 }
 
 /// Standalone execution and scheduling around the shared evaluator.
@@ -168,12 +168,12 @@ impl ContinuousQuery {
             Err(e) => return Err(EvaluationError::from(e)),
         };
 
-        let source_id = future_ref.element_ref.source_id.clone();
+        let namespace = future_ref.element_ref.namespace.clone();
         let change = SourceChange::Future { future_ref };
         let results = self.evaluator.evaluate_changes(vec![change]).await?;
-        pre_commit_hook(&results, source_id.as_ref()).await?;
+        pre_commit_hook(&results, namespace.as_ref()).await?;
         guard.commit().await?;
-        Ok(Some(DueFutureResult { results, source_id }))
+        Ok(Some(DueFutureResult { results, namespace }))
     }
 
     /// Expose the ContinuousQuery's future queue for external polling.

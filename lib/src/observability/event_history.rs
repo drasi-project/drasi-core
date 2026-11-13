@@ -24,6 +24,7 @@ use std::collections::{HashMap, VecDeque};
 use tokio::sync::broadcast;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
+use crate::ComponentId;
 
 /// Default maximum number of events to retain per component.
 pub const DEFAULT_MAX_EVENTS_PER_COMPONENT: usize = 100;
@@ -87,7 +88,7 @@ impl ComponentEventChannel {
 /// Subscribers can receive live events as they occur via broadcast channels.
 pub struct ComponentEventHistory {
     /// Event channels per component ID
-    channels: HashMap<String, ComponentEventChannel>,
+    channels: HashMap<ComponentId, ComponentEventChannel>,
     /// Maximum events to retain per component
     max_events_per_component: usize,
     /// Broadcast channel capacity
@@ -144,7 +145,7 @@ impl ComponentEventHistory {
     /// Get all events for a specific component.
     ///
     /// Returns events in chronological order (oldest first).
-    pub fn get_events(&self, component_id: &str) -> Vec<ComponentEvent> {
+    pub fn get_events(&self, component_id: &ComponentId) -> Vec<ComponentEvent> {
         self.channels
             .get(component_id)
             .map(|channel| channel.get_history())
@@ -157,11 +158,11 @@ impl ComponentEventHistory {
     /// Creates the component's channel if it doesn't exist.
     pub fn subscribe(
         &mut self,
-        component_id: &str,
+        component_id: &ComponentId,
     ) -> (Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>) {
         let channel = self
             .channels
-            .entry(component_id.to_string())
+            .entry(component_id.clone())
             .or_insert_with(|| {
                 ComponentEventChannel::new(self.max_events_per_component, self.channel_capacity)
             });
@@ -178,7 +179,7 @@ impl ComponentEventHistory {
     /// this does not create a channel and therefore only requires `&self`.
     pub fn try_subscribe(
         &self,
-        component_id: &str,
+        component_id: &ComponentId,
     ) -> Option<(Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>)> {
         let channel = self.channels.get(component_id)?;
         Some((channel.get_history(), channel.subscribe()))
@@ -188,7 +189,7 @@ impl ComponentEventHistory {
     ///
     /// Searches backwards through the component's event history to find the
     /// most recent event with `ComponentStatus::Error` and returns its message.
-    pub fn get_last_error(&self, component_id: &str) -> Option<String> {
+    pub fn get_last_error(&self, component_id: &ComponentId) -> Option<String> {
         self.channels
             .get(component_id)
             .and_then(|channel| channel.get_last_error())
@@ -212,12 +213,12 @@ impl ComponentEventHistory {
     /// Remove all events for a specific component.
     ///
     /// This should be called when a component is deleted to clean up its history.
-    pub fn remove_component(&mut self, component_id: &str) {
+    pub fn remove_component(&mut self, component_id: &ComponentId) {
         self.channels.remove(component_id);
     }
 
     /// Get the number of events stored for a specific component.
-    pub fn event_count(&self, component_id: &str) -> usize {
+    pub fn event_count(&self, component_id: &ComponentId) -> usize {
         self.channels
             .get(component_id)
             .map(|channel| channel.history.len())
@@ -240,12 +241,12 @@ mod tests {
     use chrono::Utc;
 
     fn create_test_event(
-        component_id: &str,
+        component_id: drasi_core_types::ComponentId,
         status: ComponentStatus,
         message: Option<&str>,
     ) -> ComponentEvent {
         ComponentEvent {
-            component_id: component_id.to_string(),
+            component_id,
             component_type: ComponentType::Source,
             status,
             timestamp: Utc::now(),
@@ -257,13 +258,26 @@ mod tests {
     fn test_record_and_get_events() {
         let mut history = ComponentEventHistory::new();
 
-        let event1 = create_test_event("source1", ComponentStatus::Starting, None);
-        let event2 = create_test_event("source1", ComponentStatus::Running, None);
+        let event1 = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            ComponentStatus::Starting,
+            None,
+        );
+        let event2 = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+            None,
+        );
 
         history.record_event(event1);
         history.record_event(event2);
 
-        let events = history.get_events("source1");
+        let events = history.get_events(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].status, ComponentStatus::Starting);
         assert_eq!(events[1].status, ComponentStatus::Running);
@@ -275,14 +289,18 @@ mod tests {
 
         for i in 0..5 {
             let event = create_test_event(
-                "source1",
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                    .expect("fixture UUID"),
                 ComponentStatus::Running,
                 Some(&format!("event {i}")),
             );
             history.record_event(event);
         }
 
-        let events = history.get_events("source1");
+        let events = history.get_events(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         assert_eq!(events.len(), 3);
         // Should have events 2, 3, 4 (oldest removed)
         assert_eq!(events[0].message, Some("event 2".to_string()));
@@ -294,28 +312,40 @@ mod tests {
         let mut history = ComponentEventHistory::new();
 
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Error,
             Some("First error"),
         ));
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Error,
             Some("Second error"),
         ));
-        history.record_event(create_test_event("source1", ComponentStatus::Running, None));
+        history.record_event(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+            None,
+        ));
 
-        let last_error = history.get_last_error("source1");
+        let last_error = history.get_last_error(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         assert_eq!(last_error, Some("Second error".to_string()));
     }
 
@@ -324,13 +354,22 @@ mod tests {
         let mut history = ComponentEventHistory::new();
 
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
-        history.record_event(create_test_event("source1", ComponentStatus::Running, None));
+        history.record_event(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+            None,
+        ));
 
-        let last_error = history.get_last_error("source1");
+        let last_error = history.get_last_error(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         assert!(last_error.is_none());
     }
 
@@ -339,12 +378,23 @@ mod tests {
         let mut history = ComponentEventHistory::new();
 
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
-        history.record_event(create_test_event("query1", ComponentStatus::Starting, None));
-        history.record_event(create_test_event("source1", ComponentStatus::Running, None));
+        history.record_event(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000052")
+                .expect("fixture UUID"),
+            ComponentStatus::Starting,
+            None,
+        ));
+        history.record_event(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+            None,
+        ));
 
         let all_events = history.get_all_events();
         assert_eq!(all_events.len(), 3);
@@ -355,20 +405,41 @@ mod tests {
         let mut history = ComponentEventHistory::new();
 
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
         history.record_event(create_test_event(
-            "source2",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
 
-        history.remove_component("source1");
+        history.remove_component(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
 
-        assert_eq!(history.get_events("source1").len(), 0);
-        assert_eq!(history.get_events("source2").len(), 1);
+        assert_eq!(
+            history
+                .get_events(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                        .expect("fixture UUID")
+                )
+                .len(),
+            0
+        );
+        assert_eq!(
+            history
+                .get_events(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                        .expect("fixture UUID")
+                )
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -376,20 +447,45 @@ mod tests {
         let mut history = ComponentEventHistory::new();
 
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
-        history.record_event(create_test_event("source1", ComponentStatus::Running, None));
         history.record_event(create_test_event(
-            "source2",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+            None,
+        ));
+        history.record_event(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
 
-        assert_eq!(history.event_count("source1"), 2);
-        assert_eq!(history.event_count("source2"), 1);
-        assert_eq!(history.event_count("nonexistent"), 0);
+        assert_eq!(
+            history.event_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                    .expect("fixture UUID")
+            ),
+            2
+        );
+        assert_eq!(
+            history.event_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                    .expect("fixture UUID")
+            ),
+            1
+        );
+        assert_eq!(
+            history.event_count(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000095")
+                    .expect("fixture UUID")
+            ),
+            0
+        );
         assert_eq!(history.total_event_count(), 3);
     }
 
@@ -398,13 +494,22 @@ mod tests {
         let mut history = ComponentEventHistory::new();
 
         history.record_event(create_test_event(
-            "source1",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
             ComponentStatus::Starting,
             None,
         ));
-        history.record_event(create_test_event("source1", ComponentStatus::Running, None));
+        history.record_event(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+            None,
+        ));
 
-        let (events, _receiver) = history.subscribe("source1");
+        let (events, _receiver) = history.subscribe(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].status, ComponentStatus::Starting);
         assert_eq!(events[1].status, ComponentStatus::Running);
@@ -415,10 +520,18 @@ mod tests {
         let mut history = ComponentEventHistory::new();
 
         // Subscribe before recording
-        let (_history, mut receiver) = history.subscribe("source1");
+        let (_history, mut receiver) = history.subscribe(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+        );
 
         // Record a new event
-        let event = create_test_event("source1", ComponentStatus::Running, Some("live event"));
+        let event = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+            Some("live event"),
+        );
         history.record_event(event);
 
         // Should receive the live event

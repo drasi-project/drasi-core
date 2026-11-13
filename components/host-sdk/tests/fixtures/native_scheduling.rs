@@ -164,6 +164,7 @@ impl sdk::NativeComponent for Delay {
     async fn start(&mut self) -> anyhow::Result<()> {
         let scope = self.scope.clone();
         let component = self.descriptor.id().clone();
+        let stream = StreamId::try_new("delay/out")?;
         let (producer, pending): (GraphProducerIdentity, Option<Vec<u8>>) = self
             .processing
             .run(move |context| async move {
@@ -179,7 +180,8 @@ impl sdk::NativeComponent for Delay {
                         )?;
                         anyhow::ensure!(
                             producer.graph_id() == scope.graph_id
-                                && producer.component_id() == &component,
+                                && producer.component_id() == &component
+                                && producer.stream() == &stream,
                             "delay producer belongs to another component"
                         );
                         producer
@@ -189,7 +191,7 @@ impl sdk::NativeComponent for Delay {
                             scope.instance_id,
                             scope.graph_id,
                             component.clone(),
-                            StreamId::try_new(format!("{component}/out"))?,
+                            stream,
                             true,
                         )?;
                         context

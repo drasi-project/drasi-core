@@ -123,14 +123,14 @@ impl ResultNodeProjector {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         Ok(ElementReference {
-            source_id: self.dataset.clone(),
+            namespace: self.dataset.clone(),
             element_id: Arc::from(key),
         })
     }
 
     pub fn row_identity(&self, reference: &ElementReference) -> Result<Bytes, ResultNodeError> {
         let key = reference.element_id.as_bytes();
-        if reference.source_id != self.dataset || key.is_empty() || !key.len().is_multiple_of(2) {
+        if reference.namespace != self.dataset || key.is_empty() || !key.len().is_multiple_of(2) {
             return Err(ResultNodeError::Identity);
         }
         let nibble = |byte| match byte {
@@ -638,7 +638,7 @@ mod tests {
         else {
             panic!("a result row is one node");
         };
-        assert_eq!(metadata.reference.source_id.as_ref(), "query/out");
+        assert_eq!(metadata.reference.namespace.as_ref(), "query/out");
         assert_eq!(metadata.labels.as_ref(), [Arc::from("Comfort")]);
         assert_eq!(metadata.effective_from, 9);
         assert_eq!(properties.len(), 1);

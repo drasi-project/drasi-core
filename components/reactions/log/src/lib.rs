@@ -35,7 +35,7 @@
 //!
 //! // Create instance and add to DrasiLib
 //! let reaction = Arc::new(LogReaction::new(config, event_tx));
-//! drasi.add_reaction(reaction).await?;
+//! drasi.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 //! ```
 
 mod config;

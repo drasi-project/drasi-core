@@ -4,6 +4,11 @@
 use super::*;
 use async_trait::async_trait;
 
+const FIRST_ID: &str = "00000000-0000-0000-0000-000000000601";
+const SECOND_ID: &str = "00000000-0000-0000-0000-000000000602";
+const THIRD_ID: &str = "00000000-0000-0000-0000-000000000603";
+const VOLATILE_ID: &str = "00000000-0000-0000-0000-000000000604";
+
 struct RetainedInitialSnapshot(ChangeEnvelope);
 #[async_trait]
 impl ComputationBootstrapProvider for RetainedInitialSnapshot {
@@ -23,7 +28,10 @@ impl ComputationBootstrapProvider for RetainedInitialSnapshot {
             watermarks: vec![BootstrapWatermark {
                 producer: None,
                 stream: stream("changes"),
-                source_id: Some("source".into()),
+                source_id: Some(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                ),
                 sequence: 1,
                 position: self.0.system().source_position().cloned(),
             }],
@@ -31,13 +39,13 @@ impl ComputationBootstrapProvider for RetainedInitialSnapshot {
     }
 }
 
-fn owner(name: &str) -> Arc<QuerySourceProgress> {
-    Arc::new(QuerySourceProgress::new("native-sqlite", id(name)).expect("consumer owner"))
+fn owner(component_id: &str) -> Arc<QuerySourceProgress> {
+    Arc::new(QuerySourceProgress::new("native-sqlite", id(component_id)).expect("consumer owner"))
 }
 
 fn group(owners: &[Arc<QuerySourceProgress>]) -> Arc<ConsumerProgressSet> {
     Arc::new(
-        ConsumerProgressSet::new("native-sqlite", id("source"), owners.iter().cloned())
+        ConsumerProgressSet::new("native-sqlite", id(SOURCE_ID), owners.iter().cloned())
             .expect("consumer set"),
     )
 }
@@ -45,18 +53,21 @@ fn group(owners: &[Arc<QuerySourceProgress>]) -> Arc<ConsumerProgressSet> {
 async fn consumer(
     path: &Path,
     owner: Arc<QuerySourceProgress>,
+    output_stream: &str,
 ) -> Result<ContinuousQueryTransformer> {
-    consumer_with_recovery(path, owner, QueryRecoveryPolicy::Strict).await
+    consumer_with_recovery(path, owner, output_stream, QueryRecoveryPolicy::Strict).await
 }
 
 async fn consumer_with_recovery(
     path: &Path,
     owner: Arc<QuerySourceProgress>,
+    output_stream: &str,
     recovery: QueryRecoveryPolicy,
 ) -> Result<ContinuousQueryTransformer> {
     consumer_with_text(
         path,
         owner,
+        output_stream,
         recovery,
         "MATCH (n:items) RETURN n.id AS id, n.value AS value",
     )
@@ -66,6 +77,7 @@ async fn consumer_with_recovery(
 async fn consumer_with_text(
     path: &Path,
     owner: Arc<QuerySourceProgress>,
+    output_stream: &str,
     recovery: QueryRecoveryPolicy,
     text: &str,
 ) -> Result<ContinuousQueryTransformer> {
@@ -83,7 +95,7 @@ async fn consumer_with_text(
             id: owner.component_id().clone(),
             query: text.into(),
             language: ComputationQueryLanguage::Cypher,
-            output_stream: stream(&format!("{}/out", owner.component_id())),
+            output_stream: stream(output_stream),
             outbox_capacity: size(8),
         },
         provider,
@@ -103,18 +115,18 @@ async fn consumer_with_text(
 
 async fn group_replay() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let first = owner("first");
-    let second = owner("second");
+    let first = owner(FIRST_ID);
+    let second = owner(SECOND_ID);
     let owners = group(&[first.clone(), second.clone()]);
     let mut source = SqliteSource::new_replayable_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         owners,
     )?;
     assert!(source.recovery_progress().is_none());
-    let mut one = consumer(directory.path(), first).await?;
-    let mut two = consumer(directory.path(), second).await?;
+    let mut one = consumer(directory.path(), first, "first/out").await?;
+    let mut two = consumer(directory.path(), second, "second/out").await?;
     one.start().await?;
     two.start().await?;
     source.start().await?;
@@ -150,14 +162,14 @@ async fn group_replay() -> Result<()> {
     drop(one);
     drop(two);
 
-    let first = owner("first");
-    let second = owner("second");
-    let mut one = consumer(directory.path(), first.clone()).await?;
-    let mut two = consumer(directory.path(), second.clone()).await?;
+    let first = owner(FIRST_ID);
+    let second = owner(SECOND_ID);
+    let mut one = consumer(directory.path(), first.clone(), "first/out").await?;
+    let mut two = consumer(directory.path(), second.clone(), "second/out").await?;
     one.start().await?;
     two.start().await?;
     let mut source = SqliteSource::new_replayable_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         group(&[first, second]),
@@ -197,30 +209,33 @@ async fn coordinated_membership() -> Result<()> {
         "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT);
          INSERT INTO items VALUES(1,'one'),(2,'two'),(3,'three'),(4,'four')",
     )?;
-    let first = owner("first");
-    let second = owner("second");
+    let first = owner(FIRST_ID);
+    let second = owner(SECOND_ID);
     let (mut source, snapshots) = SqliteSource::coordinated_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         group(&[first.clone(), second.clone()]),
     )?;
-    let mut one = consumer(directory.path(), first.clone())
+    let mut one = consumer(directory.path(), first.clone(), "first/out")
         .await?
-        .with_bootstrap(snapshots.for_consumer(&id("first"))?);
-    let mut two = consumer(directory.path(), second.clone())
+        .with_bootstrap(snapshots.for_consumer(&id(FIRST_ID))?);
+    let mut two = consumer(directory.path(), second.clone(), "second/out")
         .await?
-        .with_bootstrap(snapshots.for_consumer(&id("second"))?);
+        .with_bootstrap(snapshots.for_consumer(&id(SECOND_ID))?);
     assert!(source.handle().query("SELECT 1").await.is_err());
     one.start().await?;
     assert_eq!(rows(&one).len(), 4);
-    snapshots.for_consumer(&id("first"))?.stop().await?;
+    snapshots.for_consumer(&id(FIRST_ID))?.stop().await?;
     assert!(source.handle().query("SELECT 1").await.is_err());
     two.start().await?;
     assert_eq!(rows(&one), rows(&two));
     for owner in [&first, &second] {
         let state = owner.snapshot();
-        let position = &state.checkpoints[&SourceProgressKey::Source("source".into())];
+        let position = &state.checkpoints[&SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        )];
         assert_eq!(position.sequence, 0);
         assert!(position.source_position.is_some() && state.persistent && state.bootstrap_complete);
     }
@@ -243,29 +258,33 @@ async fn coordinated_membership() -> Result<()> {
     drop(two);
     drop(snapshots);
 
-    let first = owner("first");
-    let second = owner("second");
-    let third = owner("third");
+    let first = owner(FIRST_ID);
+    let second = owner(SECOND_ID);
+    let third = owner(THIRD_ID);
     let (mut source, snapshots) = SqliteSource::coordinated_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         group(&[first.clone(), second.clone(), third.clone()]),
     )?;
-    let mut one = consumer(directory.path(), first)
+    let mut one = consumer(directory.path(), first, "first/out")
         .await?
-        .with_bootstrap(snapshots.for_consumer(&id("first"))?);
-    let mut two = consumer(directory.path(), second)
+        .with_bootstrap(snapshots.for_consumer(&id(FIRST_ID))?);
+    let mut two = consumer(directory.path(), second, "second/out")
         .await?
-        .with_bootstrap(snapshots.for_consumer(&id("second"))?);
-    let mut three = consumer(directory.path(), third.clone())
+        .with_bootstrap(snapshots.for_consumer(&id(SECOND_ID))?);
+    let mut three = consumer(directory.path(), third.clone(), "third/out")
         .await?
-        .with_bootstrap(snapshots.for_consumer(&id("third"))?);
+        .with_bootstrap(snapshots.for_consumer(&id(THIRD_ID))?);
     // A newly enrolled query may initialize before the older members restart.
     three.start().await?;
     assert_eq!(rows(&three).len(), 5);
     assert_eq!(
-        third.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+        third.snapshot().checkpoints[&SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")
+        )]
+            .sequence,
         1
     );
     one.start().await?;
@@ -291,20 +310,20 @@ async fn coordinated_membership() -> Result<()> {
     drop(three);
     drop(snapshots);
 
-    let first = owner("first");
-    let third = owner("third");
+    let first = owner(FIRST_ID);
+    let third = owner(THIRD_ID);
     let (mut source, snapshots) = SqliteSource::coordinated_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         group(&[first.clone(), third.clone()]),
     )?;
-    let mut one = consumer(directory.path(), first)
+    let mut one = consumer(directory.path(), first, "first/out")
         .await?
-        .with_bootstrap(snapshots.for_consumer(&id("first"))?);
-    let mut three = consumer(directory.path(), third)
+        .with_bootstrap(snapshots.for_consumer(&id(FIRST_ID))?);
+    let mut three = consumer(directory.path(), third, "third/out")
         .await?
-        .with_bootstrap(snapshots.for_consumer(&id("third"))?);
+        .with_bootstrap(snapshots.for_consumer(&id(THIRD_ID))?);
     one.start().await?;
     three.start().await?;
     source.start().await?;
@@ -344,12 +363,12 @@ async fn factory_graph() -> Result<()> {
                 "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(0,'initial')",
             )?;
         }
-        let first = owner("first");
-        let second = owner("second");
+        let first = owner(FIRST_ID);
+        let second = owner(SECOND_ID);
         let consumers = group(&[first.clone(), second.clone()]);
         let snapshots = if coordinated {
             let (_, snapshots) = SqliteSource::coordinated_with_consumers(
-                id("source"),
+                id(SOURCE_ID),
                 stream("changes"),
                 settings.clone(),
                 consumers.clone(),
@@ -358,7 +377,7 @@ async fn factory_graph() -> Result<()> {
         } else {
             None
         };
-        let client = Arc::new(SqliteClientResource::new(id("source"), settings.clone())?);
+        let client = Arc::new(SqliteClientResource::new(id(SOURCE_ID), settings.clone())?);
         let handle = client.handle();
         let factory = Arc::new(SqliteSourceFactory::default());
         let mut builder = ComputationGraph::builder("native-sqlite");
@@ -366,30 +385,58 @@ async fn factory_graph() -> Result<()> {
         let mut receivers = Vec::new();
         let endpoint =
             |name: &str, port: &str| Endpoint::new(id(name), PortId::try_new(port).expect("port"));
-        for owner in [&first, &second] {
-            let name = owner.component_id().as_str();
-            let mut query = consumer(directory.path(), owner.clone()).await?;
+        let endpoint_id = |id: &ComponentId, port: &str| {
+            Endpoint::new(id.clone(), PortId::try_new(port).expect("port"))
+        };
+        let sink_ids = [
+            ComponentId::try_new("00000000-0000-0000-0000-000000000501")?,
+            ComponentId::try_new("00000000-0000-0000-0000-000000000502")?,
+        ];
+        for ((name, output_stream, owner), sink_id) in [
+            ("first", "first/out", &first),
+            ("second", "second/out", &second),
+        ]
+        .into_iter()
+        .zip(sink_ids)
+        {
+            let mut query = consumer(directory.path(), owner.clone(), output_stream).await?;
             if let Some(snapshots) = &snapshots {
                 query = query.with_bootstrap(snapshots.for_consumer(owner.component_id())?);
             }
             results.push(query.results());
-            let sink_id = format!("{name}-sink");
             let (sink, receiver) = drasi_reaction_application::NativeApplicationReaction::channel(
-                &sink_id,
+                sink_id.clone(),
                 QueryChangeCodec::schema().descriptor().clone(),
                 size(4),
             )?;
             receivers.push(receiver);
             builder = builder
-                .transformer(Box::new(query))
-                .sink(Box::new(sink))
-                .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
+                .transformer(
+                    drasi_lib::computation::v1::ComponentName::try_new(format!("query-{name}"))
+                        .expect("fixture component name"),
+                    Box::new(query),
+                )
+                .sink(
+                    drasi_lib::computation::v1::ComponentName::try_new(format!("sink-{name}"))
+                        .expect("fixture component name"),
+                    Box::new(sink),
+                )
+                .bind_stream(
+                    endpoint_id(owner.component_id(), "out"),
+                    stream(output_stream),
+                )
                 .connect(
-                    EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
+                    EdgeDefinition::new(
+                        endpoint(SOURCE_ID, "out"),
+                        endpoint_id(owner.component_id(), "in"),
+                    ),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
                 .connect(
-                    EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink_id, "in")),
+                    EdgeDefinition::new(
+                        endpoint_id(owner.component_id(), "out"),
+                        endpoint_id(&sink_id, "in"),
+                    ),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 );
         }
@@ -435,7 +482,7 @@ async fn factory_graph() -> Result<()> {
                 .provide_resource(resource, handle)?;
         }
         let specification = ComponentSpecification {
-            descriptor: SqliteSource::describe(id("source"), settings.output)?,
+            descriptor: SqliteSource::describe(id(SOURCE_ID), settings.output)?,
             role: ComponentRole::Source,
             completion: None,
             implementation: factory.descriptor().implementation.clone(),
@@ -458,8 +505,13 @@ async fn factory_graph() -> Result<()> {
         };
         factory.validate(&specification)?;
         let mut graph = builder
-            .component(specification, factory)
-            .bind_stream(endpoint("source", "out"), stream("changes"))
+            .component(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                    .expect("fixture component name"),
+                specification,
+                factory,
+            )
+            .bind_stream(endpoint(SOURCE_ID, "out"), stream("changes"))
             .build()?;
         let run = graph.run()?;
         let control = run.control();
@@ -485,7 +537,7 @@ async fn factory_graph() -> Result<()> {
                     loop {
                         let states = progress.snapshot()?;
                         if states.consumers.values().all(|state| state.checkpoints
-                            .get(&SourceProgressKey::Source("source".into())).is_some_and(|checkpoint| checkpoint.sequence == 1)) {
+                            .get(&SourceProgressKey::Source(drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"))).is_some_and(|checkpoint| checkpoint.sequence == 1)) {
                             break;
                         }
                         progress.changed().await?;
@@ -521,10 +573,10 @@ async fn shared_sqlite_factory_drives_two_real_queries_multi_thread() -> Result<
 
 async fn conservative_guards() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let first = owner("first");
-    let second = owner("second");
-    let mut one = consumer(directory.path(), first.clone()).await?;
-    let mut two = consumer(directory.path(), second.clone()).await?;
+    let first = owner(FIRST_ID);
+    let second = owner(SECOND_ID);
+    let mut one = consumer(directory.path(), first.clone(), "first/out").await?;
+    let mut two = consumer(directory.path(), second.clone(), "second/out").await?;
     one.start().await?;
     two.start().await?;
     let mut settings = config(directory.path());
@@ -534,7 +586,7 @@ async fn conservative_guards() -> Result<()> {
         .expect("journal limits")
         .max_transactions = size(1);
     let mut source = SqliteSource::new_replayable_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         settings.clone(),
         group(&[first.clone(), second.clone()]),
@@ -557,7 +609,7 @@ async fn conservative_guards() -> Result<()> {
     source.stop().await?;
     assert_eq!(journal_state(directory.path())?.1, 0);
     let mut removed = SqliteSource::new_replayable_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         settings.clone(),
         group(std::slice::from_ref(&first)),
@@ -567,7 +619,7 @@ async fn conservative_guards() -> Result<()> {
         .await
         .expect_err("slow member removal")
         .to_string()
-        .contains("cannot remove consumer second"));
+        .contains(&format!("cannot remove consumer {SECOND_ID}")));
     removed.stop().await?;
     source.start().await?;
     let replay = next(&mut source).await?;
@@ -575,11 +627,11 @@ async fn conservative_guards() -> Result<()> {
     source.stop().await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
 
-    let third = owner("third");
-    let mut three = consumer(directory.path(), third.clone()).await?;
+    let third = owner(THIRD_ID);
+    let mut three = consumer(directory.path(), third.clone(), "third/out").await?;
     three.start().await?;
     let mut late = SqliteSource::new_replayable_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         settings.clone(),
         group(&[first.clone(), second.clone(), third]),
@@ -590,7 +642,7 @@ async fn conservative_guards() -> Result<()> {
     );
     late.stop().await?;
     let mut single =
-        SqliteSource::new_replayable(id("source"), stream("changes"), settings, first)?;
+        SqliteSource::new_replayable(id(SOURCE_ID), stream("changes"), settings, first)?;
     assert!(
         single.start().await.is_err(),
         "shared state cannot become single-owner state"
@@ -601,11 +653,11 @@ async fn conservative_guards() -> Result<()> {
     three.stop().await?;
 
     let single_directory = tempfile::tempdir()?;
-    let first = owner("first");
-    let mut one = consumer(single_directory.path(), first.clone()).await?;
+    let first = owner(FIRST_ID);
+    let mut one = consumer(single_directory.path(), first.clone(), "first/out").await?;
     one.start().await?;
     let mut single = SqliteSource::new_replayable(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(single_directory.path()),
         first.clone(),
@@ -613,7 +665,7 @@ async fn conservative_guards() -> Result<()> {
     single.start().await?;
     single.stop().await?;
     let mut shared = SqliteSource::new_replayable_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(single_directory.path()),
         group(&[first]),
@@ -630,14 +682,14 @@ async fn conservative_guards() -> Result<()> {
 async fn member_failures() -> Result<()> {
     for reset in [false, true] {
         let directory = tempfile::tempdir()?;
-        let first = owner("first");
-        let second = owner("second");
-        let mut one = consumer(directory.path(), first.clone()).await?;
-        let mut two = consumer(directory.path(), second.clone()).await?;
+        let first = owner(FIRST_ID);
+        let second = owner(SECOND_ID);
+        let mut one = consumer(directory.path(), first.clone(), "first/out").await?;
+        let mut two = consumer(directory.path(), second.clone(), "second/out").await?;
         one.start().await?;
         two.start().await?;
         let mut source = SqliteSource::new_replayable_with_consumers(
-            id("source"),
+            id(SOURCE_ID),
             stream("changes"),
             config(directory.path()),
             group(&[first, second.clone()]),
@@ -654,6 +706,7 @@ async fn member_failures() -> Result<()> {
             two = consumer_with_text(
                 directory.path(),
                 second.clone(),
+                "second/out",
                 QueryRecoveryPolicy::AutoReset,
                 "MATCH (n:items) RETURN n.id AS id, n.value AS changed",
             )
@@ -668,7 +721,7 @@ async fn member_failures() -> Result<()> {
         let error = next(&mut source)
             .await
             .expect_err("every member must remain ready");
-        assert!(format!("{error:#}").contains("consumer second"));
+        assert!(format!("{error:#}").contains(&format!("consumer {SECOND_ID}")));
         assert!(source
             .handle()
             .execute("INSERT INTO items VALUES(2,'unadmitted')")
@@ -681,11 +734,11 @@ async fn member_failures() -> Result<()> {
         two.stop().await?;
     }
     let directory = tempfile::tempdir()?;
-    let volatile = owner("volatile");
+    let volatile = owner(VOLATILE_ID);
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "native-sqlite".into(),
-            id: id("volatile"),
+            id: id(VOLATILE_ID),
             query: "MATCH (n:items) RETURN n.id AS id".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("volatile/out"),
@@ -696,7 +749,7 @@ async fn member_failures() -> Result<()> {
     .await?
     .with_source_progress(volatile.clone())?;
     let mut source = SqliteSource::new_replayable_with_consumers(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         group(&[volatile]),
@@ -721,14 +774,14 @@ async fn interrupted_initialization() -> Result<()> {
          INSERT INTO items VALUES(1,'small'),(2,replace(hex(zeroblob(2000)),'00','xx'));",
     )?;
     for phase in 0..3 {
-        let first = owner("first");
-        let second = owner("second");
+        let first = owner(FIRST_ID);
+        let second = owner(SECOND_ID);
         let mut settings = config(directory.path());
         if phase == 0 {
             settings.transactions.max_bytes = size(1024);
         }
         let (mut source, snapshots) = SqliteSource::coordinated_with_consumers(
-            id("source"),
+            id(SOURCE_ID),
             stream("changes"),
             settings,
             group(&[first.clone(), second.clone()]),
@@ -738,12 +791,13 @@ async fn interrupted_initialization() -> Result<()> {
         } else {
             QueryRecoveryPolicy::Strict
         };
-        let mut one = consumer_with_recovery(directory.path(), first.clone(), recovery)
+        let mut one =
+            consumer_with_recovery(directory.path(), first.clone(), "first/out", recovery)
+                .await?
+                .with_bootstrap(snapshots.for_consumer(&id(FIRST_ID))?);
+        let mut two = consumer(directory.path(), second, "second/out")
             .await?
-            .with_bootstrap(snapshots.for_consumer(&id("first"))?);
-        let mut two = consumer(directory.path(), second)
-            .await?
-            .with_bootstrap(snapshots.for_consumer(&id("second"))?);
+            .with_bootstrap(snapshots.for_consumer(&id(SECOND_ID))?);
         if phase < 2 {
             let error = one
                 .start()

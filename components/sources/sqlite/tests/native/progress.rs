@@ -95,14 +95,15 @@ async fn graph_recovery_rejects_external_and_same_named_substitute_readers() -> 
             _ => unreachable!(),
         };
         let producer = SqliteSource::new_replayable(
-            id("source"),
+            id(SOURCE_ID),
             stream("changes"),
             config(directory.path()),
             reader,
         )?;
         let consumer = query(directory.path(), owner).await?;
         let (sink, _received) = drasi_reaction_application::NativeApplicationReaction::channel(
-            "sink",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             QueryChangeCodec::schema().descriptor().clone(),
             size(1),
         )?;
@@ -110,22 +111,34 @@ async fn graph_recovery_rejects_external_and_same_named_substitute_readers() -> 
             Endpoint::new(id(component), PortId::try_new(port).expect("test port"))
         };
         let graph = ComputationGraph::builder("native-sqlite")
-            .source(Box::new(producer))
-            .transformer(Box::new(consumer))
-            .sink(Box::new(sink))
-            .bind_stream(endpoint("source", "out"), stream("changes"))
-            .bind_stream(endpoint("query", "out"), stream("results"))
+            .source(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                    .expect("fixture component name"),
+                Box::new(producer),
+            )
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                    .expect("fixture component name"),
+                Box::new(consumer),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                    .expect("fixture component name"),
+                Box::new(sink),
+            )
+            .bind_stream(endpoint(SOURCE_ID, "out"), stream("changes"))
+            .bind_stream(endpoint(QUERY_ID, "out"), stream("results"))
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+                EdgeDefinition::new(endpoint(SOURCE_ID, "out"), endpoint(QUERY_ID, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+                EdgeDefinition::new(endpoint(QUERY_ID, "out"), endpoint(SINK_ID, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()?;
         let report = graph.recovery_report(&RecoveryRequirement {
-            consumer: id("query"),
+            consumer: id(QUERY_ID),
             scope: RecoveryScope::Failure(drasi_core::interface::FailureMode::ProcessRestart),
             guarantees: std::collections::BTreeSet::from([RecoveryGuarantee::Replay]),
         })?;
@@ -154,7 +167,7 @@ async fn external_reader_initializes_and_replays_without_fabricating_local_owner
     let owner = super::progress();
     let boundary = Boundary::new(owner.clone());
     let (mut producer, snapshot) = SqliteSource::coordinated(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         boundary.reader(),
@@ -186,7 +199,7 @@ async fn external_reader_initializes_and_replays_without_fabricating_local_owner
     let owner = super::progress();
     let boundary = Boundary::new(owner.clone());
     let (mut producer, snapshot) = SqliteSource::coordinated(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         boundary.reader(),
@@ -230,7 +243,7 @@ async fn revoked_external_reader_fails_before_sqlite_open_and_retains_uncommitte
     let boundary = Boundary::new(owner.clone());
     boundary.revoked.send_replace(true);
     let mut producer = SqliteSource::new_replayable(
-        id("source"),
+        id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         boundary.reader(),

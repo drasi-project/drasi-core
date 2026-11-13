@@ -90,9 +90,9 @@ impl ComputationIndexProvider for SharedStorageGroup {
     async fn create_indexes(
         &self,
         graph_id: &str,
-        query_id: &str,
+        query_id: &ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
-        if graph_id != self.graph || query_id != self.processor.as_str() {
+        if graph_id != self.graph || query_id != &self.processor {
             return Err(IndexError::other(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "shared storage belongs to a different graph or processor",

@@ -22,14 +22,18 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
         queue: queue_id.clone(),
         capacity: 8,
         source_rank: 0,
-        source_id: Some("source".into()),
+        source_id: Some(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        ),
         source_dispatch: None,
         drop_when_full: false,
     }
     .create_with_resources(&BTreeMap::from([(queue_id, queue.resource())]))?;
     for (sequence, timestamp) in [(1, 2000), (2, 1000)] {
         let wrapper = Arc::new(SourceEventWrapper::with_sequence(
-            "source".into(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
             SourceEvent::Change(SourceChange::Insert {
                 element: Element::Node {
                     metadata: ElementMetadata {
@@ -48,7 +52,7 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
             .sender()
             .send(GraphChangeCodec::encode_source_event(
                 wrapper,
-                &ComponentId::try_new("source")?,
+                &ComponentId::try_new("70faf234-cf32-569f-881e-e0574d18ae02")?,
                 StreamId::try_new("source/out")?,
                 sequence,
                 None,
@@ -58,7 +62,7 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
     let mut query = ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "order".into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new("9f58a04b-b991-5ade-bc33-262bc0010529")?,
             query: "MATCH (n:Item) RETURN n".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
@@ -99,11 +103,22 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
 
 #[tokio::test]
 async fn backwards_result_timestamps_do_not_skip_reaction_side_effects() -> Result<()> {
-    let base = ReactionBase::new(ReactionBaseParams::new("reaction", vec!["query".into()]));
+    let base = ReactionBase::new(ReactionBaseParams::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("query").expect("fixture component name"),
+        )],
+    ));
     let (updates, _receiver) = tokio::sync::mpsc::channel(32);
-    base.initialize(drasi_lib::context::ReactionRuntimeContext::new(
+    base.bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
         "ordering",
-        "reaction",
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
+        ],
         Some(Arc::new(
             drasi_lib::state_store::MemoryStateStoreProvider::new(),
         )),
@@ -113,7 +128,10 @@ async fn backwards_result_timestamps_do_not_skip_reaction_side_effects() -> Resu
     .await;
     for (sequence, timestamp) in [(1, 2000), (2, 1000), (3, 3000)] {
         base.enqueue_query_result(QueryResult {
-            query_id: "query".into(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
             sequence,
             timestamp: chrono::DateTime::from_timestamp_millis(timestamp).unwrap(),
             results: Vec::new(),
@@ -150,7 +168,16 @@ async fn backwards_result_timestamps_do_not_skip_reaction_side_effects() -> Resu
     run?;
     stop?;
     assert_eq!(*seen.lock().await, [1, 2, 3]);
-    assert_eq!(base.read_checkpoint("query").await?.unwrap().sequence, 3);
+    assert_eq!(
+        base.read_checkpoint(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID")
+        )
+        .await?
+        .unwrap()
+        .sequence,
+        3
+    );
     Ok(())
 }
 
@@ -162,8 +189,13 @@ async fn wal_subscription_recovers_without_a_native_cursor_and_reports_real_gaps
     };
     let directory = tempfile::tempdir()?;
     let wal = drasi_wal_redb::RedbWalProvider::new(directory.path());
-    wal.register("source", WriteAheadLogConfig::default())
-        .await?;
+    wal.register(
+        &drasi_core::interface::StorageScope::default(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        WriteAheadLogConfig::default(),
+    )
+    .await?;
     let change = SourceChange::Insert {
         element: Element::Node {
             metadata: ElementMetadata {
@@ -174,11 +206,26 @@ async fn wal_subscription_recovers_without_a_native_cursor_and_reports_real_gaps
             properties: ElementPropertyMap::default(),
         },
     };
-    assert_eq!(wal.append("source", &change).await?, 1);
-    let base = SourceBase::new(SourceBaseParams::new("source"))?;
+    let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+        .expect("fixture UUID");
+    assert_eq!(
+        wal.append(
+            &drasi_core::interface::StorageScope::default(),
+            &source_id,
+            &change
+        )
+        .await?,
+        1
+    );
+    let base = SourceBase::new(SourceBaseParams::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    ))?;
     let settings = drasi_lib::SourceSubscriptionSettings {
-        source_id: "source".into(),
-        query_id: "query".into(),
+        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
         nodes: Default::default(),
         relations: Default::default(),
@@ -195,8 +242,22 @@ async fn wal_subscription_recovers_without_a_native_cursor_and_reports_real_gaps
         Some(bytes::Bytes::copy_from_slice(&1u64.to_be_bytes()))
     );
     assert!(matches!(&replayed.event, SourceEvent::Change(actual) if actual == &change));
-    wal.prune_up_to("source", 1).await?;
-    assert_eq!(wal.append("source", &change).await?, 2);
+    wal.prune_up_to(
+        &drasi_core::interface::StorageScope::default(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        1,
+    )
+    .await?;
+    assert_eq!(
+        wal.append(
+            &drasi_core::interface::StorageScope::default(),
+            &source_id,
+            &change
+        )
+        .await?,
+        2
+    );
     let error = match base.subscribe_with_wal(&settings, &wal, "test").await {
         Ok(_) => anyhow::bail!("pruned history must not turn into an empty successful replay"),
         Err(error) => error,

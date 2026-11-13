@@ -8,6 +8,16 @@ use drasi_core::{computation::ComputationIndexProvider, interface::FailureMode};
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 
+const SOURCE_ID: &str = "4ac260d3-4506-5495-a1bf-d59b5c7dba85";
+const CLIENT_ID: &str = "00000000-0000-0000-0000-000000000603";
+
+fn durable_event(value: i64) -> source::SourceChange {
+    proto_event_for(
+        &ComponentId::try_new(SOURCE_ID).expect("durable source UUID"),
+        value,
+    )
+}
+
 struct CommitGate {
     armed: std::sync::atomic::AtomicBool,
     before: bool,
@@ -148,9 +158,9 @@ async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Resu
                     } else {
                         let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
                         let base =
-                            format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
+                            format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/admission/v1");
                         let (_, session) =
-                            post(&client, &base, "producers/register", json!({"producer":"client"}))
+                            post(&client, &base, "producers/register", json!({"producer":CLIENT_ID}))
                                 .await?;
                         saved = Some(serde_json::from_value::<ProducerSession>(session.clone())?);
                         gate.armed.store(true, Ordering::Release);
@@ -169,7 +179,7 @@ async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Resu
                 };
                 let interrupt = async {
                     gate.entered.notified().await;
-                    let source = ComponentId::try_new("facilities-db")?;
+                    let source = ComponentId::try_new(SOURCE_ID)?;
                     let selection = || GraphSelection::Exact(vec![source.clone()]);
                     match stop {
                         CommitStop::RequestTimeout => {}
@@ -264,12 +274,12 @@ async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Resu
                 ));
             } else {
                 let client = reqwest::Client::new();
-                let base = format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
+                let base = format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/admission/v1");
                 let (_, session) = post(
                     &client,
                     &base,
                     "producers/register",
-                    json!({"producer":"client"}),
+                    json!({"producer":CLIENT_ID}),
                 )
                 .await?;
                 assert_eq!(
@@ -358,8 +368,8 @@ async fn native_network_admission_crash_child() -> Result<()> {
             assert!(matches!(admit(&mut client, request(&session, 1, 1)).await?, proto::admit_response::Result::Receipt(value) if value.position == 1));
         } else {
             let client = reqwest::Client::new();
-            let base = format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
-            let (_, session) = post(&client, &base, "producers/register", json!({"producer":"client"})).await?;
+            let base = format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/admission/v1");
+            let (_, session) = post(&client, &base, "producers/register", json!({"producer":CLIENT_ID})).await?;
             saved = session.clone();
             std::fs::write(path.join("client-session.json"), serde_json::to_vec(&saved)?)?;
             let (_, outcome) = post(&client, &base, "events", json!({"session":session,"sequence":1,"event":http_event(1)})).await?;
@@ -407,8 +417,8 @@ async fn both_native_network_protocols_recover_after_process_exit_without_client
                 assert!(matches!(admit(&mut client, request(&session, 1, 1)).await?, proto::admit_response::Result::Receipt(value) if value.position == 1));
             } else {
                 let client = reqwest::Client::new();
-                let base = format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
-                let (_, session) = post(&client, &base, "producers/register", json!({"producer":"client"})).await?;
+                let base = format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/admission/v1");
+                let (_, session) = post(&client, &base, "producers/register", json!({"producer":CLIENT_ID})).await?;
                 assert_eq!(serde_json::from_value::<ProducerSession>(session.clone())?, saved);
                 let (_, outcome) = post(&client, &base, "events", json!({"session":session,"sequence":1,"event":http_event(1)})).await?;
                 assert_eq!(outcome["receipts"][0]["position"], 1, "{outcome}");
@@ -483,7 +493,13 @@ impl Harness {
             retention: RetentionPolicy::Backpressure,
             subscribers: BTreeMap::from([("consumer".into(), SubscriptionStart::Earliest)]),
         };
-        let original = indexes.create_indexes("durable-network", "journal").await?;
+        let original = indexes
+            .create_indexes(
+                "durable-network",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000127")
+                    .expect("fixture UUID"),
+            )
+            .await?;
         let indexes = match &gate {
             Some(gate) => gated_indexes(original, gate.clone())?,
             None => original,
@@ -500,7 +516,7 @@ impl Harness {
             .enable_admission(AdmissionOptions {
                 construction_scope: "durable-network".into(),
                 graph_id: "durable-network".into(),
-                component_id: ComponentId::try_new("facilities-db")?,
+                component_id: ComponentId::try_new(SOURCE_ID)?,
                 failure_scope: FailureMode::ProcessRestart,
                 max_producers: NonZeroUsize::new(2).expect("producer limit"),
                 receipts_per_producer: NonZeroUsize::new(2).expect("receipt limit"),
@@ -517,17 +533,17 @@ impl Harness {
             .context("source factory")?
             .clone();
         let resource = ResourceId::try_new("journal")?;
-        let mut specification = factory.specification(ComponentId::try_new("facilities-db")?,
+        let mut specification = factory.specification(ComponentId::try_new(SOURCE_ID)?,
             json!({"stream":configured_stream,"host":"127.0.0.1","port":port,"timeoutMs":if gate.is_some() { 100 } else { 2000 },"ingressCapacity":4}))?;
         specification
             .dependencies
             .insert("admission".into(), vec![resource.clone()]);
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let source = Endpoint::new(
-            ComponentId::try_new("facilities-db")?,
-            PortId::try_new("out")?,
+        let source = Endpoint::new(ComponentId::try_new(SOURCE_ID)?, PortId::try_new("out")?);
+        let target = Endpoint::new(
+            ComponentId::try_new("484abdae-6a47-5e92-acbc-64b4bf53fcc2")?,
+            PortId::try_new("in")?,
         );
-        let target = Endpoint::new(ComponentId::try_new("consumer")?, PortId::try_new("in")?);
         let graph = ComputationGraph::builder("durable-network")
             .declare_resource(ResourceSpecification {
                 id: resource.clone(),
@@ -536,19 +552,28 @@ impl Harness {
                 binding: "journal".into(),
             })?
             .provide_resource(resource.clone(), channel.resource())?
-            .component(specification, factory)
-            .sink(Box::new(Capture {
-                descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new("consumer")?,
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        GraphChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                seen: seen.clone(),
-            }))
+            .component(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                    .expect("fixture component name"),
+                specification,
+                factory,
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                    .expect("fixture component name"),
+                Box::new(Capture {
+                    descriptor: ComponentDescriptor::try_new(
+                        ComponentId::try_new("484abdae-6a47-5e92-acbc-64b4bf53fcc2")?,
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            GraphChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    seen: seen.clone(),
+                }),
+            )
             .bind_stream(source.clone(), definition.stream.clone())
             .connect(
                 EdgeDefinition::new(source, target),
@@ -577,7 +602,7 @@ impl Harness {
                 let selection = if consumers {
                     GraphSelection::All
                 } else {
-                    GraphSelection::Exact(vec![ComponentId::try_new("facilities-db")?])
+                    GraphSelection::Exact(vec![ComponentId::try_new(SOURCE_ID)?])
                 };
                 let report = control
                     .start_components(GraphRevision(1), selection)
@@ -622,13 +647,14 @@ async fn durable_source_rejects_configured_stream_mismatch_before_listening() ->
         assert!(matches!(run, Err(GraphError::Cancelled)), "{run:?}");
         let report = report?;
         assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
-        let failure = &report.components[&ComponentId::try_new("facilities-db")?];
+        let failure = &report.components[&ComponentId::try_new(SOURCE_ID)?];
         assert!(
             matches!(failure, CreationOutcome::CreationFailed(_)),
             "{failure:?}"
         );
         assert!(
-            format!("{failure:?}").contains("native source stream does not match"),
+            format!("{failure:?}")
+                .contains("native source identity or stream does not match its admission channel"),
             "{failure:?}"
         );
         assert_eq!(harness.channel.progress().await?.accepted, 0);
@@ -673,12 +699,12 @@ async fn http_durable_receipts_partial_batch_reconstruction_and_retirement() -> 
         let seen = harness.seen.clone();
         let (session, receipts) = harness.drive(reopened, |_| async {
             let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
-            let base = format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
-            let (code, session) = post(&client, &base, "producers/register", json!({"producer":"client"})).await?;
+            let base = format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/admission/v1");
+            let (code, session) = post(&client, &base, "producers/register", json!({"producer":CLIENT_ID})).await?;
             assert_eq!(code, StatusCode::OK, "{session}");
-            let (_, duplicate) = post(&client, &base, "producers/register", json!({"producer":"client"})).await?;
+            let (_, duplicate) = post(&client, &base, "producers/register", json!({"producer":CLIENT_ID})).await?;
             assert_eq!(session, duplicate);
-            let legacy = client.post(format!("http://127.0.0.1:{port}/sources/facilities-db/events"))
+            let legacy = client.post(format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/events"))
                 .json(&http_event(99)).send().await?;
             assert_eq!(legacy.status(), StatusCode::CONFLICT);
             if !reopened {
@@ -732,7 +758,7 @@ async fn http_durable_receipts_partial_batch_reconstruction_and_retirement() -> 
             assert_eq!(channel.progress().await?.accepted, 3);
             let (_, retired) = post(&client, &base, "producers/retire", json!({"session":session})).await?;
             assert_eq!(retired["retired"], true);
-            let (_, replacement) = post(&client, &base, "producers/register", json!({"producer":"client"})).await?;
+            let (_, replacement) = post(&client, &base, "producers/register", json!({"producer":CLIENT_ID})).await?;
             assert_ne!(replacement["epoch"], session["epoch"]);
             Ok((session, saved_receipts.clone()))
         }).await?;
@@ -749,8 +775,8 @@ async fn register(client: &mut Client) -> Result<proto::ProducerSession> {
     loop {
         match client
             .register_producer(proto::RegisterRequest {
-                source_id: "facilities-db".into(),
-                producer: "client".into(),
+                source_id: SOURCE_ID.into(),
+                producer: CLIENT_ID.into(),
             })
             .await?
             .into_inner()
@@ -773,10 +799,10 @@ async fn register(client: &mut Client) -> Result<proto::ProducerSession> {
 }
 fn request(session: &proto::ProducerSession, sequence: u64, value: i64) -> proto::AdmitRequest {
     proto::AdmitRequest {
-        source_id: "facilities-db".into(),
+        source_id: SOURCE_ID.into(),
         session: Some(session.clone()),
         sequence,
-        event: Some(proto_event(value)),
+        event: Some(durable_event(value)),
     }
 }
 async fn admit(
@@ -816,7 +842,7 @@ async fn grpc_durable_stream_reconstruction_receipts_and_retirement() -> Result<
             let session = register(&mut client).await?;
             assert_eq!(register(&mut client).await?, session);
             let mut legacy = source::source_service_client::SourceServiceClient::connect(address).await?;
-            assert_eq!(legacy.submit_event(source::SubmitEventRequest { event: Some(proto_event(99)) }).await.unwrap_err().code(), tonic::Code::FailedPrecondition);
+            assert_eq!(legacy.submit_event(source::SubmitEventRequest { event: Some(durable_event(99)) }).await.unwrap_err().code(), tonic::Code::FailedPrecondition);
             if !reopened {
                 let input = tokio_stream::iter((1..=3).map(|sequence| request(&session, sequence, sequence as i64)).collect::<Vec<_>>());
                 let mut output = client.stream_events(input).await?.into_inner();
@@ -831,7 +857,7 @@ async fn grpc_durable_stream_reconstruction_receipts_and_retirement() -> Result<
                 assert!(output.message().await?.is_none(), "error terminates stream without admitting later input");
                 assert!(seen.lock().unwrap().is_empty());
                 assert_eq!(channel.progress().await?.accepted, 2);
-                let result = client.retire_producer(proto::SessionRequest { source_id:"facilities-db".into(), session:Some(session.clone()) }).await?.into_inner().result;
+                let result = client.retire_producer(proto::SessionRequest { source_id:SOURCE_ID.into(), session:Some(session.clone()) }).await?.into_inner().result;
                 assert!(matches!(result, Some(proto::retire_response::Result::Error(error)) if error.kind == proto::ErrorKind::PendingObligations as i32));
                 return Ok(session);
             }
@@ -840,17 +866,17 @@ async fn grpc_durable_stream_reconstruction_receipts_and_retirement() -> Result<
             assert!(matches!(admit(&mut client, request(&session, 2, 20)).await?,
                 proto::admit_response::Result::Error(error) if error.kind == proto::ErrorKind::PayloadConflict as i32));
             let original = admit(&mut client, request(&session, 2, 2)).await?;
-            let lookup = client.admission_receipt(proto::ReceiptRequest { source_id:"facilities-db".into(), session:Some(session.clone()), sequence:2 }).await?.into_inner().result;
+            let lookup = client.admission_receipt(proto::ReceiptRequest { source_id:SOURCE_ID.into(), session:Some(session.clone()), sequence:2 }).await?.into_inner().result;
             let proto::admit_response::Result::Receipt(original) = original else { anyhow::bail!("{original:?}"); };
             assert_eq!(lookup, Some(proto::receipt_response::Result::Receipt(original)));
             assert!(matches!(admit(&mut client, request(&session, 3, 3)).await?, proto::admit_response::Result::Receipt(value) if value.position == 3));
             while channel.progress().await?.processed["consumer"] != 3 { tokio::task::yield_now().await; }
             assert_eq!(*seen.lock().unwrap(), [1,2,3]);
-            let status = client.producer_status(proto::SessionRequest { source_id:"facilities-db".into(), session:Some(session.clone()) }).await?.into_inner().result;
+            let status = client.producer_status(proto::SessionRequest { source_id:SOURCE_ID.into(), session:Some(session.clone()) }).await?.into_inner().result;
             assert!(matches!(status, Some(proto::status_response::Result::Status(value)) if value.next_sequence == Some(4) && value.earliest_receipt == Some(2)));
-            let expired = client.admission_receipt(proto::ReceiptRequest { source_id:"facilities-db".into(), session:Some(session.clone()), sequence:1 }).await?.into_inner().result;
+            let expired = client.admission_receipt(proto::ReceiptRequest { source_id:SOURCE_ID.into(), session:Some(session.clone()), sequence:1 }).await?.into_inner().result;
             assert!(matches!(expired, Some(proto::receipt_response::Result::Error(error)) if error.kind == proto::ErrorKind::ReceiptExpired as i32));
-            let retired = client.retire_producer(proto::SessionRequest { source_id:"facilities-db".into(), session:Some(session.clone()) }).await?.into_inner().result;
+            let retired = client.retire_producer(proto::SessionRequest { source_id:SOURCE_ID.into(), session:Some(session.clone()) }).await?.into_inner().result;
             assert_eq!(retired, Some(proto::retire_response::Result::Retired(true)));
             assert_ne!(register(&mut client).await?.epoch, session.epoch);
             Ok(session)

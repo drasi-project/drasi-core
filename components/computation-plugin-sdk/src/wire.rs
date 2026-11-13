@@ -7,8 +7,8 @@
 use crate::{abi, metadata::Capabilities};
 use drasi_computation_contracts::{
     decode_bounded_messagepack, encode_bounded_messagepack, BinaryEnvelopeCodec, ChangeEnvelope,
-    ComponentDescriptor, ComponentId, ImplementationIdentity, InputBinding, InputEnvelope,
-    OutputEnvelope, PortId, RecordId, Schema, SchemaDescriptor,
+    ComponentDescriptor, ComponentId, ComponentUpdatePlan, ImplementationIdentity, InputBinding,
+    InputEnvelope, OutputEnvelope, PortId, RecordId, Schema, SchemaDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, num::NonZeroUsize, sync::Arc};
@@ -32,7 +32,7 @@ pub fn codec(schemas: &[Arc<Schema>]) -> anyhow::Result<BinaryEnvelopeCodec> {
     Ok(codec)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scope {
     pub instance_id: String,
@@ -40,7 +40,7 @@ pub struct Scope {
     pub generation: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
     pub id: ComponentId,
@@ -57,6 +57,108 @@ pub struct CreateRequest {
     /// creation envelope. Not a new field in the frozen base wire request.
     #[serde(skip)]
     pub activation_credentials_bound: bool,
+    /// Local execution annotation populated only by the separately tagged
+    /// reconstruction envelope. Never serialized as a planning description or
+    /// configuration field. Initial construction has no update directive.
+    #[serde(skip)]
+    pub update_directive: Option<UpdateDirective>,
+}
+
+/// Persisted, owner-approved reconstruction intent, not a pure planning input or
+/// permission to discard state. The factory must honor the requested state
+/// treatment or reject construction; Core validates actual data safety.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDirective {
+    pub operation_id: String,
+    pub plan: ComponentUpdatePlan,
+}
+
+impl UpdateDirective {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        drasi_computation_contracts::validate_identifier(
+            "native update operation",
+            &self.operation_id,
+        )?;
+        anyhow::ensure!(
+            self.plan.mode == drasi_computation_contracts::ComponentUpdateMode::Recreate,
+            "native reconstruction directive requires a Recreate plan"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateCreation {
+    update_creation_version: u32,
+    request: CreateRequest,
+    directive: UpdateDirective,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_credentials_version: Option<u32>,
+}
+
+/// Encode actual construction, retaining the negotiated credentials marker and
+/// optional owner-approved reconstruction directive in execution-only envelopes.
+/// Use ordinary serde JSON for pure UpdateRequest planning descriptions.
+pub fn encode_create_request(request: &CreateRequest) -> anyhow::Result<Vec<u8>> {
+    if let Some(directive) = &request.update_directive {
+        directive.validate()?;
+        return encode(&UpdateCreation {
+            update_creation_version: 1,
+            request: request.clone(),
+            directive: directive.clone(),
+            activation_credentials_version: request
+                .activation_credentials_bound
+                .then_some(abi::activation_credentials::VERSION),
+        });
+    }
+    if request.activation_credentials_bound {
+        crate::activation_credentials::encode_bound_create_request(request)
+    } else {
+        encode(request)
+    }
+}
+
+pub(crate) fn decode_update_creation(bytes: &[u8]) -> anyhow::Result<CreateRequest> {
+    let mut creation: UpdateCreation = decode(bytes)?;
+    anyhow::ensure!(
+        creation.update_creation_version == 1
+            && creation
+                .activation_credentials_version
+                .is_none_or(|version| version == abi::activation_credentials::VERSION),
+        "unsupported native reconstruction envelope version"
+    );
+    creation.directive.validate()?;
+    creation.request.activation_credentials_bound =
+        creation.activation_credentials_version.is_some();
+    creation.request.update_directive = Some(creation.directive);
+    Ok(creation.request)
+}
+
+/// Pure factory inspection of two configurations for the same logical component.
+/// UUID, scope, implementation and configuration version must match. Factory
+/// planning uses bounded JSON, not a component operation or construction callback.
+/// Current-request matching excludes both execution-only creation annotations;
+/// a retained reconstruction directive never authorizes another update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRequest {
+    pub current: CreateRequest,
+    pub proposed: CreateRequest,
+}
+
+/// Approved plugin-authored intent for a retained object. The caller must first
+/// validate actual data boundaries and storage/downstream requirements; this
+/// payload and the factory's metadata cannot establish them. Encoded as bounded
+/// named MessagePack when passed to the mutable APPLY_UPDATE operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyUpdateRequest {
+    /// Stable host operation identity, unchanged for retries of this intent.
+    pub operation_id: String,
+    pub request: UpdateRequest,
+    pub plan: ComponentUpdatePlan,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +166,9 @@ pub struct CreateRequest {
 pub struct InstanceMetadata {
     pub descriptor: ComponentDescriptor,
     pub capabilities: Capabilities,
+    /// Descriptions captured at construction or the last successfully validated
+    /// APPLY_UPDATE. Re-inspect after update success; an earlier decoded metadata
+    /// value is a snapshot and never updates itself. Reader identities stay fixed.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub queries: std::collections::BTreeMap<PortId, drasi_computation_contracts::QueryDescription>,
 }

@@ -14,6 +14,7 @@
 
 use crate::indexes::config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 use crate::indexes::IndexBackendPlugin;
+use crate::{ComponentId, StorageScope};
 use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
 use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
 use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
@@ -266,7 +267,7 @@ impl IndexFactory {
     pub async fn build(
         &self,
         backend_ref: &StorageBackendRef,
-        query_id: &str,
+        query_id: &ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         match backend_ref {
             StorageBackendRef::Named(name) => {
@@ -300,8 +301,8 @@ impl IndexFactory {
     pub(crate) async fn build_scoped(
         &self,
         backend_ref: &StorageBackendRef,
-        storage_scope: &str,
-        query_id: &str,
+        storage_scope: &StorageScope,
+        query_id: &ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         if let StorageBackendRef::Named(name) = backend_ref {
             if let Some(provider) = self.providers.get(name) {
@@ -311,7 +312,7 @@ impl IndexFactory {
                     .map_err(|error| Self::initialization_error(query_id, error));
             }
         }
-        self.build(backend_ref, storage_scope).await
+        self.build(backend_ref, query_id).await
     }
 
     /// Build in-memory indexes (returns checkpoint_store: None — caller provides InMemoryCheckpointStore)
@@ -342,7 +343,7 @@ impl IndexFactory {
     async fn build_from_plugin(
         &self,
         plugin: &Arc<dyn IndexBackendPlugin>,
-        query_id: &str,
+        query_id: &ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         plugin
             .create_indexes(query_id)
@@ -351,7 +352,7 @@ impl IndexFactory {
     }
 
     fn initialization_error(
-        query_id: &str,
+        query_id: &ComponentId,
         error: drasi_core::interface::IndexError,
     ) -> IndexError {
         log::error!("Failed to create indexes for query '{query_id}': {error}");
@@ -398,7 +399,7 @@ mod tests {
     impl IndexBackendPlugin for MockPlugin {
         async fn create_indexes(
             &self,
-            _query_id: &str,
+            _query_id: &drasi_core_types::ComponentId,
         ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
         {
             let element_index = Arc::new(InMemoryElementIndex::new());
@@ -414,6 +415,16 @@ mod tests {
                 outbox_writer: None,
                 live_results_writer: None,
             })
+        }
+        async fn create_scoped_indexes(
+            &self,
+            _scope: &crate::StorageScope,
+            component_id: &crate::ComponentId,
+        ) -> std::result::Result<
+            drasi_core::interface::CreatedIndexes,
+            drasi_core::interface::IndexError,
+        > {
+            self.create_indexes(component_id).await
         }
 
         fn is_volatile(&self) -> bool {
@@ -436,10 +447,21 @@ mod tests {
         impl IndexBackendPlugin for DeclaredProvider {
             async fn create_indexes(
                 &self,
-                _query_id: &str,
+                _query_id: &drasi_core_types::ComponentId,
             ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
                 Err(drasi_core::interface::IndexError::NotSupported)
             }
+            async fn create_scoped_indexes(
+                &self,
+                _scope: &crate::StorageScope,
+                component_id: &crate::ComponentId,
+            ) -> std::result::Result<
+                drasi_core::interface::CreatedIndexes,
+                drasi_core::interface::IndexError,
+            > {
+                self.create_indexes(component_id).await
+            }
+
             fn is_volatile(&self) -> bool {
                 false
             }
@@ -488,32 +510,39 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_provider_receives_separate_storage_and_logical_query_ids() {
-        struct ScopedProvider(std::sync::Mutex<Vec<(String, String)>>);
+        struct ScopedProvider(
+            std::sync::Mutex<
+                Vec<(
+                    drasi_core_types::StorageScope,
+                    drasi_core_types::ComponentId,
+                )>,
+            >,
+        );
 
         #[async_trait]
         impl IndexBackendPlugin for ScopedProvider {
             async fn create_indexes(
                 &self,
-                query_id: &str,
+                query_id: &drasi_core_types::ComponentId,
             ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
                 self.0
                     .lock()
                     .unwrap()
-                    .push((query_id.to_owned(), query_id.to_owned()));
+                    .push((drasi_core_types::StorageScope::default(), query_id.clone()));
                 MockPlugin { volatile: true }.create_indexes(query_id).await
             }
 
             async fn create_scoped_indexes(
                 &self,
-                storage_scope: &str,
-                query_id: &str,
+                storage_scope: &drasi_core_types::StorageScope,
+                query_id: &drasi_core_types::ComponentId,
             ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
                 self.0
                     .lock()
                     .unwrap()
-                    .push((storage_scope.to_owned(), query_id.to_owned()));
+                    .push((storage_scope.clone(), query_id.clone()));
                 MockPlugin { volatile: true }
-                    .create_indexes(storage_scope)
+                    .create_scoped_indexes(storage_scope, query_id)
                     .await
             }
 
@@ -531,16 +560,36 @@ mod tests {
             )]),
         );
         let backend = StorageBackendRef::Named("scoped".to_owned());
-        factory.build(&backend, "ordinary").await.unwrap();
         factory
-            .build_scoped(&backend, "isolated-storage", "logical-query")
+            .build(
+                &backend,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001d9")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
+        factory
+            .build_scoped(
+                &backend,
+                &drasi_core_types::StorageScope::new(("isolated-storage").to_owned()),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000033e")
+                    .expect("fixture UUID"),
+            )
             .await
             .unwrap();
         assert_eq!(
             *provider.0.lock().unwrap(),
             vec![
-                ("ordinary".to_owned(), "ordinary".to_owned()),
-                ("isolated-storage".to_owned(), "logical-query".to_owned()),
+                (
+                    drasi_core_types::StorageScope::default(),
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001d9")
+                        .expect("fixture UUID")
+                ),
+                (
+                    drasi_core_types::StorageScope::new("isolated-storage"),
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000033e")
+                        .expect("fixture UUID")
+                ),
             ]
         );
     }
@@ -604,7 +653,13 @@ mod tests {
 
         let factory = IndexFactory::new(backends, HashMap::new());
         let backend_ref = StorageBackendRef::Named("memory_test".to_string());
-        let result = factory.build(&backend_ref, "test_query").await;
+        let result = factory
+            .build(
+                &backend_ref,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
 
         assert!(result.is_ok());
     }
@@ -613,7 +668,13 @@ mod tests {
     async fn test_build_named_provider() {
         let factory = IndexFactory::new(vec![], providers_with("rocks", false));
         let backend_ref = StorageBackendRef::Named("rocks".to_string());
-        let result = factory.build(&backend_ref, "test_query").await;
+        let result = factory
+            .build(
+                &backend_ref,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
         assert!(result.is_ok());
     }
 
@@ -621,7 +682,13 @@ mod tests {
     async fn test_build_unknown_backend() {
         let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Named("nonexistent".to_string());
-        let result = factory.build(&backend_ref, "test_query").await;
+        let result = factory
+            .build(
+                &backend_ref,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -643,7 +710,13 @@ mod tests {
         }];
         let factory = IndexFactory::new(backends, HashMap::new());
         let backend_ref = StorageBackendRef::Named("rocks".to_string());
-        let result = factory.build(&backend_ref, "test_query").await;
+        let result = factory
+            .build(
+                &backend_ref,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -661,7 +734,13 @@ mod tests {
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
-        let result = factory.build(&backend_ref, "test_query").await;
+        let result = factory
+            .build(
+                &backend_ref,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
 
         assert!(result.is_ok());
     }
@@ -672,7 +751,13 @@ mod tests {
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
         });
-        let result = factory.build(&backend_ref, "test_query").await;
+        let result = factory
+            .build(
+                &backend_ref,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -837,7 +922,13 @@ mod tests {
             .build()
             .unwrap();
         let index_set = rt
-            .block_on(factory.build(&StorageBackendRef::Named("memory_test".to_string()), "q1"))
+            .block_on(
+                factory.build(
+                    &StorageBackendRef::Named("memory_test".to_string()),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                ),
+            )
             .unwrap();
 
         let debug_str = format!("{index_set:?}");
@@ -878,7 +969,13 @@ mod tests {
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
-        let result = factory.build(&backend_ref, "test_query").await;
+        let result = factory
+            .build(
+                &backend_ref,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
         assert!(result.is_ok());
     }
 
@@ -888,7 +985,13 @@ mod tests {
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: true,
         });
-        let result = factory.build(&backend_ref, "test_query").await;
+        let result = factory
+            .build(
+                &backend_ref,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e4")
+                    .expect("fixture UUID"),
+            )
+            .await;
         assert!(result.is_ok());
     }
 }

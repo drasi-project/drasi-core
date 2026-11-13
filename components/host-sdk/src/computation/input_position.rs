@@ -126,7 +126,10 @@ mod tests {
     ) -> anyhow::Result<()> {
         let mut foreign = Foreign {
             references: AtomicUsize::new(1),
-            description: encode_key(&SourceProgressKey::Source("source".into()))?,
+            description: encode_key(&SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ))?,
             response: encode(&true)?,
         };
         assert!(unsafe { from_borrowed(InputPositionPolicyV1::null())? }.is_none());
@@ -144,7 +147,13 @@ mod tests {
             assert_eq!(foreign.references.load(Ordering::Acquire), 1);
         }
         let policy = unsafe { from_borrowed(table(&foreign))? }.unwrap();
-        assert_eq!(policy.key(), &SourceProgressKey::Source("source".into()));
+        assert_eq!(
+            policy.key(),
+            &SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID")
+            )
+        );
         assert!(policy.is_after(&[0], &[1])?);
         assert_eq!(foreign.references.load(Ordering::Acquire), 2);
         let clone = policy.clone();

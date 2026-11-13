@@ -27,7 +27,7 @@ fn plugin() -> Result<Arc<NativePlugin>> {
 
 fn configuration(path: &Path) -> Value {
     json!({
-        "source": "source",
+        "source": id("source"),
         "stream": "source/out",
         "settings": {
             "path": path,
@@ -217,6 +217,7 @@ async fn hosted_file_snapshot() -> Result<()> {
          INSERT INTO items VALUES(1,X'61','before'),(2,'YQ==','other');",
     )?;
     let core = drasi_lib::DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -251,14 +252,21 @@ async fn hosted_file_snapshot() -> Result<()> {
             shutdown_timeout_ms: NonZeroU64::new(5000).expect("cleanup deadline"),
         })?;
         let sql = source.handle();
-        let output = endpoint("source", "out");
-        assert!(core.add_components(ComponentBatch::builder()
-            .source(Box::new(source)).bind_stream(output.clone(), stream("source/out")).build()?
-        ).await?.committed);
-        let mut pipeline = core.computation_pipeline()?.native_source(output)?;
+        let output = Endpoint::new(source.descriptor().id().clone(), PortId::try_new("out")?);
+        core.add_components(
+            ComponentBatch::builder()
+                .source(name("source"), Box::new(source))
+                .bind_stream(output.clone(), stream("source/out"))
+                .build()?,
+        )
+        .await?;
+        let mut pipeline = core.computation_pipeline()?.native_source(output.clone())?;
         for query in ["query", "observer"] {
+            let query_id = id(query);
+            let query_name = drasi_core_types::ComponentName::try_new(query)
+                .expect("fixture component name");
             let snapshot = file_factory(&native)?.create_provider(
-                id(query), configuration(&path),
+                query_id.clone(), configuration(&path),
                 Some(Scope {
                     instance_id: INSTANCE.into(),
                     graph_id: core.computation_control()?.desired_snapshot().id.to_string(),
@@ -266,17 +274,23 @@ async fn hosted_file_snapshot() -> Result<()> {
                 }),
                 None,
             )?;
-            pipeline = pipeline.query_bootstrap(query, snapshot)?
-                .query(drasi_lib::Query::cypher(query)
+            pipeline = pipeline.query_bootstrap(&query_id, snapshot)?.query(
+                drasi_lib::Query::cypher(query_name)
                     .query("MATCH (n:items) RETURN n.id AS id,n.value AS value")
-                    .from_input("source").enable_bootstrap(true).build());
+                    .from_input_port_by_id(output.component.clone(), output.port.clone())
+                    .enable_bootstrap(true)
+                    .build()?
+                    .with_assigned_id(id(query)),
+            );
         }
-        assert!(core.add_components(pipeline.build()?).await?.committed);
+        core.add_components(pipeline.build()?).await?;
         core.start().await?;
         let mut subscriptions = Vec::new();
         for query in ["query", "observer"] {
-            tokio::time::timeout(TIMEOUT, core.computation_component(query)?.wait_started()).await??;
-            let subscription = core.subscribe_query_results(query).await?;
+            let query = drasi_core_types::ComponentName::try_new(query)
+                .expect("fixture component name");
+            tokio::time::timeout(TIMEOUT, core.component_by_name(&query)?.wait_started()).await??;
+            let subscription = core.subscribe_query_results_by_name(&query).await?;
             let mut initial = subscription.snapshot.to_vec();
             initial.sort_by_key(Value::to_string);
             assert_eq!(initial, vec![json!({"id":1,"value":"before"}), json!({"id":2,"value":"other"})]);
@@ -287,14 +301,16 @@ async fn hosted_file_snapshot() -> Result<()> {
             ("UPDATE items SET value='after-removal' WHERE id=1", "after-removal", true),
         ] {
             if remove_primary {
-                core.remove_query("query").await?;
-                subscriptions.retain(|(query, _)| *query != "query");
+                core.remove_query_by_name(&drasi_core_types::ComponentName::try_new("query").expect("fixture component name")).await?;
+                let removed = drasi_core_types::ComponentName::try_new("query")
+                    .expect("fixture component name");
+                subscriptions.retain(|(query, _)| query != &removed);
             }
             sql.execute_batch(statement).await?;
             for (query, subscription) in &mut subscriptions {
                 tokio::time::timeout(TIMEOUT, async {
                     loop {
-                        if core.get_query_results(query).await? == vec![json!({"id":1,"value":value})] {
+                        if core.get_query_results_by_name(query).await? == vec![json!({"id":1,"value":value})] {
                             return Ok::<_, anyhow::Error>(());
                         }
                         subscription.stream.next().await.context("query stream closed")??;
@@ -302,7 +318,7 @@ async fn hosted_file_snapshot() -> Result<()> {
                 }).await??;
             }
         }
-        assert_eq!(core.computation_component("source")?.observed()?.lifecycle, ComponentLifecycle::Running);
+        assert_eq!(core.component_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name"))?.observed()?.lifecycle, ComponentLifecycle::Running);
         Ok::<_, anyhow::Error>(())
     }.await;
     let cleanup = core.shutdown().await;

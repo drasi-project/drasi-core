@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -39,10 +43,20 @@ struct Wal {
 
 #[async_trait]
 impl WalProvider for Wal {
-    async fn register(&self, _: &str, _: WriteAheadLogConfig) -> std::result::Result<(), WalError> {
+    async fn register(
+        &self,
+        _scope: &drasi_core_types::StorageScope,
+        _: &drasi_core_types::ComponentId,
+        _: WriteAheadLogConfig,
+    ) -> std::result::Result<(), WalError> {
         Ok(())
     }
-    async fn append(&self, _: &str, event: &SourceChange) -> std::result::Result<u64, WalError> {
+    async fn append(
+        &self,
+        _scope: &drasi_core_types::StorageScope,
+        _: &drasi_core_types::ComponentId,
+        event: &SourceChange,
+    ) -> std::result::Result<u64, WalError> {
         let mut rows = self.rows.lock().expect("rows");
         let sequence = rows.keys().next_back().copied().unwrap_or(0) + 1;
         rows.insert(sequence, event.clone());
@@ -50,13 +64,14 @@ impl WalProvider for Wal {
     }
     async fn read_from(
         &self,
-        source: &str,
+        _scope: &drasi_core_types::StorageScope,
+        source: &drasi_core_types::ComponentId,
         sequence: u64,
     ) -> std::result::Result<Vec<(u64, SourceChange)>, WalError> {
         let rows = self.rows.lock().expect("rows");
         if rows.keys().next().is_some_and(|oldest| sequence < *oldest) {
             return Err(WalError::PositionUnavailable {
-                source_id: source.into(),
+                source_id: source.clone(),
                 requested: sequence,
                 oldest_available: rows.keys().next().copied(),
             });
@@ -66,14 +81,23 @@ impl WalProvider for Wal {
             .map(|(sequence, change)| (*sequence, change.clone()))
             .collect())
     }
-    async fn prune_up_to(&self, _: &str, sequence: u64) -> std::result::Result<u64, WalError> {
+    async fn prune_up_to(
+        &self,
+        _scope: &drasi_core_types::StorageScope,
+        _: &drasi_core_types::ComponentId,
+        sequence: u64,
+    ) -> std::result::Result<u64, WalError> {
         self.prunes.fetch_add(1, Ordering::SeqCst);
         let mut rows = self.rows.lock().expect("rows");
         let before = rows.len();
         rows.retain(|seq, _| *seq > sequence);
         Ok((before - rows.len()) as u64)
     }
-    async fn head_sequence(&self, _: &str) -> std::result::Result<u64, WalError> {
+    async fn head_sequence(
+        &self,
+        _scope: &drasi_core_types::StorageScope,
+        _: &drasi_core_types::ComponentId,
+    ) -> std::result::Result<u64, WalError> {
         Ok(self
             .rows
             .lock()
@@ -83,13 +107,25 @@ impl WalProvider for Wal {
             .copied()
             .unwrap_or(0))
     }
-    async fn oldest_sequence(&self, _: &str) -> std::result::Result<Option<u64>, WalError> {
+    async fn oldest_sequence(
+        &self,
+        _scope: &drasi_core_types::StorageScope,
+        _: &drasi_core_types::ComponentId,
+    ) -> std::result::Result<Option<u64>, WalError> {
         Ok(self.rows.lock().expect("rows").keys().next().copied())
     }
-    async fn event_count(&self, _: &str) -> std::result::Result<u64, WalError> {
+    async fn event_count(
+        &self,
+        _scope: &drasi_core_types::StorageScope,
+        _: &drasi_core_types::ComponentId,
+    ) -> std::result::Result<u64, WalError> {
         Ok(self.rows.lock().expect("rows").len() as u64)
     }
-    async fn delete_wal(&self, _: &str) -> std::result::Result<(), WalError> {
+    async fn delete_wal(
+        &self,
+        _scope: &drasi_core_types::StorageScope,
+        _: &drasi_core_types::ComponentId,
+    ) -> std::result::Result<(), WalError> {
         self.deletes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -112,14 +148,22 @@ fn event(id: u64) -> SourceChange {
 async fn wal_source_resumes_in_order_then_observes_live_appends_without_owning_partition_cleanup() {
     let wal = Arc::new(Wal::default());
     for index in 1..=3 {
-        wal.append("source", &event(index)).await.expect("append");
+        wal.append(
+            &drasi_core_types::StorageScope::default(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            &event(index),
+        )
+        .await
+        .expect("append");
     }
     let resource = Arc::new(WalSourceResource {
         provider: wal.clone(),
-        partition: "source".into(),
+        scope: drasi_lib::StorageScope::default(),
+        source_id: fixture_support::component_id(77),
     });
     let mut source = WalReplaySource::new(
-        ComponentId::try_new("replay").expect("id"),
+        fixture_support::component_id(719),
         StreamId::try_new("replay/out").expect("stream"),
         resource,
         1,
@@ -140,7 +184,14 @@ async fn wal_source_resumes_in_order_then_observes_live_appends_without_owning_p
             "adapter sequence is separate"
         );
     }
-    wal.append("source", &event(4)).await.expect("live append");
+    wal.append(
+        &drasi_core_types::StorageScope::default(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &event(4),
+    )
+    .await
+    .expect("live append");
     let live = source.next().await.expect("live").expect("event");
     assert_eq!(
         GraphChangeCodec::source_metadata(&live.envelope)
@@ -168,15 +219,30 @@ async fn wal_source_resumes_in_order_then_observes_live_appends_without_owning_p
 async fn unavailable_wal_position_is_reported_instead_of_silently_skipped() {
     let wal = Arc::new(Wal::default());
     for index in 1..=3 {
-        wal.append("source", &event(index)).await.expect("append");
+        wal.append(
+            &drasi_core_types::StorageScope::default(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            &event(index),
+        )
+        .await
+        .expect("append");
     }
-    wal.prune_up_to("source", 2).await.expect("prune");
+    wal.prune_up_to(
+        &drasi_core_types::StorageScope::default(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        2,
+    )
+    .await
+    .expect("prune");
     let mut source = WalReplaySource::new(
-        ComponentId::try_new("replay").expect("id"),
+        fixture_support::component_id(719),
         StreamId::try_new("replay/out").expect("stream"),
         Arc::new(WalSourceResource {
             provider: wal,
-            partition: "source".into(),
+            scope: drasi_lib::StorageScope::default(),
+            source_id: fixture_support::component_id(77),
         }),
         0,
     );
@@ -228,7 +294,7 @@ mod persistent_progress {
     fn query_definition() -> ContinuousQueryDefinition {
         ContinuousQueryDefinition {
             graph_id: "source-progress".into(),
-            id: ComponentId::try_new("query").expect("id"),
+            id: fixture_support::component_id(46),
             query: "MATCH (n:Item) RETURN n AS item".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out").expect("stream"),
@@ -250,21 +316,29 @@ mod persistent_progress {
         ));
         let wal = Arc::new(Wal::default());
         for sequence in 1..=2 {
-            wal.append("source", &event(sequence)).await?;
-        }
-        let endpoint = |name: &str, port: &str| {
-            Endpoint::new(
-                ComponentId::try_new(name).expect("component"),
-                PortId::try_new(port).expect("port"),
+            wal.append(
+                &drasi_core_types::StorageScope::default(),
+                &fixture_support::component_id(77),
+                &event(sequence),
             )
+            .await?;
+        }
+        let source_id = fixture_support::component_id(77);
+        let endpoint = |id: &ComponentId, port: &str| {
+            Endpoint::new(id.clone(), PortId::try_new(port).expect("port"))
         };
         let (sent, mut received) = mpsc::channel(8);
         let mut builder = ComputationGraph::builder("source-progress");
         let mut owners = Vec::new();
         let mut results = Vec::new();
-        for name in ["left", "right"] {
+        let query_ids = [fixture_support::component_id(201), fixture_support::component_id(202)];
+        for ((name, query_id), sink_id) in ["left", "right"]
+            .into_iter()
+            .zip(query_ids.iter())
+            .zip([fixture_support::component_id(203), fixture_support::component_id(204)])
+        {
             let mut definition = query_definition();
-            definition.id = ComponentId::try_new(name)?;
+            definition.id = query_id.clone();
             definition.output_stream = StreamId::try_new(format!("{name}/out"))?;
             let owner = Arc::new(QuerySourceProgress::new(
                 "source-progress",
@@ -275,12 +349,11 @@ mod persistent_progress {
                 .with_source_progress(owner.clone())?;
             results.push(query.results());
             owners.push(owner);
-            let sink = format!("{name}-sink");
             builder = builder
-                .transformer(Box::new(query))
-                .sink(Box::new(Sink {
+                .fixture_transformer(Box::new(query))
+                .fixture_sink(Box::new(Sink {
                     descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new(sink.as_str())?,
+                        sink_id.clone(),
                         vec![PortDescriptor::new(
                             PortId::try_new("in")?,
                             PortDirection::Input,
@@ -291,31 +364,32 @@ mod persistent_progress {
                     received: sent.clone(),
                 }))
                 .bind_stream(
-                    endpoint(name, "out"),
+                    endpoint(query_id, "out"),
                     StreamId::try_new(format!("{name}/out"))?,
                 )
                 .connect(
-                    EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
+                    EdgeDefinition::new(endpoint(&source_id, "out"), endpoint(query_id, "in")),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
                 .connect(
-                    EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink, "in")),
+                    EdgeDefinition::new(endpoint(query_id, "out"), endpoint(&sink_id, "in")),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 );
         }
         let consumers = Arc::new(ConsumerProgressSet::new(
             "source-progress",
-            ComponentId::try_new("source")?,
+            fixture_support::component_id(77),
             owners.clone(),
         )?);
         let factory = Arc::new(WalReplaySourceFactory::default());
         let specification = ComponentSpecification {
             descriptor: WalReplaySource::new(
-                ComponentId::try_new("source")?,
+                fixture_support::component_id(77),
                 StreamId::try_new("source/out")?,
                 Arc::new(WalSourceResource {
                     provider: wal.clone(),
-                    partition: "source".into(),
+                    scope: drasi_lib::StorageScope::default(),
+                    source_id: source_id.clone(),
                 }),
                 0,
             )
@@ -351,7 +425,8 @@ mod persistent_progress {
                     ResourceRole::Wal,
                     Arc::new(WalSourceResource {
                         provider: wal.clone(),
-                        partition: "source".into(),
+                        scope: drasi_lib::StorageScope::default(),
+                        source_id: source_id.clone(),
                     }),
                 ),
             ),
@@ -372,8 +447,11 @@ mod persistent_progress {
                 .provide_resource(id, handle)?;
         }
         let mut graph = builder
-            .component(specification, factory)
-            .bind_stream(endpoint("source", "out"), StreamId::try_new("source/out")?)
+            .component(fixture_support::component_name(), specification, factory)
+            .bind_stream(
+                endpoint(&source_id, "out"),
+                StreamId::try_new("source/out")?,
+            )
             .build()?;
         assert!(owners.iter().all(|owner| !owner.snapshot().ready));
         let run = graph.start()?;
@@ -381,7 +459,7 @@ mod persistent_progress {
         let (execution, observed) = tokio::time::timeout(Duration::from_secs(15), async {
             tokio::join!(run, async {
                 let collected = async {
-                    let mut by_query: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+                    let mut by_query: BTreeMap<ComponentId, Vec<u64>> = BTreeMap::new();
                     for _ in 0..4 {
                         let output = received
                             .recv()
@@ -395,8 +473,8 @@ mod persistent_progress {
                     anyhow::ensure!(
                         by_query
                             == BTreeMap::from([
-                                ("left".into(), vec![1, 2]),
-                                ("right".into(), vec![1, 2]),
+                                (query_ids[0].clone(), vec![1, 2]),
+                                (query_ids[1].clone(), vec![1, 2]),
                             ]),
                         "WAL fan-out differed: {by_query:?}"
                     );
@@ -412,7 +490,8 @@ mod persistent_progress {
         assert!(matches!(execution, Err(GraphError::Cancelled)));
         for (owner, results) in owners.iter().zip(results) {
             assert_eq!(
-                owner.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+                owner.snapshot().checkpoints[&SourceProgressKey::Source(source_id.clone())]
+                    .sequence,
                 2
             );
             assert_eq!(results.snapshot()?.rows.len(), 2);
@@ -436,21 +515,29 @@ mod persistent_progress {
         ));
         let wal = Arc::new(Wal::default());
         for sequence in 1..=3 {
-            wal.append("source", &event(sequence))
-                .await
-                .expect("append");
+            wal.append(
+                &drasi_core_types::StorageScope::default(),
+                &fixture_support::component_id(77),
+                &event(sequence),
+            )
+            .await
+            .expect("append");
         }
         let resource = Arc::new(WalSourceResource {
             provider: wal.clone(),
-            partition: "source".into(),
+            scope: drasi_lib::StorageScope::default(),
+            source_id: fixture_support::component_id(77),
         });
-        let source_id = ComponentId::try_new("source").expect("source");
+        let source_id = fixture_support::component_id(77);
         let output_stream = StreamId::try_new("source/out").expect("stream");
         let mut queries = Vec::new();
         let mut owners = Vec::new();
-        for name in ["left", "right"] {
+        for (name, query_id) in [
+            ("left", fixture_support::component_id(201)),
+            ("right", fixture_support::component_id(202)),
+        ] {
             let mut definition = query_definition();
-            definition.id = ComponentId::try_new(name).expect("consumer");
+            definition.id = query_id;
             definition.output_stream = StreamId::try_new(format!("{name}/out")).expect("output");
             let owner = Arc::new(
                 QuerySourceProgress::new("source-progress", definition.id.clone()).expect("owner"),
@@ -507,9 +594,10 @@ mod persistent_progress {
             "configured resume must not skip the slow owner"
         );
         invalid.stop().await.expect("cleanup rejected start");
-        let mut source = WalReplaySource::new(source_id, output_stream.clone(), resource, 0)
-            .with_consumer_progress(consumers)
-            .expect("multi-owner binding");
+        let mut source =
+            WalReplaySource::new(source_id.clone(), output_stream.clone(), resource, 0)
+                .with_consumer_progress(consumers)
+                .expect("multi-owner binding");
         source.start().await.expect("resume all owners");
         let replay = source.next().await.expect("replay").expect("second event");
         assert_eq!(
@@ -549,7 +637,8 @@ mod persistent_progress {
         }
         for owner in &owners {
             assert_eq!(
-                owner.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+                owner.snapshot().checkpoints[&SourceProgressKey::Source(source_id.clone())]
+                    .sequence,
                 3,
             );
             assert_eq!(owner.snapshot().transport_sequences[&output_stream], 4);
@@ -574,32 +663,36 @@ mod persistent_progress {
             ),
         ));
         let progress = Arc::new(
-            QuerySourceProgress::new(
-                "source-progress",
-                ComponentId::try_new("query").expect("id"),
-            )
-            .expect("scope"),
+            QuerySourceProgress::new("source-progress", fixture_support::component_id(46))
+                .expect("scope"),
         );
         let wal = Arc::new(Wal::default());
-        wal.append("source", &event(1)).await.expect("first");
+        wal.append(
+            &drasi_core_types::StorageScope::default(),
+            &fixture_support::component_id(77),
+            &event(1),
+        )
+        .await
+        .expect("first");
         let wal_resource = Arc::new(WalSourceResource {
             provider: wal.clone(),
-            partition: "source".into(),
+            scope: drasi_lib::StorageScope::default(),
+            source_id: fixture_support::component_id(77),
         });
         let source_factory = Arc::new(WalReplaySourceFactory::default());
         let query_factory = Arc::new(ContinuousQueryFactory::default());
-        let endpoint = |node: &str, port: &str| {
-            Endpoint::new(
-                ComponentId::try_new(node).expect("id"),
-                PortId::try_new(port).expect("port"),
-            )
+        let source_id = fixture_support::component_id(77);
+        let query_id = fixture_support::component_id(46);
+        let sink_id = fixture_support::component_id(101);
+        let endpoint = |id: &ComponentId, port: &str| {
+            Endpoint::new(id.clone(), PortId::try_new(port).expect("port"))
         };
         let resource_id = |id: &str| ResourceId::try_new(id).expect("resource");
         let literal = |value: &str| ConfigurationValue::Literal(value.into());
         let (received, mut output) = mpsc::channel(8);
         let source = ComponentSpecification {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("source").expect("id"),
+                fixture_support::component_id(77),
                 vec![PortDescriptor::new(
                     PortId::try_new("out").expect("port"),
                     PortDirection::Output,
@@ -635,7 +728,7 @@ mod persistent_progress {
         };
         let sink = Sink {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("sink").expect("id"),
+                fixture_support::component_id(101),
                 vec![PortDescriptor::new(
                     PortId::try_new("in").expect("port"),
                     PortDirection::Input,
@@ -647,23 +740,23 @@ mod persistent_progress {
             received,
         };
         let mut builder = ComputationGraph::builder("source-progress")
-            .component(source, source_factory)
-            .component(query, query_factory)
-            .sink(Box::new(sink))
+            .component(fixture_support::component_name(), source, source_factory)
+            .component(fixture_support::component_name(), query, query_factory)
+            .fixture_sink(Box::new(sink))
             .bind_stream(
-                endpoint("source", "out"),
+                endpoint(&source_id, "out"),
                 StreamId::try_new("source/out").expect("stream"),
             )
             .bind_stream(
-                endpoint("query", "out"),
+                endpoint(&query_id, "out"),
                 StreamId::try_new("query/out").expect("stream"),
             )
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+                EdgeDefinition::new(endpoint(&source_id, "out"), endpoint(&query_id, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+                EdgeDefinition::new(endpoint(&query_id, "out"), endpoint(&sink_id, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             );
         for (id, role, handle) in [
@@ -720,7 +813,7 @@ mod persistent_progress {
                         .sequence(),
                     1
                 );
-                let key = SourceProgressKey::Source("source".into());
+                let key = SourceProgressKey::Source(source_id.clone());
                 assert_eq!(progress.snapshot().checkpoints[&key].sequence, 1);
                 assert_eq!(
                     progress.snapshot().checkpoints[&key]
@@ -728,7 +821,13 @@ mod persistent_progress {
                         .as_deref(),
                     Some(&1u64.to_be_bytes()[..])
                 );
-                wal.append("source", &event(2)).await.expect("live append");
+                wal.append(
+                    &drasi_core_types::StorageScope::default(),
+                    &source_id,
+                    &event(2),
+                )
+                .await
+                .expect("live append");
                 assert_eq!(
                     output
                         .recv()
@@ -754,7 +853,7 @@ mod persistent_progress {
             .with_source_progress(progress.clone())
             .expect("same owner");
         let mut source = WalReplaySource::new(
-            ComponentId::try_new("source").expect("id"),
+            fixture_support::component_id(77),
             StreamId::try_new("source/out").expect("stream"),
             wal_resource,
             0,
@@ -763,7 +862,13 @@ mod persistent_progress {
         let (source_started, query_started) = tokio::join!(source.start(), query.start());
         source_started.expect("source waits for durable query reconciliation");
         query_started.expect("query recovery");
-        wal.append("source", &event(3)).await.expect("next append");
+        wal.append(
+            &drasi_core_types::StorageScope::default(),
+            &source_id,
+            &event(3),
+        )
+        .await
+        .expect("next append");
         let next = source.next().await.expect("resume").expect("event");
         assert_eq!(
             GraphChangeCodec::source_metadata(&next.envelope)

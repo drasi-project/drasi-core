@@ -693,16 +693,31 @@ async fn test_postgres_reaction_creation() {
         retry_attempts: 3,
     };
 
-    let reaction =
-        PostgresStoredProcReaction::new("test-reaction", vec!["test-query".to_string()], config)
-            .await;
+    let reaction = PostgresStoredProcReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        )],
+        config,
+    )
+    .await;
 
     assert!(reaction.is_ok(), "Should create reaction successfully");
 
     let reaction = reaction.unwrap();
-    assert_eq!(reaction.id(), "test-reaction");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
     assert_eq!(reaction.type_name(), "storedproc-postgres");
-    assert_eq!(reaction.query_ids(), vec!["test-query"]);
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_lib::ComponentName::try_new("test-query").unwrap(),
+        )]
+    );
 
     pg.cleanup().await;
 }
@@ -719,31 +734,45 @@ async fn test_postgres_reaction_builder() {
     let pg_config = pg.config();
     setup_stored_procedures(pg_config).await;
 
-    let reaction = PostgresStoredProcReaction::builder("test-builder")
-        .with_hostname(&pg_config.host)
-        .with_port(pg_config.port)
-        .with_database(&pg_config.database)
-        .with_user(&pg_config.user)
-        .with_password(&pg_config.password)
-        .with_ssl(false)
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
-            )),
-            updated: None,
-            deleted: None,
-        })
-        .with_query("test-query")
-        .with_command_timeout_ms(5000)
-        .with_retry_attempts(3)
-        .build()
-        .await;
+    let reaction = PostgresStoredProcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000058")
+            .expect("fixture UUID"),
+    )
+    .with_hostname(&pg_config.host)
+    .with_port(pg_config.port)
+    .with_database(&pg_config.database)
+    .with_user(&pg_config.user)
+    .with_password(&pg_config.password)
+    .with_ssl(false)
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
+        )),
+        updated: None,
+        deleted: None,
+    })
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+    )
+    .with_command_timeout_ms(5000)
+    .with_retry_attempts(3)
+    .build()
+    .await;
 
     assert!(reaction.is_ok(), "Builder should create reaction");
 
     let reaction = reaction.unwrap();
-    assert_eq!(reaction.id(), "test-builder");
-    assert_eq!(reaction.query_ids(), vec!["test-query"]);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000058")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_lib::ComponentName::try_new("test-query").unwrap(),
+        )]
+    );
 
     pg.cleanup().await;
 }
@@ -818,34 +847,48 @@ async fn test_postgres_reaction_lifecycle() {
     setup_stored_procedures(pg_config).await;
 
     // Create the PostgreSQL stored procedure reaction
-    let reaction = PostgresStoredProcReaction::builder("postgres-reaction")
-        .with_hostname(&pg_config.host)
-        .with_port(pg_config.port)
-        .with_database(&pg_config.database)
-        .with_user(&pg_config.user)
-        .with_password(&pg_config.password)
-        .with_ssl(false)
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
-            )),
-            updated: Some(TemplateSpec::new(
-                "CALL log_sensor_updated({{param after.sensor_id}}, {{param after.temperature}})",
-            )),
-            deleted: Some(TemplateSpec::new(
-                "CALL log_sensor_deleted({{param before.sensor_id}})",
-            )),
-        })
-        .with_query("sensor-query")
-        .with_auto_start(false) // Don't auto-start for this test
-        .build()
-        .await
-        .expect("Should create reaction");
+    let reaction = PostgresStoredProcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000059")
+            .expect("fixture UUID"),
+    )
+    .with_hostname(&pg_config.host)
+    .with_port(pg_config.port)
+    .with_database(&pg_config.database)
+    .with_user(&pg_config.user)
+    .with_password(&pg_config.password)
+    .with_ssl(false)
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
+        )),
+        updated: Some(TemplateSpec::new(
+            "CALL log_sensor_updated({{param after.sensor_id}}, {{param after.temperature}})",
+        )),
+        deleted: Some(TemplateSpec::new(
+            "CALL log_sensor_deleted({{param before.sensor_id}})",
+        )),
+    })
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("sensor-query").expect("fixture component name"),
+    )
+    .with_auto_start(false) // Don't auto-start for this test
+    .build()
+    .await
+    .expect("Should create reaction");
 
     // Verify reaction properties
-    assert_eq!(reaction.id(), "postgres-reaction");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000059")
+            .expect("fixture UUID")
+    );
     assert_eq!(reaction.type_name(), "storedproc-postgres");
-    assert_eq!(reaction.query_ids(), vec!["sensor-query"]);
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_lib::ComponentName::try_new("sensor-query").unwrap(),
+        )]
+    );
     assert!(!reaction.auto_start(), "Should not auto-start");
 
     // Verify initial status
@@ -1474,36 +1517,42 @@ async fn test_end_to_end_param_pipeline_all_operations() {
     let pg_config = pg.config();
     setup_stored_procedures(pg_config).await;
 
-    let reaction = PostgresStoredProcReaction::builder("e2e-pipeline")
-        .with_hostname(&pg_config.host)
-        .with_port(pg_config.port)
-        .with_database(&pg_config.database)
-        .with_user(&pg_config.user)
-        .with_password(&pg_config.password)
-        .with_ssl(false)
-        .with_query("sensor-query")
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
-            )),
-            updated: Some(TemplateSpec::new(
-                "CALL log_sensor_updated({{param after.sensor_id}}, {{param after.temperature}})",
-            )),
-            deleted: Some(TemplateSpec::new(
-                "CALL log_sensor_deleted({{param before.sensor_id}})",
-            )),
-        })
-        .with_auto_start(false)
-        .build()
-        .await
-        .expect("build reaction");
+    let reaction = PostgresStoredProcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000005a")
+            .expect("fixture UUID"),
+    )
+    .with_hostname(&pg_config.host)
+    .with_port(pg_config.port)
+    .with_database(&pg_config.database)
+    .with_user(&pg_config.user)
+    .with_password(&pg_config.password)
+    .with_ssl(false)
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("sensor-query").expect("fixture component name"),
+    )
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
+        )),
+        updated: Some(TemplateSpec::new(
+            "CALL log_sensor_updated({{param after.sensor_id}}, {{param after.temperature}})",
+        )),
+        deleted: Some(TemplateSpec::new(
+            "CALL log_sensor_deleted({{param before.sensor_id}})",
+        )),
+    })
+    .with_auto_start(false)
+    .build()
+    .await
+    .expect("build reaction");
 
     reaction.start().await.expect("start");
 
     // ADD
     reaction
         .enqueue_query_result(QueryResult::new(
-            "sensor-query".to_string(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+                .expect("fixture UUID"),
             1,
             Utc::now(),
             vec![add_diff(
@@ -1517,7 +1566,8 @@ async fn test_end_to_end_param_pipeline_all_operations() {
     // UPDATE
     reaction
         .enqueue_query_result(QueryResult::new(
-            "sensor-query".to_string(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+                .expect("fixture UUID"),
             2,
             Utc::now(),
             vec![ResultDiff::Update {
@@ -1535,7 +1585,8 @@ async fn test_end_to_end_param_pipeline_all_operations() {
     // DELETE
     reaction
         .enqueue_query_result(QueryResult::new(
-            "sensor-query".to_string(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000019")
+                .expect("fixture UUID"),
             3,
             Utc::now(),
             vec![ResultDiff::Delete {
@@ -1590,35 +1641,44 @@ async fn test_end_to_end_context_keys_and_json_binding() {
     )
     .await;
 
-    let reaction = PostgresStoredProcReaction::builder("e2e-ctx")
-        .with_hostname(&pg_config.host)
-        .with_port(pg_config.port)
-        .with_database(&pg_config.database)
-        .with_user(&pg_config.user)
-        .with_password(&pg_config.password)
-        .with_ssl(false)
-        .with_query("ctx-query")
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL capture_ctx({{param query_name}}, {{param operation}}, {{param after}})",
-            )),
-            updated: None,
-            deleted: None,
-        })
-        .with_auto_start(false)
-        .build()
-        .await
-        .expect("build reaction");
+    let reaction = PostgresStoredProcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000005b")
+            .expect("fixture UUID"),
+    )
+    .with_hostname(&pg_config.host)
+    .with_port(pg_config.port)
+    .with_database(&pg_config.database)
+    .with_user(&pg_config.user)
+    .with_password(&pg_config.password)
+    .with_ssl(false)
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("ctx-query").expect("fixture component name"),
+    )
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL capture_ctx({{param query_name}}, {{param operation}}, {{param after}})",
+        )),
+        updated: None,
+        deleted: None,
+    })
+    .with_auto_start(false)
+    .build()
+    .await
+    .expect("build reaction");
 
     reaction.start().await.expect("start");
+    let mut result = QueryResult::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000005c")
+            .expect("fixture UUID"),
+        1,
+        Utc::now(),
+        vec![add_diff(json!({"sensor_id": "s1", "temperature": 30.0}))],
+        HashMap::new(),
+    );
+    result.query_name =
+        Some(drasi_core::ComponentName::try_new("ctx-query").expect("fixture component name"));
     reaction
-        .enqueue_query_result(QueryResult::new(
-            "ctx-query".to_string(),
-            1,
-            Utc::now(),
-            vec![add_diff(json!({"sensor_id": "s1", "temperature": 30.0}))],
-            HashMap::new(),
-        ))
+        .enqueue_query_result(result)
         .await
         .expect("enqueue add");
 
@@ -1673,28 +1733,34 @@ async fn test_end_to_end_numeric_string_preserved_in_text_column() {
     )
     .await;
 
-    let reaction = PostgresStoredProcReaction::builder("e2e-code")
-        .with_hostname(&pg_config.host)
-        .with_port(pg_config.port)
-        .with_database(&pg_config.database)
-        .with_user(&pg_config.user)
-        .with_password(&pg_config.password)
-        .with_ssl(false)
-        .with_query("code-query")
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("CALL store_code({{param after.code}})")),
-            updated: None,
-            deleted: None,
-        })
-        .with_auto_start(false)
-        .build()
-        .await
-        .expect("build reaction");
+    let reaction = PostgresStoredProcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000005d")
+            .expect("fixture UUID"),
+    )
+    .with_hostname(&pg_config.host)
+    .with_port(pg_config.port)
+    .with_database(&pg_config.database)
+    .with_user(&pg_config.user)
+    .with_password(&pg_config.password)
+    .with_ssl(false)
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("code-query").expect("fixture component name"),
+    )
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("CALL store_code({{param after.code}})")),
+        updated: None,
+        deleted: None,
+    })
+    .with_auto_start(false)
+    .build()
+    .await
+    .expect("build reaction");
 
     reaction.start().await.expect("start");
     reaction
         .enqueue_query_result(QueryResult::new(
-            "code-query".to_string(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000005e")
+                .expect("fixture UUID"),
             1,
             Utc::now(),
             // "007" parses as a number but must NOT be coerced for a TEXT column.

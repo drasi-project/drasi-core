@@ -26,6 +26,9 @@ impl ComputationComponent for ObservedQuery {
             self.snapshots.clone(),
         )
     }
+    async fn initialize(&mut self) -> Result<()> {
+        self.inner.initialize().await
+    }
     async fn start(&mut self) -> Result<()> {
         self.inner.start().await
     }
@@ -49,20 +52,24 @@ impl Transformer for ObservedQuery {
     }
 }
 
-fn endpoint(component: &str, port: &str) -> Result<Endpoint> {
-    Ok(Endpoint::new(
-        ComponentId::try_new(component)?,
-        PortId::try_new(port)?,
-    ))
+fn endpoint(component: &ComponentId, port: &str) -> Result<Endpoint> {
+    Ok(Endpoint::new(component.clone(), PortId::try_new(port)?))
 }
 
-async fn add_query(core: &DrasiLib, query: Box<dyn Transformer>) -> Result<ComponentHandle> {
-    let stream = StreamId::try_new(format!("{}/out", query.descriptor().id()))?;
+async fn add_query(
+    core: &DrasiLib,
+    name: &str,
+    query: Box<dyn Transformer>,
+) -> Result<ComponentHandle> {
+    let stream = StreamId::try_new(format!("{name}/out"))?;
     Ok(core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::transformer(query))
-                .auto_start(false)
-                .bind_stream(PortId::try_new("out")?, stream),
+            ComponentAddition::new(
+                ComponentName::try_new(name)?,
+                ConstructedComponent::transformer(query),
+            )
+            .auto_start(false)
+            .bind_stream(PortId::try_new("out")?, stream),
         )
         .await?)
 }
@@ -75,14 +82,17 @@ async fn add_capture(
 ) -> Result<ComponentHandle> {
     Ok(core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink {
-                descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new(name)?,
-                    vec![port("in", PortDirection::Input)?],
-                )?,
-                received,
-                notification,
-            })))
+            ComponentAddition::new(
+                ComponentName::try_new(name)?,
+                ConstructedComponent::sink(Box::new(Sink {
+                    descriptor: ComponentDescriptor::try_new(
+                        ComponentId::generate(),
+                        vec![port("in", PortDirection::Input)?],
+                    )?,
+                    received,
+                    notification,
+                })),
+            )
             .auto_start(false),
         )
         .await?)
@@ -152,13 +162,18 @@ async fn running_upstream_handover() -> Result<()> {
     let fixture = Fixture::new().await?;
     let mut configuration = Fixture::configuration();
     configuration["query"] = json!("MATCH (n:Item) RETURN n.value AS value");
-    let upstream = fixture.query_with("query", configuration, fixture.binding.clone())?;
+    let upstream = fixture.query_with(
+        ComponentId::try_new("ace1bc0c-86a6-5280-939e-a217b5ba615f")?,
+        configuration,
+        fixture.binding.clone(),
+    )?;
     let upstream_reader = snapshot_reader(&upstream)?;
     let gate = Arc::new(SnapshotGate::default());
     let _release = ReleaseOnDrop(gate.clone());
     let (completed, mut progress) = watch::channel(0);
     let upstream = add_query(
         &fixture.core,
+        "query",
         Box::new(ObservedQuery {
             inner: upstream,
             snapshots: Arc::new(PausedSnapshot {
@@ -172,19 +187,27 @@ async fn running_upstream_handover() -> Result<()> {
     let configuration = json!({
         "query": "MATCH (n:Result) RETURN sum(n.value) AS total",
         "volatile": true,
-        "bootstrap": [{"component": "query", "port": "out"}]
+        "stream": "downstream/out",
+        "bootstrap": [{"component": upstream.id(), "port": "out"}]
     });
     let input = InputBinding {
         input_port: PortId::try_new("in")?,
-        output: OutputEndpoint::new(ComponentId::try_new("query")?, PortId::try_new("out")?),
+        output: OutputEndpoint::new(upstream.id().clone(), PortId::try_new("out")?),
         stream: StreamId::try_new("query/out")?,
     };
-    let downstream = fixture.query_with("downstream", configuration.clone(), input.clone())?;
+    let downstream = fixture.query_with(
+        ComponentId::generate(),
+        configuration.clone(),
+        input.clone(),
+    )?;
     let downstream_reader = snapshot_reader(&downstream)?;
-    let downstream = add_query(&fixture.core, Box::new(downstream)).await?;
+    let downstream = add_query(&fixture.core, "downstream", Box::new(downstream)).await?;
+    let mut configuration = configuration;
+    configuration["stream"] = json!("reference/out");
     let reference = add_query(
         &fixture.core,
-        Box::new(fixture.query_with("reference", configuration, input)?),
+        "reference",
+        Box::new(fixture.query_with(ComponentId::generate(), configuration, input)?),
     )
     .await?;
     let received = Arc::new(Mutex::new(Vec::new()));
@@ -208,16 +231,25 @@ async fn running_upstream_handover() -> Result<()> {
     connect_with_capacity(
         &fixture.core,
         vec![
-            EdgeDefinition::new(endpoint("source", "data")?, endpoint("query", "in")?),
-            EdgeDefinition::new(endpoint("query", "out")?, endpoint("downstream", "in")?),
-            EdgeDefinition::new(endpoint("query", "out")?, endpoint("reference", "in")?),
             EdgeDefinition::new(
-                endpoint("downstream", "out")?,
-                endpoint("delayed-results", "in")?,
+                endpoint(&fixture.binding.output.component, "data")?,
+                endpoint(upstream.id(), "in")?,
             ),
             EdgeDefinition::new(
-                endpoint("reference", "out")?,
-                endpoint("reference-results", "in")?,
+                endpoint(upstream.id(), "out")?,
+                endpoint(downstream.id(), "in")?,
+            ),
+            EdgeDefinition::new(
+                endpoint(upstream.id(), "out")?,
+                endpoint(reference.id(), "in")?,
+            ),
+            EdgeDefinition::new(
+                endpoint(downstream.id(), "out")?,
+                endpoint(capture.id(), "in")?,
+            ),
+            EdgeDefinition::new(
+                endpoint(reference.id(), "out")?,
+                endpoint(reference_capture.id(), "in")?,
             ),
         ],
         3,
@@ -228,14 +260,20 @@ async fn running_upstream_handover() -> Result<()> {
         reference_capture.start().await?;
         fixture
             .core
-            .computation_component("unused-sink")?
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("unused-sink")
+                    .expect("fixture component name"),
+            )?
             .start()
             .await?;
         upstream.start().await?;
         reference.start().await?;
         fixture
             .core
-            .computation_component("source")?
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )?
             .start()
             .await?;
         fixture.live.send(fixture.input(10, 3)?.envelope).await?;

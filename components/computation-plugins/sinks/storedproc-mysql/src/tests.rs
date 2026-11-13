@@ -2,14 +2,17 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use drasi_computation_contracts::{ComponentId, PortDirection};
 use drasi_computation_plugin_sdk::{ActivationCredentials, ExportedPlugin, NativeComponent};
 use drasi_reaction_common::OperationType;
 use serde_json::{json, Value};
 
+const OUTPUT_COMPONENT_ID: &str = "05a0315c-fc56-5d56-ab43-c9391eddf076";
+
 fn settings() -> Value {
     json!({
         "hostname":"no-connection-at-construction","database":"test","user":"user","password":"secret",
-        "outputs":{"db.people":{"component":"db.people","port":"out"}},
+        "outputs":{"db.people":{"component":OUTPUT_COMPONENT_ID,"port":"out"}},
         "default_template":{"added":{"template":"CALL added({{param after.id}},{{param after}})"}},
         "routes":{"people":{"deleted":{"template":"CALL deleted({{param before.id}})"}}}
     })
@@ -20,7 +23,7 @@ fn inputs() -> Vec<drasi_computation_contracts::InputBinding> {
     vec![InputBinding {
         input_port: PortId::try_new("in").expect("port"),
         output: OutputEndpoint::new(
-            ComponentId::try_new("db.people").expect("component"),
+            ComponentId::try_new(OUTPUT_COMPONENT_ID).expect("component"),
             PortId::try_new("out").expect("port"),
         ),
         stream: StreamId::try_new("people/out").expect("stream"),
@@ -36,12 +39,13 @@ async fn activation_credentials_are_explicit_transient_and_not_constructor_io() 
     settings.as_object_mut().unwrap().remove("password");
     let mut request = CreateRequest {
         inputs: inputs(),
-        id: ComponentId::try_new("sink")?,
+        id: ComponentId::try_new("ada6c229-bc29-54e3-ae61-b603c07a41b2")?,
         implementation: factory.metadata().implementation,
         configuration_version: 1,
         configuration: json!({"settings":settings}),
         scope: None,
         activation_credentials_bound: false,
+        update_directive: None,
     };
     assert!(factory.create(&request, ControlSender::default()).is_err());
     request.activation_credentials_bound = true;
@@ -75,13 +79,37 @@ async fn activation_credentials_are_explicit_transient_and_not_constructor_io() 
 }
 
 #[test]
+fn factory_metadata_constructs_without_database_io() -> Result<()> {
+    ExportedPlugin::new(plugin()?)?;
+    #[cfg(feature = "dynamic-plugin")]
+    assert!(!drasi_computation_plugin_metadata().is_null());
+    let metadata = MySqlStoredProcFactory.metadata();
+    assert_eq!(metadata.role, ComponentRole::Sink);
+    assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
+    assert_eq!(metadata.ports, MySqlStoredProcSink::ports()?);
+    assert_eq!(metadata.ports.len(), 1);
+    assert_eq!(metadata.ports[0].id().as_str(), "in");
+    assert_eq!(metadata.ports[0].direction(), PortDirection::Input);
+    assert_eq!(
+        metadata.ports[0].schema(),
+        GraphChangeCodec::schema().descriptor()
+    );
+    let id = ComponentId::generate();
+    let descriptor = MySqlStoredProcSink::describe(id.clone())?;
+    assert_eq!(descriptor.id(), &id);
+    assert_eq!(descriptor.ports(), metadata.ports.as_slice());
+    assert!(metadata.configuration.fields["settings"].secret);
+    Ok(())
+}
+
+#[test]
 fn native_mysql_factory_is_handled_and_construction_only() -> Result<()> {
     ExportedPlugin::new(plugin()?)?;
     let metadata = MySqlStoredProcFactory.metadata();
     assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
     assert!(metadata.configuration.fields["settings"].secret);
     let sink = MySqlStoredProcSink::new(
-        ComponentId::try_new("sink")?,
+        ComponentId::try_new("ada6c229-bc29-54e3-ae61-b603c07a41b2")?,
         serde_json::from_value(settings())?,
         &inputs(),
     )?;
@@ -104,7 +132,10 @@ fn native_mysql_factory_is_handled_and_construction_only() -> Result<()> {
 #[test]
 fn native_mysql_rejects_unsafe_sql_and_invalid_resource_limits() {
     for (field, value) in [
-        ("outputs", json!({"bad id": {"component": "db.people"}})),
+        (
+            "outputs",
+            json!({"bad id": {"component": OUTPUT_COMPONENT_ID}}),
+        ),
         ("port", json!(0)),
         ("retry_attempts", json!(9)),
         ("command_timeout_ms", json!(0)),

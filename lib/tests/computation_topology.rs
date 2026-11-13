@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use async_trait::async_trait;
@@ -42,19 +46,40 @@ impl EnvelopeSource for UnavailableSource {
 
 fn graph() -> ComputationGraph {
     ComputationGraph::builder("export")
-        .source(Box::new(UnavailableSource(descriptor(
-            "source",
-            &[],
-            &["out"],
-        ))))
-        .sink(Box::new(CollectSink::new(
-            "sink",
-            &["in"],
-            Received::default(),
-        )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .source(
+            ComponentName::try_new("source").expect("fixture name"),
+            Box::new(UnavailableSource(descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ))),
+        )
+        .sink(
+            ComponentName::try_new("sink").expect("fixture name"),
+            Box::new(CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                "sink",
+                &["in"],
+                Received::default(),
+            )),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -114,16 +139,36 @@ async fn imported_external_components_must_be_supplied_and_execute_in_a_fresh_gr
     );
     let received = Received::default();
     let mut bindings = TopologyBindings::default();
+    let binding_for = |name: &str| {
+        let component = desired
+            .components
+            .iter()
+            .find(|component| component.name.as_str() == name)
+            .expect("fixture component");
+        let ComponentConstruction::External { binding } = &component.construction else {
+            panic!("fixture external binding")
+        };
+        binding.clone()
+    };
     bindings.components.insert(
-        "source".into(),
+        binding_for("source"),
         ConstructedComponent::source(Box::new(FiniteSource::new(
-            "source",
-            vec![output(root("source", 1, &[5]))],
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[5],
+            ))],
         ))),
     );
     bindings.components.insert(
-        "sink".into(),
+        binding_for("sink"),
         ConstructedComponent::sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             received.clone(),
@@ -131,7 +176,7 @@ async fn imported_external_components_must_be_supplied_and_execute_in_a_fresh_gr
     );
     let mut imported = desired.build(bindings).expect("explicit external bindings");
     assert_eq!(
-        imported.observed().components[&component("source")].realization,
+        imported.observed().components[&component(77)].realization,
         RealizationState::Pending
     );
     imported
@@ -147,15 +192,15 @@ fn exact_dependency_dependent_and_all_selections_preserve_boundary_relationships
     let graph = graph();
     let exact = graph
         .snapshot()
-        .select(GraphSelection::Exact(vec![component("source")]))
+        .select(GraphSelection::Exact(vec![component(77)]))
         .expect("exact");
     assert_eq!(exact.components.len(), 1);
     assert_eq!(exact.boundary_relationships.len(), 1);
     assert!(exact.relationships.is_empty());
     assert!(exact.build(TopologyBindings::default()).is_err());
     for selection in [
-        GraphSelection::Dependencies(vec![component("sink")]),
-        GraphSelection::Dependents(vec![component("source")]),
+        GraphSelection::Dependencies(vec![component(101)]),
+        GraphSelection::Dependents(vec![component(77)]),
         GraphSelection::All,
     ] {
         let selected = graph.snapshot().select(selection).expect("closure");

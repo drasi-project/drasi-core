@@ -3,10 +3,15 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use async_trait::async_trait;
 use computation_support::*;
+use drasi_core_types::ComponentName;
 use drasi_lib::{computation::v1::*, DrasiLib};
 use std::{
     sync::{
@@ -94,23 +99,52 @@ async fn in_flight_stop(single: bool) {
     let (input, events) = mpsc::channel(4);
     let (output, mut received) = mpsc::channel(4);
     let batch = ComponentBatch::builder()
-        .source(Box::new(Source {
-            descriptor: descriptor("source", &[], &["out"]),
-            input: events,
-        }))
-        .sink(Box::new(Sink {
-            descriptor: descriptor("sink", &["in"], &[]),
-            gate: gate.clone(),
-            output,
-        }))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .source(
+            ComponentName::try_new("source").unwrap(),
+            Box::new(Source {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &[],
+                    &["out"],
+                ),
+                input: events,
+            }),
+        )
+        .sink(
+            ComponentName::try_new("sink").unwrap(),
+            Box::new(Sink {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                    &["in"],
+                    &[],
+                ),
+                gate: gate.clone(),
+                output,
+            }),
+        )
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
         .unwrap();
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -132,7 +166,11 @@ async fn in_flight_stop(single: bool) {
     gate.entered.notified().await;
     let control = drasi.computation_control().unwrap();
     let mut observed = control.subscribe_observed();
-    let sink = drasi.computation_component("sink").unwrap();
+    let sink = drasi
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("sink").expect("fixture component name"),
+        )
+        .unwrap();
     let stop = async {
         if single {
             sink.stop().await.map(|_| ()).map_err(anyhow::Error::from)
@@ -145,9 +183,9 @@ async fn in_flight_stop(single: bool) {
         result = &mut stop => panic!("stop interrupted admitted work: {result:?}"),
         result = observed.wait_for(|state| {
             if single {
-                state.components[&component("sink")].lifecycle == ComponentLifecycle::Quiescing
+                state.components[&component(101)].lifecycle == ComponentLifecycle::Quiescing
             } else {
-                state.components[&component("source")].lifecycle == ComponentLifecycle::Quiesced
+                state.components[&component(77)].lifecycle == ComponentLifecycle::Quiesced
             }
         }) => { result.unwrap(); }
     }
@@ -171,7 +209,13 @@ async fn in_flight_stop(single: bool) {
     drasi.shutdown().await.unwrap();
 }
 fn output_event(sequence: u64) -> OutputEnvelope {
-    output(root("source", sequence, &[sequence as u16]))
+    output(root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        sequence,
+        &[sequence as u16],
+    ))
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -198,18 +242,40 @@ async fn graceful_deadline_refuses_stop_without_aborting_the_in_flight_handler()
     let (output, mut received) = mpsc::channel(2);
     let mut graph = ComputationGraph::builder("stop-timeout")
         .cleanup_timeout(Duration::from_millis(50))
-        .source(Box::new(Source {
-            descriptor: descriptor("source", &[], &["out"]),
+        .fixture_source(Box::new(Source {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             input: events,
         }))
-        .sink(Box::new(Sink {
-            descriptor: descriptor("sink", &["in"], &[]),
+        .fixture_sink(Box::new(Sink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+                &[],
+            ),
             gate: gate.clone(),
             output,
         }))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -232,7 +298,7 @@ async fn graceful_deadline_refuses_stop_without_aborting_the_in_flight_handler()
         assert_eq!(gate.dropped.load(Ordering::SeqCst), 0);
         assert_eq!(gate.stopped.load(Ordering::SeqCst), 0);
         assert_eq!(
-            control.observed().components[&component("sink")].lifecycle,
+            control.observed().components[&component(101)].lifecycle,
             ComponentLifecycle::Running
         );
         gate.release.notify_one();
@@ -288,7 +354,13 @@ mod durable {
     impl Transformer for Continuation {
         async fn transform(&mut self, _: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
             self.pending = true;
-            Ok(vec![output(root("transform", 1, &[1]))])
+            Ok(vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                "transform",
+                1,
+                &[1],
+            ))])
         }
         fn has_pending_emissions(&self) -> bool {
             self.pending
@@ -301,7 +373,11 @@ mod durable {
                         .resources()
                         .checkpoint_store()
                         .unwrap()
-                        .stage_checkpoint("continuation", 1, None)
+                        .stage_checkpoint(
+                            &drasi_core_types::CheckpointKey::Metadata("continuation".into()),
+                            1,
+                            None,
+                        )
                         .await?;
                     self.gate.entered.notify_one();
                     self.gate.release.notified().await;
@@ -310,7 +386,13 @@ mod durable {
                 .await?;
             self.pending = false;
             work.1 = true;
-            Ok(vec![output(root("transform", 2, &[2]))])
+            Ok(vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+                    .expect("fixture UUID"),
+                "transform",
+                2,
+                &[2],
+            ))])
         }
     }
 
@@ -332,7 +414,10 @@ mod durable {
                 Arc::new(CypherParser::new(functions.clone())),
             )
             .with_function_registry(functions),
-            provider.create_indexes("drain", "durable").await.unwrap(),
+            provider
+                .create_indexes("drain", &component(429))
+                .await
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -341,29 +426,31 @@ mod durable {
         let (sender, events) = mpsc::channel(2);
         sender.send(output_event(1)).await.unwrap();
         let mut graph = ComputationGraph::builder("durable-drain")
-            .source(Box::new(Source {
-                descriptor: descriptor("source", &[], &["out"]),
+            .fixture_source(Box::new(Source {
+                descriptor: descriptor(&component(77), &[], &["out"]),
                 input: events,
             }))
-            .transformer(Box::new(Continuation {
-                descriptor: descriptor("transform", &["in"], &["out"]),
+            .fixture_transformer(Box::new(Continuation {
+                descriptor: descriptor(&component(429), &["in"], &["out"]),
                 gate: gate.clone(),
                 query,
                 pending: false,
             }))
-            .sink(Box::new(CollectSink::new(
+            .fixture_sink(Box::new(CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
                 "sink",
                 &["in"],
                 received.clone(),
             )))
-            .bind_stream(endpoint("source", "out"), stream("source"))
-            .bind_stream(endpoint("transform", "out"), stream("transform"))
+            .bind_stream(endpoint(&component(77), "out"), stream("source"))
+            .bind_stream(endpoint(&component(429), "out"), stream("transform"))
             .connect(
-                edge("source", "transform"),
+                edge(&component(77), &component(429)),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                edge("transform", "sink"),
+                edge(&component(429), &component(101)),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()
@@ -382,7 +469,7 @@ mod durable {
             tokio::pin!(stop);
             tokio::select! {
                 result=&mut stop=>panic!("stop cut through a durable continuation: {result:?}"),
-                state=observed.wait_for(|state| state.components[&component("source")].lifecycle==ComponentLifecycle::Quiesced)=>{state.unwrap();}
+                state=observed.wait_for(|state| state.components[&component(77)].lifecycle==ComponentLifecycle::Quiesced)=>{state.unwrap();}
             }
             gate.release.notify_one();
             assert_eq!(stop.await.unwrap().summary, OperationSummary::Completed);
@@ -391,12 +478,17 @@ mod durable {
         });
         assert!(matches!(result, Err(GraphError::Cancelled)));
         drop(graph);
-        let stored = provider.create_indexes("drain", "durable").await.unwrap();
+        let stored = provider
+            .create_indexes("drain", &component(429))
+            .await
+            .unwrap();
         assert_eq!(
             stored
                 .checkpoint_store()
                 .unwrap()
-                .read_checkpoint("continuation")
+                .read_checkpoint(&drasi_core_types::CheckpointKey::Metadata(
+                    "continuation".into(),
+                ))
                 .await
                 .unwrap()
                 .unwrap()

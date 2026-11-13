@@ -52,25 +52,32 @@ pub struct BootstrapReport {
 }
 
 pub struct SnapshotTestReaction {
-    id: String,
-    query_ids: Vec<String>,
+    id: drasi_lib::ComponentId,
+    query_inputs: Vec<drasi_lib::config::ComponentReference>,
+    query_ids: Mutex<Option<Vec<drasi_lib::ComponentId>>>,
     status: Mutex<ComponentStatus>,
     report: Arc<Mutex<BootstrapReport>>,
     snapshot_fetcher: Mutex<Option<Arc<dyn SnapshotFetcher>>>,
     panic_on_initialize: bool,
+    bound_initialization_store: Mutex<Option<Arc<dyn drasi_lib::StateStoreProvider>>>,
     failed_initialization_store: Mutex<Option<Arc<dyn drasi_lib::StateStoreProvider>>>,
 }
 
 impl SnapshotTestReaction {
-    pub fn new(id: &str, query_ids: Vec<String>) -> (Self, Arc<Mutex<BootstrapReport>>) {
+    pub fn new(
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
+    ) -> (Self, Arc<Mutex<BootstrapReport>>) {
         let report = Arc::new(Mutex::new(BootstrapReport::default()));
         let reaction = Self {
-            id: id.to_string(),
-            query_ids,
+            id: id.clone(),
+            query_inputs,
+            query_ids: Mutex::new(None),
             status: Mutex::new(ComponentStatus::Added),
             report: report.clone(),
             snapshot_fetcher: Mutex::new(None),
             panic_on_initialize: false,
+            bound_initialization_store: Mutex::new(None),
             failed_initialization_store: Mutex::new(None),
         };
         (reaction, report)
@@ -79,7 +86,7 @@ impl SnapshotTestReaction {
 
 #[async_trait]
 impl Reaction for SnapshotTestReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.id
     }
 
@@ -87,8 +94,8 @@ impl Reaction for SnapshotTestReaction {
         "snapshot-test"
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.query_ids.clone()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.query_inputs.clone()
     }
 
     fn auto_start(&self) -> bool {
@@ -114,11 +121,9 @@ impl Reaction for SnapshotTestReaction {
         )])
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         if self.panic_on_initialize {
-            *self.failed_initialization_store.lock().await = context.state_store;
-            tokio::task::yield_now().await;
-            panic!("snapshot-test initialization panic");
+            *self.bound_initialization_store.lock().await = context.state_store;
         }
         // Test-only: exercise the FFI identity-provider clone/drop path across the reaction
         // plugin boundary. Gated entirely behind the
@@ -144,9 +149,20 @@ impl Reaction for SnapshotTestReaction {
             }
         }
 
+        *self.query_ids.lock().await = Some(context.query_ids);
         // Store the snapshot fetcher (if provided) for use during start().
         let mut guard = self.snapshot_fetcher.lock().await;
         *guard = context.snapshot_fetcher;
+    }
+
+    async fn initialize(&self) -> Result<()> {
+        if self.panic_on_initialize {
+            *self.failed_initialization_store.lock().await =
+                self.bound_initialization_store.lock().await.take();
+            tokio::task::yield_now().await;
+            panic!("snapshot-test initialization panic");
+        }
+        Ok(())
     }
 
     async fn start(&self) -> Result<()> {
@@ -154,7 +170,13 @@ impl Reaction for SnapshotTestReaction {
         // streaming all rows. This validates the vtable FFI path (Site 1).
         let fetcher = self.snapshot_fetcher.lock().await.clone();
         if let Some(fetcher) = fetcher {
-            if let Some(query_id) = self.query_ids.first() {
+            let query_ids = self
+                .query_ids
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("query bindings were not initialized"))?;
+            if let Some(query_id) = query_ids.first() {
                 let snapshot = fetcher
                     .fetch_snapshot(query_id)
                     .await
@@ -176,8 +198,15 @@ impl Reaction for SnapshotTestReaction {
     }
 
     async fn stop(&self) -> Result<()> {
-        self.failed_initialization_store.lock().await.take();
         *self.status.lock().await = ComponentStatus::Stopped;
+        Ok(())
+    }
+
+    async fn dispose(&self) -> Result<()> {
+        self.failed_initialization_store.lock().await.take();
+        self.bound_initialization_store.lock().await.take();
+        self.snapshot_fetcher.lock().await.take();
+        self.query_ids.lock().await.take();
         Ok(())
     }
 

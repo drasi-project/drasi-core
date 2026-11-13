@@ -127,7 +127,7 @@ impl InputPositionComparator for CursorOrder {
 
 pub fn position_policy(source: &ComponentId) -> Result<Arc<InputPositionPolicy>> {
     Ok(Arc::new(InputPositionPolicy::new(
-        SourceProgressKey::Source(source.to_string()),
+        SourceProgressKey::Source(source.clone()),
         Arc::new(CursorOrder),
     )?))
 }
@@ -139,7 +139,7 @@ pub fn checkpoint(
 ) -> Result<Option<u64>> {
     let Some(checkpoint) = snapshot
         .checkpoints
-        .get(&SourceProgressKey::Source(source.to_string()))
+        .get(&SourceProgressKey::Source(source.clone()))
     else {
         return Ok(None);
     };
@@ -620,7 +620,7 @@ impl Journal {
                 );
             } else {
                 anyhow::ensure!(!coordinated && !snapshot.consumers[consumer].checkpoints
-                    .contains_key(&SourceProgressKey::Source(self.source.to_string())),
+                    .contains_key(&SourceProgressKey::Source(self.source.clone())),
                     "native SQLite consumer {consumer} requires its coordinated snapshot enrollment");
                 anyhow::ensure!(
                     transaction.execute(
@@ -757,7 +757,7 @@ impl Journal {
         let transaction = SourceTransactionCodec::decode_committed(&payload, limits)?;
         let identity = self.identity(sequence)?;
         anyhow::ensure!(
-            transaction.source_id() == self.source.as_str()
+            transaction.source_id() == &self.source
                 && transaction.transaction_id() == identity.as_ref()
                 && transaction.position() == identity.as_ref(),
             "native SQLite replay record identity is damaged"

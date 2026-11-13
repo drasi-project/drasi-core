@@ -43,6 +43,7 @@ use thiserror::Error;
 
 use crate::channels::*;
 use crate::context::SourceRuntimeContext;
+use crate::ComponentId;
 
 /// Structured error type for source operations.
 ///
@@ -51,7 +52,7 @@ use crate::context::SourceRuntimeContext;
 /// ```rust
 /// use drasi_lib::sources::SourceError;
 /// let err = anyhow::Error::new(SourceError::PositionUnavailable {
-///     source_id: "source".into(),
+///     source_id: drasi_lib::ComponentId::generate(),
 ///     requested: bytes::Bytes::from_static(b"last-position"),
 ///     earliest_available: None,
 /// });
@@ -68,7 +69,7 @@ pub enum SourceError {
     /// The caller should consult its recovery_policy to decide next steps.
     #[error("Source '{source_id}' cannot resume from requested position: position unavailable (earliest available: {earliest_available:?})")]
     PositionUnavailable {
-        source_id: String,
+        source_id: ComponentId,
         /// The position that was requested (opaque bytes from a previous checkpoint)
         requested: Bytes,
         /// The earliest position the source can provide, if known
@@ -126,7 +127,7 @@ impl PositionComparator for ByteLexPositionComparator {
 /// the omitted lifecycle methods and `todo!` bodies are not a runnable source.
 ///
 /// ```no_run
-/// use drasi_lib::Source;
+/// use drasi_lib::{ComponentId, Source};
 /// use drasi_lib::sources::{SourceBase, SourceBaseParams};
 /// use drasi_lib::context::SourceRuntimeContext;
 /// # use anyhow::Result;
@@ -136,7 +137,7 @@ impl PositionComparator for ByteLexPositionComparator {
 /// # use drasi_lib::channels::{ComponentStatus, DispatchMode, SubscriptionResponse};
 /// # use drasi_lib::config::SourceSubscriptionSettings;
 /// # pub struct MySourceConfig {
-/// #     id: String,
+/// #     id: ComponentId,
 /// #     dispatch_mode: DispatchMode,
 /// #     buffer_capacity: usize,
 /// # }
@@ -148,7 +149,7 @@ impl PositionComparator for ByteLexPositionComparator {
 ///
 /// impl MySource {
 ///     pub fn new(config: MySourceConfig) -> Result<Self> {
-///         let params = SourceBaseParams::new(&config.id)
+///         let params = SourceBaseParams::new(config.id)
 ///             .with_dispatch_mode(config.dispatch_mode)
 ///             .with_dispatch_buffer_capacity(config.buffer_capacity);
 ///
@@ -160,7 +161,7 @@ impl PositionComparator for ByteLexPositionComparator {
 ///
 /// #[async_trait]
 /// impl Source for MySource {
-///     fn id(&self) -> &str {
+///     fn id(&self) -> &ComponentId {
 ///         &self.base.id
 ///     }
 ///
@@ -172,8 +173,8 @@ impl PositionComparator for ByteLexPositionComparator {
 ///         todo!("Return every declared configuration property")
 ///     }
 ///
-///     async fn initialize(&self, context: SourceRuntimeContext) {
-///         self.base.initialize(context).await;
+///     async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+///         self.base.bind_runtime_context(context).await;
 ///     }
 ///
 ///     // ... implement other methods
@@ -189,7 +190,7 @@ impl PositionComparator for ByteLexPositionComparator {
 #[async_trait]
 pub trait Source: Send + Sync {
     /// Get the source's unique identifier
-    fn id(&self) -> &str;
+    fn id(&self) -> &ComponentId;
 
     /// Get the source type name (e.g., "postgres", "http", "mock")
     fn type_name(&self) -> &str;
@@ -254,12 +255,45 @@ pub trait Source: Send + Sync {
     /// Start the source
     ///
     /// This begins data ingestion and event generation.
-    async fn start(&self) -> Result<()>;
+    async fn start(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Stop the source
     ///
     /// This stops data ingestion and cleans up resources.
-    async fn stop(&self) -> Result<()>;
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Optional instance-lifetime initialization after mandatory context binding.
+    async fn initialize(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Final instance-lifetime release, including after failed initialization.
+    /// This does not delete persistent state or external artifacts.
+    async fn dispose(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Pause independently owned processing at a host-established data boundary.
+    async fn pause_processing(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Resume a temporary pause without starting a new activation.
+    async fn resume_processing(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Execute a registered factory's accepted retained-object update.
+    async fn apply_update(
+        &self,
+        _context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> Result<()> {
+        anyhow::bail!("this source does not support retained-object updates")
+    }
 
     /// Get the current status of the source
     async fn status(&self) -> ComponentStatus;
@@ -302,15 +336,13 @@ pub trait Source: Send + Sync {
     /// Use this to release external resources that should not persist after
     /// the source is deleted (e.g., drop a replication slot, remove cursors).
     ///
-    /// The default implementation is a no-op. Override only if your source
-    /// manages external state that needs explicit teardown.
-    ///
-    /// Errors are logged but do not prevent the source from being removed.
-    async fn deprovision(&self) -> Result<()> {
-        Ok(())
+    /// Support is explicit. Failure retains the cleanup owner and prevents
+    /// final release; ordinary disposal never invokes this destructive hook.
+    async fn delete_owned_resources(&self) -> Result<()> {
+        anyhow::bail!("this source does not support deleting owned resources")
     }
 
-    /// Initialize the source with runtime context.
+    /// Bind mandatory framework services before optional initialization.
     ///
     /// This method is called automatically by DrasiLib when the source is added
     /// via `add_source()`. Plugin developers do not need to call this directly.
@@ -320,8 +352,9 @@ pub trait Source: Send + Sync {
     /// - `event_tx`: Channel for reporting component lifecycle events
     /// - `state_store`: Optional persistent state storage
     ///
-    /// Implementation should delegate to `self.base.initialize(context).await`.
-    async fn initialize(&self, context: SourceRuntimeContext);
+    /// Implementations using SourceBase delegate to `bind_runtime_context`.
+    /// This required hook is separate from the optional no-op initializer.
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext);
 
     /// Set the bootstrap provider for this source
     ///
@@ -348,7 +381,7 @@ pub trait Source: Send + Sync {
     ///
     /// Dynamically loaded sources use the same cleanup contract: `SourceProxy`
     /// forwards this call through the source FFI vtable.
-    async fn remove_position_handle(&self, _query_id: &str) {}
+    async fn remove_position_handle(&self, _query_id: &ComponentId) {}
 
     /// Signal that the initial batch of query subscriptions is complete.
     ///
@@ -387,7 +420,7 @@ pub trait Source: Send + Sync {
 /// This allows boxed trait objects to be used with methods expecting `impl Source`.
 #[async_trait]
 impl Source for Box<dyn Source + 'static> {
-    fn id(&self) -> &str {
+    fn id(&self) -> &ComponentId {
         (**self).id()
     }
 
@@ -438,12 +471,35 @@ impl Source for Box<dyn Source + 'static> {
         (**self).as_any()
     }
 
-    async fn deprovision(&self) -> Result<()> {
-        (**self).deprovision().await
+    async fn delete_owned_resources(&self) -> Result<()> {
+        (**self).delete_owned_resources().await
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        (**self).initialize(context).await
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        (**self).bind_runtime_context(context).await
+    }
+
+    async fn initialize(&self) -> Result<()> {
+        (**self).initialize().await
+    }
+
+    async fn dispose(&self) -> Result<()> {
+        (**self).dispose().await
+    }
+
+    async fn pause_processing(&self) -> Result<()> {
+        (**self).pause_processing().await
+    }
+
+    async fn resume_processing(&self) -> Result<()> {
+        (**self).resume_processing().await
+    }
+
+    async fn apply_update(
+        &self,
+        context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> Result<()> {
+        (**self).apply_update(context).await
     }
 
     async fn set_bootstrap_provider(
@@ -453,7 +509,7 @@ impl Source for Box<dyn Source + 'static> {
         (**self).set_bootstrap_provider(provider).await
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &ComponentId) {
         (**self).remove_position_handle(query_id).await
     }
 

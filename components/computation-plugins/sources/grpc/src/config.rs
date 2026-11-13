@@ -20,8 +20,6 @@ fn message_bytes() -> usize {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GrpcSourceConfig {
     pub stream: StreamId,
-    #[serde(default = "shared::source_id")]
-    pub source_id: String,
     #[serde(default = "shared::host")]
     pub host: String,
     #[serde(default = "port")]
@@ -44,7 +42,6 @@ impl GrpcSourceConfig {
         use serde_json::json;
         ConfigDefinition::try_new([
             Field::new("stream", String, true, "Nonempty output stream identifier."),
-            Field::new("sourceId", String, false, "Source identifier; incoming events must name the same source.").default(shared::source_id()),
             Field::new("host", String, false, "IP address on which to listen.").default(shared::host()),
             Field::new("port", Integer, false, "TCP port; zero requests an available local port.").default(port()).minimum(0).maximum(u16::MAX as u64),
             Field::new("timeoutMs", Integer, false, "Request, admission and stream-idle timeout in milliseconds; must be representable by the system clock.").default(shared::timeout_ms()).minimum(1),
@@ -64,17 +61,9 @@ impl GrpcSourceConfig {
         Ok(config)
     }
 
-    /// Compatibility entry point; gRPC settings no longer select a protocol.
-    #[deprecated(note = "use GrpcSourceConfig::from_value without a protocol flag")]
-    pub fn parse(value: Value, grpc: bool) -> Result<Self> {
-        ensure!(grpc, "gRPC source configuration cannot select HTTP");
-        Self::from_value(value)
-    }
-
     pub(crate) fn ingress(&self) -> IngressConfig {
         IngressConfig {
             stream: self.stream.clone(),
-            source_id: self.source_id.clone(),
             host: self.host.clone(),
             port: self.port,
             timeout_ms: self.timeout_ms,
@@ -95,7 +84,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(config)?,
             json!({
-                "stream":"events/out", "sourceId":"facilities-db", "host":"0.0.0.0",
+                "stream":"events/out", "host":"0.0.0.0",
                 "port":50051, "timeoutMs":60000, "ingressCapacity":1024,
                 "maxMessageBytes":4194304, "adaptiveEnabled":false
             })
@@ -125,16 +114,5 @@ mod tests {
                 "{value}"
             );
         }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn compatibility_parser_does_not_switch_component_protocol() -> Result<()> {
-        assert_eq!(
-            GrpcSourceConfig::parse(json!({"stream":"s"}), true)?.port,
-            50051
-        );
-        assert!(GrpcSourceConfig::parse(json!({"stream":"s"}), false).is_err());
-        Ok(())
     }
 }

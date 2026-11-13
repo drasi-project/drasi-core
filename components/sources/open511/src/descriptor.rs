@@ -228,7 +228,7 @@ impl SourcePluginDescriptor for Open511SourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -302,7 +302,7 @@ impl SourcePluginDescriptor for Open511SourceDescriptor {
             initial_cursor_behavior,
         };
 
-        let mut source = Open511SourceBuilder::new(id)
+        let mut source = Open511SourceBuilder::new(id.clone())
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;

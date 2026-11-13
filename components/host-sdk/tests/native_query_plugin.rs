@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Build the native libraries and run with `bash lib/tests/run-query-plugin.sh smoke`.
+//! Prepare libraries with `make build-test-plugins`, then run this Cargo test target.
 
 #[path = "native_query_plugin/bootstrap.rs"]
 mod bootstrap;
@@ -33,11 +33,25 @@ fn library() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
-    target.join("debug").join(format!(
+    let target = if target.is_absolute() {
+        target
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(target)
+    };
+    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| target.join("debug/plugins"));
+    directory.join(format!(
         "{}drasi_computation_transformer_query{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     ))
+}
+
+fn name(value: &str) -> Result<ComponentName> {
+    Ok(ComponentName::try_new(value)?)
 }
 
 fn item(value: i64, effective_from: u64) -> Element {
@@ -80,15 +94,20 @@ async fn run_query() -> Result<()> {
         .context("query factory missing from loaded plugin")?;
     let configuration = json!({
         "query": "MATCH (n:Item) RETURN n.value AS value",
-        "volatile": true
+        "volatile": true,
+        "stream": "query/out"
     });
     assert!(factory
         .create_component(
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
             json!({"query": "MATCH (n) RETURN n", "volatile": false})
         )
         .is_err());
-    let mut query = factory.create_component(ComponentId::try_new("query")?, configuration)?;
+    let mut query = factory.create_component(
+        ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
+        configuration,
+    )?;
+    query.initialize().await?;
     query.start().await?;
     let changes = [
         SourceChange::Insert {
@@ -163,18 +182,19 @@ async fn separately_loaded_query_supports_gql() -> Result<()> {
     };
     assert!(factory
         .create_component_with_processing(
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
             json!({"query":"MATCH (n:Item) RETURN n.value AS value", "language":"unsupported"}),
             scope.clone(),
             provider.clone(),
         )
         .is_err());
     let mut query = factory.create_component_with_processing(
-        ComponentId::try_new("query")?,
+        ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
         json!({"query":"MATCH (n:Item) RETURN n.value AS value", "language":"gql"}),
         scope,
         provider,
     )?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -223,13 +243,14 @@ async fn separately_loaded_query_reuses_host_indexes_after_recreation() -> Resul
     let configuration = json!({"query": "MATCH (n:Item) RETURN n.value AS value"});
     let create = || {
         factory.create_component_with_processing(
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
             configuration.clone(),
             scope.clone(),
             provider.clone(),
         )
     };
     let mut query = create()?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -245,6 +266,7 @@ async fn separately_loaded_query_reuses_host_indexes_after_recreation() -> Resul
     drop(query);
 
     let mut query = create()?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -310,13 +332,14 @@ async fn separately_loaded_aggregate_reuses_host_result_index() -> Result<()> {
     };
     let create = || {
         factory.create_component_with_processing(
-            ComponentId::try_new("aggregate")?,
+            ComponentId::try_new("86aeac7b-db74-589b-bcd7-6fa525374b11")?,
             json!({"query": "MATCH (n:Item) RETURN sum(n.value) AS total"}),
             scope.clone(),
             provider.clone(),
         )
     };
     let mut query = create()?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -332,6 +355,7 @@ async fn separately_loaded_aggregate_reuses_host_result_index() -> Result<()> {
     drop(query);
 
     let mut query = create()?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -383,13 +407,14 @@ async fn separately_loaded_grouped_query_reuses_host_result_index() -> Result<()
     };
     let create = || {
         factory.create_component_with_processing(
-            ComponentId::try_new("grouped")?,
+            ComponentId::try_new("70d2eb9d-9e88-5433-84c8-3ea7e0eb2a31")?,
             json!({"query": "MATCH (n:Item) RETURN n.value AS value, count(n) AS total"}),
             scope.clone(),
             provider.clone(),
         )
     };
     let mut query = create()?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -405,6 +430,7 @@ async fn separately_loaded_grouped_query_reuses_host_result_index() -> Result<()
     drop(query);
 
     let mut query = create()?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -457,13 +483,14 @@ async fn separately_loaded_min_query_reuses_sorted_index() -> Result<()> {
     };
     let create = || {
         factory.create_component_with_processing(
-            ComponentId::try_new("minimum")?,
+            ComponentId::try_new("d9a4b665-b6dd-58ad-b85c-01e641508f12")?,
             json!({"query": "MATCH (n:Item) RETURN min(n.value) AS minimum"}),
             scope.clone(),
             provider.clone(),
         )
     };
     let mut query = create()?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -487,6 +514,7 @@ async fn separately_loaded_min_query_reuses_sorted_index() -> Result<()> {
     drop(query);
 
     let mut query = create()?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -532,7 +560,7 @@ async fn separately_loaded_indexed_query_matches_relationships() -> Result<()> {
         ),
     ));
     let mut query = factory.create_component_with_processing(
-        ComponentId::try_new("join")?,
+        ComponentId::try_new("f115fec1-9a5a-5abd-bedf-3617fffbe14f")?,
         json!({"query": "MATCH (a:Item)-[:LINK]->(b:Item) RETURN a.value AS left, b.value AS right"}),
         drasi_computation_plugin_sdk::Scope {
             instance_id: "query-test".into(),
@@ -541,6 +569,7 @@ async fn separately_loaded_indexed_query_matches_relationships() -> Result<()> {
         },
         provider,
     )?;
+    query.initialize().await?;
     query.start().await?;
     for (sequence, element) in [
         item_with_id("one", 1, 1),
@@ -722,9 +751,9 @@ async fn graph_query(indexed: bool, publication: QueryPublicationMode) -> Result
         })
         .context("missing query factory")?
         .clone();
-    let source = ComponentId::try_new("source")?;
-    let query = ComponentId::try_new("query")?;
-    let sink = ComponentId::try_new("sink")?;
+    let source = ComponentId::try_new("6bd7483a-29cf-5f73-8a11-3f5b33affcdb")?;
+    let query = ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?;
+    let sink = ComponentId::try_new("7da5f70b-67c3-5ecf-8373-7ab9232ffb4b")?;
     let source_endpoint = Endpoint::new(source.clone(), PortId::try_new("out")?);
     let query_input = Endpoint::new(query.clone(), PortId::try_new("in")?);
     let query_output = Endpoint::new(query.clone(), PortId::try_new("out")?);
@@ -737,10 +766,11 @@ async fn graph_query(indexed: bool, publication: QueryPublicationMode) -> Result
         if indexed {
             json!({
                 "query":"MATCH (n:Item) RETURN n.value AS value",
+                "stream":"query/out",
                 "publication": if publication == QueryPublicationMode::Atomic { "atomic" } else { "non_atomic" },
             })
         } else {
-            json!({"query":"MATCH (n:Item) RETURN n.value AS value","volatile":true})
+            json!({"query":"MATCH (n:Item) RETURN n.value AS value","volatile":true,"stream":"query/out"})
         },
     )?;
     let mut builder = ComputationGraph::builder("plugin-query");
@@ -776,30 +806,43 @@ async fn graph_query(indexed: bool, publication: QueryPublicationMode) -> Result
             )?;
     }
     let mut graph = builder
-        .source(Box::new(Source {
-            descriptor: ComponentDescriptor::try_new(
-                source,
-                vec![port("out", PortDirection::Output)?],
-            )?,
-            envelope: Some(
-                input(
-                    SourceChange::Insert {
-                        element: item(1, 1),
-                    },
-                    1,
-                )?
-                .envelope,
-            ),
-        }))
-        .component(specification, factory)
-        .sink(Box::new(Sink {
-            descriptor: ComponentDescriptor::try_new(
-                sink,
-                vec![port("in", PortDirection::Input)?],
-            )?,
-            received: received.clone(),
-            notification: notification.clone(),
-        }))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(Source {
+                descriptor: ComponentDescriptor::try_new(
+                    source,
+                    vec![port("out", PortDirection::Output)?],
+                )?,
+                envelope: Some(
+                    input(
+                        SourceChange::Insert {
+                            element: item(1, 1),
+                        },
+                        1,
+                    )?
+                    .envelope,
+                ),
+            }),
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            specification,
+            factory,
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(Sink {
+                descriptor: ComponentDescriptor::try_new(
+                    sink,
+                    vec![port("in", PortDirection::Input)?],
+                )?,
+                received: received.clone(),
+                notification: notification.clone(),
+            }),
+        )
         .connect(
             EdgeDefinition::new(source_endpoint.clone(), query_input),
             Box::new(BoundedPipeConfig { capacity: 1 }),

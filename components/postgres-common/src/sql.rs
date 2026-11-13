@@ -204,6 +204,10 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
 
+    const QUERY_COMPONENT_ID: &str = "bd2fd4a4-3997-5d09-8c0e-4374c201eb82";
+    const SOURCE_COMPONENT_ID: &str = "5c3e49cc-32f8-5b75-888d-30b75b572221";
+    const DB_COMPONENT_ID: &str = "68b2acc4-86bd-5b9c-998b-67a11634c870";
+
     #[test]
     fn parameter_binding_preserves_strings_unsigned_integers_and_numeric_wire_format() {
         let mut bytes = BytesMut::new();
@@ -286,13 +290,19 @@ mod tests {
         ];
         let annotated = QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new("source.query")?,
+            &ComponentId::try_new(QUERY_COMPONENT_ID)?,
             SystemMetadata::new(StreamId::try_new("query/out")?, 1),
             &ResultNodeProjector::try_new("test/postgres-common-sql/query/out", None)?,
             &evaluations,
             QueryOutputMetadata {
-                query_id: "source.query".into(),
-                source_id: Some("postgres".into()),
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000037c",
+                )
+                .expect("fixture UUID"),
+                input_origin: Some(drasi_computation_contracts::QueryInputOrigin::Source(
+                    drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                        .expect("fixture UUID"),
+                )),
                 timestamp: chrono::DateTime::from_timestamp(10, 123_000_000).unwrap(),
                 metadata: HashMap::new(),
                 profiling: None,
@@ -304,7 +314,7 @@ mod tests {
             annotated.changes().clone(),
             (**annotated.system()).clone(),
         );
-        let outputs = test_outputs("q", "source.query", "query/out")?;
+        let outputs = test_outputs("q", QUERY_COMPONENT_ID, "query/out")?;
         let query_output = outputs.output_for(&StreamId::try_new("query/out")?)?;
         // operation, before value, after value, identity key
         let expected = [
@@ -322,7 +332,7 @@ mod tests {
             assert_eq!(native.alias, "q");
             assert_eq!(
                 native.context["output"],
-                json!({"alias": "q", "component": "source.query", "port": "out"})
+                json!({"alias": "q", "component": QUERY_COMPONENT_ID, "port": "out"})
             );
             assert!(native.context.get("producer").is_none());
             assert_eq!(native.context["operation"], name);
@@ -351,7 +361,7 @@ mod tests {
         };
         use std::{collections::BTreeSet, sync::Arc};
         let metadata = ElementMetadata {
-            reference: ElementReference::new("db", "7"),
+            reference: ElementReference::new(DB_COMPONENT_ID, "7"),
             labels: Arc::from([Arc::from("Person")]),
             effective_from: 2_000,
         };
@@ -381,7 +391,7 @@ mod tests {
             3,
             chrono::DateTime::from_timestamp(10, 0),
         )?;
-        let outputs = test_outputs("db", "facilities-db", "db/out")?;
+        let outputs = test_outputs("db", DB_COMPONENT_ID, "db/out")?;
         let db_output = outputs.output_for(&StreamId::try_new("db/out")?)?;
         let inputs = envelope
             .changes()
@@ -400,7 +410,7 @@ mod tests {
         assert_eq!(inputs[2].context["operation"], "DELETE");
         assert_eq!(
             inputs[2].context["identity"],
-            json!({"namespace": "db", "id": "7"})
+            json!({"namespace": DB_COMPONENT_ID, "id": "7"})
         );
         assert!(
             inputs[2].context.get("before").is_none(),

@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::Result;
@@ -35,9 +39,9 @@ impl ComputationService for Inspectable {
 
 #[tokio::test]
 async fn inspectable_objects_are_not_promoted_to_empty_factory_recipes() -> Result<()> {
-    let id = ComponentId::try_new("application-object")?;
+    let id = fixture_support::component_id(755);
     let mut graph = ComputationGraph::builder("recipes")
-        .service(Box::new(Inspectable(ComponentDescriptor::try_new(
+        .fixture_service(Box::new(Inspectable(ComponentDescriptor::try_new(
             id.clone(),
             Vec::new(),
         )?)))
@@ -63,11 +67,12 @@ async fn inspectable_objects_are_not_promoted_to_empty_factory_recipes() -> Resu
 #[test]
 fn reconstruction_keeps_unavailable_implementations_and_secret_references() -> Result<()> {
     let mut topology = drasi_lib::management::DesiredInstance::default().topology;
-    let id = ComponentId::try_new("source")?;
+    let id = fixture_support::component_id(77);
     let secret = ResourceId::try_new("secrets")?;
     let descriptor = ComponentDescriptor::try_new(id.clone(), Vec::new())?
         .with_semantic_kind(ComponentSemanticKind::Source);
     topology.components.push(DesiredComponent {
+        name: ComponentName::try_new("source")?,
         descriptor: descriptor.clone(),
         role: ComponentRole::Service,
         completion: None,

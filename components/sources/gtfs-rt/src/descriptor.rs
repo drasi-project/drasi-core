@@ -132,7 +132,7 @@ impl SourcePluginDescriptor for GtfsRtSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -171,7 +171,7 @@ impl SourcePluginDescriptor for GtfsRtSourceDescriptor {
 
         config.validate()?;
 
-        let mut source = GtfsRtSourceBuilder::new(id)
+        let mut source = GtfsRtSourceBuilder::new(id.clone())
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;

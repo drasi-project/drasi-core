@@ -63,7 +63,7 @@ pub fn build_handlebars() -> Handlebars<'static> {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_loop(
-    reaction_name: String,
+    reaction_id: drasi_lib::ComponentId,
     base: ReactionBase,
     config: A2AReactionConfig,
     client: A2AClient,
@@ -96,7 +96,7 @@ pub(crate) async fn run_loop(
             }
             let diff_index = u32::try_from(diff_index).unwrap_or(u32::MAX);
             let delivery = process_diff(
-                &reaction_name,
+                &reaction_id,
                 &base,
                 &config,
                 &client,
@@ -111,7 +111,7 @@ pub(crate) async fn run_loop(
             if let Err(error) = delivery {
                 delivery_failed = true;
                 error!(
-                    "[{reaction_name}] Failed processing query '{}' seq {}: {error:#}",
+                    "[{reaction_id}] Failed processing query '{}' seq {}: {error:#}",
                     query_result.query_id, query_result.sequence
                 );
                 break;
@@ -134,7 +134,7 @@ pub(crate) async fn run_loop(
                 }
                 FailureAction::SkipAndContinue => {
                     warn!(
-                        "[{reaction_name}] Delivery failed for query '{}' seq {}, skipping per AutoSkipGap",
+                        "[{reaction_id}] Delivery failed for query '{}' seq {}, skipping per AutoSkipGap",
                         query_result.query_id, query_result.sequence
                     );
                     if let Err(error) = checkpoints
@@ -142,7 +142,7 @@ pub(crate) async fn run_loop(
                         .await
                     {
                         error!(
-                            "[{reaction_name}] Failed advancing checkpoint after skip for query '{}' seq {}: {error:#}",
+                            "[{reaction_id}] Failed advancing checkpoint after skip for query '{}' seq {}: {error:#}",
                             query_result.query_id, query_result.sequence
                         );
                     }
@@ -156,7 +156,7 @@ pub(crate) async fn run_loop(
             .await
         {
             error!(
-                "[{reaction_name}] Failed writing checkpoint for query '{}' seq {}: {error:#}",
+                "[{reaction_id}] Failed writing checkpoint for query '{}' seq {}: {error:#}",
                 query_result.query_id, query_result.sequence
             );
             if FailureAction::from_policy(policy) == FailureAction::Stop {
@@ -174,7 +174,7 @@ pub(crate) async fn run_loop(
         }
     }
 
-    info!("[{reaction_name}] A2A processing loop stopped");
+    info!("[{reaction_id}] A2A processing loop stopped");
     status_handle
         .set_status(
             ComponentStatus::Stopped,
@@ -185,7 +185,7 @@ pub(crate) async fn run_loop(
 
 #[allow(clippy::too_many_arguments)]
 async fn process_diff(
-    reaction_name: &str,
+    reaction_id: &drasi_lib::ComponentId,
     base: &ReactionBase,
     config: &A2AReactionConfig,
     client: &A2AClient,
@@ -203,7 +203,7 @@ async fn process_diff(
         Ok(result_key) => result_key,
         Err(error) => {
             warn!(
-                "[{reaction_name}] Dropping '{}' diff at seq {} due to missing result key: {error:#}",
+                "[{reaction_id}] Dropping '{}' diff at seq {} due to missing result key: {error:#}",
                 diff_payload.operation.as_str(),
                 query_result.sequence
             );
@@ -218,7 +218,7 @@ async fn process_diff(
             format!("failed loading activation state key '{state_key}' from state store")
         })?;
     let message_id = message_id(
-        reaction_name,
+        reaction_id,
         &query_result.query_id,
         &result_key,
         query_result.sequence,
@@ -235,7 +235,7 @@ async fn process_diff(
         )
     {
         activation = refresh_active_task(
-            reaction_name,
+            reaction_id,
             base,
             client,
             activation_cache,
@@ -293,7 +293,7 @@ async fn process_diff(
                     }
                     DeliveryResult::Dropped => {
                         debug!(
-                            "[{reaction_name}] SendCreate dropped for query '{}' result key '{}'",
+                            "[{reaction_id}] SendCreate dropped for query '{}' result key '{}'",
                             query_result.query_id, result_key
                         );
                     }
@@ -352,7 +352,7 @@ async fn process_diff(
                             }
                             DeliveryResult::Dropped => {
                                 debug!(
-                            "[{reaction_name}] SendFollowUp dropped for query '{}' result key '{}'",
+                            "[{reaction_id}] SendFollowUp dropped for query '{}' result key '{}'",
                             query_result.query_id, result_key
                         );
                             }
@@ -391,7 +391,7 @@ async fn process_diff(
                                 .is_some_and(JsonRpcFailure::is_task_not_cancelable) =>
                     {
                         activation = refresh_active_task(
-                            reaction_name,
+                            reaction_id,
                             base,
                             client,
                             activation_cache,
@@ -440,7 +440,7 @@ async fn process_diff(
                         }
                         DeliveryResult::Dropped => {
                             debug!(
-                                "[{reaction_name}] CancelTask dropped for query '{}' result key '{}'; keeping cached activation",
+                                "[{reaction_id}] CancelTask dropped for query '{}' result key '{}'; keeping cached activation",
                                 query_result.query_id, result_key
                             );
                         }
@@ -461,7 +461,7 @@ async fn process_diff(
                             .is_some_and(JsonRpcFailure::is_task_not_cancelable) =>
                     {
                         activation = refresh_active_task(
-                            reaction_name,
+                            reaction_id,
                             base,
                             client,
                             activation_cache,
@@ -490,7 +490,7 @@ async fn process_diff(
             }
             Action::Drop { reason } => {
                 debug!(
-                    "[{reaction_name}] Dropping '{}' diff for query '{}' result key '{}': {reason}",
+                    "[{reaction_id}] Dropping '{}' diff for query '{}' result key '{}': {reason}",
                     diff_payload.operation.as_str(),
                     query_result.query_id,
                     result_key
@@ -515,7 +515,7 @@ async fn process_diff(
 }
 
 async fn refresh_active_task(
-    reaction_name: &str,
+    reaction_id: &drasi_lib::ComponentId,
     base: &ReactionBase,
     client: &A2AClient,
     activation_cache: &mut HashMap<String, ActivationState>,
@@ -537,7 +537,7 @@ async fn refresh_active_task(
         Ok(outcome) => outcome,
         Err(error) if json_rpc_failure(&error).is_some_and(JsonRpcFailure::is_method_not_found) => {
             warn!(
-                "[{reaction_name}] GetTask is not supported; keeping cached activation for '{state_key}'"
+                "[{reaction_id}] GetTask is not supported; keeping cached activation for '{state_key}'"
             );
             return Ok(activation);
         }
@@ -788,7 +788,7 @@ fn data_payload(
     let mut root = serde_json::Map::new();
     root.insert(
         "queryId".to_string(),
-        serde_json::Value::String(query_result.query_id.clone()),
+        serde_json::json!(query_result.query_id),
     );
     root.insert(
         "operation".to_string(),
@@ -821,26 +821,26 @@ fn data_payload(
 }
 
 fn message_id(
-    reaction_id: &str,
-    query_id: &str,
+    reaction_id: &drasi_lib::ComponentId,
+    query_id: &drasi_lib::ComponentId,
     result_key: &ResultKey,
     sequence: u64,
     diff_index: u32,
 ) -> MessageId {
     MessageId(format!(
         "{}:{sequence}:{diff_index}",
-        length_prefixed(&[reaction_id, query_id, result_key.as_str()])
+        length_prefixed(&[reaction_id.as_str(), query_id.as_str(), result_key.as_str()])
     ))
 }
 
-fn activation_id(query_id: &str, result_key: &ResultKey) -> String {
-    length_prefixed(&[query_id, result_key.as_str()])
+fn activation_id(query_id: &drasi_lib::ComponentId, result_key: &ResultKey) -> String {
+    length_prefixed(&[query_id.as_str(), result_key.as_str()])
 }
 
-fn activation_state_key(query_id: &str, result_key: &ResultKey) -> String {
+fn activation_state_key(query_id: &drasi_lib::ComponentId, result_key: &ResultKey) -> String {
     format!(
         "{ACTIVATION_STATE_KEY_PREFIX}:{}",
-        length_prefixed(&[query_id, result_key.as_str()])
+        length_prefixed(&[query_id.as_str(), result_key.as_str()])
     )
 }
 
@@ -859,7 +859,10 @@ async fn load_activation_state(
     };
 
     let value = store
-        .get(&base.id, state_key)
+        .get(
+            &drasi_lib::StorePartition::component(base.id.clone()),
+            state_key,
+        )
         .await
         .map_err(state_store_error)
         .with_context(|| format!("state store read failed for key '{state_key}'"))?;
@@ -897,7 +900,11 @@ async fn save_activation_state(
     };
     let bytes = serde_json::to_vec(activation).context("failed encoding activation state")?;
     store
-        .set(&base.id, state_key, bytes)
+        .set(
+            &drasi_lib::StorePartition::component(base.id.clone()),
+            state_key,
+            bytes,
+        )
         .await
         .map_err(state_store_error)
         .with_context(|| format!("state store write failed for key '{state_key}'"))?;
@@ -914,7 +921,10 @@ async fn clear_activation_state(
         return Ok(());
     };
     store
-        .delete(&base.id, state_key)
+        .delete(
+            &drasi_lib::StorePartition::component(base.id.clone()),
+            state_key,
+        )
         .await
         .map_err(state_store_error)
         .with_context(|| format!("state store delete failed for key '{state_key}'"))?;

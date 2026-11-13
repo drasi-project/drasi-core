@@ -17,7 +17,7 @@
 mod mock_source;
 
 use anyhow::{Context, Result};
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{config::ComponentId, DrasiLib, Query};
 use drasi_reaction_dashboard::{DashboardConfig, DashboardReaction};
 use futures::stream::Stream;
 use futures::{SinkExt, StreamExt};
@@ -27,6 +27,10 @@ use std::time::Duration;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
 
 async fn next_message<S>(stream: &mut S, message_type: &str) -> Result<Value>
 where
@@ -69,26 +73,36 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
         .is_test(true)
         .try_init();
 
-    let (mock_source, source_handle) = MockSource::new("test-source")?;
+    let source_name = "test-source";
+    let (mock_source, source_handle) = MockSource::new(component_id(29))?;
 
-    let query = Query::cypher("test-query")
-        .query(
-            r#"
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (p:Person)
             RETURN p.name AS name, p.age AS age
         "#,
-        )
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
     let port = reserve_port()?;
-    let reaction = DashboardReaction::builder("test-dashboard")
-        .with_query("test-query")
+    let reaction_name = "test-dashboard";
+    let reaction = DashboardReaction::builder(component_id(954).clone())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        )
         .with_port(port)
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -102,12 +116,23 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
                 .clone(),
         )
         .with_id("dashboard-test-core")
-        .with_source(mock_source)
+        .with_source(
+            drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+            mock_source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("test-dashboard").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 
+    let query_name =
+        drasi_core::ComponentName::try_new("test-query").expect("fixture component name");
+    let query_info = core.get_query_info_by_name(&query_name).await?;
+    assert_eq!(query_info.name, query_name);
+    let query_id = query_info.id;
     core.start().await?;
 
     let base = format!("http://127.0.0.1:{port}");
@@ -137,6 +162,12 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     assert!(
         root_body.contains("Drasi Dashboard"),
         "dashboard index page should be served"
+    );
+    let queries_response = client.get(format!("{base}/api/queries")).send().await?;
+    assert_eq!(queries_response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        queries_response.json::<Value>().await?,
+        serde_json::json!({"queryIds": [query_id]})
     );
 
     // Dashboard CRUD via REST.
@@ -174,14 +205,17 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     // WebSocket protocol harness.
     let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-    next_message(&mut ws_receiver, "query_snapshot").await?;
+    let initial = next_message(&mut ws_receiver, "query_snapshot").await?;
+    assert_eq!(initial["query_id"], query_id.to_string());
+    assert_eq!(initial["rows"], serde_json::json!([]));
 
     ws_sender
         .send(Message::Text(
-            r#"{"type":"subscribe","query_ids":["test-query"]}"#.to_string(),
+            serde_json::json!({"type": "subscribe", "query_ids": [query_id]}).to_string(),
         ))
         .await?;
     let baseline = next_message(&mut ws_receiver, "query_snapshot").await?;
+    assert_eq!(baseline, initial);
     assert_eq!(baseline["rows"], serde_json::json!([]));
 
     // INSERT verification.
@@ -196,6 +230,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
         )
         .await?;
     let insert_message = next_message(&mut ws_receiver, "query_result").await?;
+    assert_eq!(insert_message["query_id"], query_id.to_string());
     let add_diff = insert_message["results"]
         .as_array()
         .and_then(|results| results.iter().find(|result| result["op"] == "add"))
@@ -222,6 +257,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
         )
         .await?;
     let update_message = next_message(&mut ws_receiver, "query_result").await?;
+    assert_eq!(update_message["query_id"], query_id.to_string());
     assert!(
         update_message["results"]
             .as_array()
@@ -243,6 +279,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
         .send_node_delete("person-1", vec!["Person"])
         .await?;
     let delete_message = next_message(&mut ws_receiver, "query_result").await?;
+    assert_eq!(delete_message["query_id"], query_id.to_string());
     assert!(
         delete_message["results"]
             .as_array()
@@ -253,7 +290,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     );
 
     let _ = ws_sender.send(Message::Close(None)).await;
-    core.stop().await?;
+    core.shutdown().await?;
 
     Ok(())
 }
@@ -268,21 +305,31 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
         .is_test(true)
         .try_init();
 
-    let (mock_source, _source_handle) = MockSource::new("shutdown-source")?;
+    let source_name = "shutdown-source";
+    let (mock_source, _source_handle) = MockSource::new(component_id(955))?;
 
-    let query = Query::cypher("shutdown-query")
-        .query("MATCH (p:Person) RETURN p.name AS name")
-        .from_input("shutdown-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("shutdown-query").expect("fixture component name"),
+    )
+    .query("MATCH (p:Person) RETURN p.name AS name")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("shutdown-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
     let port = reserve_port()?;
-    let reaction = DashboardReaction::builder("shutdown-dashboard")
-        .with_query("shutdown-query")
+    let reaction_name = "shutdown-dashboard";
+    let reaction = DashboardReaction::builder(component_id(956).clone())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("shutdown-query").expect("fixture component name"),
+        )
         .with_port(port)
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -296,12 +343,24 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
                 .clone(),
         )
         .with_id("dashboard-shutdown-core")
-        .with_source(mock_source)
+        .with_source(
+            drasi_core::ComponentName::try_new("shutdown-source").expect("fixture component name"),
+            mock_source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("shutdown-dashboard")
+                .expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 
+    let query_name =
+        drasi_core::ComponentName::try_new("shutdown-query").expect("fixture component name");
+    let query_info = core.get_query_info_by_name(&query_name).await?;
+    assert_eq!(query_info.name, query_name);
+    let query_id = query_info.id;
     core.start().await?;
 
     let base_url = format!("http://127.0.0.1:{port}/");
@@ -334,17 +393,29 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
         cache_control.contains("no-cache"),
         "served assets should carry a no-cache Cache-Control header, got: {cache_control:?}"
     );
+    let queries_response = client
+        .get(format!("http://127.0.0.1:{port}/api/queries"))
+        .send()
+        .await?;
+    assert_eq!(queries_response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        queries_response.json::<Value>().await?,
+        serde_json::json!({"queryIds": [query_id]})
+    );
 
     // Open a live WebSocket so we can observe it being closed on shutdown.
     let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-    next_message(&mut ws_receiver, "query_snapshot").await?;
+    let initial = next_message(&mut ws_receiver, "query_snapshot").await?;
+    assert_eq!(initial["query_id"], query_id.to_string());
+    assert_eq!(initial["rows"], serde_json::json!([]));
     ws_sender
         .send(Message::Text(
-            r#"{"type":"subscribe","query_ids":["shutdown-query"]}"#.to_string(),
+            serde_json::json!({"type": "subscribe", "query_ids": [query_id]}).to_string(),
         ))
         .await?;
-    next_message(&mut ws_receiver, "query_snapshot").await?;
+    let replacement = next_message(&mut ws_receiver, "query_snapshot").await?;
+    assert_eq!(replacement, initial);
 
     // Stop the reaction (and the rest of the core).
     core.stop().await?;
@@ -388,6 +459,7 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
         released,
         "HTTP server should stop accepting connections after the reaction stops"
     );
+    core.shutdown().await?;
 
     Ok(())
 }

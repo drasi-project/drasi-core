@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use drasi_computation_contracts::BOOTSTRAP_STATE_CHECKPOINT;
 use drasi_core::computation::ComputationIndexes;
 use drasi_core::interface::{CheckpointStore, SourceCheckpoint};
+use drasi_core_types::{CheckpointKey, ComponentId, OutputPartition};
 use drasi_query_common::QueryResetMarker;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
@@ -18,13 +19,13 @@ struct NonAtomicReset {
     preserve_bootstrap: bool,
 }
 
-fn non_atomic_key(component: &str) -> String {
-    format!("computation-processing-reset-v1:{component}")
+fn non_atomic_key(component: &ComponentId) -> OutputPartition {
+    OutputPartition::Component(component.clone()).metadata("computation-processing-reset-v1")
 }
 
 async fn non_atomic_marker(
     resources: &ComputationIndexes,
-    component: &str,
+    component: &ComponentId,
 ) -> Result<Option<NonAtomicReset>> {
     let rows = resources
         .outbox_writer()
@@ -58,7 +59,7 @@ async fn non_atomic_marker(
 
 async fn write_non_atomic_marker(
     resources: &ComputationIndexes,
-    component: &str,
+    component: &ComponentId,
     marker: &NonAtomicReset,
 ) -> Result<()> {
     resources
@@ -71,7 +72,7 @@ async fn write_non_atomic_marker(
 
 pub(super) async fn non_atomic_info(
     resources: &ComputationIndexes,
-    component: &str,
+    component: &ComponentId,
 ) -> Result<Option<drasi_computation_plugin_sdk::processing::ProcessingResetInfo>> {
     Ok(non_atomic_marker(resources, component)
         .await?
@@ -85,7 +86,7 @@ pub(super) async fn non_atomic_info(
 
 pub(super) async fn begin_non_atomic(
     resources: &ComputationIndexes,
-    component: &str,
+    component: &ComponentId,
     progress: &Draft,
     preserve_bootstrap: bool,
 ) -> Result<u64> {
@@ -103,7 +104,10 @@ pub(super) async fn begin_non_atomic(
     )?;
     let marker = NonAtomicReset {
         state: QueryResetMarker {
-            sequence: store.read_result_sequence(component).await?.unwrap_or(0),
+            sequence: store
+                .read_result_sequence(&OutputPartition::Component(component.clone()))
+                .await?
+                .unwrap_or(0),
             in_progress: true,
             generation,
         },
@@ -115,7 +119,7 @@ pub(super) async fn begin_non_atomic(
 
 pub(super) async fn reset_non_atomic(
     resources: &ComputationIndexes,
-    component: &str,
+    component: &ComponentId,
     progress: &Draft,
     preserve_bootstrap: bool,
 ) -> Result<u64> {
@@ -138,7 +142,7 @@ pub(super) async fn reset_non_atomic(
     resources
         .outbox_writer()
         .context("missing reset outbox")?
-        .clear(component)
+        .clear(&OutputPartition::Component(component.clone()))
         .await?;
     resources
         .live_results_writer()
@@ -157,7 +161,7 @@ pub(super) async fn reset_non_atomic(
 
 pub(super) async fn finish_non_atomic(
     resources: &ComputationIndexes,
-    component: &str,
+    component: &ComponentId,
     progress: &Draft,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -173,7 +177,7 @@ pub(super) async fn finish_non_atomic(
     );
     let store = progress.checkpoint_store(resources)?;
     let generation = store
-        .read_checkpoint(RESET_GENERATION)
+        .read_checkpoint(&CheckpointKey::Metadata(RESET_GENERATION.into()))
         .await?
         .context("reset state has not committed")?;
     anyhow::ensure!(
@@ -182,7 +186,9 @@ pub(super) async fn finish_non_atomic(
     );
     if marker.preserve_bootstrap {
         let bootstrap = store
-            .read_checkpoint(drasi_computation_contracts::BOOTSTRAP_COMPLETE_CHECKPOINT)
+            .read_checkpoint(&CheckpointKey::Metadata(
+                drasi_computation_contracts::BOOTSTRAP_COMPLETE_CHECKPOINT.into(),
+            ))
             .await?
             .context("reset bootstrap has not completed")?;
         anyhow::ensure!(
@@ -191,7 +197,7 @@ pub(super) async fn finish_non_atomic(
         );
     }
     marker.state.sequence = store
-        .read_result_sequence(component)
+        .read_result_sequence(&OutputPartition::Component(component.clone()))
         .await?
         .context("reset result head is missing")?;
     anyhow::ensure!(
@@ -203,7 +209,9 @@ pub(super) async fn finish_non_atomic(
 }
 
 async fn generation(store: &dyn CheckpointStore) -> Result<u64> {
-    let generation = store.read_checkpoint(RESET_GENERATION).await?;
+    let generation = store
+        .read_checkpoint(&CheckpointKey::Metadata(RESET_GENERATION.into()))
+        .await?;
     if let Some(generation) = &generation {
         anyhow::ensure!(
             generation.sequence > 0 && generation.source_position.is_none(),
@@ -222,7 +230,9 @@ async fn metadata(
         .checked_add(1)
         .context("processing reset generation exhausted")?;
     let bootstrap = if preserve_bootstrap {
-        store.read_checkpoint(BOOTSTRAP_STATE_CHECKPOINT).await?
+        store
+            .read_checkpoint(&CheckpointKey::Metadata(BOOTSTRAP_STATE_CHECKPOINT.into()))
+            .await?
     } else {
         None
     };
@@ -239,7 +249,7 @@ async fn clear_indexes(resources: &ComputationIndexes) -> Result<()> {
 
 async fn stage_metadata(
     store: &dyn CheckpointStore,
-    component: &str,
+    component: &ComponentId,
     progress: &Draft,
     generation: u64,
     bootstrap: Option<SourceCheckpoint>,
@@ -247,23 +257,29 @@ async fn stage_metadata(
     if let Some(bootstrap) = bootstrap {
         store
             .stage_checkpoint(
-                BOOTSTRAP_STATE_CHECKPOINT,
+                &CheckpointKey::Metadata(BOOTSTRAP_STATE_CHECKPOINT.into()),
                 bootstrap.sequence,
                 bootstrap.source_position.as_ref(),
             )
             .await?;
     }
     store
-        .stage_checkpoint(RESET_GENERATION, generation, None)
+        .stage_checkpoint(
+            &CheckpointKey::Metadata(RESET_GENERATION.into()),
+            generation,
+            None,
+        )
         .await?;
-    store.stage_result_sequence(component, 0).await?;
+    store
+        .stage_result_sequence(&OutputPartition::Component(component.clone()), 0)
+        .await?;
     progress.reset(generation)?;
     Ok(generation)
 }
 
 pub(super) async fn reset_volatile(
     resources: &ComputationIndexes,
-    component: &str,
+    component: &ComponentId,
     progress: &Draft,
     preserve_bootstrap: bool,
 ) -> Result<u64> {
@@ -285,7 +301,7 @@ pub(super) async fn reset_volatile(
 
 pub(super) async fn reset(
     resources: &ComputationIndexes,
-    component: &str,
+    component: &ComponentId,
     progress: &Draft,
     preserve_bootstrap: bool,
 ) -> Result<u64> {
@@ -301,7 +317,7 @@ pub(super) async fn reset(
     resources
         .outbox_writer()
         .context("missing reset outbox")?
-        .clear(component)
+        .clear(&OutputPartition::Component(component.clone()))
         .await?;
     resources
         .outbox_writer()

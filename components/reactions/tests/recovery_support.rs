@@ -16,8 +16,15 @@ use std::time::Duration;
 
 use drasi_lib::{
     queries::OutboxResponse, reactions::ReactionCheckpoint, state_store::StateStoreProvider,
-    DrasiLib,
+    ComponentId, ComponentName, DrasiLib, StorePartition,
 };
+
+pub fn component_id(core: &DrasiLib, name: &str) -> ComponentId {
+    core.component_by_name(&ComponentName::try_new(name).expect("fixture component name"))
+        .expect("fixture component is declared")
+        .id()
+        .clone()
+}
 
 pub fn require_current_runtime() {
     match std::env::var("DRASI_TEST_EXECUTION").as_deref() {
@@ -30,7 +37,7 @@ pub fn require_current_runtime() {
 
 pub async fn outbox(core: &DrasiLib, query_id: &str) -> OutboxResponse {
     core.query_manager()
-        .get_query_instance(query_id)
+        .get_query_instance_by_id(&component_id(core, query_id))
         .await
         .expect("query instance")
         .fetch_outbox(0)
@@ -64,12 +71,18 @@ pub async fn wait_for_outbox(core: &DrasiLib, query_id: &str, expected: u64) -> 
 }
 
 pub async fn checkpoint(
+    core: &DrasiLib,
     store: &dyn StateStoreProvider,
     reaction_id: &str,
     query_id: &str,
 ) -> Option<ReactionCheckpoint> {
+    let reaction_id = component_id(core, reaction_id);
+    let query_id = component_id(core, query_id);
     store
-        .get(reaction_id, &format!("checkpoint:{query_id}"))
+        .get(
+            &StorePartition::component(reaction_id),
+            &format!("checkpoint:{query_id}"),
+        )
         .await
         .expect("read reaction checkpoint")
         .map(|bytes| bincode::deserialize(&bytes).expect("decode reaction checkpoint"))
@@ -85,7 +98,7 @@ pub async fn wait_for_checkpoint(
     let config_hash = outbox(core, query_id).await.config_hash;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let observed = checkpoint(store, reaction_id, query_id).await;
+        let observed = checkpoint(core, store, reaction_id, query_id).await;
         if let Some(checkpoint) = &observed {
             assert_eq!(
                 checkpoint.config_hash, config_hash,

@@ -195,7 +195,10 @@ fn plugin(claim: Claim) -> anyhow::Result<Arc<NativePlugin>> {
 fn input(port: &str) -> anyhow::Result<InputEnvelope> {
     Ok(InputEnvelope {
         port: PortId::try_new(port)?,
-        envelope: super::envelope(&ComponentId::try_new("input")?, 1),
+        envelope: super::envelope(
+            &ComponentId::try_new("5a04dd10-2262-5e78-902e-c05712e0e336")?,
+            1,
+        ),
     })
 }
 
@@ -205,7 +208,11 @@ async fn native_snapshot_replacement_is_registered_per_input_and_reaches_the_han
     let plugin = plugin(Claim::Exact)?;
     let factory = plugin.factories()[0].clone();
     assert_eq!(factory.metadata().capabilities.snapshot_inputs, ids(&["a"]));
-    let mut sink = factory.create_component(ComponentId::try_new("snapshot")?, json!({}))?;
+    let mut sink = factory.create_component(
+        ComponentId::try_new("1fc4ace9-ce11-5939-badc-9f2589586b5c")?,
+        json!({}),
+    )?;
+    sink.initialize().await?;
     sink.start().await?;
     let (a, b) = (PortId::try_new("a")?, PortId::try_new("b")?);
     assert!(sink.snapshot_consumer(&b).is_none());
@@ -240,7 +247,10 @@ async fn native_sink_without_snapshot_handlers_has_no_snapshot_capability() -> a
     let plugin = super::plugin();
     let factory = plugin.factories()[2].clone();
     assert!(factory.metadata().capabilities.snapshot_inputs.is_empty());
-    let mut sink = factory.create_component(ComponentId::try_new("plain")?, json!({}))?;
+    let mut sink = factory.create_component(
+        ComponentId::try_new("1382bb01-9c2a-53a8-8e00-5dae3c7f3e3f")?,
+        json!({}),
+    )?;
     assert!(sink.snapshot_consumer(&PortId::try_new("in")?).is_none());
     let bytes = sdk::wire::encode(&sdk::wire::Envelope::input(&input("in")?, &sink.codec)?)?;
     assert!(sink
@@ -257,7 +267,10 @@ async fn native_snapshot_claims_must_match_registered_input_handlers() -> anyhow
         let plugin = plugin(claim)?;
         assert!(
             plugin.factories()[0]
-                .create_component(ComponentId::try_new("mismatch")?, json!({}))
+                .create_component(
+                    ComponentId::try_new("85f5655b-8ea8-56ea-869d-c61515692402")?,
+                    json!({})
+                )
                 .is_err(),
             "mismatched snapshot metadata created a component"
         );

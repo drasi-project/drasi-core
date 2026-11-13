@@ -36,10 +36,166 @@ use drasi_lib::context::workers::{
 };
 use drasi_lib::observability::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::common::CheckpointState;
 use drasi_lib::{Reaction, SnapshotFetcher};
 
 pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use drasi_lib::{
+        channels::{QueryResult, ResultDiff},
+        context::ReactionRuntimeContext,
+        state_store::{MemoryStateStoreProvider, StateStoreProvider},
+        ComponentId, ReactionCheckpoint, StorePartition,
+    };
+
+    async fn fixture() -> anyhow::Result<(SseReaction, Arc<MemoryStateStoreProvider>, ComponentId)>
+    {
+        let query = ComponentId::generate();
+        let reaction = SseReaction::builder(ComponentId::generate())
+            .with_host("127.0.0.1")
+            .with_port(0)
+            .with_query_by_id(query.clone())
+            .build()?;
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        let (updates, _rx) = tokio::sync::mpsc::channel(32);
+        reaction
+            .bind_runtime_context(ReactionRuntimeContext::new(
+                "sse-checkpoints",
+                reaction.id().clone(),
+                vec![query.clone()],
+                Some(store.clone()),
+                updates,
+                None,
+            ))
+            .await;
+        Ok((reaction, store, query))
+    }
+
+    fn result(query: &ComponentId, sequence: u64) -> QueryResult {
+        QueryResult::new(
+            query.clone(),
+            sequence,
+            chrono::Utc::now(),
+            vec![ResultDiff::Add {
+                data: json!({"name": "Alice"}),
+                row_signature: sequence,
+            }],
+            HashMap::new(),
+        )
+    }
+
+    async fn wait_checkpoint(
+        reaction: &SseReaction,
+        query: &ComponentId,
+        expected: &ReactionCheckpoint,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if reaction.base.read_checkpoint(query).await?.as_ref() == Some(expected) {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn checkpoints_follow_broadcast_and_capture_the_late_startup_hash() -> anyhow::Result<()>
+    {
+        let (reaction, _store, query) = fixture().await?;
+        reaction.start().await?;
+        tokio::task::yield_now().await;
+        let seed = ReactionCheckpoint {
+            sequence: 0,
+            config_hash: 73,
+        };
+        reaction.base.write_checkpoint(&query, &seed).await?;
+        let mut subscriber = reaction
+            .broadcasters
+            .read()
+            .await
+            .get("/events")
+            .context("default broadcaster")?
+            .subscribe();
+        let held = reaction.broadcasters.write().await;
+        reaction.enqueue_query_result(result(&query, 1)).await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !reaction.base.priority_queue.is_empty().await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            reaction.base.read_checkpoint(&query).await?,
+            Some(seed.clone())
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let value: serde_json::Value = serde_json::from_str(&subscriber.recv().await?)?;
+                if value["type"] != "heartbeat" {
+                    assert_eq!(value["results"][0]["data"]["name"], "Alice");
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        })
+        .await??;
+        wait_checkpoint(
+            &reaction,
+            &query,
+            &ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 73,
+            },
+        )
+        .await?;
+        reaction.stop().await?;
+        reaction.start().await?;
+        reaction.enqueue_query_result(result(&query, 2)).await?;
+        wait_checkpoint(
+            &reaction,
+            &query,
+            &ReactionCheckpoint {
+                sequence: 2,
+                config_hash: 73,
+            },
+        )
+        .await?;
+        reaction.stop().await?;
+        assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unreadable_checkpoints_fail_the_processor_without_advancing_or_detaching_it(
+    ) -> anyhow::Result<()> {
+        let (mut reaction, store, query) = fixture().await?;
+        reaction.base.recovery_policy = Some(drasi_lib::ReactionRecoveryPolicy::Strict);
+        let partition = StorePartition::component(reaction.id().clone());
+        let key = format!("checkpoint:{query}");
+        store.set(&partition, &key, vec![0]).await?;
+        reaction.start().await?;
+        reaction.enqueue_query_result(result(&query, 1)).await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while reaction.status().await != ComponentStatus::Error {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(store.get(&partition, &key).await?, Some(vec![0]));
+        assert!(reaction.base.processing_task.read().await.is_some());
+        reaction.stop().await?;
+        assert!(reaction.base.processing_task.read().await.is_none());
+        assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+        Ok(())
+    }
+}
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
 
@@ -87,7 +243,7 @@ impl std::fmt::Debug for SseReaction {
 
 impl SseReaction {
     /// Create a builder for SseReaction
-    pub fn builder(id: impl Into<String>) -> SseReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> SseReactionBuilder {
         SseReactionBuilder::new(id)
     }
 
@@ -95,8 +251,12 @@ impl SseReaction {
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: SseReactionConfig) -> Self {
-        Self::create_internal(id.into(), queries, config, None, true)
+    pub fn new(
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
+        config: SseReactionConfig,
+    ) -> Self {
+        Self::create_internal(id.clone(), queries, config, None, true)
     }
 
     /// Create a new SSE reaction with custom priority queue capacity
@@ -104,24 +264,18 @@ impl SseReaction {
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
     pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: SseReactionConfig,
         priority_queue_capacity: usize,
     ) -> Self {
-        Self::create_internal(
-            id.into(),
-            queries,
-            config,
-            Some(priority_queue_capacity),
-            true,
-        )
+        Self::create_internal(id, queries, config, Some(priority_queue_capacity), true)
     }
 
     /// Create from builder (internal method)
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: SseReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -131,8 +285,8 @@ impl SseReaction {
 
     /// Internal constructor
     fn create_internal(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: SseReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -167,7 +321,7 @@ impl SseReaction {
 
 #[async_trait]
 impl Reaction for SseReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -182,7 +336,7 @@ impl Reaction for SseReaction {
             .properties_or_serialize(&SseReactionConfigDto::from(&self.config))
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -190,8 +344,8 @@ impl Reaction for SseReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -249,6 +403,10 @@ impl Reaction for SseReaction {
         let broadcasters = self.broadcasters.clone();
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
+        let base = self.base.clone_shared();
+        let policy = self
+            .base
+            .resolved_recovery_policy(self.default_recovery_policy());
         let renderer = SseRenderer::new(
             self.config.sse_path.clone(),
             self.config.routes.clone(),
@@ -256,6 +414,7 @@ impl Reaction for SseReaction {
         );
         spawn_owned_worker(&self.base.processing_task, async move {
             info!("[{reaction_id}] SSE result processing task started");
+            let mut checkpoints = CheckpointState::load(&base).await;
 
             loop {
                 if !matches!(
@@ -311,6 +470,27 @@ impl Reaction for SseReaction {
                             event.path
                         ),
                     }
+                }
+                // Local broadcast progress is not acknowledgement by SSE clients.
+                if let Err(error) = checkpoints
+                    .advance_with_policy(
+                        &base,
+                        &query_result.query_id,
+                        query_result.sequence,
+                        policy,
+                    )
+                    .await
+                {
+                    error!("[{reaction_id}] SSE checkpoint write failed: {error:#}");
+                    base.set_status(
+                        ComponentStatus::Error,
+                        Some(format!(
+                            "SSE checkpoint failed for query '{}' (seq {}): {error:#}",
+                            query_result.query_id, query_result.sequence
+                        )),
+                    )
+                    .await;
+                    break;
                 }
             }
             info!("[{reaction_id}] SSE result processing task ended");
@@ -391,7 +571,9 @@ impl Reaction for SseReaction {
                     "/snapshot/:query_id",
                     get({
                         let sf = snapshot_fetcher.clone();
-                        move |axum::extract::Path(query_id): axum::extract::Path<String>| {
+                        move |axum::extract::Path(query_id): axum::extract::Path<
+                            drasi_lib::ComponentId,
+                        >| {
                             let sf = sf.clone();
                             async move {
                                 let fetcher = match sf.as_ref() {
@@ -644,10 +826,13 @@ mod lifecycle_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn bind_failure_is_typed_and_never_starts_workers() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let reaction = SseReaction::builder("occupied")
-            .with_host("127.0.0.1")
-            .with_port(listener.local_addr()?.port())
-            .build()?;
+        let reaction = SseReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000053")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(listener.local_addr()?.port())
+        .build()?;
         let error = reaction.start().await.unwrap_err();
         assert_eq!(
             error
@@ -669,7 +854,12 @@ mod lifecycle_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_cleanup_retains_worker_and_connection_owners() -> anyhow::Result<()> {
         for connection_only in [false, true] {
-            let reaction = SseReaction::builder("cancelled").with_port(0).build()?;
+            let reaction = SseReaction::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000054")
+                    .expect("fixture UUID"),
+            )
+            .with_port(0)
+            .build()?;
             let release = Arc::new(Notify::new());
             let connection = if connection_only {
                 Some(reaction.shutdown_tx.subscribe())
@@ -712,7 +902,12 @@ mod lifecycle_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn server_failures_preserve_io_and_panic_causes() -> anyhow::Result<()> {
         for panic in [false, true] {
-            let reaction = SseReaction::builder("failed").with_port(0).build()?;
+            let reaction = SseReaction::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                    .expect("fixture UUID"),
+            )
+            .with_port(0)
+            .build()?;
             spawn_owned_worker(&reaction.server_task, async move {
                 assert!(!panic, "injected SSE server panic");
                 Err(std::io::Error::new(
@@ -744,7 +939,12 @@ mod lifecycle_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn server_timeout_keeps_the_actual_http_request_owned_until_it_finishes(
     ) -> anyhow::Result<()> {
-        let reaction = SseReaction::builder("slow-request").with_port(0).build()?;
+        let reaction = SseReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000082")
+                .expect("fixture UUID"),
+        )
+        .with_port(0)
+        .build()?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let entered = Arc::new(Notify::new());
@@ -814,14 +1014,17 @@ mod lifecycle_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancellation_before_binding_still_requires_lifecycle_cleanup() -> anyhow::Result<()> {
-        let (reaction, reservation) =
-            crate::tests::sse_reaction_with_reserved_port("early-cancel").await;
+        let (reaction, reservation) = crate::tests::sse_reaction_with_reserved_port(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000039e")
+                .expect("fixture UUID"),
+        )
+        .await;
         let address = reservation.local_addr()?;
         drop(reservation);
         let (updates, mut events) = tokio::sync::mpsc::channel(1);
         updates
             .send(drasi_lib::component_graph::ComponentUpdate::Status {
-                component_id: reaction.id().into(),
+                component_id: reaction.id().clone(),
                 status: ComponentStatus::Stopped,
                 message: None,
             })
@@ -850,8 +1053,11 @@ mod lifecycle_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn partial_start_requires_cleanup_even_without_spawned_workers() -> anyhow::Result<()> {
-        let (reaction, reservation) =
-            crate::tests::sse_reaction_with_reserved_port("partial").await;
+        let (reaction, reservation) = crate::tests::sse_reaction_with_reserved_port(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000039f")
+                .expect("fixture UUID"),
+        )
+        .await;
         drop(reservation);
         let gate = reaction.base.shutdown_tx.write().await;
         let mut start = Box::pin(reaction.start());
@@ -877,8 +1083,11 @@ mod lifecycle_tests {
         use drasi_lib::channels::ResultDiff;
         use serde_json::Value;
 
-        let (reaction, reservation) =
-            crate::tests::sse_reaction_with_reserved_port("starting").await;
+        let (reaction, reservation) = crate::tests::sse_reaction_with_reserved_port(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a0")
+                .expect("fixture UUID"),
+        )
+        .await;
         drop(reservation);
         let mut results = reaction.broadcasters.read().await["/events"].subscribe();
         let shutdown_gate = reaction.base.shutdown_tx.write().await;
@@ -892,7 +1101,8 @@ mod lifecycle_tests {
         assert!(reaction.base.processing_task.read().await.is_some());
         reaction
             .enqueue_query_result(drasi_lib::channels::QueryResult::new(
-                "starting-query".into(),
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000331")
+                    .expect("fixture UUID"),
                 1,
                 chrono::Utc::now(),
                 vec![ResultDiff::Add {
@@ -905,7 +1115,7 @@ mod lifecycle_tests {
         let payload = tokio::time::timeout(Duration::from_secs(5), results.recv()).await??;
         assert_eq!(
             serde_json::from_str::<Value>(&payload)?["queryId"],
-            "starting-query"
+            "00000000-0000-0000-0000-000000000331"
         );
         drop(server_gate);
         start.await?;
@@ -915,8 +1125,11 @@ mod lifecycle_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn heartbeat_failure_still_cleans_processor_and_listener() -> anyhow::Result<()> {
-        let (mut reaction, reservation) =
-            crate::tests::sse_reaction_with_reserved_port("heartbeat-failure").await;
+        let (mut reaction, reservation) = crate::tests::sse_reaction_with_reserved_port(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a1")
+                .expect("fixture UUID"),
+        )
+        .await;
         let address = reservation.local_addr()?;
         drop(reservation);
         reaction.config.heartbeat_interval_ms = 0;
@@ -959,8 +1172,11 @@ mod lifecycle_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn unabortable_heartbeat_retains_ownership_but_does_not_skip_server_cleanup(
     ) -> anyhow::Result<()> {
-        let (reaction, reservation) =
-            crate::tests::sse_reaction_with_reserved_port("blocked-heartbeat").await;
+        let (reaction, reservation) = crate::tests::sse_reaction_with_reserved_port(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a2")
+                .expect("fixture UUID"),
+        )
+        .await;
         let address = reservation.local_addr()?;
         drop(reservation);
         reaction.start().await?;
@@ -1004,11 +1220,14 @@ mod lifecycle_tests {
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = reservation.local_addr()?.port();
         drop(reservation);
-        let reaction = SseReaction::builder("restart")
-            .with_host("127.0.0.1")
-            .with_port(port)
-            .with_heartbeat_interval_ms(5)
-            .build()?;
+        let reaction = SseReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000055")
+                .expect("fixture UUID"),
+        )
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .with_heartbeat_interval_ms(5)
+        .build()?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(2))
@@ -1018,7 +1237,9 @@ mod lifecycle_tests {
             reaction.start().await?;
             assert_eq!(
                 client
-                    .get(format!("http://127.0.0.1:{port}/snapshot/query"))
+                    .get(format!(
+                        "http://127.0.0.1:{port}/snapshot/00000000-0000-0000-0000-000000000331"
+                    ))
                     .send()
                     .await?
                     .status(),

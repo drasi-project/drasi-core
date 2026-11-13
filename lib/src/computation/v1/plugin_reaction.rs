@@ -14,7 +14,7 @@
 
 use super::{plugin_services::PluginObservations, query_catalog::CatalogQuery, *};
 use crate::{
-    channels::{ComponentStatus, ResultDiff},
+    channels::{ComponentStatus, QueryResult, ResultDiff},
     context::ReactionRuntimeContext,
     queries::output_state::{
         FetchError, OutboxGap, OutboxResponse, OutboxStream, SnapshotResponse, SnapshotStream,
@@ -61,7 +61,7 @@ pub(super) async fn output_view(query: &CatalogQuery) -> anyhow::Result<OutputVi
     query.output.view().await
 }
 pub(super) fn snapshot_response_parts(
-    query_id: &str,
+    query_id: &ComponentId,
     snapshot: &QueryResultSnapshot,
     config_hash: u64,
 ) -> anyhow::Result<SnapshotResponse> {
@@ -75,7 +75,7 @@ pub(super) fn snapshot_response_parts(
         &snapshot.projector,
         query_id,
         snapshot,
-        &ComponentId::try_new("snapshot-bridge")?,
+        &ComponentId::derive_owned(&query_id.clone(), "snapshot-bridge")?,
         SystemMetadata::new(
             StreamId::try_new("snapshot-bridge/out")?,
             snapshot.as_of_sequence,
@@ -178,12 +178,15 @@ pub(super) fn outbox_response_parts(
 
 struct Fetcher {
     catalog: QueryResultsCatalog,
-    queries: BTreeSet<String>,
+    queries: BTreeSet<ComponentId>,
     timeout: Duration,
 }
 #[async_trait]
 impl SnapshotFetcher for Fetcher {
-    async fn fetch_snapshot(&self, id: &str) -> std::result::Result<SnapshotStream, FetchError> {
+    async fn fetch_snapshot(
+        &self,
+        id: &ComponentId,
+    ) -> std::result::Result<SnapshotStream, FetchError> {
         if !self.queries.contains(id) {
             return Err(FetchError::NotRunning {
                 status: ComponentStatus::Error,
@@ -271,17 +274,18 @@ struct ReactionLife {
     initialization_complete: bool,
     needs_stop: bool,
     running: bool,
-    replace_on_start: bool,
     closed: bool,
-    accepted: BTreeMap<String, (u64, u64)>,
-    query_generations: BTreeMap<String, u64>,
+    disposed: bool,
+    paused: bool,
+    accepted: BTreeMap<ComponentId, (u64, u64)>,
+    query_generations: BTreeMap<ComponentId, u64>,
 }
 
 pub struct ReactionPluginHost {
-    id: String,
-    query_ids: Vec<String>,
+    id: ComponentId,
+    query_ids: Vec<ComponentId>,
+    input_aliases: BTreeMap<ComponentId, String>,
     reaction: Mutex<Arc<dyn Reaction>>,
-    constructor: Option<Arc<dyn ReactionPluginConstructor>>,
     services: LegacyPluginServices,
     catalog: QueryResultsCatalog,
     options: ReactionPluginOptions,
@@ -295,11 +299,18 @@ pub struct ReactionPluginHost {
 }
 
 pub(crate) struct RuntimeReactionMetrics {
-    pub queries: BTreeMap<String, Arc<crate::metrics::ReactionMetrics>>,
+    pub queries: BTreeMap<ComponentId, Arc<crate::metrics::ReactionMetrics>>,
     pub lifecycle: Arc<crate::metrics::LifecycleMetrics>,
 }
 
 impl ReactionPluginHost {
+    fn result_for_reaction(&self, mut result: QueryResult) -> QueryResult {
+        if let Some(alias) = self.input_aliases.get(&result.query_id) {
+            result.input_alias = Some(alias.clone());
+        }
+        result
+    }
+
     pub fn owned(
         reaction: Box<dyn Reaction>,
         services: LegacyPluginServices,
@@ -312,8 +323,9 @@ impl ReactionPluginHost {
             catalog,
             options,
             true,
-            None,
             false,
+            None,
+            None,
         )
     }
     pub fn borrowed(
@@ -326,11 +338,12 @@ impl ReactionPluginHost {
             catalog,
             ReactionPluginOptions::default(),
             false,
-            None,
             false,
+            None,
+            None,
         )
     }
-    pub async fn recreatable(
+    pub async fn from_constructor(
         constructor: Arc<dyn ReactionPluginConstructor>,
         services: LegacyPluginServices,
         catalog: QueryResultsCatalog,
@@ -343,8 +356,9 @@ impl ReactionPluginHost {
             catalog,
             options,
             true,
-            Some(constructor),
             false,
+            None,
+            None,
         )
     }
     pub(crate) fn for_runtime(
@@ -353,8 +367,19 @@ impl ReactionPluginHost {
         catalog: QueryResultsCatalog,
         options: ReactionPluginOptions,
         metrics: RuntimeReactionMetrics,
+        query_ids: Vec<ComponentId>,
+        input_aliases: BTreeMap<ComponentId, String>,
     ) -> anyhow::Result<Arc<Self>> {
-        let mut host = Self::new(reaction, services, catalog, options, true, None, true)?;
+        let mut host = Self::new(
+            reaction,
+            services,
+            catalog,
+            options,
+            true,
+            true,
+            Some(query_ids),
+            Some(input_aliases),
+        )?;
         Arc::get_mut(&mut host).expect("new host").runtime_metrics = Some(metrics);
         Ok(host)
     }
@@ -364,8 +389,9 @@ impl ReactionPluginHost {
         catalog: QueryResultsCatalog,
         options: ReactionPluginOptions,
         owned: bool,
-        constructor: Option<Arc<dyn ReactionPluginConstructor>>,
         deferred_validation: bool,
+        query_ids: Option<Vec<ComponentId>>,
+        input_aliases: Option<BTreeMap<ComponentId, String>>,
     ) -> anyhow::Result<Arc<Self>> {
         if options.bootstrap_timeout_secs == 0 {
             anyhow::bail!("reaction bootstrap timeout must be nonzero");
@@ -397,10 +423,17 @@ impl ReactionPluginHost {
         {
             anyhow::bail!("automatic reaction reset requires snapshot/bootstrap support");
         }
-        let query_ids = reaction.query_ids();
+        let query_ids = match query_ids {
+            Some(ids) => ids,
+            None => reaction.query_inputs().into_iter().map(|reference| {
+                reference.as_id().cloned().ok_or_else(|| {
+                    anyhow::anyhow!("reaction input {reference} must be bound before constructing its execution host")
+                })
+            }).collect::<anyhow::Result<Vec<_>>>()?,
+        };
+        let input_aliases = input_aliases.unwrap_or_default();
         let mut unique = BTreeSet::new();
         for id in &query_ids {
-            ComponentId::try_new(id.as_str())?;
             if !unique.insert(id) {
                 anyhow::bail!("reaction has duplicate query IDs");
             }
@@ -410,8 +443,8 @@ impl ReactionPluginHost {
             observations: PluginObservations::new(&id),
             id,
             query_ids,
+            input_aliases,
             reaction: Mutex::new(reaction),
-            constructor,
             services,
             catalog,
             options,
@@ -423,13 +456,13 @@ impl ReactionPluginHost {
             resource_observer: Mutex::new(None),
         }))
     }
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> &ComponentId {
         &self.id
     }
     pub fn is_owned(&self) -> bool {
         self.owned
     }
-    pub fn query_ids(&self) -> &[String] {
+    pub fn query_ids(&self) -> &[ComponentId] {
         &self.query_ids
     }
     pub fn services(&self) -> &LegacyPluginServices {
@@ -453,19 +486,23 @@ impl ReactionPluginHost {
             .map_err(|_| anyhow::anyhow!("reaction instance ownership poisoned"))?
             .clone())
     }
-    fn metadata_key(&self, query: &str) -> String {
+    fn metadata_key(&self, query: &ComponentId) -> String {
         format!(
             "computation-query:{}",
             query
+                .as_str()
                 .bytes()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         )
     }
-    async fn read_metadata(&self, query: &str) -> anyhow::Result<Option<RecoveryMetadata>> {
+    async fn read_metadata(&self, query: &ComponentId) -> anyhow::Result<Option<RecoveryMetadata>> {
         if let Some(store) = &self.services.state_store {
             store
-                .get(&self.id, &self.metadata_key(query))
+                .get(
+                    &crate::StorePartition::component(self.id.clone()),
+                    &self.metadata_key(query),
+                )
                 .await?
                 .map(|value| serde_json::from_slice(&value).map_err(Into::into))
                 .transpose()
@@ -475,14 +512,14 @@ impl ReactionPluginHost {
     }
     async fn write_metadata(
         &self,
-        query: &str,
+        query: &ComponentId,
         view: &OutputView,
         pending: bool,
     ) -> anyhow::Result<()> {
         if let Some(store) = &self.services.state_store {
             store
                 .set(
-                    &self.id,
+                    &crate::StorePartition::component(self.id.clone()),
                     &self.metadata_key(query),
                     serde_json::to_vec(&RecoveryMetadata {
                         config_hash: view.config_hash,
@@ -498,7 +535,7 @@ impl ReactionPluginHost {
     async fn bootstrap(
         &self,
         reaction: &dyn Reaction,
-        query: &str,
+        query: &ComponentId,
         view: &OutputView,
         checkpoint: Option<ReactionCheckpoint>,
         reset: bool,
@@ -594,7 +631,7 @@ impl ReactionPluginHost {
         Ok(())
     }
 
-    async fn validate_output_persistence(&self, query: &str) -> anyhow::Result<()> {
+    async fn validate_output_persistence(&self, query: &ComponentId) -> anyhow::Result<()> {
         // An active query may still be constructing its stores. Wait only when
         // the capability is unknown, never before validating the state store.
         if self.catalog.output_is_persistent(query).is_err() {
@@ -622,7 +659,7 @@ impl ReactionPluginHost {
     }
 
     fn validate_head(
-        query_id: &str,
+        query_id: &ComponentId,
         head: &QuerySubscriptionHead,
         query: &CatalogQuery,
         view: &OutputView,
@@ -638,7 +675,7 @@ impl ReactionPluginHost {
         Ok(())
     }
 
-    async fn checkpoint(&self, query: &str) -> anyhow::Result<Option<ReactionCheckpoint>> {
+    async fn checkpoint(&self, query: &ComponentId) -> anyhow::Result<Option<ReactionCheckpoint>> {
         match &self.services.state_store {
             Some(store) => {
                 crate::reactions::checkpoint::read_checkpoint(store.as_ref(), &self.id, query).await
@@ -649,7 +686,7 @@ impl ReactionPluginHost {
 
     async fn seed_position(
         &self,
-        query: &str,
+        query: &ComponentId,
         sequence: u64,
         view: &OutputView,
     ) -> anyhow::Result<()> {
@@ -676,7 +713,7 @@ impl ReactionPluginHost {
 
     async fn start_with_heads(
         &self,
-        mut supplied_heads: Option<BTreeMap<String, QuerySubscriptionHead>>,
+        mut supplied_heads: Option<BTreeMap<ComponentId, QuerySubscriptionHead>>,
     ) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
         if life.closed {
@@ -690,33 +727,11 @@ impl ReactionPluginHost {
             return Ok(());
         }
         self.validate_startup(self.reaction()?.as_ref()).await?;
-        if life.replace_on_start {
-            let reaction = self
-                .constructor
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("missing reaction reconstruction factory"))?
-                .create()
-                .await?;
-            if reaction.id() != self.id || reaction.query_ids() != self.query_ids {
-                anyhow::bail!("reaction reconstruction changed identity or query bindings");
-            }
-            let previous = self.reaction()?;
-            if reaction.is_durable() != previous.is_durable()
-                || reaction.needs_snapshot_on_fresh_start()
-                    != previous.needs_snapshot_on_fresh_start()
-                || reaction.default_recovery_policy() != previous.default_recovery_policy()
-            {
-                anyhow::bail!("reaction reconstruction changed its recovery contract");
-            }
-            *self
-                .reaction
-                .lock()
-                .map_err(|_| anyhow::anyhow!("reaction ownership poisoned"))? = reaction.into();
-            life.initialized = false;
-            life.initialization_complete = false;
-            life.replace_on_start = false;
-        }
-        let reaction = self.initialize_locked(&mut life).await?;
+        anyhow::ensure!(
+            life.initialization_complete,
+            "reaction must be initialized before start"
+        );
+        let reaction = self.reaction()?;
         self.observations.reset().await?;
         let mut heads = BTreeMap::new();
         for query_id in &self.query_ids {
@@ -869,7 +884,9 @@ impl ReactionPluginHost {
             for result in entries {
                 self.observations
                     .drive(
-                        reaction.enqueue_query_result(result.as_ref().clone()),
+                        reaction.enqueue_query_result(
+                            self.result_for_reaction(result.as_ref().clone()),
+                        ),
                         false,
                     )
                     .await?;
@@ -889,9 +906,9 @@ impl ReactionPluginHost {
                 .drive(self.reaction()?.stop(), true)
                 .await?;
             life.needs_stop = false;
-            life.replace_on_start = self.constructor.is_some();
         }
         life.running = false;
+        life.paused = false;
         if self.owned {
             life.accepted.clear();
             life.query_generations.clear();
@@ -900,10 +917,31 @@ impl ReactionPluginHost {
     }
     pub(crate) async fn initialize_component(&self) -> anyhow::Result<()> {
         if !self.owned {
-            anyhow::bail!("borrowed reactions cannot be initialized");
+            return Ok(());
         }
         let mut life = self.life.lock().await;
+        anyhow::ensure!(!life.closed, "reaction host is closed");
         self.initialize_locked(&mut life).await?;
+        Ok(())
+    }
+    pub(crate) async fn pause_processing(&self) -> anyhow::Result<()> {
+        let mut life = self.life.lock().await;
+        if self.owned && life.running && !life.paused {
+            self.observations
+                .drive(self.reaction()?.pause_processing(), false)
+                .await?;
+            life.paused = true;
+        }
+        Ok(())
+    }
+    pub(crate) async fn resume_processing(&self) -> anyhow::Result<()> {
+        let mut life = self.life.lock().await;
+        if self.owned && life.paused {
+            self.observations
+                .drive(self.reaction()?.resume_processing(), false)
+                .await?;
+            life.paused = false;
+        }
         Ok(())
     }
     pub(crate) async fn wait_running(&self) -> anyhow::Result<()> {
@@ -933,10 +971,10 @@ impl ReactionPluginHost {
         }
         if !life.initialized {
             life.initialized = true;
-            life.needs_stop = true;
             let mut context = ReactionRuntimeContext::new(
                 self.services.scope.as_ref(),
-                &self.id,
+                self.id.clone(),
+                self.query_ids.clone(),
                 self.services.state_store.clone(),
                 self.observations.channel().await,
                 self.services.identity.clone(),
@@ -954,7 +992,8 @@ impl ReactionPluginHost {
             self.observations
                 .drive(
                     async {
-                        reaction.initialize(context).await;
+                        reaction.bind_runtime_context(context).await;
+                        reaction.initialize().await?;
                         Ok(())
                     },
                     false,
@@ -1013,7 +1052,11 @@ impl ReactionPluginHost {
                 }
             }
             self.observations
-                .drive(self.reaction()?.enqueue_query_result(result.clone()), false)
+                .drive(
+                    self.reaction()?
+                        .enqueue_query_result(self.result_for_reaction(result.clone())),
+                    false,
+                )
                 .await?;
             if let Some(metrics) = self
                 .runtime_metrics
@@ -1031,10 +1074,14 @@ impl ReactionPluginHost {
         }
     }
 
-    fn require_query_generation(&self, life: &ReactionLife, query: &str) -> anyhow::Result<()> {
+    fn require_query_generation(
+        &self,
+        life: &ReactionLife,
+        query: &ComponentId,
+    ) -> anyhow::Result<()> {
         let current = self
             .catalog
-            .get(&ComponentId::try_new(query)?)?
+            .get(query)?
             .ok_or_else(|| anyhow::anyhow!("query '{query}' is no longer registered"))?;
         anyhow::ensure!(
             life.query_generations.get(query) == Some(&current.generation),
@@ -1042,12 +1089,16 @@ impl ReactionPluginHost {
         );
         Ok(())
     }
-    pub async fn deprovision_owned(&self) -> anyhow::Result<()> {
+    pub async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         if !self.owned {
-            anyhow::bail!("cannot deprovision a borrowed reaction");
+            anyhow::bail!("cannot delete a borrowed reaction's resources");
         }
-        self.shutdown().await?;
-        self.reaction()?.deprovision().await
+        let life = self.life.lock().await;
+        anyhow::ensure!(
+            !life.disposed && !life.needs_stop,
+            "reaction resource deletion requires a stopped, undisposed owner"
+        );
+        self.reaction()?.delete_owned_resources().await
     }
     pub(crate) async fn start_component(&self) -> anyhow::Result<()> {
         self.start().await
@@ -1055,7 +1106,7 @@ impl ReactionPluginHost {
     pub(crate) async fn validate_startup_configuration(&self) -> anyhow::Result<()> {
         self.validate_startup(self.reaction()?.as_ref()).await
     }
-    pub(crate) async fn wait_query_ready(&self, query: &str) -> anyhow::Result<()> {
+    pub(crate) async fn wait_query_ready(&self, query: &ComponentId) -> anyhow::Result<()> {
         self.catalog
             .ready(
                 query,
@@ -1066,7 +1117,7 @@ impl ReactionPluginHost {
     }
     pub(crate) async fn start_component_with_heads(
         &self,
-        heads: BTreeMap<String, QuerySubscriptionHead>,
+        heads: BTreeMap<ComponentId, QuerySubscriptionHead>,
     ) -> anyhow::Result<()> {
         self.start_with_heads(Some(heads)).await
     }
@@ -1079,7 +1130,7 @@ impl ReactionPluginHost {
     pub(crate) async fn handle_envelope(&self, envelope: &ChangeEnvelope) -> anyhow::Result<()> {
         self.accept(envelope).await
     }
-    pub(crate) async fn recover_gap(&self, query: &str) -> anyhow::Result<()> {
+    pub(crate) async fn recover_gap(&self, query: &ComponentId) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
         anyhow::ensure!(
             self.owned,
@@ -1120,7 +1171,9 @@ impl ReactionPluginHost {
                         for result in replay.results {
                             self.observations
                                 .drive(
-                                    reaction.enqueue_query_result(result.as_ref().clone()),
+                                    reaction.enqueue_query_result(
+                                        self.result_for_reaction(result.as_ref().clone()),
+                                    ),
                                     false,
                                 )
                                 .await?;
@@ -1172,7 +1225,14 @@ impl ReactionPluginHost {
 impl ResourceCleanup for ReactionPluginHost {
     async fn shutdown(&self) -> anyhow::Result<()> {
         self.stop().await?;
-        self.life.lock().await.closed = true;
+        let mut life = self.life.lock().await;
+        life.closed = true;
+        if self.owned && !life.disposed {
+            self.observations
+                .drive(self.reaction()?.dispose(), true)
+                .await?;
+            life.disposed = true;
+        }
         self.observations.close().await;
         Ok(())
     }
@@ -1211,12 +1271,24 @@ impl ComputationComponent for ReactionPluginAdapter {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.host.initialize_component().await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.host.shutdown().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.host.pause_processing().await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.host.resume_processing().await
+    }
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.host.owned,
             "borrowed reaction state must be removed by its owner"
         );
-        self.host.reaction()?.deprovision().await
+        self.host.reaction()?.delete_owned_resources().await
     }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.host.start_component().await
@@ -1434,7 +1506,7 @@ mod tests {
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: "snapshot-stream-test".into(),
-                id: ComponentId::try_new("query").unwrap(),
+                id: crate::test_helpers::component_id(46),
                 query: "MATCH (n) RETURN n.value AS value".into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new("query/out").unwrap(),
@@ -1464,18 +1536,27 @@ mod tests {
                 .unwrap();
         }
         let expected_hash = catalog
-            .get(&ComponentId::try_new("query").unwrap())
+            .get(&crate::test_helpers::component_id(46))
             .unwrap()
             .unwrap()
             .output
             .configuration_hash();
         let fetcher = Fetcher {
             catalog,
-            queries: BTreeSet::from(["query".into()]),
+            queries: BTreeSet::from([drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002e",
+            )
+            .expect("fixture UUID")]),
             timeout: Duration::from_secs(1),
         };
         let before = QueryChangeCodec::snapshot_row_projections();
-        let stream = fetcher.fetch_snapshot("query").await.unwrap();
+        let stream = fetcher
+            .fetch_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
         assert_eq!(QueryChangeCodec::snapshot_row_projections(), before);
         results.state.write().unwrap().rows.clear();
         assert_eq!(stream.as_of_sequence, 10_010);
@@ -1496,14 +1577,24 @@ mod tests {
             .rows
             .insert(foreign.identity().clone(), foreign);
         assert!(matches!(
-            fetcher.fetch_snapshot("query").await,
+            fetcher
+                .fetch_snapshot(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID")
+                )
+                .await,
             Err(FetchError::NotRunning {
                 status: ComponentStatus::Error
             })
         ));
         assert_eq!(QueryChangeCodec::snapshot_row_projections() - before, 3);
         assert!(matches!(
-            fetcher.fetch_snapshot("unsubscribed").await,
+            fetcher
+                .fetch_snapshot(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001de")
+                        .expect("fixture UUID")
+                )
+                .await,
             Err(FetchError::NotRunning {
                 status: ComponentStatus::Error
             })

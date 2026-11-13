@@ -36,14 +36,14 @@ fn init_logging() {
 
 async fn wait_for_query_results(
     core: &Arc<DrasiLib>,
-    query_id: &str,
+    query_id: &drasi_core::ComponentName,
     predicate: impl Fn(&[serde_json::Value]) -> bool,
 ) -> Result<()> {
     let start = Instant::now();
     let timeout = Duration::from_secs(30);
     loop {
         // The query may still be bootstrapping (Starting state), so tolerate errors
-        match core.get_query_results(query_id).await {
+        match core.get_query_results_by_name(query_id).await {
             Ok(results) => {
                 if predicate(&results) {
                     return Ok(());
@@ -66,7 +66,7 @@ async fn wait_for_query_results(
 
 async fn build_person_core(
     config: &neo4j_helpers::Neo4jConfig,
-    query_id: &str,
+    query_id: drasi_core::ComponentName,
 ) -> Result<Arc<DrasiLib>> {
     let bootstrap_provider = Neo4jBootstrapProvider::new(Neo4jBootstrapConfig {
         uri: format!("bolt://{}", config.bolt_uri()),
@@ -77,33 +77,43 @@ async fn build_person_core(
         rel_types: vec!["ACTED_IN".to_string()],
     });
 
-    let source = Neo4jSource::builder("neo4j-test-source")
-        .with_uri(format!("bolt://{}", config.bolt_uri()))
-        .with_user(config.user.clone())
-        .with_password(config.password.clone())
-        .with_database(config.database.clone())
-        .with_labels(vec!["Person".to_string(), "Movie".to_string()])
-        .with_rel_types(vec!["ACTED_IN".to_string()])
-        .with_poll_interval(Duration::from_millis(200))
-        .with_bootstrap_provider(bootstrap_provider)
-        .start_from_now()
-        .build()?;
+    let source = Neo4jSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006e")
+            .expect("fixture UUID"),
+    )
+    .with_uri(format!("bolt://{}", config.bolt_uri()))
+    .with_user(config.user.clone())
+    .with_password(config.password.clone())
+    .with_database(config.database.clone())
+    .with_labels(vec!["Person".to_string(), "Movie".to_string()])
+    .with_rel_types(vec!["ACTED_IN".to_string()])
+    .with_poll_interval(Duration::from_millis(200))
+    .with_bootstrap_provider(bootstrap_provider)
+    .start_from_now()
+    .build()?;
 
-    let query = Query::cypher(query_id)
+    let query = Query::cypher(query_id.clone())
         .query(
             r#"
             MATCH (p:Person)
             RETURN p.id AS id, p.name AS name
             "#,
         )
-        .from_input("neo4j-test-source")
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("neo4j-test-source")
+                .expect("fixture component name"),
+        )
         .auto_start(true)
         .enable_bootstrap(true)
-        .build();
+        .build()
+        .expect("valid query configuration");
 
-    let (reaction, _handle) = ApplicationReaction::builder("test-reaction")
-        .with_query(query_id)
-        .build();
+    let (reaction, _handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(query_id.clone())
+    .build();
 
     Ok(Arc::new(
         DrasiLib::builder()
@@ -120,9 +130,17 @@ async fn build_person_core(
                     .clone(),
             )
             .with_id("neo4j-test-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("neo4j-test-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("test-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     ))
@@ -137,11 +155,25 @@ async fn test_source_connects_and_starts() -> Result<()> {
     let graph = neo.get_graph().await?;
     reset_graph(&graph).await?;
 
-    let core = build_person_core(neo.config(), "status-query").await?;
+    let core = build_person_core(
+        neo.config(),
+        drasi_core::ComponentName::try_new("status-query").expect("fixture component name"),
+    )
+    .await?;
     core.start().await?;
 
-    wait_for_query_results(&core, "status-query", |results| results.is_empty()).await?;
-    let status = core.get_source_status("neo4j-test-source").await?;
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("status-query").expect("fixture component name"),
+        |results| results.is_empty(),
+    )
+    .await?;
+    let status = core
+        .get_source_status_by_name(
+            &drasi_core::ComponentName::try_new("neo4j-test-source")
+                .expect("fixture component name"),
+        )
+        .await?;
     assert_eq!(status, drasi_lib::channels::ComponentStatus::Running);
 
     core.stop().await?;
@@ -158,34 +190,56 @@ async fn test_insert_update_delete_detection() -> Result<()> {
     let graph = neo.get_graph().await?;
     reset_graph(&graph).await?;
 
-    let core = build_person_core(neo.config(), "crud-query").await?;
+    let core = build_person_core(
+        neo.config(),
+        drasi_core::ComponentName::try_new("crud-query").expect("fixture component name"),
+    )
+    .await?;
     core.start().await?;
-    wait_for_query_results(&core, "crud-query", |results| results.is_empty()).await?;
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("crud-query").expect("fixture component name"),
+        |results| results.is_empty(),
+    )
+    .await?;
 
     graph
         .run(query("CREATE (:Person {id:'1', name:'Alice', age:30})"))
         .await?;
-    wait_for_query_results(&core, "crud-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("crud-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice".into()))
+        },
+    )
     .await?;
 
     graph
         .run(query("MATCH (p:Person {id:'1'}) SET p.name = 'Bob'"))
         .await?;
-    wait_for_query_results(&core, "crud-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Bob".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("crud-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Bob".into()))
+        },
+    )
     .await?;
 
     graph
         .run(query("MATCH (p:Person {id:'1'}) DETACH DELETE p"))
         .await?;
-    wait_for_query_results(&core, "crud-query", |results| results.is_empty()).await?;
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("crud-query").expect("fixture component name"),
+        |results| results.is_empty(),
+    )
+    .await?;
 
     core.stop().await?;
     neo.cleanup().await;
@@ -222,13 +276,17 @@ async fn test_relationship_detection() -> Result<()> {
         rel_types: vec!["ACTED_IN".to_string()],
     });
     let request = BootstrapRequest {
-        query_id: "relationship-query".to_string(),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006f")
+            .expect("fixture UUID"),
         node_labels: vec!["Person".to_string(), "Movie".to_string()],
         relation_labels: vec!["ACTED_IN".to_string()],
         request_id: "relationship-bootstrap".to_string(),
     };
-    let context =
-        BootstrapContext::new_minimal("test-server".to_string(), "neo4j-rel-source".to_string());
+    let context = BootstrapContext::new_minimal(
+        "test-server".to_string(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000070")
+            .expect("fixture UUID"),
+    );
     let (tx, mut rx) = mpsc::channel(64);
     let emitted = provider.bootstrap(request, &context, tx, None).await?;
     assert!(emitted.event_count >= 3);

@@ -51,7 +51,8 @@ fn result_cases() -> Vec<(&'static str, QueryResult)> {
         (
             label,
             QueryResult::with_profiling(
-                "building-comfort".to_owned(),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a6")
+                    .expect("fixture UUID"),
                 99900,
                 chrono::DateTime::from_timestamp(1700000000, 0).expect("valid fixture timestamp"),
                 vec![diff],

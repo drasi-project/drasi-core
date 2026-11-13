@@ -14,6 +14,40 @@ use std::path::Path;
 
 const GRAPH: &str = "native-consumer";
 
+#[tokio::test]
+async fn disposing_an_unstarted_consumer_releases_constructor_owned_storage() -> anyhow::Result<()>
+{
+    let plugin = plugin()?;
+    let directory = tempfile::tempdir()?;
+    let provider = provider(directory.path())?;
+    let factory = factory(&plugin, sdk::ConsumerMode::Transactional);
+    let component_id = ComponentId::try_new("ad3878c1-f442-4990-b613-779cb3900083")?;
+    let mut first = factory
+        .create_consumer(
+            component_id.clone(),
+            json!({"mode": "normal"}),
+            scope(),
+            provider.clone(),
+            options(),
+        )
+        .await?;
+    first.initialize().await?;
+    first.dispose().await?;
+    assert!(first.start().await.is_err());
+    let mut second = factory
+        .create_consumer(
+            component_id,
+            json!({"mode": "normal"}),
+            scope(),
+            provider,
+            options(),
+        )
+        .await?;
+    second.initialize().await?;
+    second.dispose().await?;
+    Ok(())
+}
+
 #[path = "consumer_handoff_tests.rs"]
 mod handoff_tests;
 
@@ -54,8 +88,8 @@ pub(in crate::computation) fn plugin() -> anyhow::Result<Arc<NativePlugin>> {
         )
     }
 }
-pub(in crate::computation) fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).unwrap()
+pub(in crate::computation) fn id(value: u128) -> ComponentId {
+    component_id(value)
 }
 pub(in crate::computation) fn scope() -> sdk::Scope {
     sdk::Scope {
@@ -98,10 +132,30 @@ pub(in crate::computation) fn factory(
         .unwrap()
         .clone()
 }
+
+pub(in crate::computation) async fn initialized_consumer(
+    factory: &NativeFactory,
+    id: ComponentId,
+    configuration: serde_json::Value,
+    scope: sdk::Scope,
+    provider: Arc<dyn ComputationIndexProvider>,
+    options: DeliveryOptions,
+) -> anyhow::Result<NativeConsumerProxy> {
+    let mut consumer = factory
+        .create_consumer(id, configuration, scope, provider, options)
+        .await?;
+    consumer.initialize().await?;
+    Ok(consumer)
+}
+
 pub(in crate::computation) fn batch() -> anyhow::Result<InputEnvelope> {
+    let source = id(77);
     let producer: GraphProducerIdentity = serde_json::from_value(json!({
-        "construction_scope": GRAPH, "graph_id": GRAPH, "component_id": "source",
-        "stream": "out", "incarnation": "c218b0c6-8803-48df-aa4c-d5350f0e6453",
+        "construction_scope": GRAPH,
+        "graph_id": GRAPH,
+        "component_id": source.as_str(),
+        "stream": "out",
+        "incarnation": "c218b0c6-8803-48df-aa4c-d5350f0e6453",
         "persistent": true
     }))?;
     let changes = (0..3)
@@ -117,7 +171,7 @@ pub(in crate::computation) fn batch() -> anyhow::Result<InputEnvelope> {
         })
         .collect::<Vec<_>>();
     let mut envelope = GraphChangeCodec::derive_changes(
-        &super::envelope(&id("source"), 1),
+        &super::envelope(&id(77), 1),
         &changes,
         producer.stream().clone(),
         1,
@@ -136,9 +190,11 @@ fn effects(path: &Path) -> anyhow::Result<(usize, usize, usize)> {
     )?)
 }
 async fn count(provider: &dyn ComputationIndexProvider) -> anyhow::Result<Option<ElementValue>> {
+    let consumer = id(423);
     let transaction =
-        ComputationTransaction::try_new(provider.create_indexes(GRAPH, "consumer").await?)?;
-    let prefix: String = "consumer"
+        ComputationTransaction::try_new(provider.create_indexes(GRAPH, &consumer).await?)?;
+    let prefix: String = consumer
+        .as_str()
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect();
@@ -166,17 +222,17 @@ async fn external_reconstruction(plugin: &NativePlugin) -> anyhow::Result<()> {
     let destination = directory.path().join("effects.db");
     let provider = provider(&directory.path().join("progress"))?;
     let factory = factory(plugin, sdk::ConsumerMode::External);
-    assert!(factory.create_component(id("consumer"), json!({})).is_err());
+    assert!(factory.create_component(id(423), json!({})).is_err());
     for mode in ["fail-second", "retry-once", "normal"] {
-        let mut consumer = factory
-            .create_consumer(
-                id("consumer"),
-                json!({"path":destination, "mode":mode}),
-                scope(),
-                provider.clone(),
-                options(),
-            )
-            .await?;
+        let mut consumer = initialized_consumer(
+            factory.as_ref(),
+            id(423),
+            json!({"path":destination, "mode":mode}),
+            scope(),
+            provider.clone(),
+            options(),
+        )
+        .await?;
         consumer.start().await?;
         let result = consumer.handle(batch()?).await;
         let progress = consumer.progress().await?;
@@ -201,15 +257,15 @@ async fn transactional_reconstruction(plugin: &NativePlugin) -> anyhow::Result<(
     let provider = provider(directory.path())?;
     let factory = factory(plugin, sdk::ConsumerMode::Transactional);
     for (mode, expected) in [("fail-second", 1), ("normal", 3), ("normal", 3)] {
-        let mut consumer = factory
-            .create_consumer(
-                id("consumer"),
-                json!({"mode":mode}),
-                scope(),
-                provider.clone(),
-                options(),
-            )
-            .await?;
+        let mut consumer = initialized_consumer(
+            factory.as_ref(),
+            id(423),
+            json!({"mode":mode}),
+            scope(),
+            provider.clone(),
+            options(),
+        )
+        .await?;
         consumer.start().await?;
         let result = consumer.handle(batch()?).await;
         if mode == "fail-second" {
@@ -246,15 +302,17 @@ async fn native_consumer_separate_library_preserves_both_completion_modes() -> a
 async fn native_consumer_ignored_state_errors_cannot_commit() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = provider(directory.path())?;
-    let mut consumer = factory(plugin()?.as_ref(), sdk::ConsumerMode::Transactional)
-        .create_consumer(
-            id("consumer"),
-            json!({"mode":"ignore-state-error"}),
-            scope(),
-            provider.clone(),
-            options(),
-        )
-        .await?;
+    let plugin = plugin()?;
+    let factory = factory(plugin.as_ref(), sdk::ConsumerMode::Transactional);
+    let mut consumer = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({"mode":"ignore-state-error"}),
+        scope(),
+        provider.clone(),
+        options(),
+    )
+    .await?;
     consumer.start().await?;
     assert!(consumer.handle(batch()?).await.is_err());
     assert_eq!(consumer.progress().await?[0].completed_operations, 0);
@@ -269,15 +327,15 @@ async fn native_consumer_cancelled_transaction_requires_cleanup_and_replays() ->
     let signal = directory.path().join("entered");
     let provider = provider(&directory.path().join("progress"))?;
     let factory = factory(plugin()?.as_ref(), sdk::ConsumerMode::Transactional);
-    let mut consumer = factory
-        .create_consumer(
-            id("consumer"),
-            json!({"mode":"pending", "signal":signal}),
-            scope(),
-            provider.clone(),
-            options(),
-        )
-        .await?;
+    let mut consumer = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({"mode":"pending", "signal":signal}),
+        scope(),
+        provider.clone(),
+        options(),
+    )
+    .await?;
     consumer.start().await?;
     {
         let handle = consumer.handle(batch()?);
@@ -292,15 +350,15 @@ async fn native_consumer_cancelled_transaction_requires_cleanup_and_replays() ->
     assert!(consumer.start().await.is_err());
     consumer.stop().await?;
     assert_eq!(count(provider.as_ref()).await?, None);
-    let mut replacement = factory
-        .create_consumer(
-            id("consumer"),
-            json!({}),
-            scope(),
-            provider.clone(),
-            options(),
-        )
-        .await?;
+    let mut replacement = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({}),
+        scope(),
+        provider.clone(),
+        options(),
+    )
+    .await?;
     replacement.start().await?;
     replacement.handle(batch()?).await?;
     replacement.stop().await?;
@@ -315,21 +373,29 @@ async fn native_consumer_cannot_reinterpret_existing_handling_mode() -> anyhow::
     let directory = tempfile::tempdir()?;
     let provider = provider(&directory.path().join("progress"))?;
     let plugin = plugin()?;
-    let mut consumer = factory(&plugin, sdk::ConsumerMode::External)
-        .create_consumer(
-            id("consumer"),
-            json!({"path":directory.path().join("effects.db")}),
-            scope(),
-            provider.clone(),
-            options(),
-        )
-        .await?;
+    let external = factory(&plugin, sdk::ConsumerMode::External);
+    let mut consumer = initialized_consumer(
+        external.as_ref(),
+        id(423),
+        json!({"path":directory.path().join("effects.db")}),
+        scope(),
+        provider.clone(),
+        options(),
+    )
+    .await?;
     consumer.start().await?;
     consumer.handle(batch()?).await?;
     consumer.stop().await?;
-    let mut consumer = factory(&plugin, sdk::ConsumerMode::Transactional)
-        .create_consumer(id("consumer"), json!({}), scope(), provider, options())
-        .await?;
+    let transactional = factory(&plugin, sdk::ConsumerMode::Transactional);
+    let mut consumer = initialized_consumer(
+        transactional.as_ref(),
+        id(423),
+        json!({}),
+        scope(),
+        provider,
+        options(),
+    )
+    .await?;
     assert!(consumer.start().await.is_err());
     consumer.stop().await?;
     Ok(())
@@ -373,10 +439,8 @@ async fn native_consumer_graph_factory_requires_and_resolves_delivery_resource(
 ) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let factory = factory(plugin()?.as_ref(), sdk::ConsumerMode::External);
-    let mut specification = factory.specification(
-        id("consumer"),
-        json!({"path":directory.path().join("effects.db")}),
-    )?;
+    let mut specification =
+        factory.specification(id(423), json!({"path":directory.path().join("effects.db")}))?;
     assert!(factory.validate(&specification).is_err());
     let resource = ResourceId::try_new("delivery")?;
     specification
@@ -403,22 +467,25 @@ async fn native_consumer_graph_factory_requires_and_resolves_delivery_resource(
                 }),
             ),
         )?
-        .component(specification, factory)
-        .source(Box::new(BatchSource {
-            descriptor: ComponentDescriptor::try_new(
-                id("source"),
-                vec![super::port(PortDirection::Output)],
-            )?,
-            input: Some(batch()?.envelope),
-        }))
+        .component(ComponentName::try_new("consumer")?, specification, factory)
+        .source(
+            ComponentName::try_new("source")?,
+            Box::new(BatchSource {
+                descriptor: ComponentDescriptor::try_new(
+                    id(77),
+                    vec![super::port(PortDirection::Output)],
+                )?,
+                input: Some(batch()?.envelope),
+            }),
+        )
         .bind_stream(
-            Endpoint::new(id("source"), PortId::try_new("out")?),
+            Endpoint::new(id(77), PortId::try_new("out")?),
             StreamId::try_new("out")?,
         )
         .connect(
             EdgeDefinition::new(
-                Endpoint::new(id("source"), PortId::try_new("out")?),
-                Endpoint::new(id("consumer"), PortId::try_new("in")?),
+                Endpoint::new(id(77), PortId::try_new("out")?),
+                Endpoint::new(id(423), PortId::try_new("in")?),
             ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
@@ -443,24 +510,30 @@ async fn native_consumer_panic_requires_reconstruction_after_cleanup() -> anyhow
     let directory = tempfile::tempdir()?;
     let factory = factory(plugin()?.as_ref(), sdk::ConsumerMode::Transactional);
     let provider = provider(directory.path())?;
-    let mut consumer = factory
-        .create_consumer(
-            id("consumer"),
-            json!({"mode":"panic"}),
-            scope(),
-            provider.clone(),
-            options(),
-        )
-        .await?;
+    let mut consumer = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({"mode":"panic"}),
+        scope(),
+        provider.clone(),
+        options(),
+    )
+    .await?;
     consumer.start().await?;
     assert!(consumer.handle(batch()?).await.is_err());
     consumer.stop().await?;
     assert!(consumer.start().await.is_err());
     consumer.stop().await?;
     assert_eq!(count(provider.as_ref()).await?, None);
-    let mut replacement = factory
-        .create_consumer(id("consumer"), json!({}), scope(), provider, options())
-        .await?;
+    let mut replacement = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({}),
+        scope(),
+        provider,
+        options(),
+    )
+    .await?;
     replacement.start().await?;
     replacement.handle(batch()?).await?;
     replacement.stop().await?;
@@ -558,15 +631,16 @@ async fn native_consumer_recipe_preserves_progress_and_isolates_instance_owners(
         );
         let mut scope = scope();
         scope.instance_id = instance.into();
-        let mut sink = factory(&plugin, sdk::ConsumerMode::Transactional)
-            .create_consumer(
-                id("consumer"),
-                json!({}),
-                scope,
-                resource.provider.clone(),
-                resource.options.clone(),
-            )
-            .await?;
+        let factory = factory(&plugin, sdk::ConsumerMode::Transactional);
+        let mut sink = initialized_consumer(
+            factory.as_ref(),
+            id(423),
+            json!({}),
+            scope,
+            resource.provider.clone(),
+            resource.options.clone(),
+        )
+        .await?;
         sink.start().await?;
         sink.handle(batch()?).await?;
         sink.stop().await?;
@@ -611,7 +685,7 @@ impl ComputationIndexProvider for ObservedProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> std::result::Result<
         drasi_core::computation::ComputationIndexes,
         drasi_core::interface::IndexError,
@@ -652,25 +726,19 @@ async fn native_consumer_rejected_construction_awaits_acquired_storage_cleanup(
     let mut unsupported = options();
     unsupported.scope = RecoveryScope::Failure(FailureMode::PowerLoss);
     assert!(factory
-        .create_consumer(
-            id("consumer"),
-            json!({}),
-            scope(),
-            provider.clone(),
-            unsupported,
-        )
+        .create_consumer(id(423), json!({}), scope(), provider.clone(), unsupported,)
         .await
         .is_err());
     assert_eq!(provider.closed.load(Ordering::Acquire), 1);
-    let mut consumer = factory
-        .create_consumer(
-            id("consumer"),
-            json!({}),
-            scope(),
-            provider.clone(),
-            options(),
-        )
-        .await?;
+    let mut consumer = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({}),
+        scope(),
+        provider.clone(),
+        options(),
+    )
+    .await?;
     consumer.start().await?;
     consumer.stop().await?;
     assert_eq!(provider.closed.load(Ordering::Acquire), 2);
@@ -681,15 +749,17 @@ async fn native_consumer_cancelled_stop_retains_storage_until_cleanup_completes(
 ) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = observed(directory.path())?;
-    let mut consumer = factory(plugin()?.as_ref(), sdk::ConsumerMode::Transactional)
-        .create_consumer(
-            id("consumer"),
-            json!({}),
-            scope(),
-            provider.clone(),
-            options(),
-        )
-        .await?;
+    let plugin = plugin()?;
+    let factory = factory(plugin.as_ref(), sdk::ConsumerMode::Transactional);
+    let mut consumer = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({}),
+        scope(),
+        provider.clone(),
+        options(),
+    )
+    .await?;
     consumer.start().await?;
     provider.hold.store(true, Ordering::Release);
     {
@@ -717,15 +787,17 @@ async fn native_consumer_weakened_restart_retains_rejected_storage_for_cleanup(
 ) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let provider = observed(directory.path())?;
-    let mut consumer = factory(plugin()?.as_ref(), sdk::ConsumerMode::Transactional)
-        .create_consumer(
-            id("consumer"),
-            json!({}),
-            scope(),
-            provider.clone(),
-            options(),
-        )
-        .await?;
+    let plugin = plugin()?;
+    let factory = factory(plugin.as_ref(), sdk::ConsumerMode::Transactional);
+    let mut consumer = initialized_consumer(
+        factory.as_ref(),
+        id(423),
+        json!({}),
+        scope(),
+        provider.clone(),
+        options(),
+    )
+    .await?;
     consumer.start().await?;
     consumer.stop().await?;
     provider.weakened.store(true, Ordering::Release);

@@ -53,11 +53,15 @@ impl Health {
             .components
             .iter()
             .filter_map(|(id, component)| {
+                let label = snapshot
+                    .desired
+                    .component_by_id(id)
+                    .map_or_else(|| id.to_string(), |node| node.name.to_string());
                 component.failure.as_ref().map(|failure| {
                     anyhow::Error::new(GraphError::Reported {
                         cause: failure.cause.clone(),
                     })
-                    .context(format!("component '{id}' failed"))
+                    .context(format!("component '{label}' failed"))
                 })
             })
             .collect();
@@ -98,23 +102,65 @@ impl Health {
 
 pub(super) async fn wait_started(
     core: &DrasiLib,
-    id: &str,
+    name: &str,
     deadline: Duration,
 ) -> anyhow::Result<()> {
-    let component = core.computation_component(id)?;
+    let component = core.component_by_name(&ComponentName::try_new(name)?)?;
     match tokio::time::timeout(deadline, component.wait_started()).await {
-        Ok(result) => result.with_context(|| format!("start component '{id}'")),
+        Ok(result) => result.with_context(|| format!("start component '{name}'")),
         Err(error) => {
             let waiting = component
                 .observed()
-                .with_context(|| format!("inspect component '{id}' after readiness timeout"))?
+                .with_context(|| format!("inspect component '{name}' after readiness timeout"))?
                 .waiting_reason()
                 .map(|reason| format!(" ({reason})"))
                 .unwrap_or_default();
             Err(anyhow::Error::new(error)
-                .context(format!("wait for component '{id}' readiness{waiting}")))
+                .context(format!("wait for component '{name}' readiness{waiting}")))
         }
     }
+}
+
+pub(super) async fn accepted_component(
+    core: &DrasiLib,
+    receipt: &drasi_lib::management::AcceptanceReceipt,
+    name: &ComponentName,
+) -> anyhow::Result<ComponentHandle> {
+    let id = receipt
+        .creation
+        .as_ref()
+        .and_then(|creation| {
+            creation
+                .components
+                .iter()
+                .find(|component| &component.name == name)
+        })
+        .with_context(|| format!("creation receipt did not assign '{name}'"))?
+        .id
+        .clone();
+    let status = core.reconcile_desired_state().await?;
+    anyhow::ensure!(
+        status.error.is_none(),
+        "accepted component '{name}' could not be realized: {status:?}"
+    );
+    declared_component(core, &id, name).await
+}
+
+pub(super) async fn declared_component(
+    core: &DrasiLib,
+    id: &ComponentId,
+    name: &ComponentName,
+) -> anyhow::Result<ComponentHandle> {
+    let control = core.computation_control()?;
+    let inspector = control.inspector();
+    let mut publications = inspector.subscribe();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        publications.wait_for(|snapshot| snapshot.observed.components.contains_key(id)),
+    )
+    .await
+    .with_context(|| format!("wait for accepted component '{name}' publication"))??;
+    Ok(core.component_by_id(id)?)
 }
 
 pub(super) fn error_messages(error: &anyhow::Error) -> Vec<String> {
@@ -272,8 +318,8 @@ mod tests {
     #[test]
     fn lifecycle_reports_preserve_every_failed_component() -> anyhow::Result<()> {
         let mut components = std::collections::BTreeMap::new();
-        for name in ["first", "second"] {
-            let id = ComponentId::try_new(name)?;
+        for value in [772_u128, 773] {
+            let id = drasi_lib::ComponentId::try_new(format!("{value:032x}"))?;
             components.insert(
                 id.clone(),
                 StartOutcome::StartFailed(ComponentFailure {
@@ -296,8 +342,8 @@ mod tests {
         assert_eq!(
             error_messages(&error.into()),
             [
-                "start component 'first': connection refused",
-                "start component 'second': connection refused"
+                "start component '00000000-0000-0000-0000-000000000304': connection refused",
+                "start component '00000000-0000-0000-0000-000000000305': connection refused"
             ]
         );
         Ok(())

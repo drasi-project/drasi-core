@@ -71,14 +71,14 @@ pub struct HyperliquidSource {
 
 impl HyperliquidSource {
     /// Create a builder for HyperliquidSource.
-    pub fn builder(id: impl Into<String>) -> HyperliquidSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> HyperliquidSourceBuilder {
         HyperliquidSourceBuilder::new(id)
     }
 }
 
 #[async_trait]
 impl Source for HyperliquidSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -296,8 +296,8 @@ impl Source for HyperliquidSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
 
         if let Some(state_store) = context.state_store {
             *self.state_store.write().await = Some(state_store);
@@ -311,7 +311,7 @@ impl Source for HyperliquidSource {
 
 /// Builder for HyperliquidSource.
 pub struct HyperliquidSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: HyperliquidSourceConfig,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -321,9 +321,9 @@ pub struct HyperliquidSourceBuilder {
 }
 
 impl HyperliquidSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: HyperliquidSourceConfig::default(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -429,7 +429,7 @@ impl HyperliquidSourceBuilder {
 
         let stream_state = StreamState::default();
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }

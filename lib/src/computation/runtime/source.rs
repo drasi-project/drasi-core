@@ -33,7 +33,9 @@ struct Life {
     initialized: bool,
     initialized_complete: bool,
     needs_stop: bool,
+    stop_completed: bool,
     closed: bool,
+    disposed: bool,
 }
 
 struct SubscriptionObserver {
@@ -57,6 +59,7 @@ impl SourceSubscriptionObserver for SubscriptionObserver {
 
 pub(super) struct SourceInstance {
     pub source: Arc<dyn Source>,
+    pub(super) pending: Option<Arc<super::source_creation::DeferredSource>>,
     pub borrowed: Arc<SourcePluginHost>,
     services: LegacyPluginServices,
     parent_control: GraphControl,
@@ -75,6 +78,32 @@ impl SourceInstance {
         owner: Weak<super::Runtime>,
     ) -> Arc<Self> {
         let source: Arc<dyn Source> = source.into();
+        Self::new_inner(source, None, services, changed, parent_control, owner)
+    }
+    pub(super) fn deferred(
+        source: Arc<super::source_creation::DeferredSource>,
+        services: LegacyPluginServices,
+        changed: watch::Sender<u64>,
+        parent_control: GraphControl,
+        owner: Weak<super::Runtime>,
+    ) -> Arc<Self> {
+        Self::new_inner(
+            source.clone(),
+            Some(source),
+            services,
+            changed,
+            parent_control,
+            owner,
+        )
+    }
+    fn new_inner(
+        source: Arc<dyn Source>,
+        pending: Option<Arc<super::source_creation::DeferredSource>>,
+        services: LegacyPluginServices,
+        changed: watch::Sender<u64>,
+        parent_control: GraphControl,
+        owner: Weak<super::Runtime>,
+    ) -> Arc<Self> {
         let subscriptions = Arc::new(SubscriptionObserver {
             owner,
             revision: AtomicU64::new(0),
@@ -84,8 +113,12 @@ impl SourceInstance {
             borrowed: SourcePluginHost::borrowed_with_subscription_observer(
                 source.clone(),
                 subscriptions.clone(),
+                pending
+                    .clone()
+                    .map(|source| source as Arc<dyn crate::computation::v1::SourcePreparation>),
             ),
             source,
+            pending,
             services,
             parent_control,
             life: Mutex::new(Life::default()),
@@ -109,11 +142,33 @@ impl SourceInstance {
 }
 #[async_trait]
 impl RuntimeComponent for SourceInstance {
-    fn id(&self) -> &str {
+    fn id(&self) -> &ComponentId {
         self.source.id()
     }
     fn kind(&self) -> &'static str {
         "source"
+    }
+    fn metadata(&self) -> Option<std::collections::HashMap<String, String>> {
+        self.pending
+            .as_ref()
+            .and_then(|pending| pending.metadata().cloned())
+    }
+    fn configuration_available(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_none_or(|pending| pending.configuration_available())
+    }
+    async fn construct(&self, generation: ComponentGeneration) -> anyhow::Result<()> {
+        if let Some(pending) = &self.pending {
+            pending.construct().await?;
+            super::construction::publish_metadata(
+                pending.metadata(),
+                &self.parent_control,
+                &self.source.id().clone(),
+                generation,
+            )?;
+        }
+        Ok(())
     }
     async fn initialize(&self, generation: ComponentGeneration) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
@@ -124,14 +179,13 @@ impl RuntimeComponent for SourceInstance {
             return Ok(());
         }
         if life.initialized {
-            self.observations.drive(self.source.stop(), true).await?;
-            life.needs_stop = false;
+            anyhow::bail!("failed source initialization requires a newly constructed object");
         }
         self.observations.reset().await?;
         life.initialized = true;
         let mut context = SourceRuntimeContext::new(
             self.services.scope.as_ref(),
-            self.source.id(),
+            self.source.id().clone(),
             self.services.state_store.clone(),
             self.observations.channel().await,
             self.services.identity.clone(),
@@ -139,14 +193,14 @@ impl RuntimeComponent for SourceInstance {
         context.wal_provider = self.services.wal.clone();
         context.resource_observer = Some(Arc::new(GraphResourceObserver::new(
             self.parent_control.clone(),
-            ComponentId::try_new(self.source.id())?,
+            self.source.id().clone(),
             generation,
         )));
         self.observations
             .drive(
                 async {
-                    self.source.initialize(context).await;
-                    Ok(())
+                    self.source.bind_runtime_context(context).await;
+                    self.source.initialize().await
                 },
                 false,
             )
@@ -161,6 +215,7 @@ impl RuntimeComponent for SourceInstance {
             anyhow::bail!("source is not initialized for activation");
         }
         life.needs_stop = true;
+        life.stop_completed = false;
         self.subscriptions.begin_subscriptions();
         self.observations.reset().await?;
         let result = self.observations.drive(self.source.start(), false).await;
@@ -170,7 +225,7 @@ impl RuntimeComponent for SourceInstance {
     }
     async fn stop(&self) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
-        if life.needs_stop || life.initialized && !life.initialized_complete {
+        if life.needs_stop {
             self.observations.drive(self.source.stop(), true).await?;
             let status = self.source.status().await;
             anyhow::ensure!(
@@ -179,6 +234,7 @@ impl RuntimeComponent for SourceInstance {
                 self.source.id()
             );
             life.needs_stop = false;
+            life.stop_completed = true;
         }
         self.notify();
         Ok(())
@@ -224,11 +280,29 @@ impl RuntimeComponent for SourceInstance {
     }
     async fn shutdown(&self) -> anyhow::Result<()> {
         self.stop().await?;
-        self.life.lock().await.closed = true;
+        let mut life = self.life.lock().await;
+        life.closed = true;
+        if !life.disposed {
+            self.observations.drive(self.source.dispose(), true).await?;
+            life.disposed = true;
+        }
+        drop(life);
         self.observations.close().await;
         Ok(())
     }
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        self.source.deprovision().await
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.source.delete_owned_resources().await
+    }
+    async fn pause_processing(&self) -> anyhow::Result<()> {
+        self.source.pause_processing().await
+    }
+    async fn resume_processing(&self) -> anyhow::Result<()> {
+        self.source.resume_processing().await
+    }
+    async fn apply_update(
+        &self,
+        context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> anyhow::Result<()> {
+        self.source.apply_update(context).await
     }
 }

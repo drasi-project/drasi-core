@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use async_trait::async_trait;
 use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::computation::v1::*;
@@ -29,7 +33,26 @@ use std::{
 use tokio::sync::{mpsc, Notify};
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).unwrap()
+    fixture_support::component_id(match value {
+        "invalid" => 1,
+        "upstream" => 2,
+        "downstream" => 3,
+        "source" => 4,
+        "sink" => 5,
+        "unrelated" => 6,
+        "component" => 7,
+        "first" => 8,
+        "second" => 9,
+        "query" => 10,
+        "reaction" => 11,
+        "failing" => 12,
+        "pending" => 13,
+        "transformer" => 14,
+        "existing" => 15,
+        "broken" => 16,
+        "healthy" => 17,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 fn port(value: &str) -> PortId {
@@ -98,10 +121,10 @@ impl ComputationService for Service {
 }
 
 fn service(name: &str) -> ComponentAddition {
-    ComponentAddition::new(ConstructedComponent::service(Box::new(Service::new(
-        name,
-        Arc::new(AtomicUsize::new(0)),
-    ))))
+    ComponentAddition::new(
+        ComponentName::try_new(name).unwrap(),
+        ConstructedComponent::service(Box::new(Service::new(name, Arc::new(AtomicUsize::new(0))))),
+    )
 }
 
 #[tokio::test]
@@ -129,9 +152,10 @@ async fn addition_reports_only_graph_rejection_and_waits_report_node_failures() 
         let mut failing = Service::new("failing", Arc::new(AtomicUsize::new(0)));
         failing.fail = true;
         let failing = control
-            .add_component(ComponentAddition::new(ConstructedComponent::service(
-                Box::new(failing),
-            )))
+            .add_component(ComponentAddition::new(
+                ComponentName::try_new("failing").unwrap(),
+                ConstructedComponent::service(Box::new(failing)),
+            ))
             .await
             .unwrap();
         assert!(failing.wait_started().await.is_err());
@@ -203,6 +227,7 @@ async fn pending_construction_does_not_block_additions_and_can_be_stopped() {
         control.deployment_report().await.unwrap();
         let pending = control
             .add_component(ComponentAddition::from_specification(
+                ComponentName::try_new("pending").unwrap(),
                 specification,
                 factory,
             ))
@@ -241,10 +266,13 @@ async fn readiness_autostart_waits_for_connected_downstream_not_unrelated_compon
         control.deployment_report().await.unwrap();
         let upstream = control
             .add_component(
-                ComponentAddition::new(ConstructedComponent::service(Box::new(Service::new(
-                    "upstream",
-                    upstream_starts.clone(),
-                ))))
+                ComponentAddition::new(
+                    ComponentName::try_new("upstream").unwrap(),
+                    ConstructedComponent::service(Box::new(Service::new(
+                        "upstream",
+                        upstream_starts.clone(),
+                    ))),
+                )
                 .require_downstream_ready(),
             )
             .await
@@ -385,19 +413,19 @@ async fn control_notifications_bypass_a_full_data_pipe_and_a_blocked_data_handle
     let progressed = Arc::new(Notify::new());
     let entered = Arc::new(Notify::new());
     let mut graph = ComputationGraph::builder("out-of-band")
-        .source(Box::new(InputSource {
+        .fixture_source(Box::new(InputSource {
             descriptor: descriptor("source", false, true),
             input: receiver,
             control: source_control.clone(),
             produced: produced.clone(),
             progressed: progressed.clone(),
         }))
-        .sink(Box::new(BlockedSink {
+        .fixture_sink(Box::new(BlockedSink {
             descriptor: descriptor("sink", true, false),
             entered: entered.clone(),
             handler: Arc::new(Recorder(received)),
         }))
-        .service(Box::new(Service::new(
+        .fixture_service(Box::new(Service::new(
             "unrelated",
             Arc::new(AtomicUsize::new(0)),
         )))
@@ -591,13 +619,16 @@ async fn individual_source_transformer_sink_additions_can_be_connected_increment
         control.deployment_report().await.unwrap();
         let source = control
             .add_component(
-                ComponentAddition::new(ConstructedComponent::source(Box::new(InputSource {
-                    descriptor: descriptor("source", false, true),
-                    input: receiver,
-                    control: Arc::new(Mutex::new(None)),
-                    produced: Arc::new(AtomicUsize::new(0)),
-                    progressed: Arc::new(Notify::new()),
-                })))
+                ComponentAddition::new(
+                    ComponentName::try_new("source").unwrap(),
+                    ConstructedComponent::source(Box::new(InputSource {
+                        descriptor: descriptor("source", false, true),
+                        input: receiver,
+                        control: Arc::new(Mutex::new(None)),
+                        produced: Arc::new(AtomicUsize::new(0)),
+                        progressed: Arc::new(Notify::new()),
+                    })),
+                )
                 .bind_stream(port("out"), stream("source/out"))
                 .require_downstream_ready(),
             )
@@ -605,21 +636,25 @@ async fn individual_source_transformer_sink_additions_can_be_connected_increment
             .unwrap();
         let transformer = control
             .add_component(
-                ComponentAddition::new(ConstructedComponent::transformer(Box::new(Passthrough {
-                    descriptor: descriptor("transformer", true, true),
-                })))
+                ComponentAddition::new(
+                    ComponentName::try_new("transformer").unwrap(),
+                    ConstructedComponent::transformer(Box::new(Passthrough {
+                        descriptor: descriptor("transformer", true, true),
+                    })),
+                )
                 .bind_stream(port("out"), stream("transformer/out"))
                 .require_downstream_ready(),
             )
             .await
             .unwrap();
         let sink = control
-            .add_component(ComponentAddition::new(ConstructedComponent::sink(
-                Box::new(CountingSink {
+            .add_component(ComponentAddition::new(
+                ComponentName::try_new("sink").unwrap(),
+                ConstructedComponent::sink(Box::new(CountingSink {
                     descriptor: descriptor("sink", true, false),
                     output,
-                }),
-            )))
+                })),
+            ))
             .await
             .unwrap();
         for (from, to) in [("source", "transformer"), ("transformer", "sink")] {
@@ -841,12 +876,13 @@ async fn startup_wait_requires_actual_readiness_and_resets_on_a_new_start() {
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.unwrap();
         let component = control
-            .add_component(ComponentAddition::new(ConstructedComponent::service(
-                Box::new(ConfirmedService(Service::new(
+            .add_component(ComponentAddition::new(
+                ComponentName::try_new("component").unwrap(),
+                ConstructedComponent::service(Box::new(ConfirmedService(Service::new(
                     "component",
                     Arc::new(AtomicUsize::new(0)),
-                ))),
-            )))
+                )))),
+            ))
             .await
             .unwrap();
         let mut changes = control.subscribe_observed();
@@ -913,7 +949,7 @@ async fn rejected_addition_retains_cleanup_and_never_shuts_down_existing_or_borr
     let existing = ResourceHandle::new(ResourceRole::StateStore, Arc::new(1usize))
         .with_cleanup(Arc::new(CountCleanup(existing_cleanup.clone())));
     let mut graph = ComputationGraph::builder("rejection")
-        .service(Box::new(Service::new(
+        .fixture_service(Box::new(Service::new(
             "existing",
             Arc::new(AtomicUsize::new(0)),
         )))
@@ -982,7 +1018,7 @@ impl ResourceCleanup for GatedRejectedCleanup {
 async fn cancelled_rejected_disposal_retains_the_original_cleanup() {
     let cleanup = Arc::new(GatedRejectedCleanup::default());
     let mut graph = ComputationGraph::builder("retained-rejection-cleanup")
-        .service(Box::new(Service::new("existing", Arc::default())))
+        .fixture_service(Box::new(Service::new("existing", Arc::default())))
         .build()
         .unwrap();
     let run = graph.run().unwrap();
@@ -1048,13 +1084,16 @@ async fn connecting_deferred_components_does_not_start_them_before_explicit_acti
         control.deployment_report().await.unwrap();
         let source = control
             .add_component(
-                ComponentAddition::new(ConstructedComponent::source(Box::new(InputSource {
-                    descriptor: descriptor("source", false, true),
-                    input: receiver,
-                    control: Arc::new(Mutex::new(None)),
-                    produced: Arc::new(AtomicUsize::new(0)),
-                    progressed: Arc::new(Notify::new()),
-                })))
+                ComponentAddition::new(
+                    ComponentName::try_new("source").unwrap(),
+                    ConstructedComponent::source(Box::new(InputSource {
+                        descriptor: descriptor("source", false, true),
+                        input: receiver,
+                        control: Arc::new(Mutex::new(None)),
+                        produced: Arc::new(AtomicUsize::new(0)),
+                        progressed: Arc::new(Notify::new()),
+                    })),
+                )
                 .bind_stream(port("out"), stream("source/out"))
                 .defer_activation(),
             )
@@ -1062,10 +1101,13 @@ async fn connecting_deferred_components_does_not_start_them_before_explicit_acti
             .unwrap();
         let sink = control
             .add_component(
-                ComponentAddition::new(ConstructedComponent::sink(Box::new(CountingSink {
-                    descriptor: descriptor("sink", true, false),
-                    output,
-                })))
+                ComponentAddition::new(
+                    ComponentName::try_new("sink").unwrap(),
+                    ConstructedComponent::sink(Box::new(CountingSink {
+                        descriptor: descriptor("sink", true, false),
+                        output,
+                    })),
+                )
                 .defer_activation(),
             )
             .await
@@ -1109,6 +1151,7 @@ async fn an_unresolved_factory_does_not_block_unrelated_changes() {
         control.deployment_report().await.unwrap();
         let broken = ComponentAddition {
             definition: DesiredComponent {
+                name: ComponentName::try_new("broken").unwrap(),
                 descriptor: descriptor("broken", false, false),
                 role: ComponentRole::Service,
                 completion: None,
@@ -1174,7 +1217,7 @@ struct SlowReadySource {
 
 #[async_trait]
 impl drasi_lib::Source for SlowReadySource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.base.id
     }
     fn type_name(&self) -> &str {
@@ -1183,8 +1226,8 @@ impl drasi_lib::Source for SlowReadySource {
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
         std::collections::HashMap::new()
     }
-    async fn initialize(&self, context: drasi_lib::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         if self.fail_initialize {
             self.base
                 .set_status(
@@ -1223,6 +1266,7 @@ impl drasi_lib::Source for SlowReadySource {
 #[tokio::test]
 async fn ordinary_source_handle_waits_for_running_not_only_successful_start_hook() {
     let core = drasi_lib::DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -1241,15 +1285,20 @@ async fn ordinary_source_handle_waits_for_running_not_only_successful_start_hook
     core.start().await.unwrap();
     let base = Arc::new(
         drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new(
-            "slow-source",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c8")
+                .expect("fixture UUID"),
         ))
         .unwrap(),
     );
     let handle = core
-        .add_source_with_handle(SlowReadySource {
-            base: base.clone(),
-            fail_initialize: false,
-        })
+        .add_source_with_handle(
+            drasi_core_types::ComponentName::try_new("slow-source")
+                .expect("fixture component name"),
+            SlowReadySource {
+                base: base.clone(),
+                fail_initialize: false,
+            },
+        )
         .await
         .unwrap();
     handle.wait_created().await.unwrap();
@@ -1274,6 +1323,7 @@ async fn ordinary_source_handle_waits_for_running_not_only_successful_start_hook
 #[tokio::test]
 async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors() {
     let core = drasi_lib::DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -1290,47 +1340,59 @@ async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors()
         .await
         .unwrap();
     let base = Arc::new(
-        drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new("source"))
-            .unwrap(),
+        drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        ))
+        .unwrap(),
     );
-    core.add_source_with_handle(SlowReadySource {
-        base,
-        fail_initialize: false,
-    })
-    .await
-    .unwrap()
-    .wait_created()
-    .await
-    .unwrap();
-    core.add_query_with_handle(
-        drasi_lib::Query::cypher("query")
-            .query("MATCH (n) RETURN n")
-            .from_input("source")
-            .build(),
-    )
-    .await
-    .unwrap()
-    .wait_created()
-    .await
-    .unwrap();
-    let (reaction, _results) = drasi_reaction_application::ApplicationReaction::new(
-        "reaction".to_owned(),
-        vec!["query".to_owned()],
-    );
-    core.add_reaction_with_handle(reaction)
-        .await
-        .unwrap()
-        .wait_created()
+    let source = core
+        .add_source_with_handle(
+            drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            SlowReadySource {
+                base,
+                fail_initialize: false,
+            },
+        )
         .await
         .unwrap();
+    source.wait_created().await.unwrap();
+    let query = core
+        .add_query_with_handle(
+            drasi_lib::Query::cypher(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .query("MATCH (n) RETURN n")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+            )
+            .build()
+            .expect("valid query"),
+        )
+        .await
+        .unwrap();
+    query.wait_created().await.unwrap();
+    let (reaction, _results) = drasi_reaction_application::ApplicationReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(query.id().clone())],
+    );
+    let reaction = core
+        .add_reaction_with_handle(
+            drasi_core_types::ComponentName::try_new("reaction").expect("fixture component name"),
+            reaction,
+        )
+        .await
+        .unwrap();
+    reaction.wait_created().await.unwrap();
     let control = core.computation_control().unwrap();
     let mut expected = vec![
-        (id("source"), id("query")),
+        (source.id().clone(), query.id().clone()),
         (
-            id("source"),
-            ComputationPipelineBuilder::source_component_id("query", "source").unwrap(),
+            source.id().clone(),
+            ComputationPipelineBuilder::source_component_id(query.id(), source.id()).unwrap(),
         ),
-        (id("query"), id("reaction")),
+        (query.id().clone(), reaction.id().clone()),
     ];
     expected.sort();
     let mut changes = control.subscribe_observed();
@@ -1355,15 +1417,17 @@ async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors()
         expected.len()
     );
     let source = core
-        .computation_component("source")
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
+        )
         .unwrap()
         .control()
         .unwrap();
     source
-        .notify_neighbor(&id("query"), ControlNotification::Available)
+        .notify_neighbor(query.id(), ControlNotification::Available)
         .unwrap();
     assert!(source
-        .notify_neighbor(&id("reaction"), ControlNotification::Available)
+        .notify_neighbor(reaction.id(), ControlNotification::Available)
         .is_err());
     assert!(control.desired_snapshot().control_connections.is_empty());
     core.shutdown().await.unwrap();
@@ -1372,6 +1436,7 @@ async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors()
 #[tokio::test]
 async fn a_void_initializer_error_is_not_lost_when_the_initializer_returns() {
     let core = drasi_lib::DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -1390,15 +1455,20 @@ async fn a_void_initializer_error_is_not_lost_when_the_initializer_returns() {
     core.start().await.unwrap();
     let base = Arc::new(
         drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new(
-            "failed-source",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000006a")
+                .expect("fixture UUID"),
         ))
         .unwrap(),
     );
     let handle = core
-        .add_source_with_handle(SlowReadySource {
-            base,
-            fail_initialize: true,
-        })
+        .add_source_with_handle(
+            drasi_core_types::ComponentName::try_new("failed-source")
+                .expect("fixture component name"),
+            SlowReadySource {
+                base,
+                fail_initialize: true,
+            },
+        )
         .await
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(2), handle.wait_started())

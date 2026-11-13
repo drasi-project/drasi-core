@@ -132,8 +132,14 @@ impl SourceMiddlewarePipeline {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SourcePipelineKey {
+    Component(crate::ComponentId),
+    Namespace(Arc<str>),
+}
+
 pub struct SourceMiddlewarePipelineCollection {
-    items: HashMap<Arc<str>, Arc<SourceMiddlewarePipeline>>,
+    items: HashMap<SourcePipelineKey, Arc<SourceMiddlewarePipeline>>,
 }
 
 impl Default for SourceMiddlewarePipelineCollection {
@@ -149,11 +155,11 @@ impl SourceMiddlewarePipelineCollection {
         }
     }
 
-    pub fn insert(&mut self, source_id: Arc<str>, pipeline: SourceMiddlewarePipeline) {
-        self.items.insert(source_id, Arc::new(pipeline));
+    pub fn insert(&mut self, key: SourcePipelineKey, pipeline: SourceMiddlewarePipeline) {
+        self.items.insert(key, Arc::new(pipeline));
     }
 
-    pub fn get(&self, source_id: Arc<str>) -> Option<Arc<SourceMiddlewarePipeline>> {
-        self.items.get(&source_id).cloned()
+    pub fn get(&self, key: &SourcePipelineKey) -> Option<Arc<SourceMiddlewarePipeline>> {
+        self.items.get(key).cloned()
     }
 }

@@ -4,6 +4,19 @@
 use super::*;
 use drasi_core::interface::{IndexError, OutboxWriter};
 
+fn is_event_journal(key: &drasi_core::interface::OutputPartition) -> bool {
+    matches!(
+        key,
+        drasi_core::interface::OutputPartition::Group {
+            journal: Some(_),
+            partition,
+        } if matches!(
+            partition.as_ref(),
+            drasi_core::interface::OutputPartition::Journal(name) if name == "events"
+        )
+    )
+}
+
 struct PagedReadGate {
     after: std::sync::atomic::AtomicU64,
     entered: tokio::sync::Notify,
@@ -51,19 +64,28 @@ impl drasi_core::computation::ComputationResourceCleanup for PagedCleanup {
 
 #[async_trait]
 impl OutboxWriter for PagedOutbox {
-    async fn append(&self, key: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
         self.inner.append(key, sequence, data).await
     }
-    async fn read_from(&self, key: &str, after: u64) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_from(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        after: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         assert!(
-            !key.ends_with("_6576656e7473"),
+            !is_event_journal(key),
             "paged journals must not eagerly load event history"
         );
         self.inner.read_from(key, after).await
     }
     async fn read_page(
         &self,
-        key: &str,
+        key: &drasi_core::interface::OutputPartition,
         after: u64,
         limits: drasi_core::interface::OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
@@ -88,25 +110,36 @@ impl OutboxWriter for PagedOutbox {
             })
             .await
     }
-    async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_latest_sequence(key).await
     }
-    async fn clear(&self, key: &str) -> Result<(), IndexError> {
+    async fn clear(&self, key: &drasi_core::interface::OutputPartition) -> Result<(), IndexError> {
         self.inner.clear(key).await
     }
     async fn append_and_trim(
         &self,
-        key: &str,
+        key: &drasi_core::interface::OutputPartition,
         sequence: u64,
         data: &[u8],
         floor: u64,
     ) -> Result<usize, IndexError> {
         self.inner.append_and_trim(key, sequence, data, floor).await
     }
-    async fn trim_before(&self, key: &str, floor: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        floor: u64,
+    ) -> Result<usize, IndexError> {
         self.inner.trim_before(key, floor).await
     }
-    async fn trim_to_capacity(&self, key: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
         self.inner.trim_to_capacity(key, capacity).await
     }
 }
@@ -126,7 +159,7 @@ async fn paged_group(path: &Path, gate: Arc<PagedReadGate>) -> Result<Arc<Shared
     let control = original.indexes().session_control.clone();
     SharedStorageGroup::new(
         "query-graph",
-        ComponentId::try_new("query")?,
+        ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?,
         wrapped_indexes(original, control, outbox)?.with_cleanup(cleanup),
     )
 }
@@ -162,7 +195,7 @@ async fn paged_shared_startup_holds_the_group_gate_across_every_page() -> Result
     let directory = tempfile::tempdir()?;
     let inputs = admitted_inputs(&directory.path().join("inputs")).await?;
     let gate = Arc::new(PagedReadGate::default());
-    let group = paged_group(directory.path(), gate.clone()).await?;
+    let group = paged_group(&directory.path().join("shared"), gate.clone()).await?;
     let channel = paged_channel(&group).await?;
     for input in &inputs {
         channel.publish(input).await?;
@@ -170,7 +203,13 @@ async fn paged_shared_startup_holds_the_group_gate_across_every_page() -> Result
     channel.shutdown().await?;
     gate.after.store(1, Ordering::SeqCst);
     let processor = drasi_core::computation::ComputationTransaction::try_new(
-        group.create_indexes("query-graph", "query").await?,
+        group
+            .create_indexes(
+                "query-graph",
+                &drasi_core::ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")
+                    .expect("fixture UUID"),
+            )
+            .await?,
     )?;
     let (restored, writer) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(
@@ -202,7 +241,11 @@ async fn paged_shared_startup_holds_the_group_gate_across_every_page() -> Result
 async fn paged_shared_refill_waits_without_holding_channel_state() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let inputs = admitted_inputs(&directory.path().join("inputs")).await?;
-    let group = paged_group(directory.path(), Arc::new(PagedReadGate::default())).await?;
+    let group = paged_group(
+        &directory.path().join("shared"),
+        Arc::new(PagedReadGate::default()),
+    )
+    .await?;
     let channel = paged_channel(&group).await?;
     for input in &inputs {
         channel.publish(input).await?;
@@ -210,7 +253,13 @@ async fn paged_shared_refill_waits_without_holding_channel_state() -> Result<()>
     let mut pipe = shared_endpoint(&group, &channel, "fast")?;
     let mut receiver = pipe.pipe.take_receiver()?;
     let processor = drasi_core::computation::ComputationTransaction::try_new(
-        group.create_indexes("query-graph", "query").await?,
+        group
+            .create_indexes(
+                "query-graph",
+                &drasi_core::ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")
+                    .expect("fixture UUID"),
+            )
+            .await?,
     )?;
     let entered = tokio::sync::Notify::new();
     let waiting = tokio::sync::Notify::new();
@@ -338,26 +387,38 @@ async fn paged_shared_refill_failure_and_cancellation_preserve_unhandled_history
 
 struct FailSecondJournalAppend {
     inner: Arc<dyn OutboxWriter>,
-    staged: std::sync::Mutex<Vec<String>>,
+    staged: std::sync::Mutex<Vec<drasi_core::interface::OutputPartition>>,
 }
 
 #[async_trait]
 impl OutboxWriter for FailSecondJournalAppend {
-    async fn append(&self, key: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
         self.inner.append(key, sequence, data).await
     }
-    async fn read_from(&self, key: &str, after: u64) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_from(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        after: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.inner.read_from(key, after).await
     }
-    async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_latest_sequence(key).await
     }
-    async fn clear(&self, key: &str) -> Result<(), IndexError> {
+    async fn clear(&self, key: &drasi_core::interface::OutputPartition) -> Result<(), IndexError> {
         self.inner.clear(key).await
     }
     async fn append_and_trim(
         &self,
-        key: &str,
+        key: &drasi_core::interface::OutputPartition,
         sequence: u64,
         data: &[u8],
         retain_from: u64,
@@ -367,7 +428,7 @@ impl OutboxWriter for FailSecondJournalAppend {
             .append_and_trim(key, sequence, data, retain_from)
             .await?;
         // Select namespaced journal events, not producer output or journal metadata.
-        if key.starts_with("drasi_group_v1_journal_") && key.ends_with("_6576656e7473") {
+        if is_event_journal(key) {
             let mut staged = self.staged.lock().expect("staged journal writes");
             staged.push(key.to_owned());
             if staged.len() == 2 {
@@ -376,10 +437,18 @@ impl OutboxWriter for FailSecondJournalAppend {
         }
         Ok(removed)
     }
-    async fn trim_before(&self, key: &str, retain_from: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
         self.inner.trim_before(key, retain_from).await
     }
-    async fn trim_to_capacity(&self, key: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        key: &drasi_core::interface::OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
         self.inner.trim_to_capacity(key, capacity).await
     }
 }
@@ -511,7 +580,7 @@ async fn shared_journals_after(
 ) -> Result<(Arc<SharedStorageGroup>, [Arc<QosChannel>; 2])> {
     let group = SharedStorageGroup::new(
         "query-graph",
-        ComponentId::try_new("query")?,
+        ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?,
         uncertain_indexes_after(root, fail, gate, skip).await?,
     )?;
     let left = group
@@ -550,11 +619,126 @@ enum SharedProducer {
     Linear,
 }
 
+struct SharedProducerRecipe {
+    producer: SharedProducer,
+    reconstruct_identical: bool,
+}
+
+impl From<SharedProducer> for SharedProducerRecipe {
+    fn from(producer: SharedProducer) -> Self {
+        Self {
+            producer,
+            reconstruct_identical: false,
+        }
+    }
+}
+
+struct IdenticalProducerFactory {
+    inner: Arc<dyn ComponentFactory>,
+    descriptor: FactoryDescriptor,
+    initial: ComponentSpecification,
+}
+
+impl IdenticalProducerFactory {
+    fn wrap(
+        inner: Arc<dyn ComponentFactory>,
+        mut initial: ComponentSpecification,
+    ) -> Result<(ComponentSpecification, Arc<dyn ComponentFactory>)> {
+        let mut descriptor = inner.descriptor().clone();
+        descriptor.implementation = ImplementationIdentity::try_new(
+            format!("test/qos-identical/{}", descriptor.implementation.name),
+            "1",
+        )?;
+        initial.implementation = descriptor.implementation.clone();
+        inner.validate(&initial)?;
+        Ok((
+            initial.clone(),
+            Arc::new(Self {
+                inner,
+                descriptor,
+                initial,
+            }),
+        ))
+    }
+}
+
+#[async_trait]
+impl ComponentFactory for IdenticalProducerFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+
+    fn query_authoring(&self) -> Option<&dyn QueryAuthoring> {
+        self.inner.query_authoring()
+    }
+
+    fn record_schemas(&self) -> Vec<Arc<Schema>> {
+        self.inner.record_schemas()
+    }
+
+    fn binds_inputs(&self) -> bool {
+        self.inner.binds_inputs()
+    }
+
+    fn validate(&self, specification: &ComponentSpecification) -> Result<()> {
+        self.inner.validate(specification)
+    }
+
+    fn validate_resources(
+        &self,
+        specification: &ComponentSpecification,
+        declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<()> {
+        self.inner
+            .validate_resources(specification, declarations, resources)
+    }
+
+    fn validate_scope(
+        &self,
+        graph_id: &str,
+        specification: &ComponentSpecification,
+        declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<()> {
+        self.inner
+            .validate_scope(graph_id, specification, declarations, resources)
+    }
+
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current == &self.initial && proposed == &self.initial,
+            "QoS fixture only supports reconstruction of its exact initial recipe"
+        );
+        self.inner.validate(current)?;
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
+
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        if context.specification.as_ref() != &self.initial {
+            return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                "QoS fixture construction requires its exact initial recipe"
+            )));
+        }
+        self.inner.create(context).await
+    }
+}
+
 fn shared_graph_for(
     group: &Arc<SharedStorageGroup>,
     channels: &[Arc<QosChannel>; 2],
     events: usize,
-    producer: SharedProducer,
+    producer: impl Into<SharedProducerRecipe>,
     release: Option<Arc<Hold>>,
     slow: Option<Arc<Hold>>,
     seen: Arc<BindingObservations>,
@@ -585,29 +769,33 @@ fn shared_graph_with_pipes(
     group: &Arc<SharedStorageGroup>,
     pipes: &[(Arc<QosChannel>, QosPipeConfig); 2],
     events: usize,
-    producer: SharedProducer,
+    producer: impl Into<SharedProducerRecipe>,
     release: Option<Arc<Hold>>,
     slow: Option<Arc<Hold>>,
     seen: Arc<BindingObservations>,
 ) -> Result<ComputationGraph> {
-    let ep = |component: &str, port: &str| -> Result<Endpoint> {
-        Ok(Endpoint::new(
-            ComponentId::try_new(component)?,
-            PortId::try_new(port)?,
-        ))
+    let SharedProducerRecipe {
+        producer,
+        reconstruct_identical,
+    } = producer.into();
+    let ep = |component: &ComponentId, port: &str| -> Result<Endpoint> {
+        Ok(Endpoint::new(component.clone(), PortId::try_new(port)?))
     };
-    let descriptor =
-        |id: &str, port: &str, direction, schema: Arc<Schema>| -> Result<ComponentDescriptor> {
-            Ok(ComponentDescriptor::try_new(
-                ComponentId::try_new(id)?,
-                vec![PortDescriptor::new(
-                    PortId::try_new(port)?,
-                    direction,
-                    schema.descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?)
-        };
+    let descriptor = |id: ComponentId,
+                      port: &str,
+                      direction,
+                      schema: Arc<Schema>|
+     -> Result<ComponentDescriptor> {
+        Ok(ComponentDescriptor::try_new(
+            id,
+            vec![PortDescriptor::new(
+                PortId::try_new(port)?,
+                direction,
+                schema.descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )?)
+    };
     let query = if matches!(producer, SharedProducer::Query(true)) {
         "MATCH (n:Item) WHERE drasi.trueLater(true, 2000) RETURN n"
     } else {
@@ -615,12 +803,14 @@ fn shared_graph_with_pipes(
     };
     let definition = ContinuousQueryDefinition {
         graph_id: "query-graph".into(),
-        id: ComponentId::try_new("query")?,
+        id: ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?,
         query: query.into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("query/out")?,
         outbox_capacity: NonZeroUsize::new(8).expect("output capacity"),
     };
+    let producer_id = definition.id.clone();
+    let source_id = ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?;
     let factory = Arc::new(ContinuousQueryFactory::default());
     let storage = ResourceId::try_new("shared-storage")?;
     let specification = ComponentSpecification {
@@ -655,58 +845,89 @@ fn shared_graph_with_pipes(
         .provide_resource(storage.clone(), group.resource())?;
     let output_schema = match producer {
         SharedProducer::Query(_) => {
-            builder = builder.component(specification, factory);
+            let (specification, factory): (_, Arc<dyn ComponentFactory>) = if reconstruct_identical
+            {
+                IdenticalProducerFactory::wrap(factory, specification)?
+            } else {
+                (specification, factory)
+            };
+            builder = builder.component(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                    .expect("fixture component name"),
+                specification,
+                factory,
+            );
             QueryChangeCodec::schema()
         }
         SharedProducer::Middleware | SharedProducer::Linear => {
             let registry_id = ResourceId::try_new("steps")?;
             let middleware = Arc::new(drasi_core::middleware::MiddlewareTypeRegistry::new());
-            let (specification, factory, resource): (_, Arc<dyn ComponentFactory>, _) = if matches!(
-                producer,
-                SharedProducer::Middleware
-            ) {
-                let definition = MiddlewareTransformerDefinition {
-                    id: ComponentId::try_new("query")?,
-                    output_stream: StreamId::try_new("query/out")?,
-                    middleware: vec![],
-                    pipeline: vec![],
-                };
-                (
-                    definition.durable_specification(
-                        registry_id.clone(),
-                        storage.clone(),
-                        DurableMiddlewareOptions {
-                            graph_id: "query-graph".into(),
-                            outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
-                        },
-                    )?,
-                    Arc::new(MiddlewareTransformerFactory::default()),
-                    ResourceHandle::new(
-                        ResourceRole::Middleware,
-                        Arc::new(MiddlewareRegistryResource(middleware)),
-                    ),
-                )
-            } else {
-                let registry = Arc::new(TransactionalTransformerRegistry::standard(middleware));
-                let definition = TransactionTransformerDefinition {
-                        graph_id: "query-graph".into(), id: ComponentId::try_new("query")?,
+            let is_middleware = matches!(producer, SharedProducer::Middleware);
+            let (specification, factory, resource): (_, Arc<dyn ComponentFactory>, _) =
+                if is_middleware {
+                    let definition = MiddlewareTransformerDefinition {
+                        id: ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?,
                         output_stream: StreamId::try_new("query/out")?,
-                        outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
-                        steps: ["first", "second"].into_iter().map(|name| Ok(TransactionStepDefinition {
-                            id: ComponentId::try_new(name)?,
-                            implementation: ImplementationIdentity::try_new("drasi/middleware-transformer", "1")?,
+                        middleware: vec![],
+                        pipeline: vec![],
+                    };
+                    (
+                        definition.durable_specification(
+                            registry_id.clone(),
+                            storage.clone(),
+                            DurableMiddlewareOptions {
+                                graph_id: "query-graph".into(),
+                                outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
+                            },
+                        )?,
+                        Arc::new(MiddlewareTransformerFactory::default()),
+                        ResourceHandle::new(
+                            ResourceRole::Middleware,
+                            Arc::new(MiddlewareRegistryResource(middleware)),
+                        ),
+                    )
+                } else {
+                    let registry = Arc::new(TransactionalTransformerRegistry::standard(middleware));
+                    let definition = TransactionTransformerDefinition {
+                    graph_id: "query-graph".into(),
+                    id: ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?,
+                    output_stream: StreamId::try_new("query/out")?,
+                    outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
+                    steps: [
+                        "00000000-0000-0000-0000-000000000431",
+                        "00000000-0000-0000-0000-000000000432",
+                    ]
+                    .into_iter()
+                    .map(|id| {
+                        Ok(TransactionStepDefinition {
+                            id: ComponentId::try_new(id)?,
+                            implementation: ImplementationIdentity::try_new(
+                                "drasi/middleware-transformer",
+                                "1",
+                            )?,
                             configuration_version: 1,
                             configuration: serde_json::json!({"middleware": [], "pipeline": []}),
-                        })).collect::<Result<_>>()?,
-                    };
-                (
-                    definition.specification(&registry, registry_id.clone(), storage.clone())?,
-                    Arc::new(TransactionTransformerFactory::default()),
-                    ResourceHandle::new(
-                        ResourceRole::Component,
-                        Arc::new(TransactionalTransformerRegistryResource(registry)),
-                    ),
-                )
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+                };
+                    (
+                        definition.specification(
+                            &registry,
+                            registry_id.clone(),
+                            storage.clone(),
+                        )?,
+                        Arc::new(TransactionTransformerFactory::default()),
+                        ResourceHandle::new(
+                            ResourceRole::Component,
+                            Arc::new(TransactionalTransformerRegistryResource(registry)),
+                        ),
+                    )
+                };
+            let (specification, factory) = if reconstruct_identical {
+                IdenticalProducerFactory::wrap(factory, specification)?
+            } else {
+                (specification, factory)
             };
             builder = builder
                 .declare_resource(ResourceSpecification {
@@ -716,32 +937,48 @@ fn shared_graph_with_pipes(
                     binding: "steps".into(),
                 })?
                 .provide_resource(registry_id, resource)?
-                .component(specification, factory);
+                .component(
+                    drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
+                        .expect("fixture component name"),
+                    specification,
+                    factory,
+                );
             GraphChangeCodec::schema()
         }
     };
     builder = builder
-        .source(Box::new(SharedSource {
-            inner: BindingSource {
-                descriptor: descriptor(
-                    "source",
-                    "out",
-                    PortDirection::Output,
-                    GraphChangeCodec::schema(),
-                )?,
-                events: (1..=events)
-                    .map(|index| event(index as u64))
-                    .collect::<Result<_>>()?,
-            },
-            release,
-        }))
-        .bind_stream(ep("source", "out")?, StreamId::try_new("source/out")?)
-        .bind_stream(ep("query", "out")?, StreamId::try_new("query/out")?)
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(SharedSource {
+                inner: BindingSource {
+                    descriptor: descriptor(
+                        source_id.clone(),
+                        "out",
+                        PortDirection::Output,
+                        GraphChangeCodec::schema(),
+                    )?,
+                    events: (1..=events)
+                        .map(|index| event(index as u64))
+                        .collect::<Result<_>>()?,
+                },
+                release,
+            }),
+        )
+        .bind_stream(ep(&source_id, "out")?, StreamId::try_new("source/out")?)
+        .bind_stream(ep(&producer_id, "out")?, StreamId::try_new("query/out")?)
         .connect(
-            EdgeDefinition::new(ep("source", "out")?, ep("query", "in")?),
+            EdgeDefinition::new(ep(&source_id, "out")?, ep(&producer_id, "in")?),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         );
-    for (index, (name, (channel, pipe))) in ["left", "right"].into_iter().zip(pipes).enumerate() {
+    for (index, ((name, id), (channel, pipe))) in [
+        ("left", ComponentId::try_new(LEFT_SINK_ID)?),
+        ("right", ComponentId::try_new(RIGHT_SINK_ID)?),
+    ]
+    .into_iter()
+    .zip(pipes)
+    .enumerate()
+    {
         let multicast = Arc::ptr_eq(&pipes[0].0, &pipes[1].0);
         let resource = pipe.resource.clone();
         if !multicast || index == 0 {
@@ -755,21 +992,25 @@ fn shared_graph_with_pipes(
                 .provide_resource(resource.clone(), channel.resource())?;
         }
         builder = builder
-            .sink(Box::new(SharedSink {
-                inner: BindingSink {
-                    descriptor: descriptor(
-                        name,
-                        "in",
-                        PortDirection::Input,
-                        output_schema.clone(),
-                    )?,
-                    destination_url: name.into(),
-                    seen: seen.clone(),
-                },
-                hold: if index == 1 { slow.clone() } else { None },
-            }))
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new(name)
+                    .expect("fixture component name"),
+                Box::new(SharedSink {
+                    inner: BindingSink {
+                        descriptor: descriptor(
+                            id.clone(),
+                            "in",
+                            PortDirection::Input,
+                            output_schema.clone(),
+                        )?,
+                        destination_url: name.into(),
+                        seen: seen.clone(),
+                    },
+                    hold: if index == 1 { slow.clone() } else { None },
+                }),
+            )
             .connect(
-                EdgeDefinition::new(ep("query", "out")?, ep(name, "in")?),
+                EdgeDefinition::new(ep(&producer_id, "out")?, ep(&id, "in")?),
                 Box::new(pipe.clone()),
             );
     }
@@ -819,7 +1060,7 @@ async fn shared_graph_mixed_output_stores_recover_partial_publication() -> Resul
             for interrupted in [true, false] {
                 let group = SharedStorageGroup::new(
                     "query-graph",
-                    ComponentId::try_new("query")?,
+                    ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?,
                     uncertain_indexes(
                         &directory.path().join("shared"),
                         Arc::new(AtomicBool::new(false)),
@@ -929,7 +1170,18 @@ async fn shared_graph_reconciliation_replaces_producers_and_preserves_owner() ->
         let (group, channels) =
             shared_group(directory.path(), Arc::new(AtomicBool::new(false)), None).await?;
         let seen = Arc::new(BindingObservations::default());
-        let mut graph = shared_graph_for(&group, &channels, 1, producer, None, None, seen.clone())?;
+        let mut graph = shared_graph_for(
+            &group,
+            &channels,
+            1,
+            SharedProducerRecipe {
+                producer,
+                reconstruct_identical: true,
+            },
+            None,
+            None,
+            seen.clone(),
+        )?;
         let run = graph.run()?;
         let control = run.control();
         let (result, inspected) = tokio::time::timeout(Duration::from_secs(20), async {
@@ -961,7 +1213,7 @@ async fn shared_graph_reconciliation_replaces_producers_and_preserves_owner() ->
                         .await
                         .is_err());
                     assert_eq!(control.desired_snapshot().revision, revision);
-                    let id = ComponentId::try_new("query")?;
+                    let id = ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?;
                     let desired = control
                         .desired_snapshot()
                         .select(GraphSelection::Exact(vec![id.clone()]))?
@@ -995,7 +1247,17 @@ async fn shared_graph_reconciliation_replaces_producers_and_preserves_owner() ->
                         .await?;
                     assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
                     assert_eq!(report.removed.len(), 4);
-                    drop(group.create_indexes("query-graph", "query").await?);
+                    drop(
+                        group
+                            .create_indexes(
+                                "query-graph",
+                                &drasi_core::ComponentId::try_new(
+                                    "d327b5f6-f8a9-5b60-bbc8-1fe7e076a197",
+                                )
+                                .expect("fixture UUID"),
+                            )
+                            .await?,
+                    );
                     let independent = group
                         .channel(shared_definition()?, "after-removal", codec()?, options())
                         .await?;
@@ -1166,7 +1428,9 @@ async fn admitted_inputs(path: &Path) -> Result<Vec<ChangeEnvelope>> {
     let source = persistent(path, definition.clone()).await?;
     source.enable_admission(admission_options()?).await?;
     let session = source
-        .register_producer(ComponentId::try_new("client")?)
+        .register_producer(ComponentId::try_new(
+            "9d633cfb-41d5-5d1c-afe6-d2f7b75aa35b",
+        )?)
         .await?;
     let mut connection = endpoint(&source, &definition, "fast", false)?;
     let mut receiver = connection.pipe.take_receiver()?;
@@ -1248,7 +1512,13 @@ async fn shared_endpoint_revocation_rejects_waiting_appends_without_acceptance()
             let connection = shared_endpoint(&group, &channels[0], "fast")?;
             let sender = connection.pipe.sender();
             let blocker = drasi_core::computation::ComputationTransaction::try_new(
-                group.create_indexes("query-graph", "query").await?,
+                group
+                    .create_indexes(
+                        "query-graph",
+                        &drasi_core::ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")
+                            .expect("fixture UUID"),
+                    )
+                    .await?,
             )?;
             let hold = Arc::new(Hold::default());
             if !waiting_for_storage {
@@ -1318,9 +1588,20 @@ async fn shared_storage_binding_requires_the_actual_group_and_declared_owner() -
         None,
     )
     .await?;
-    assert!(left.create_indexes("another-graph", "query").await.is_err());
     assert!(left
-        .create_indexes("query-graph", "another-query")
+        .create_indexes(
+            "another-graph",
+            &drasi_core::ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")
+                .expect("fixture UUID")
+        )
+        .await
+        .is_err());
+    assert!(left
+        .create_indexes(
+            "query-graph",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000130")
+                .expect("fixture UUID")
+        )
         .await
         .is_err());
     assert!(shared_graph(
@@ -1378,13 +1659,17 @@ async fn shared_graph_stopped_producer_leaves_subscriber_acknowledgements_availa
                 control
                     .quiesce_components(
                         revision,
-                        GraphSelection::Exact(vec![ComponentId::try_new("query")?]),
+                        GraphSelection::Exact(vec![ComponentId::try_new(
+                            "d327b5f6-f8a9-5b60-bbc8-1fe7e076a197",
+                        )?]),
                     )
                     .await?;
                 let report = control
                     .stop_components(
                         revision,
-                        GraphSelection::Exact(vec![ComponentId::try_new("query")?]),
+                        GraphSelection::Exact(vec![ComponentId::try_new(
+                            "d327b5f6-f8a9-5b60-bbc8-1fe7e076a197",
+                        )?]),
                     )
                     .await?;
                 assert_eq!(report.summary, OperationSummary::Completed);
@@ -1393,7 +1678,10 @@ async fn shared_graph_stopped_producer_leaves_subscriber_acknowledgements_availa
                 assert!(snapshot
                     .edges
                     .iter()
-                    .filter(|edge| edge.definition.from.component.as_str() == "query")
+                    .filter(|edge| {
+                        edge.definition.from.component.as_str()
+                            == "d327b5f6-f8a9-5b60-bbc8-1fe7e076a197"
+                    })
                     .all(|edge| edge.resources.get(&storage) == Some(&ResourceRole::IndexBackend)));
                 assert_eq!(channels[1].progress().await?.processed["target"], 0);
                 let independent = group
@@ -1536,7 +1824,7 @@ async fn shared_graph_multicast_reserves_and_appends_once_for_both_subscribers()
     let directory = tempfile::tempdir()?;
     let group = SharedStorageGroup::new(
         "query-graph",
-        ComponentId::try_new("query")?,
+        ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?,
         uncertain_indexes(directory.path(), Arc::new(AtomicBool::new(false)), None).await?,
     )?;
     let mut definition = shared_definition()?;
@@ -1585,7 +1873,7 @@ async fn shared_graph_output_encoding_failure_rolls_back_producer_and_all_journa
     let control = run.control();
     let (result, observed) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(run, async {
-            let query = ComponentId::try_new("query")?;
+            let query = ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?;
             loop {
                 if let Some(failure) = &control.observed().components[&query].failure {
                     assert_eq!(failure.phase, FailurePhase::Processing);
@@ -1655,7 +1943,7 @@ async fn shared_graph_staged_journal_failure_rolls_back_all_participants() -> Re
         let control = original.indexes().session_control.clone();
         let group = SharedStorageGroup::new(
             "query-graph",
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?,
             wrapped_indexes(original, control, outbox.clone())?,
         )?;
         let channels = [
@@ -1673,7 +1961,7 @@ async fn shared_graph_staged_journal_failure_rolls_back_all_participants() -> Re
         let (result, inspected) = tokio::time::timeout(Duration::from_secs(15), async {
             tokio::join!(run, async {
                 let inspected = async {
-                    let id = ComponentId::try_new("query")?;
+                    let id = ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")?;
                     let mut observed = control.subscribe_observed();
                     observed
                         .wait_for(|state| state.components[&id].failure.is_some())
@@ -1747,7 +2035,13 @@ async fn shared_group_failure_wakes_queued_writes_and_reconstruction_before_clea
         .expect("retained input")
         .into_parts();
     let processor = drasi_core::computation::ComputationTransaction::try_new(
-        group.create_indexes("query-graph", "query").await?,
+        group
+            .create_indexes(
+                "query-graph",
+                &drasi_core::ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")
+                    .expect("fixture UUID"),
+            )
+            .await?,
     )?;
     let hold = Arc::new(Hold::default());
     let mut processing = Box::pin(processor.run(async {
@@ -1810,7 +2104,13 @@ async fn shared_journal_reconstruction_waits_for_the_group_transaction() -> Resu
     let identity = channels[0].output_journal_identity();
     channels[0].shutdown().await?;
     let processor = drasi_core::computation::ComputationTransaction::try_new(
-        group.create_indexes("query-graph", "query").await?,
+        group
+            .create_indexes(
+                "query-graph",
+                &drasi_core::ComponentId::try_new("d327b5f6-f8a9-5b60-bbc8-1fe7e076a197")
+                    .expect("fixture UUID"),
+            )
+            .await?,
     )?;
     let hold = Arc::new(Hold::default());
     let (held, restored) = tokio::time::timeout(Duration::from_secs(3), async {
@@ -1880,8 +2180,10 @@ async fn shared_journal_metadata_corruption_and_implicit_reconfiguration_fail_cl
             .outbox_writer()
             .expect("journal")
             .clone();
-        let original = outbox.read_from("metadata", 0).await?;
-        let events = outbox.read_from("events", 0).await?;
+        let events_key = drasi_core::interface::OutputPartition::Journal("events".into());
+        let metadata_key = events_key.metadata("metadata");
+        let original = outbox.read_from(&metadata_key, 0).await?;
+        let events = outbox.read_from(&events_key, 0).await?;
         let mut bytes = original[0].1.to_vec();
         match fault {
             "header" => bytes[0] = b'X',
@@ -1908,21 +2210,21 @@ async fn shared_journal_metadata_corruption_and_implicit_reconfiguration_fail_cl
         journal
             .run(async {
                 if fault == "missing" {
-                    outbox.clear("metadata").await?;
+                    outbox.clear(&metadata_key).await?;
                 } else {
-                    outbox.append("metadata", 1, &bytes).await?;
+                    outbox.append(&metadata_key, 1, &bytes).await?;
                 }
                 if fault == "extra-row" {
-                    outbox.append("metadata", 2, &bytes).await?;
+                    outbox.append(&metadata_key, 2, &bytes).await?;
                 }
                 if fault == "missing-events" {
-                    outbox.clear("events").await?;
+                    outbox.clear(&events_key).await?;
                 }
                 Ok(())
             })
             .await?;
-        let damaged_metadata = outbox.read_from("metadata", 0).await?;
-        let damaged_events = outbox.read_from("events", 0).await?;
+        let damaged_metadata = outbox.read_from(&metadata_key, 0).await?;
+        let damaged_events = outbox.read_from(&events_key, 0).await?;
         journal.shutdown().await?;
         drop((journal, outbox));
         let mut replay = options();
@@ -1946,24 +2248,24 @@ async fn shared_journal_metadata_corruption_and_implicit_reconfiguration_fail_cl
             .expect("journal")
             .clone();
         assert_eq!(
-            outbox.read_from("metadata", 0).await?,
+            outbox.read_from(&metadata_key, 0).await?,
             damaged_metadata,
             "{fault}"
         );
         assert_eq!(
-            outbox.read_from("events", 0).await?,
+            outbox.read_from(&events_key, 0).await?,
             damaged_events,
             "{fault}"
         );
         journal
             .run(async {
-                outbox.clear("metadata").await?;
+                outbox.clear(&metadata_key).await?;
                 for (sequence, bytes) in &original {
-                    outbox.append("metadata", *sequence, bytes).await?;
+                    outbox.append(&metadata_key, *sequence, bytes).await?;
                 }
-                outbox.clear("events").await?;
+                outbox.clear(&events_key).await?;
                 for (sequence, bytes) in &events {
-                    outbox.append("events", *sequence, bytes).await?;
+                    outbox.append(&events_key, *sequence, bytes).await?;
                 }
                 Ok(())
             })

@@ -21,7 +21,9 @@ use aws_sdk_sqs::{types::QueueAttributeName, Client};
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_aws_sqs::{QueryConfig, SqsReaction, SqsReactionConfig, TemplateSpec};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
+use shared_tests::fixture_attribution::{Attribution, Fixture};
 use testcontainers::runners::AsyncRunner;
+use testcontainers::{ContainerRequest, Image, ImageExt};
 use testcontainers_modules::elasticmq::ElasticMq;
 use uuid::Uuid;
 
@@ -143,7 +145,24 @@ async fn receive_single_message(
 async fn test_sqs_reaction_end_to_end() -> Result<()> {
     setup_logger();
 
-    let container = ElasticMq::default().start().await?;
+    let image = ElasticMq::default();
+    let attribution = Attribution::from_env(Fixture::new(
+        "elasticmq",
+        format!("{}:{}", image.name(), image.tag()),
+        "components/reactions/aws-sqs/tests/sqs_tests.rs",
+        1,
+    ))?;
+    let mut request: ContainerRequest<_> = image.into();
+    if let Some(owner) = &attribution {
+        request = request
+            .with_container_name(owner.container_name(1))
+            .with_labels(owner.labels(1));
+        owner.record_intent(1)?;
+    }
+    let container = request.start().await?;
+    if let Some(owner) = &attribution {
+        owner.record_started(1, container.id())?;
+    }
     let host = container.get_host().await?;
     let port = container.get_host_port_ipv4(9324).await?;
     let endpoint = format!("http://{host}:{port}");
@@ -160,8 +179,8 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
         .ok_or_else(|| anyhow!("queue url missing"))?
         .to_string();
 
-    let reaction = SqsReaction::builder("sqs-test-reaction")
-        .with_query("sensor-query")
+    let reaction = SqsReaction::builder(drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000029").expect("fixture UUID"))
+        .with_query_by_name(drasi_core::ComponentName::try_new("sensor-query").expect("fixture component name"))
         .with_queue_url(queue_url.clone())
         .with_endpoint_url(endpoint.clone())
         .with_region("us-east-1")
@@ -187,17 +206,23 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
         .build()?;
 
     let (source, source_handle) = ApplicationSource::new(
-        "app-source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000024")
+            .expect("fixture UUID"),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: None,
         },
     )?;
-    let query = Query::cypher("sensor-query")
-        .query("MATCH (s:Sensor) RETURN s.id AS id, s.value AS value")
-        .from_input("app-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("sensor-query").expect("fixture component name"),
+    )
+    .query("MATCH (s:Sensor) RETURN s.id AS id, s.value AS value")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("app-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
     let core = DrasiLib::builder()
         .with_query_factory(
@@ -213,18 +238,35 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
                 .clone(),
         )
         .with_id("sqs-test-core")
-        .with_source(source)
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core::ComponentName::try_new("app-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("sqs-test-reaction")
+                .expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
     core.start().await?;
     tokio::time::timeout(
         Duration::from_secs(10),
-        core.computation_component("sqs-test-reaction")?
-            .wait_started(),
+        core.component_by_name(
+            &drasi_core::ComponentName::try_new("sqs-test-reaction")
+                .expect("fixture component name"),
+        )?
+        .wait_started(),
     )
     .await??;
+    let query_id = core
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("sensor-query").expect("fixture component name"),
+        )?
+        .id()
+        .to_string();
 
     source_handle
         .send_node_insert(
@@ -246,10 +288,7 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
         insert_attrs.get("drasi-operation"),
         Some(&"ADD".to_string())
     );
-    assert_eq!(
-        insert_attrs.get("drasi-query-id"),
-        Some(&"sensor-query".to_string())
-    );
+    assert_eq!(insert_attrs.get("drasi-query-id"), Some(&query_id));
     assert_eq!(insert_attrs.get("sensor-id"), Some(&"sensor-1".to_string()));
 
     source_handle
@@ -298,7 +337,24 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
 async fn test_sqs_reaction_aggregation_query() -> Result<()> {
     setup_logger();
 
-    let container = ElasticMq::default().start().await?;
+    let image = ElasticMq::default();
+    let attribution = Attribution::from_env(Fixture::new(
+        "elasticmq",
+        format!("{}:{}", image.name(), image.tag()),
+        "components/reactions/aws-sqs/tests/sqs_tests.rs",
+        1,
+    ))?;
+    let mut request: ContainerRequest<_> = image.into();
+    if let Some(owner) = &attribution {
+        request = request
+            .with_container_name(owner.container_name(1))
+            .with_labels(owner.labels(1));
+        owner.record_intent(1)?;
+    }
+    let container = request.start().await?;
+    if let Some(owner) = &attribution {
+        owner.record_started(1, container.id())?;
+    }
     let host = container.get_host().await?;
     let port = container.get_host_port_ipv4(9324).await?;
     let endpoint = format!("http://{host}:{port}");
@@ -315,8 +371,8 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
         .ok_or_else(|| anyhow!("queue url missing"))?
         .to_string();
 
-    let reaction = SqsReaction::builder("sqs-agg-reaction")
-        .with_query("agg-query")
+    let reaction = SqsReaction::builder(drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002a").expect("fixture UUID"))
+        .with_query_by_name(drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"))
         .with_queue_url(queue_url.clone())
         .with_endpoint_url(endpoint.clone())
         .with_region("us-east-1")
@@ -333,17 +389,23 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
         .build()?;
 
     let (source, source_handle) = ApplicationSource::new(
-        "app-source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000024")
+            .expect("fixture UUID"),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: None,
         },
     )?;
-    let query = Query::cypher("agg-query")
-        .query("MATCH (s:Sensor) RETURN count(s) AS total, sum(s.value) AS total_value")
-        .from_input("app-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+    )
+    .query("MATCH (s:Sensor) RETURN count(s) AS total, sum(s.value) AS total_value")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("app-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
     let core = DrasiLib::builder()
         .with_query_factory(
@@ -359,18 +421,34 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
                 .clone(),
         )
         .with_id("sqs-agg-test-core")
-        .with_source(source)
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core::ComponentName::try_new("app-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("sqs-agg-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
     core.start().await?;
     tokio::time::timeout(
         Duration::from_secs(10),
-        core.computation_component("sqs-agg-reaction")?
-            .wait_started(),
+        core.component_by_name(
+            &drasi_core::ComponentName::try_new("sqs-agg-reaction")
+                .expect("fixture component name"),
+        )?
+        .wait_started(),
     )
     .await??;
+    let query_id = core
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+        )?
+        .id()
+        .to_string();
 
     // Insert first sensor — aggregation should fire with total=1, total_value=10
     source_handle
@@ -391,7 +469,7 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
         body1["total_value"], 10.0,
         "first insert: total_value should be 10"
     );
-    assert_eq!(attrs1.get("drasi-query-id"), Some(&"agg-query".to_string()));
+    assert_eq!(attrs1.get("drasi-query-id"), Some(&query_id));
 
     // Insert second sensor — aggregation should update to total=2, total_value=30
     source_handle

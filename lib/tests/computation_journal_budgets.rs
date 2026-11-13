@@ -19,11 +19,17 @@ fn size(envelope: &ChangeEnvelope) -> usize {
 }
 
 fn large(sequence: u64) -> ChangeEnvelope {
-    let mut envelope = root("source", sequence, &[sequence as u16]);
+    let mut envelope = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        sequence,
+        &[sequence as u16],
+    );
     envelope
         .append_annotation(
             ContextEntry::try_new(
-                component("context"),
+                component(745),
                 "payload",
                 ContextValue::Bytes(Arc::from(vec![7; 4096])),
             )
@@ -71,8 +77,30 @@ async fn handle(receiver: &mut dyn EnvelopeReceiver, sequence: u64) -> Result<()
 
 async fn retained_pressure(store: &dyn RetainedEnvelopeStore) -> Result<()> {
     let generation = store.acquire_generation()?;
-    store.append(generation, &root("source", 1, &[1])).await?;
-    store.append(generation, &root("source", 2, &[2])).await?;
+    store
+        .append(
+            generation,
+            &root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[1],
+            ),
+        )
+        .await?;
+    store
+        .append(
+            generation,
+            &root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                2,
+                &[2],
+            ),
+        )
+        .await?;
     store.acknowledge(generation, 1).await?;
     assert!(matches!(
         store.append(generation, &large(3)).await,
@@ -93,11 +121,36 @@ async fn retained_pressure(store: &dyn RetainedEnvelopeStore) -> Result<()> {
         Err(PipeError::PositionUnavailable { oldest: 3, .. })
     ));
     assert!(matches!(
-        store.append(generation, &root("source", 4, &[4])).await,
+        store
+            .append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    4,
+                    &[4]
+                )
+            )
+            .await,
         Err(PipeError::CapacityExhausted)
     ));
     store.acknowledge(generation, 3).await?;
-    assert_eq!(store.append(generation, &root("source", 4, &[4])).await?, 4);
+    assert_eq!(
+        store
+            .append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    4,
+                    &[4]
+                )
+            )
+            .await?,
+        4
+    );
     assert_eq!(
         store
             .next(generation, 3)
@@ -114,8 +167,24 @@ async fn qos_pressure(channel: &Arc<QosChannel>) -> Result<()> {
     let mut slow = subscribe(channel, "slow")?;
     let mut fast_receiver = fast.pipe.take_receiver()?;
     let mut slow_receiver = slow.pipe.take_receiver()?;
-    channel.publish(&root("source", 1, &[1])).await?;
-    channel.publish(&root("source", 2, &[2])).await?;
+    channel
+        .publish(&root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ))
+        .await?;
+    channel
+        .publish(&root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            2,
+            &[2],
+        ))
+        .await?;
     let oversized = large(3);
     for _ in 0..128 {
         let mut cancelled = Box::pin(channel.publish(&oversized));
@@ -136,7 +205,13 @@ async fn qos_pressure(channel: &Arc<QosChannel>) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), publishers.join_next())
         .await?
         .context("oversized publication task")???;
-    let next = root("source", 4, &[4]);
+    let next = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        4,
+        &[4],
+    );
     let producer = channel.clone();
     publishers.spawn(async move { producer.publish(&next).await });
     assert!(publishers.try_join_next().is_none());
@@ -161,7 +236,15 @@ async fn qos_pressure(channel: &Arc<QosChannel>) -> Result<()> {
 }
 
 async fn memory_pressure() -> Result<()> {
-    let limit = nonzero(2 * size(&root("source", 1, &[1])));
+    let limit = nonzero(
+        2 * size(&root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        )),
+    );
     let retained =
         MemoryEnvelopeStore::new_with_byte_budget(nonzero(8), RetentionPolicy::Backpressure, limit);
     assert_eq!(retained.max_bytes(), Some(limit));
@@ -189,7 +272,15 @@ async fn byte_quota_waits_for_handling_and_every_subscriber_multi_thread() -> Re
 
 #[tokio::test]
 async fn lossy_byte_pruning_reports_exact_gaps_and_keeps_an_oversized_singleton() -> Result<()> {
-    let limit = nonzero(2 * size(&root("source", 1, &[1])));
+    let limit = nonzero(
+        2 * size(&root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        )),
+    );
     let store =
         MemoryEnvelopeStore::new_with_byte_budget(nonzero(8), RetentionPolicy::PruneOldest, limit);
     let generation = store.acquire_generation()?;
@@ -199,7 +290,23 @@ async fn lossy_byte_pruning_reports_exact_gaps_and_keeps_an_oversized_singleton(
     )?;
     let mut slow = subscribe(&channel, "slow")?;
     let mut receiver = slow.pipe.take_receiver()?;
-    for event in [root("source", 1, &[1]), root("source", 2, &[2]), large(3)] {
+    for event in [
+        root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ),
+        root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            2,
+            &[2],
+        ),
+        large(3),
+    ] {
         store.append(generation, &event).await?;
         channel.publish(&event).await?;
     }
@@ -250,7 +357,7 @@ async fn retirement_releases_bytes_but_cancelled_publication_does_not_consume_th
 mod durable {
     use super::*;
     use drasi_core::computation::{ComputationIndexProvider, ComputationIndexes};
-    use drasi_core::interface::OutboxPageLimits;
+    use drasi_core::interface::{OutboxPageLimits, OutputPartition};
     use drasi_index_rocksdb::{
         computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
     };
@@ -265,7 +372,9 @@ mod durable {
                 RocksDbMemoryBudget::from_total_budget_bytes(32 << 20)?,
             ),
         );
-        Ok(provider.create_indexes("byte-budgets", "journal").await?)
+        Ok(provider
+            .create_indexes("byte-budgets", &component(750))
+            .await?)
     }
 
     fn codec() -> Result<EnvelopeCodec> {
@@ -318,7 +427,13 @@ mod durable {
                 let envelope = if sequence == 7 {
                     large(sequence)
                 } else {
-                    root("source", sequence, &[sequence as u16])
+                    root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        sequence,
+                        &[sequence as u16],
+                    )
                 };
                 store.append(generation, &envelope).await?;
             }
@@ -329,7 +444,18 @@ mod durable {
             store.acknowledge(generation, 4).await?;
             for sequence in 18..=21 {
                 store
-                    .append(generation, &root("source", sequence, &[sequence as u16]))
+                    .append(
+                        generation,
+                        &root(
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            "source",
+                            sequence,
+                            &[sequence as u16],
+                        ),
+                    )
                     .await?;
             }
             store.shutdown().await?;
@@ -371,7 +497,15 @@ mod durable {
         let directory = tempfile::tempdir()?;
         let store = paged_retained(
             directory.path(),
-            Some(nonzero(2 * size(&root("source", 1, &[1])))),
+            Some(nonzero(
+                2 * size(&root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[1],
+                )),
+            )),
         )
         .await?;
         retained_pressure(&store).await?;
@@ -400,7 +534,18 @@ mod durable {
             let generation = store.acquire_generation()?;
             for sequence in 1..=17 {
                 store
-                    .append(generation, &root("source", sequence, &[sequence as u16]))
+                    .append(
+                        generation,
+                        &root(
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            "source",
+                            sequence,
+                            &[sequence as u16],
+                        ),
+                    )
                     .await?;
             }
             store.shutdown().await?;
@@ -410,7 +555,11 @@ mod durable {
             indexes
                 .outbox_writer()
                 .expect("outbox")
-                .append("edge", corrupt_position, b"invalid frame")
+                .append(
+                    &OutputPartition::Journal("edge".into()),
+                    corrupt_position,
+                    b"invalid frame",
+                )
                 .await?;
             indexes.indexes().session_control.commit().await?;
             let store = IndexedEnvelopeStore::try_new_with_options(
@@ -460,7 +609,7 @@ mod durable {
         QosRecoveryOptions::Admission(AdmissionOptions {
             construction_scope: "instance".into(),
             graph_id: "byte-budget".into(),
-            component_id: component("source"),
+            component_id: component(77),
             failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
             max_producers: nonzero(2),
             receipts_per_producer: nonzero(8),
@@ -489,7 +638,13 @@ mod durable {
     }
 
     fn positioned(sequence: u64) -> ChangeEnvelope {
-        let envelope = root("source", sequence, &[sequence as u16]);
+        let envelope = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            sequence,
+            &[sequence as u16],
+        );
         envelope.derive(
             envelope.id().clone(),
             envelope.changes().clone(),
@@ -500,7 +655,7 @@ mod durable {
 
     async fn admitted_outputs(path: &Path) -> Result<Vec<ChangeEnvelope>> {
         let channel = paged_qos(path, admission_options()).await?;
-        let session = channel.register_producer(component("client")).await?;
+        let session = channel.register_producer(component(748)).await?;
         for sequence in 1..=17 {
             channel
                 .admit(&session, sequence, &positioned(sequence))
@@ -560,7 +715,7 @@ mod durable {
         for subscriber in ["fast", "slow"] {
             let group = SharedStorageGroup::new(
                 "shared",
-                component("producer"),
+                component(749),
                 indexes(&directory.path().join("shared")).await?,
             )?;
             let channel = shared_journal(&group).await?;
@@ -626,7 +781,7 @@ mod durable {
         let inputs = admitted_outputs(&directory.path().join("inputs")).await?;
         let group = SharedStorageGroup::new(
             "shared",
-            component("producer"),
+            component(749),
             indexes(&directory.path().join("shared")).await?,
         )?;
         let channel = shared_journal(&group).await?;
@@ -644,7 +799,7 @@ mod durable {
                     .resources()
                     .outbox_writer()
                     .expect("outbox")
-                    .append("events", 17, b"corrupt")
+                    .append(&OutputPartition::Journal("events".into()), 17, b"corrupt")
                     .await?;
                 Ok(())
             })
@@ -710,8 +865,7 @@ mod durable {
         let inputs = admitted_outputs(&directory.path().join("inputs")).await?;
         let path = directory.path().join("shared");
         let capacity = nonzero(4);
-        let group =
-            SharedStorageGroup::new("shared", component("producer"), indexes(&path).await?)?;
+        let group = SharedStorageGroup::new("shared", component(749), indexes(&path).await?)?;
         let channel = shared_journal_with_capacity(&group, capacity).await?;
         for input in &inputs[..4] {
             channel.publish(input).await?;
@@ -745,8 +899,7 @@ mod durable {
         group.shutdown().await?;
         drop((receivers, pipes, channel, group));
 
-        let group =
-            SharedStorageGroup::new("shared", component("producer"), indexes(&path).await?)?;
+        let group = SharedStorageGroup::new("shared", component(749), indexes(&path).await?)?;
         let channel = shared_journal_with_capacity(&group, capacity).await?;
         assert_shared_window(&channel, capacity, 5, [5, 5]).await?;
         assert_eq!(channel.progress().await?.earliest_available, Some(2));
@@ -769,11 +922,8 @@ mod durable {
             let mut completed = [0u64; 2];
             for (session, until) in [inputs.len() / 2, inputs.len()].into_iter().enumerate() {
                 let last = session == 1;
-                let group = SharedStorageGroup::new(
-                    "shared",
-                    component("producer"),
-                    indexes(&path).await?,
-                )?;
+                let group =
+                    SharedStorageGroup::new("shared", component(749), indexes(&path).await?)?;
                 let channel = shared_journal_with_capacity(&group, capacity).await?;
                 assert_shared_window(&channel, capacity, accepted, completed).await?;
                 let mut pipes = Vec::new();
@@ -854,7 +1004,16 @@ mod durable {
         }
         assert_eq!(channel.progress().await?.earliest_available, Some(1));
         assert_eq!(channel.publish(&positioned(1)).await?.position(), Some(1));
-        assert!(channel.publish(&root("source", 1, &[999])).await.is_err());
+        assert!(channel
+            .publish(&root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[999]
+            ))
+            .await
+            .is_err());
         fast.control.cancel();
         drop(receiver);
         channel.shutdown().await?;
@@ -887,7 +1046,7 @@ mod durable {
     async fn paged_qos_preserves_admission_and_output_replay_receipts() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let channel = paged_qos(directory.path(), admission_options()).await?;
-        let session = channel.register_producer(component("client")).await?;
+        let session = channel.register_producer(component(748)).await?;
         for sequence in 1..=17 {
             channel
                 .admit(&session, sequence, &positioned(sequence))
@@ -918,13 +1077,14 @@ mod durable {
             receipt_capacity: nonzero(8),
         });
         let outputs = admitted_outputs(&directory.path().join("source")).await?;
-        let channel = paged_qos(directory.path(), recovery.clone()).await?;
+        let path = directory.path().join("replay");
+        let channel = paged_qos(&path, recovery.clone()).await?;
         for envelope in &outputs {
             channel.publish(envelope).await?;
         }
         channel.shutdown().await?;
         drop(channel);
-        let channel = paged_qos(directory.path(), recovery).await?;
+        let channel = paged_qos(&path, recovery).await?;
         assert_eq!(channel.publish(&outputs[16]).await?.position(), Some(17));
         assert!(channel.publish(&outputs[0]).await.is_err());
         for subscriber in ["fast", "slow"] {
@@ -1014,7 +1174,7 @@ mod durable {
             let directory = tempfile::tempdir()?;
             let channel = paged_qos(directory.path(), recovery.clone()).await?;
             let session = if matches!(recovery, QosRecoveryOptions::Admission(_)) {
-                Some(channel.register_producer(component("client")).await?)
+                Some(channel.register_producer(component(748)).await?)
             } else {
                 None
             };
@@ -1046,7 +1206,7 @@ mod durable {
             resources
                 .outbox_writer()
                 .expect("outbox")
-                .append("edge", 9, &invalid)
+                .append(&OutputPartition::Journal("edge".into()), 9, &invalid)
                 .await?;
             resources.indexes().session_control.commit().await?;
             resources.cleanup().expect("cleanup").shutdown().await?;
@@ -1063,10 +1223,32 @@ mod durable {
     async fn real_persistent_journals_charge_binary_size_not_storage_json_and_preserve_acknowledgements(
     ) -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let limit = nonzero(2 * size(&root("source", 1, &[1])));
+        let limit = nonzero(
+            2 * size(&root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[1],
+            )),
+        );
         assert_ne!(
-            size(&root("source", 1, &[1])),
-            codec()?.encode(&root("source", 1, &[1]))?.len()
+            size(&root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[1]
+            )),
+            codec()?
+                .encode(&root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[1]
+                ))?
+                .len()
         );
         let store = retained(&directory.path().join("retained"), limit).await?;
         retained_pressure(&store).await?;
@@ -1115,17 +1297,56 @@ mod durable {
     #[tokio::test]
     async fn smaller_reopened_budgets_preserve_existing_pending_history() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let event_size = size(&root("source", 1, &[1]));
+        let event_size = size(&root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ));
         let store = retained(directory.path(), nonzero(2 * event_size)).await?;
         let generation = store.acquire_generation()?;
-        store.append(generation, &root("source", 1, &[1])).await?;
-        store.append(generation, &root("source", 2, &[2])).await?;
+        store
+            .append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[1],
+                ),
+            )
+            .await?;
+        store
+            .append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    2,
+                    &[2],
+                ),
+            )
+            .await?;
         store.shutdown().await?;
         drop(store);
         let store = retained(directory.path(), nonzero(event_size)).await?;
         let generation = store.acquire_generation()?;
         assert!(matches!(
-            store.append(generation, &root("source", 3, &[3])).await,
+            store
+                .append(
+                    generation,
+                    &root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        3,
+                        &[3]
+                    )
+                )
+                .await,
             Err(PipeError::CapacityExhausted)
         ));
         assert_eq!(
@@ -1137,7 +1358,18 @@ mod durable {
             1
         );
         store.acknowledge(generation, 2).await?;
-        store.append(generation, &root("source", 3, &[3])).await?;
+        store
+            .append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    3,
+                    &[3],
+                ),
+            )
+            .await?;
         store.shutdown().await?;
         Ok(())
     }
@@ -1148,8 +1380,14 @@ mod durable {
         let directory = tempfile::tempdir()?;
         let options = admission_options();
         let channel = qos(directory.path(), nonzero(1), options.clone()).await?;
-        let session = channel.register_producer(component("client")).await?;
-        let first = root("source", 1, &[1]);
+        let session = channel.register_producer(component(748)).await?;
+        let first = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        );
         let receipt = channel.admit(&session, 1, &first).await?;
         assert_eq!(channel.admit(&session, 1, &first).await?, receipt);
         assert!(matches!(

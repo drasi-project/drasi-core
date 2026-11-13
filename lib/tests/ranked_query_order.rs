@@ -66,16 +66,18 @@ struct Subscription {
 }
 #[derive(Clone)]
 struct OrderedSource {
-    id: String,
+    id: drasi_core_types::ComponentId,
+    namespace: Arc<str>,
     status: ComponentStatusHandle,
     sequence: Arc<AtomicU64>,
     subscription_count: Arc<AtomicUsize>,
-    subscribers: Arc<Mutex<BTreeMap<String, Subscription>>>,
+    subscribers: Arc<Mutex<BTreeMap<drasi_core_types::ComponentId, Subscription>>>,
 }
 impl OrderedSource {
-    fn new(id: &str) -> Self {
+    fn new(namespace: &str, id: drasi_core_types::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
+            namespace: Arc::from(namespace),
             status: ComponentStatusHandle::new(id),
             sequence: Arc::new(AtomicU64::new(1)),
             subscription_count: Arc::new(AtomicUsize::new(0)),
@@ -98,13 +100,13 @@ impl OrderedSource {
             SourceEvent::Change(SourceChange::Insert {
                 element: Element::Node {
                     metadata: ElementMetadata {
-                        reference: ElementReference::new(&self.id, &sequence.to_string()),
+                        reference: ElementReference::new(&self.namespace, &sequence.to_string()),
                         labels: Arc::from([Arc::from("Item")]),
                         // Deliberately unrelated to the reported wrapper time.
                         effective_from: 50_000 - sequence,
                     },
                     properties: ElementPropertyMap::from(serde_json::json!({
-                        "origin": self.id, "sequence": sequence,
+                        "origin": self.namespace, "sequence": sequence,
                     })),
                 },
             }),
@@ -178,7 +180,7 @@ impl OrderedSource {
 }
 #[async_trait]
 impl Source for OrderedSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.id
     }
     fn type_name(&self) -> &str {
@@ -190,7 +192,7 @@ impl Source for OrderedSource {
     fn supports_replay(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
@@ -236,11 +238,28 @@ impl Source for OrderedSource {
 }
 
 async fn scenario() {
-    let z = OrderedSource::new("z-source");
-    let a = OrderedSource::new("a-source");
-    let earlier = OrderedSource::new("early");
-    let quiet = OrderedSource::new("quiet");
+    let z = OrderedSource::new(
+        "z-source",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000035c")
+            .expect("fixture UUID"),
+    );
+    let a = OrderedSource::new(
+        "a-source",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000035d")
+            .expect("fixture UUID"),
+    );
+    let earlier = OrderedSource::new(
+        "early",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000035e")
+            .expect("fixture UUID"),
+    );
+    let quiet = OrderedSource::new(
+        "quiet",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002f2")
+            .expect("fixture UUID"),
+    );
     let mut builder = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -253,24 +272,40 @@ async fn scenario() {
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(z.clone())
-        .with_source(a.clone())
-        .with_source(earlier.clone())
-        .with_source(quiet.clone());
+        .with_source(
+            drasi_core_types::ComponentName::try_new("z-source").expect("fixture component name"),
+            z.clone(),
+        )
+        .with_source(
+            drasi_core_types::ComponentName::try_new("a-source").expect("fixture component name"),
+            a.clone(),
+        )
+        .with_source(
+            drasi_core_types::ComponentName::try_new("early").expect("fixture component name"),
+            earlier.clone(),
+        )
+        .with_source(
+            drasi_core_types::ComponentName::try_new("quiet").expect("fixture component name"),
+            quiet.clone(),
+        );
     for (id, sources) in [
         ("z-first", ["z-source", "a-source", "early", "quiet"]),
         ("a-first", ["a-source", "z-source", "early", "quiet"]),
     ] {
-        let mut query = drasi_lib::Query::cypher(id)
+        let query_name =
+            drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
+        let mut query = drasi_lib::Query::cypher(query_name)
             .query("MATCH (n:Item) RETURN n.origin AS origin, n.sequence AS sequence")
             .with_priority_queue_capacity(16)
             .with_outbox_capacity(32)
             .enable_bootstrap(true)
             .auto_start(true);
         for source in sources {
-            query = query.from_input(source);
+            query = query.from_input_by_name(
+                drasi_core_types::ComponentName::try_new(source).expect("fixture component name"),
+            );
         }
-        builder = builder.with_query(query.build());
+        builder = builder.with_query(query.build().expect("valid ranked query"));
     }
     let core = builder.build().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), core.start())
@@ -294,12 +329,17 @@ async fn scenario() {
         source.release_bootstrap().await;
     }
     for id in ["z-first", "a-first"] {
-        core.computation_component(id)
-            .expect("query belongs to the computation graph")
-            .wait_started()
+        let query_name =
+            drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
+        let query_handle = core
+            .component_by_name(&query_name)
+            .expect("query belongs to the computation graph");
+        query_handle.wait_started().await.unwrap();
+        let query = core
+            .query_manager()
+            .get_query_instance_by_name(&query_name)
             .await
             .unwrap();
-        let query = core.query_manager().get_query_instance(id).await.unwrap();
         let outbox = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let outbox = query.fetch_outbox(0).await.unwrap();
@@ -317,8 +357,18 @@ async fn scenario() {
             vec![("early", 1), ("a-source", 1), ("a-source", 2), ("z-source", 1), ("z-source", 2)]
         };
         for ((origin, source_sequence), result) in expected.into_iter().zip(&outbox.results) {
-            assert_eq!(result.query_id, id);
-            assert_eq!(result.metadata["source_id"], origin);
+            assert_eq!(result.query_id, query_handle.id().clone());
+            let source_id = core
+                .component_by_name(&drasi_lib::ComponentName::try_new(origin).unwrap())
+                .unwrap()
+                .id()
+                .clone();
+            assert_eq!(
+                result.metadata["input_origin"],
+                serde_json::json!(drasi_computation_contracts::QueryInputOrigin::Source(
+                    source_id
+                ))
+            );
             assert_eq!(result.results.len(), 1);
             let drasi_lib::channels::ResultDiff::Add { data, .. } = &result.results[0] else {
                 panic!("expected add")
@@ -349,8 +399,14 @@ async fn scenario() {
         loop {
             let mut stopped = true;
             for source in ["z-source", "a-source", "early", "quiet"] {
-                stopped &=
-                    core.get_source_status(source).await.unwrap() == ComponentStatus::Stopped;
+                stopped &= core
+                    .get_source_status_by_name(
+                        &drasi_core_types::ComponentName::try_new(source)
+                            .expect("fixture component name"),
+                    )
+                    .await
+                    .unwrap()
+                    == ComponentStatus::Stopped;
             }
             if stopped {
                 break;
@@ -376,7 +432,13 @@ async fn scenario() {
         source.release_bootstrap().await;
     }
     for id in ["z-first", "a-first"] {
-        let query = core.query_manager().get_query_instance(id).await.unwrap();
+        let query_name =
+            drasi_core_types::ComponentName::try_new(id).expect("fixture component name");
+        let query = core
+            .query_manager()
+            .get_query_instance_by_name(&query_name)
+            .await
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let snapshot = query.fetch_snapshot().await.unwrap();
@@ -403,15 +465,20 @@ async fn query_specific_source_ranks_do_not_use_lexical_or_effective_time_orderi
 
 #[tokio::test]
 async fn scheduled_batches_keep_original_source_provenance() {
-    let source = OrderedSource::new("source");
-    let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
-            .with_source(source.clone())
-            .with_query(drasi_lib::Query::cypher("timed")
+    let source = OrderedSource::new(
+        "source",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
+    let core = DrasiLib::builder().with_allow_external_component_ids(true).with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
+            .with_source(drasi_core_types::ComponentName::try_new("source").expect("fixture component name"), source.clone())
+            .with_query(drasi_lib::Query::cypher(drasi_core_types::ComponentName::try_new("timed").expect("fixture component name"))
                 .query("MATCH (n:Item) WHERE drasi.trueFor(n.ready, duration({seconds:5})) RETURN n.name AS name")
-                .from_input("source")
+                .from_input_by_name(drasi_core_types::ComponentName::try_new("source").expect("fixture component name"))
                 .enable_bootstrap(true)
                 .auto_start(true)
-                .build())
+                .build()
+                .expect("valid scheduled query"))
             .build().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), core.start())
         .await
@@ -437,7 +504,9 @@ async fn scheduled_batches_keep_original_source_provenance() {
     source.release_bootstrap().await;
     let query = core
         .query_manager()
-        .get_query_instance("timed")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("timed").expect("fixture component name"),
+        )
         .await
         .unwrap();
     let results = tokio::time::timeout(Duration::from_secs(5), async {
@@ -453,8 +522,19 @@ async fn scheduled_batches_keep_original_source_provenance() {
     .unwrap();
     for (index, result) in results.iter().enumerate() {
         assert_eq!(result.sequence, index as u64 + 1);
-        assert_eq!(result.query_id, "timed");
-        assert_eq!(result.metadata["source_id"], "source");
+        assert_eq!(
+            result.query_id,
+            core.component_by_name(&drasi_lib::ComponentName::try_new("timed").unwrap())
+                .unwrap()
+                .id()
+                .clone()
+        );
+        assert_eq!(
+            result.metadata["input_origin"],
+            serde_json::json!(drasi_computation_contracts::QueryInputOrigin::Scheduled(
+                ElementReference::new("source", &format!("node-{index}"))
+            ))
+        );
         assert!(result.profiling.is_some());
         let [drasi_lib::channels::ResultDiff::Add { data, .. }] = result.results.as_slice() else {
             panic!("expected one scheduled add");
@@ -467,12 +547,17 @@ async fn scheduled_batches_keep_original_source_provenance() {
 #[tokio::test]
 async fn source_framework_sequence_is_shared_before_fanout_and_preserves_resume_floors() {
     use drasi_lib::sources::{SourceBase, SourceBaseParams};
-    let source = SourceBase::new(SourceBaseParams::new("shared")).unwrap();
+    let source = SourceBase::new(SourceBaseParams::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a9")
+            .expect("fixture UUID"),
+    ))
+    .unwrap();
     let mut first = source.try_test_subscribe().await.unwrap();
     let mut second = source.try_test_subscribe().await.unwrap();
     let event = |sequence| {
         SourceEventWrapper::with_profiling(
-            "shared".into(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a9")
+                .expect("fixture UUID"),
             SourceEvent::Change(SourceChange::Insert {
                 element: Element::Node {
                     metadata: ElementMetadata {
@@ -508,8 +593,14 @@ async fn source_framework_sequence_is_shared_before_fanout_and_preserves_resume_
     let response = source
         .subscribe_with_bootstrap(
             &SourceSubscriptionSettings {
-                source_id: "shared".into(),
-                query_id: "resumed".into(),
+                source_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-0000000001a9",
+                )
+                .expect("fixture UUID"),
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-000000000360",
+                )
+                .expect("fixture UUID"),
                 nodes: Default::default(),
                 relations: Default::default(),
                 enable_bootstrap: false,

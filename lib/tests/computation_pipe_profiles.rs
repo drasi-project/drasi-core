@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::sync::{
@@ -47,7 +51,13 @@ async fn broadcast_retains_exact_capacity_and_reports_lag_without_faking_backpre
     drop(pipe);
     for sequence in 1..=5 {
         sender
-            .send(root("source", sequence, &[sequence as u16]))
+            .send(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                sequence,
+                &[sequence as u16],
+            ))
             .await
             .expect("nonblocking send");
     }
@@ -79,7 +89,13 @@ async fn broadcast_retains_exact_capacity_and_reports_lag_without_faking_backpre
     assert_eq!((metrics.delivered, metrics.queued), (3, 0));
     assert!(matches!(
         sender
-            .send(root("source", 6, &[6]))
+            .send(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                6,
+                &[6]
+            ))
             .await
             .expect_err("closed")
             .error,
@@ -97,8 +113,23 @@ async fn explicitly_lossy_broadcast_policy_continues_after_recorded_gap() {
     let sender = pipe.sender();
     let control = pipe.control();
     let mut receiver = pipe.take_receiver().expect("receiver");
-    sender.send(root("source", 1, &[1])).await.expect("one");
-    let original = root("source", 2, &[2]);
+    sender
+        .send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ))
+        .await
+        .expect("one");
+    let original = root(
+        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        "source",
+        2,
+        &[2],
+    );
     sender.send(original.clone()).await.expect("two");
     let (mut envelope, ack) = receiver
         .receive()
@@ -109,13 +140,26 @@ async fn explicitly_lossy_broadcast_policy_continues_after_recorded_gap() {
     assert!(ack.is_none());
     assert!(Arc::ptr_eq(envelope.event(), original.event()));
     envelope
-        .append_annotation(annotation("sink"))
+        .append_annotation(annotation(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+            "sink",
+        ))
         .expect("annotation");
     assert_eq!(original.annotations().len(), 1);
     assert_eq!(envelope.annotations().len(), 2);
     assert_eq!(control.metrics().expect("metrics").discarded, 1);
     drop(receiver);
-    assert!(sender.send(root("source", 3, &[3])).await.is_err());
+    assert!(sender
+        .send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            3,
+            &[3]
+        ))
+        .await
+        .is_err());
 }
 
 struct LimitedSender {
@@ -150,7 +194,15 @@ async fn batch_failure_preserves_accepted_receipts_failed_event_and_unattempted_
     let failure = sender
         .send_batch(
             (1..=5)
-                .map(|sequence| root("source", sequence, &[1]))
+                .map(|sequence| {
+                    root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        sequence,
+                        &[1],
+                    )
+                })
                 .collect(),
         )
         .await
@@ -198,8 +250,25 @@ async fn bounded_batch_backpressure_metrics_and_cancellation_are_explicit() {
     let sender = pipe.sender();
     let control = pipe.control();
     let mut receiver = pipe.take_receiver().expect("receiver");
-    sender.send(root("source", 1, &[1])).await.expect("first");
-    let mut blocked = Box::pin(sender.send(root("source", 2, &[2])));
+    sender
+        .send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ))
+        .await
+        .expect("first");
+    let mut blocked = Box::pin(
+        sender.send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            2,
+            &[2],
+        )),
+    );
     assert!(futures::poll!(&mut blocked).is_pending());
     assert_eq!(control.metrics().expect("metrics").blocked_sends, 1);
     control.cancel();
@@ -317,14 +386,20 @@ async fn event_time_merge_orders_available_stream_heads_without_reordering_a_pro
     let ready = Arc::new(tokio::sync::Notify::new());
     let received = Received::default();
     let mut builder = ComputationGraph::builder("event-time-merge")
-        .sink(Box::new(PrimedSink {
-            descriptor: descriptor("sink", &["a", "b"], &[]),
+        .fixture_sink(Box::new(PrimedSink {
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["a", "b"],
+                &[],
+            ),
             completed: completed.clone(),
             ready: ready.clone(),
             received: received.clone(),
         }))
-        .input_merge(component("sink"), InputMergePolicy::EventTimeAcrossStreams);
+        .input_merge(component(101), InputMergePolicy::EventTimeAcrossStreams);
     for (name, times) in [("a", [50, 10]), ("b", [30, 60])] {
+        let component_id = fixture_support::component_id(if name == "a" { 1 } else { 2 });
         let events = times
             .into_iter()
             .enumerate()
@@ -340,14 +415,23 @@ async fn event_time_merge_orders_available_stream_heads_without_reordering_a_pro
             })
             .collect();
         builder = builder
-            .source(Box::new(DrainingSource {
-                inner: FiniteSource::new(name, events),
+            .fixture_source(Box::new(DrainingSource {
+                inner: FiniteSource::new(component_id.clone(), events),
                 completed: completed.clone(),
                 ready: ready.clone(),
             }))
-            .bind_stream(endpoint(name, "out"), stream(name))
+            .bind_stream(endpoint(&component_id, "out"), stream(name))
             .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint("sink", name)),
+                EdgeDefinition::new(
+                    endpoint(&component_id, "out"),
+                    endpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000065",
+                        )
+                        .expect("fixture UUID"),
+                        name,
+                    ),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 2 }),
             );
     }

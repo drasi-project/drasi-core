@@ -22,6 +22,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use drasi_core::models::SourceChange;
+use drasi_core_types::{ComponentId, StorageScope};
 use drasi_ffi_primitives::{
     FfiWalAppendResult, FfiWalEntry, FfiWalOptionalU64Result, FfiWalReadResult, FfiWalU64Result,
 };
@@ -30,10 +31,10 @@ use drasi_plugin_sdk::ffi::vtables::WalProviderVtable;
 use drasi_plugin_sdk::ffi::{FfiResult, FfiStr};
 
 /// Wraps an FFI body in `catch_unwind` and returns `default` on panic.
-fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
+fn ffi_guard<T, F: FnOnce() -> T>(default: impl FnOnce() -> T, f: F) -> T {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(v) => v,
-        Err(_) => default,
+        Err(_) => default(),
     }
 }
 
@@ -85,51 +86,93 @@ fn clone_provider(state: *mut c_void) -> (Arc<dyn WalProvider>, tokio::runtime::
     (bridge_state.provider.clone(), bridge_state.runtime.clone())
 }
 
+fn decode_address(scope: FfiStr, source: FfiStr) -> Result<(StorageScope, ComponentId), String> {
+    if scope.ptr.is_null()
+        || scope.len == 0
+        || scope.len > 65_536
+        || source.ptr.is_null()
+        || source.len == 0
+        || source.len > 128
+    {
+        return Err("invalid WAL scope or component UUID buffer".into());
+    }
+    let scope = serde_json::from_slice(unsafe {
+        std::slice::from_raw_parts(scope.ptr.cast::<u8>(), scope.len)
+    })
+    .map_err(|error| format!("invalid WAL scope: {error}"))?;
+    let source = std::str::from_utf8(unsafe {
+        std::slice::from_raw_parts(source.ptr.cast::<u8>(), source.len)
+    })
+    .map_err(|error| format!("invalid WAL component UUID encoding: {error}"))?;
+    let source = ComponentId::try_new(source).map_err(|error| error.to_string())?;
+    Ok((scope, source))
+}
+
 extern "C" fn wal_register(
     state: *mut c_void,
+    scope_json: FfiStr,
     source_id: FfiStr,
     max_events: u64,
     capacity_policy: u8,
 ) -> FfiResult {
-    ffi_guard(FfiResult::err("wal_register: panic".to_string()), || {
-        let (provider, rt) = clone_provider(state);
-        let source_id = unsafe { source_id.to_string() };
-        let policy = match capacity_policy {
-            0 => CapacityPolicy::RejectIncoming,
-            1 => CapacityPolicy::OverwriteOldest,
-            _ => return FfiResult::err(format!("invalid capacity_policy: {capacity_policy}")),
-        };
-        let config = WriteAheadLogConfig {
-            max_events,
-            capacity_policy: policy,
-        };
-        match rt.block_on(provider.register(&source_id, config)) {
-            Ok(()) => FfiResult::ok(),
-            Err(e) => FfiResult::err(e.to_string()),
-        }
-    })
+    ffi_guard(
+        || FfiResult::err("wal_register: panic".to_string()),
+        || {
+            let (provider, rt) = clone_provider(state);
+            let (scope, source_id) = match decode_address(scope_json, source_id) {
+                Ok(address) => address,
+                Err(error) => return FfiResult::err(error),
+            };
+            let policy = match capacity_policy {
+                0 => CapacityPolicy::RejectIncoming,
+                1 => CapacityPolicy::OverwriteOldest,
+                _ => return FfiResult::err(format!("invalid capacity_policy: {capacity_policy}")),
+            };
+            let config = WriteAheadLogConfig {
+                max_events,
+                capacity_policy: policy,
+            };
+            match rt.block_on(provider.register(&scope, &source_id, config)) {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        },
+    )
 }
 
 extern "C" fn wal_append(
     state: *mut c_void,
+    scope_json: FfiStr,
     source_id: FfiStr,
-    event: *const c_void,
+    event: *const u8,
+    event_len: usize,
 ) -> FfiWalAppendResult {
     ffi_guard(
-        FfiWalAppendResult::err("wal_append: panic".to_string()),
+        || FfiWalAppendResult::err("wal_append: panic".to_string()),
         || {
-            if event.is_null() {
-                return FfiWalAppendResult::err("wal_append: null event pointer".to_string());
+            if event.is_null()
+                || event_len == 0
+                || event_len > drasi_plugin_sdk::ffi::payload::MAX_FFI_PAYLOAD_BYTES
+            {
+                return FfiWalAppendResult::err("wal_append: invalid event buffer".to_string());
             }
             let (provider, rt) = clone_provider(state);
-            let source_id = unsafe { source_id.to_string() };
-            // Safety: the plugin passes a valid *const SourceChange that it owns.
-            // We only borrow it for the duration of this call.
-            let source_change = unsafe { &*(event as *const SourceChange) };
-            match rt.block_on(provider.append(&source_id, source_change)) {
+            let (scope, source_id) = match decode_address(scope_json, source_id) {
+                Ok(address) => address,
+                Err(error) => return FfiWalAppendResult::err(error),
+            };
+            let source_change: SourceChange = match rmp_serde::from_slice(unsafe {
+                std::slice::from_raw_parts(event, event_len)
+            }) {
+                Ok(change) => change,
+                Err(error) => {
+                    return FfiWalAppendResult::err(format!("invalid WAL event: {error}"))
+                }
+            };
+            match rt.block_on(provider.append(&scope, &source_id, &source_change)) {
                 Ok(seq) => FfiWalAppendResult::ok(seq),
                 Err(drasi_lib::wal::WalError::CapacityExhausted(_)) => {
-                    FfiWalAppendResult::capacity_exhausted(&source_id)
+                    FfiWalAppendResult::capacity_exhausted(source_id.as_str())
                 }
                 Err(e) => FfiWalAppendResult::err(e.to_string()),
             }
@@ -139,27 +182,46 @@ extern "C" fn wal_append(
 
 extern "C" fn wal_read_from(
     state: *mut c_void,
+    scope_json: FfiStr,
     source_id: FfiStr,
     sequence: u64,
 ) -> FfiWalReadResult {
     ffi_guard(
-        FfiWalReadResult::err("wal_read_from: panic".to_string()),
+        || FfiWalReadResult::err("wal_read_from: panic".to_string()),
         || {
             let (provider, rt) = clone_provider(state);
-            let source_id = unsafe { source_id.to_string() };
-            match rt.block_on(provider.read_from(&source_id, sequence)) {
+            let (scope, source_id) = match decode_address(scope_json, source_id) {
+                Ok(address) => address,
+                Err(error) => return FfiWalReadResult::err(error),
+            };
+            match rt.block_on(provider.read_from(&scope, &source_id, sequence)) {
                 Ok(events) => {
                     if events.is_empty() {
                         return FfiWalReadResult::empty();
                     }
-                    let ffi_entries: Vec<FfiWalEntry> = events
+                    let encoded: Result<Vec<_>, String> = events
                         .into_iter()
-                        .map(|(seq, change)| {
-                            // Heap-allocate the SourceChange; plugin takes ownership
-                            let boxed = Box::new(change);
+                        .map(|(sequence, change)| {
+                            let bytes = rmp_serde::to_vec_named(&change)
+                                .map_err(|error| error.to_string())?;
+                            if bytes.len() > drasi_plugin_sdk::ffi::payload::MAX_FFI_PAYLOAD_BYTES {
+                                return Err("WAL event exceeds the FFI payload limit".into());
+                            }
+                            Ok((sequence, bytes))
+                        })
+                        .collect();
+                    let encoded = match encoded {
+                        Ok(encoded) => encoded,
+                        Err(error) => return FfiWalReadResult::err(error),
+                    };
+                    let ffi_entries = encoded
+                        .into_iter()
+                        .map(|(sequence, bytes)| {
+                            let event_len = bytes.len();
                             FfiWalEntry {
-                                sequence: seq,
-                                event: Box::into_raw(boxed) as *mut c_void,
+                                sequence,
+                                event: Box::into_raw(bytes.into_boxed_slice()).cast::<u8>(),
+                                event_len,
                             }
                         })
                         .collect();
@@ -173,15 +235,19 @@ extern "C" fn wal_read_from(
 
 extern "C" fn wal_prune_up_to(
     state: *mut c_void,
+    scope_json: FfiStr,
     source_id: FfiStr,
     sequence: u64,
 ) -> FfiWalU64Result {
     ffi_guard(
-        FfiWalU64Result::err("wal_prune_up_to: panic".to_string()),
+        || FfiWalU64Result::err("wal_prune_up_to: panic".to_string()),
         || {
             let (provider, rt) = clone_provider(state);
-            let source_id = unsafe { source_id.to_string() };
-            match rt.block_on(provider.prune_up_to(&source_id, sequence)) {
+            let (scope, source_id) = match decode_address(scope_json, source_id) {
+                Ok(address) => address,
+                Err(error) => return FfiWalU64Result::err(error),
+            };
+            match rt.block_on(provider.prune_up_to(&scope, &source_id, sequence)) {
                 Ok(count) => FfiWalU64Result::ok(count),
                 Err(e) => FfiWalU64Result::err(e.to_string()),
             }
@@ -189,13 +255,20 @@ extern "C" fn wal_prune_up_to(
     )
 }
 
-extern "C" fn wal_head_sequence(state: *mut c_void, source_id: FfiStr) -> FfiWalU64Result {
+extern "C" fn wal_head_sequence(
+    state: *mut c_void,
+    scope_json: FfiStr,
+    source_id: FfiStr,
+) -> FfiWalU64Result {
     ffi_guard(
-        FfiWalU64Result::err("wal_head_sequence: panic".to_string()),
+        || FfiWalU64Result::err("wal_head_sequence: panic".to_string()),
         || {
             let (provider, rt) = clone_provider(state);
-            let source_id = unsafe { source_id.to_string() };
-            match rt.block_on(provider.head_sequence(&source_id)) {
+            let (scope, source_id) = match decode_address(scope_json, source_id) {
+                Ok(address) => address,
+                Err(error) => return FfiWalU64Result::err(error),
+            };
+            match rt.block_on(provider.head_sequence(&scope, &source_id)) {
                 Ok(seq) => FfiWalU64Result::ok(seq),
                 Err(e) => FfiWalU64Result::err(e.to_string()),
             }
@@ -205,14 +278,18 @@ extern "C" fn wal_head_sequence(state: *mut c_void, source_id: FfiStr) -> FfiWal
 
 extern "C" fn wal_oldest_sequence(
     state: *mut c_void,
+    scope_json: FfiStr,
     source_id: FfiStr,
 ) -> FfiWalOptionalU64Result {
     ffi_guard(
-        FfiWalOptionalU64Result::err("wal_oldest_sequence: panic".to_string()),
+        || FfiWalOptionalU64Result::err("wal_oldest_sequence: panic".to_string()),
         || {
             let (provider, rt) = clone_provider(state);
-            let source_id = unsafe { source_id.to_string() };
-            match rt.block_on(provider.oldest_sequence(&source_id)) {
+            let (scope, source_id) = match decode_address(scope_json, source_id) {
+                Ok(address) => address,
+                Err(error) => return FfiWalOptionalU64Result::err(error),
+            };
+            match rt.block_on(provider.oldest_sequence(&scope, &source_id)) {
                 Ok(Some(seq)) => FfiWalOptionalU64Result::some(seq),
                 Ok(None) => FfiWalOptionalU64Result::none(),
                 Err(e) => FfiWalOptionalU64Result::err(e.to_string()),
@@ -221,13 +298,20 @@ extern "C" fn wal_oldest_sequence(
     )
 }
 
-extern "C" fn wal_event_count(state: *mut c_void, source_id: FfiStr) -> FfiWalU64Result {
+extern "C" fn wal_event_count(
+    state: *mut c_void,
+    scope_json: FfiStr,
+    source_id: FfiStr,
+) -> FfiWalU64Result {
     ffi_guard(
-        FfiWalU64Result::err("wal_event_count: panic".to_string()),
+        || FfiWalU64Result::err("wal_event_count: panic".to_string()),
         || {
             let (provider, rt) = clone_provider(state);
-            let source_id = unsafe { source_id.to_string() };
-            match rt.block_on(provider.event_count(&source_id)) {
+            let (scope, source_id) = match decode_address(scope_json, source_id) {
+                Ok(address) => address,
+                Err(error) => return FfiWalU64Result::err(error),
+            };
+            match rt.block_on(provider.event_count(&scope, &source_id)) {
                 Ok(count) => FfiWalU64Result::ok(count),
                 Err(e) => FfiWalU64Result::err(e.to_string()),
             }
@@ -235,26 +319,44 @@ extern "C" fn wal_event_count(state: *mut c_void, source_id: FfiStr) -> FfiWalU6
     )
 }
 
-extern "C" fn wal_delete_wal(state: *mut c_void, source_id: FfiStr) -> FfiResult {
-    ffi_guard(FfiResult::err("wal_delete_wal: panic".to_string()), || {
-        let (provider, rt) = clone_provider(state);
-        let source_id = unsafe { source_id.to_string() };
-        match rt.block_on(provider.delete_wal(&source_id)) {
-            Ok(()) => FfiResult::ok(),
-            Err(e) => FfiResult::err(e.to_string()),
-        }
-    })
+extern "C" fn wal_delete_wal(
+    state: *mut c_void,
+    scope_json: FfiStr,
+    source_id: FfiStr,
+) -> FfiResult {
+    ffi_guard(
+        || FfiResult::err("wal_delete_wal: panic".to_string()),
+        || {
+            let (provider, rt) = clone_provider(state);
+            let (scope, source_id) = match decode_address(scope_json, source_id) {
+                Ok(address) => address,
+                Err(error) => return FfiResult::err(error),
+            };
+            match rt.block_on(provider.delete_wal(&scope, &source_id)) {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        },
+    )
 }
 
 extern "C" fn wal_free_read_result(entries: *mut FfiWalEntry, count: usize, capacity: usize) {
-    if entries.is_null() || count == 0 {
+    if entries.is_null() {
         return;
     }
-    // Reconstruct the Vec with correct capacity to free the buffer memory.
-    // Note: the SourceChange pointers within entries have already been consumed
-    // by the plugin (Box::from_raw), so we only free the entries array itself.
+    if count > capacity || !entries.is_aligned() {
+        log::error!("Invalid WAL read-result release buffer");
+        return;
+    }
     unsafe {
-        let _ = Vec::from_raw_parts(entries, count, capacity);
+        for entry in Vec::from_raw_parts(entries, count, capacity) {
+            if !entry.event.is_null() {
+                drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                    entry.event,
+                    entry.event_len,
+                )));
+            }
+        }
     }
 }
 

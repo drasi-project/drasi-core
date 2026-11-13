@@ -20,6 +20,27 @@ use std::{
     sync::Arc,
 };
 
+/// UUID component identities and required, separately editable component names.
+pub const DESIRED_TOPOLOGY_VERSION: u32 = 3;
+
+/// Opaque reference to a process-local object, never a component ID or name.
+/// Serializing a token does not make its object reconstructible or grant access.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BindingToken(uuid::Uuid);
+
+impl BindingToken {
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for BindingToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DesiredPipe {
     Bounded {
@@ -34,7 +55,7 @@ pub enum DesiredPipe {
     Qos(crate::computation::v1::QosPipeConfig),
     Ranked(crate::computation::v1::RankedInputPipeConfig),
     External {
-        binding: String,
+        binding: BindingToken,
         capabilities: Vec<PipeCapability>,
         capacity: Option<usize>,
         #[serde(default)]
@@ -47,12 +68,14 @@ pub enum DesiredPipe {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ComponentConstruction {
     Factory(ComponentSpecification),
-    External { binding: String },
+    External { binding: BindingToken },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredComponent {
+    /// Graph-owned metadata; never part of a plugin's immutable descriptor.
+    pub name: ComponentName,
     pub descriptor: ComponentDescriptor,
     pub role: ComponentRole,
     pub completion: Option<SinkCompletion>,
@@ -115,6 +138,28 @@ pub struct FactoryRegistry {
 }
 
 impl FactoryRegistry {
+    pub(crate) fn select_query_factory(
+        &mut self,
+        factory: Arc<dyn ComponentFactory>,
+    ) -> GraphResult<()> {
+        let identity = factory.descriptor().implementation.clone();
+        if let Some(existing) = self.factories.get(&identity) {
+            if Arc::ptr_eq(existing, &factory) {
+                return Ok(());
+            }
+            if !Self::standard()
+                .get(&identity)
+                .is_some_and(|standard| Arc::ptr_eq(existing, standard))
+            {
+                return Err(topology(
+                    "ordinary and managed query factories disagree on an implementation identity",
+                ));
+            }
+        }
+        self.factories.insert(identity, factory);
+        Ok(())
+    }
+
     pub(crate) fn merge(&mut self, other: Self) -> GraphResult<()> {
         for (identity, factory) in other.factories {
             if let Some(existing) = self.factories.get(&identity) {
@@ -207,8 +252,8 @@ impl FactoryRegistry {
 #[derive(Default)]
 pub struct TopologyBindings {
     pub factories: FactoryRegistry,
-    pub components: BTreeMap<String, ConstructedComponent>,
-    pub pipes: BTreeMap<String, Box<dyn PipeProvider>>,
+    pub components: BTreeMap<BindingToken, ConstructedComponent>,
+    pub pipes: BTreeMap<BindingToken, Box<dyn PipeProvider>>,
     pub resources: BTreeMap<ResourceId, ResourceHandle>,
     /// Constructed after dependencies are available and old owners are released.
     /// An ID cannot also have an already constructed resource binding.
@@ -221,12 +266,65 @@ pub struct TopologyBindings {
     pub validation_error: Option<Arc<GraphError>>,
     /// Management has durably accepted these declarations. Resolve missing
     /// factories and invalid component configuration as node creation outcomes.
+    /// Queue new component creation on the controller after committing the graph,
+    /// so initializers cannot block the configuration owner's next acceptance.
     #[doc(hidden)]
     pub deferred_management_validation: bool,
 }
 
 impl TopologyBindings {
+    pub(crate) fn validate_merge(&self, other: &Self) -> GraphResult<()> {
+        let mut factories = self.factories.clone();
+        factories.merge(other.factories.clone())?;
+        if self
+            .components
+            .keys()
+            .any(|id| other.components.contains_key(id))
+        {
+            return Err(topology("duplicate external component binding"));
+        }
+        if self.pipes.keys().any(|id| other.pipes.contains_key(id)) {
+            return Err(topology("duplicate external pipe binding"));
+        }
+        for (id, resource) in &other.resources {
+            if self
+                .resources
+                .get(id)
+                .is_some_and(|existing| !existing.same_shared_instance(resource))
+            {
+                return Err(topology(format!("resource {id} has conflicting bindings")));
+            }
+        }
+        if self
+            .resource_constructors
+            .keys()
+            .any(|id| other.resource_constructors.contains_key(id))
+        {
+            return Err(topology("duplicate resource constructor"));
+        }
+        if self
+            .resources
+            .keys()
+            .chain(other.resources.keys())
+            .any(|id| {
+                self.resource_constructors.contains_key(id)
+                    || other.resource_constructors.contains_key(id)
+            })
+        {
+            return Err(topology(
+                "a resource cannot have both an object and a constructor",
+            ));
+        }
+        if self.validation_error.is_some() && other.validation_error.is_some() {
+            return Err(topology(
+                "cannot combine multiple invalid component batches",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn merge(&mut self, other: Self) -> GraphResult<()> {
+        self.validate_merge(&other)?;
         self.factories.merge(other.factories)?;
         for (id, component) in other.components {
             if self.components.insert(id, component).is_some() {
@@ -367,6 +465,40 @@ impl DesiredPipe {
 }
 
 impl DesiredTopology {
+    pub(crate) fn validate_query_reset_consumers(&self, query: &ComponentId) -> anyhow::Result<()> {
+        let mut downstream = BTreeSet::from([query.clone()]);
+        loop {
+            let before = downstream.len();
+            for edge in self
+                .relationships
+                .iter()
+                .chain(&self.boundary_relationships)
+            {
+                if downstream.contains(&edge.definition.from.component) {
+                    downstream.insert(edge.definition.to.component.clone());
+                }
+            }
+            for (from, to) in &self.subscriptions {
+                if downstream.contains(from) {
+                    downstream.insert(to.clone());
+                }
+            }
+            if downstream.len() == before {
+                break;
+            }
+        }
+        anyhow::ensure!(
+            !self
+                .components
+                .iter()
+                .any(|node| node.descriptor.id() != query
+                    && downstream.contains(node.descriptor.id())
+                    && node.descriptor.semantic_kind()
+                        == Some(crate::computation::v1::ComponentSemanticKind::Query)),
+            "query reconstruction does not support downstream query state reset"
+        );
+        Ok(())
+    }
     pub(crate) fn resolve_required_relationships(&mut self) {
         let known: BTreeSet<_> = self
             .components
@@ -447,10 +579,7 @@ impl DesiredTopology {
     pub fn from_json(value: &str) -> GraphResult<Self> {
         let topology: Self = serde_json::from_str(value)
             .map_err(|error| super::topology(format!("invalid desired topology: {error}")))?;
-        if topology.version != 1 {
-            return Err(super::topology("unsupported desired topology version"));
-        }
-        validate_identifier("graph", &topology.graph_id)?;
+        topology.validate_structure()?;
         Ok(topology)
     }
     pub fn build(&self, bindings: TopologyBindings) -> GraphResult<ComputationGraph> {
@@ -461,9 +590,6 @@ impl DesiredTopology {
 
     fn build_resolved(&self, mut bindings: TopologyBindings) -> GraphResult<ComputationGraph> {
         super::controller::reconcile::validate_definition(self)?;
-        if self.version != 1 {
-            return Err(topology("unsupported desired topology version"));
-        }
         if self
             .resource_configurations
             .keys()
@@ -506,11 +632,12 @@ impl DesiredTopology {
                         .get(&spec.implementation)
                         .cloned();
                     if let Some(factory) = factory {
-                        builder = builder.component(spec.clone(), factory);
+                        builder = builder.component(component.name.clone(), spec.clone(), factory);
                     } else {
-                        builder
-                            .components
-                            .push(Component::Unresolved(Arc::new(component.clone())));
+                        builder.components.push((
+                            component.name.clone(),
+                            Component::Unresolved(Arc::new(component.clone())),
+                        ));
                     }
                 }
                 ComponentConstruction::External { binding } => {
@@ -527,7 +654,9 @@ impl DesiredTopology {
                             "external component {binding} does not match its desired interface"
                         )));
                     }
-                    builder.components.push(instance.0);
+                    builder
+                        .components
+                        .push((component.name.clone(), instance.0));
                 }
             }
             builder = builder
@@ -606,10 +735,7 @@ impl DesiredTopology {
             .iter()
             .filter_map(|component| {
                 if let ComponentConstruction::External { binding } = &component.construction {
-                    Some((
-                        component.descriptor.id().clone(),
-                        Arc::from(binding.as_str()),
-                    ))
+                    Some((component.descriptor.id().clone(), binding.clone()))
                 } else {
                     None
                 }
@@ -714,10 +840,11 @@ impl GraphSnapshot {
                         ComponentConstruction::Factory(spec.clone())
                     }
                     None => ComponentConstruction::External {
-                        binding: self.external_bindings[node.descriptor.id()].to_string(),
+                        binding: self.external_bindings[node.descriptor.id()].clone(),
                     },
                 };
                 DesiredComponent {
+                    name: node.name.clone(),
                     descriptor: node.descriptor.clone(),
                     role: node.role,
                     completion: node.completion,
@@ -768,7 +895,7 @@ impl GraphSnapshot {
         }
         resources::include_dependencies(&self.resource_dependencies, &mut resources);
         Ok(DesiredTopology {
-            version: 1,
+            version: DESIRED_TOPOLOGY_VERSION,
             graph_id: self.id.to_string(),
             revision: self.revision,
             components,

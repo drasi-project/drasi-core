@@ -21,6 +21,7 @@ impl Default for SqliteSourceFactory {
                         (
                             Arc::from("rest_api"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Object,
                                 required: false,
                                 secret: false,
@@ -29,6 +30,7 @@ impl Default for SqliteSourceFactory {
                         (
                             Arc::from("coordinated_snapshot"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Boolean,
                                 required: false,
                                 secret: false,
@@ -37,6 +39,7 @@ impl Default for SqliteSourceFactory {
                         (
                             Arc::from("stream"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::String,
                                 required: true,
                                 secret: false,
@@ -45,6 +48,7 @@ impl Default for SqliteSourceFactory {
                         (
                             Arc::from("settings"),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Object,
                                 required: true,
                                 secret: false,

@@ -16,11 +16,11 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 ## Done means (the main CI gates)
 - `cargo fmt -- --check` passes
 - `make clippy` passes - do NOT use `cargo clippy --all-features` (the bundled-jq feature has a flaky source build); warnings are errors
-- `make check-native-dependencies` passes - only the query transformer may depend on the evaluator and query parsers; native plugins and their SDK must not pull in drasi-lib or the legacy SDK
-- Build the required shared libraries with `make build-native-network-plugins build-test-plugins`.
-- Run the remaining workspace tests with `cargo test --workspace --exclude drasi-host-sdk --exclude drasi-lib --exclude lib-integration-tests -- --test-threads=1`.
-- Run `bash lib/tests/run-runtime-parity.sh` for library, no-default, recovery/middleware, integration, Host SDK and selected backend profiles. CI runs both this command and the workspace command above.
-- `make test-host-sdk` runs the focused Host SDK checks. Container-backed tests need a running Docker-compatible daemon; this workspace uses Podman.
+- `make test` runs the foundational crate gate, shared-library preparation, workspace tests and all Host SDK targets. It is also the primary CI command.
+- `make test-host-sdk` prepares matching plugins and runs every Host SDK target with its test-support, registry, fetcher and watcher features.
+- Supported additional feature configurations are explicit Cargo commands in `.github/workflows/test.yml`, not custom test profiles.
+- Container tests are ignored by default and discovered by `.github/workflows/test-integration.yml`. Local runs need a Docker-compatible daemon; this workspace uses Podman. SQL Server and prepared cross-OS peers require their documented explicit configuration.
+- Keep the root `Cargo.lock` tracked and use `--locked` for reproducible builds and tests.
 - Commits are signed off: `git commit -s` (DCO)
 - CI additionally gates PRs on: a typos check, cargo-audit, cargo-deny, FFI layout tests, and coverage
 

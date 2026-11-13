@@ -84,7 +84,7 @@ impl EnvelopeSink for Service {
 
 fn service() -> Service {
     Service {
-        descriptor: ComponentDescriptor::try_new(ComponentId::try_new("service").unwrap(), vec![])
+        descriptor: ComponentDescriptor::try_new(crate::test_helpers::component_id(432), vec![])
             .unwrap(),
         starts: Arc::new(AtomicUsize::new(0)),
         stops: Arc::new(AtomicUsize::new(0)),
@@ -97,6 +97,7 @@ fn service() -> Service {
 
 async fn instance(component: Service) -> DrasiLib {
     DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             crate::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -111,7 +112,10 @@ async fn instance(component: Service) -> DrasiLib {
         )
         .with_components(
             ComponentBatch::builder()
-                .service(Box::new(component))
+                .service(
+                    ComponentName::try_new("service").unwrap(),
+                    Box::new(component),
+                )
                 .build()
                 .unwrap()
                 .auto_start(false),
@@ -126,12 +130,15 @@ fn group(core: &DrasiLib, ids: &[&str]) -> ComponentHandle {
     let members: BTreeMap<_, _> = ids
         .iter()
         .map(|id| {
-            let handle = core.computation_component(id).unwrap();
+            let name = crate::ComponentName::try_new(*id).expect("fixture component name");
+            let handle = core.component_by_name(&name).unwrap();
             (handle.id().clone(), handle.generation())
         })
         .collect();
+    let anchor_name = crate::ComponentName::try_new(ids[0]).expect("fixture component name");
+    let anchor = core.component_by_name(&anchor_name).unwrap();
     control
-        .component_handle(&ComponentId::try_new(ids[0]).unwrap())
+        .component_handle_by_id(anchor.id())
         .unwrap()
         .with_lifecycle_members(members)
         .unwrap()
@@ -275,11 +282,11 @@ async fn stop_during_failure_cleanup() {
     )
     .unwrap();
     let from = Endpoint::new(
-        ComponentId::try_new("source").unwrap(),
+        crate::test_helpers::component_id(77),
         PortId::try_new("out").unwrap(),
     );
     let to = Endpoint::new(
-        ComponentId::try_new("sink").unwrap(),
+        crate::test_helpers::component_id(101),
         PortId::try_new("in").unwrap(),
     );
     source.descriptor = ComponentDescriptor::try_new(
@@ -306,8 +313,8 @@ async fn stop_during_failure_cleanup() {
     sink.stop_gate = Some(stop_gate.clone());
     let edge = EdgeDefinition::new(from.clone(), to);
     let batch = ComponentBatch::builder()
-        .source(Box::new(source))
-        .sink(Box::new(sink))
+        .source(ComponentName::try_new("source").unwrap(), Box::new(source))
+        .sink(ComponentName::try_new("sink").unwrap(), Box::new(sink))
         .bind_stream(from, StreamId::try_new("source/out").unwrap())
         .connect(edge.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
         .relationship_policy(
@@ -321,6 +328,7 @@ async fn stop_during_failure_cleanup() {
         .unwrap()
         .auto_start(false);
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             crate::computation::v1::FactoryRegistry::standard()
                 .get(

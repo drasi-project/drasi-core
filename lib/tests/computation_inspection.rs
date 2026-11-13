@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 use computation_support::*;
 use drasi_lib::{computation::v1::*, DrasiLib};
@@ -25,19 +29,42 @@ use std::{
 
 fn graph() -> ComputationGraph {
     ComputationGraph::builder("inspected")
-        .source(Box::new(FiniteSource::new("source", vec![])))
-        .sink(Box::new(CollectSink::new(
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![],
+        )))
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             Arc::new(Mutex::new(Vec::new())),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .relationship_policy(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             RelationshipPolicy {
                 required_for_binding: false,
                 orphan_permitted: true,
@@ -50,19 +77,42 @@ fn graph() -> ComputationGraph {
 
 fn components() -> ComponentBatch {
     ComponentBatch::builder()
-        .source(Box::new(FiniteSource::new("source", vec![])))
-        .sink(Box::new(CollectSink::new(
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![],
+        )))
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             Arc::new(Mutex::new(Vec::new())),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .relationship_policy(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             RelationshipPolicy {
                 required_for_binding: false,
                 orphan_permitted: true,
@@ -76,6 +126,7 @@ fn components() -> ComponentBatch {
 #[tokio::test]
 async fn inspection_history_is_coherent_for_instance_components() {
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -91,51 +142,43 @@ async fn inspection_history_is_coherent_for_instance_components() {
         .build()
         .await
         .expect("instance");
-    drasi
-        .add_components(components())
-        .await
-        .expect("register")
-        .ensure_committed()
-        .expect("desired topology committed");
+    drasi.add_components(components()).await.expect("register");
     let inspector = drasi.inspect_computation_graph().expect("inspection");
     let before = inspector.snapshot().sequence;
     let control = drasi.computation_control().unwrap();
     let revision = control.desired_snapshot().revision;
-    control
-        .set_lifecycle_policy(
-            revision,
-            component("sink"),
-            LifecyclePolicy { auto_start: false },
-        )
-        .await
-        .expect("desired update");
+    apply_topology(&drasi, |topology| {
+        topology
+            .components
+            .iter_mut()
+            .find(|node| node.descriptor.id() == &component(101))
+            .expect("sink definition")
+            .lifecycle
+            .auto_start = false;
+    })
+    .await;
     let snapshots = inspector.history(before).expect("history");
     assert!(!snapshots.is_empty());
     for snapshot in snapshots {
         assert_eq!(snapshot.desired.revision, snapshot.observed.revision);
     }
-    assert_eq!(
-        inspector.snapshot().desired.revision,
-        GraphRevision(revision.0 + 1)
-    );
+    assert!(inspector.snapshot().desired.revision.0 > revision.0);
+    assert!(!control.desired_snapshot().lifecycle_policies[&component(101)].auto_start);
     assert!(control
         .desired_snapshot()
         .nodes
         .iter()
-        .any(|node| node.descriptor.id().as_str() == "sink"));
+        .any(|node| node.descriptor.id() == &component(101)));
     drasi.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
 async fn computation_topology_is_queryable_as_typed_graph_changes() {
     let target = graph();
-    let mut source = ComputationTopologySource::new(
-        component("topology"),
-        stream("topology"),
-        target.inspector(),
-    );
+    let mut source =
+        ComputationTopologySource::new(component(733), stream("topology"), target.inspector());
     let mut query = ContinuousQueryTransformer::new(ContinuousQueryDefinition {
-        graph_id: "inspection-query".into(), id: component("query"),
+        graph_id: "inspection-query".into(), id: component(46),
         query: "MATCH (g:ComputationGraph)-[:HAS_COMPONENT]->(c:ComputationComponent) RETURN c.id AS id".into(),
         language: ComputationQueryLanguage::Cypher, output_stream: stream("query"),
         outbox_capacity: NonZeroUsize::new(16).expect("capacity"),
@@ -166,7 +209,7 @@ async fn computation_topology_is_queryable_as_typed_graph_changes() {
         .collect();
     assert_eq!(
         ids,
-        BTreeSet::from(["source".to_string(), "sink".to_string()])
+        BTreeSet::from([component(77).to_string(), component(101).to_string()])
     );
     source.stop().await.expect("stop source");
     query.stop().await.expect("stop query");
@@ -175,6 +218,7 @@ async fn computation_topology_is_queryable_as_typed_graph_changes() {
 #[tokio::test]
 async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit() {
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -193,36 +237,26 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
     drasi
         .add_components(components().auto_start(false))
         .await
-        .expect("register")
-        .ensure_committed()
-        .expect("desired topology committed");
+        .expect("register");
     let control = drasi.computation_control().unwrap();
-    let preview = control
-        .preview(
-            control.desired_snapshot().revision,
-            vec![DesiredMutation::Unbind {
-                edge: edge("source", "sink"),
-                policy: RemovalPolicy::Orphan,
-            }],
-        )
-        .await
-        .expect("preview");
-    control
-        .reconcile(preview, TopologyBindings::default())
-        .await
-        .expect("unbind")
-        .ensure_committed()
-        .expect("desired topology committed");
+    apply_topology(&drasi, |topology| {
+        let wanted = edge(&component(77), &component(101));
+        let index = topology
+            .relationships
+            .iter()
+            .position(|relationship| relationship.definition == wanted)
+            .expect("bound relationship");
+        let relationship = topology.relationships.remove(index);
+        topology.boundary_relationships.push(relationship);
+    })
+    .await;
     let inspector = control.inspector();
-    let mut source = ComputationTopologySource::new(
-        component("topology"),
-        stream("topology"),
-        inspector.clone(),
-    );
+    let mut source =
+        ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "orphan-inspection".into(),
-            id: component("query"),
+            id: component(46),
             query: "MATCH (r:ComputationRelationship) RETURN r.binding AS binding".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("query"),
@@ -278,17 +312,16 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
         "Declared"
     );
     for index in 0..270 {
-        let revision = control.desired_snapshot().revision;
-        control
-            .set_lifecycle_policy(
-                revision,
-                component("sink"),
-                LifecyclePolicy {
-                    auto_start: index % 2 == 0,
-                },
-            )
-            .await
-            .expect("policy");
+        apply_topology(&drasi, |topology| {
+            topology
+                .components
+                .iter_mut()
+                .find(|node| node.descriptor.id() == &component(101))
+                .expect("sink definition")
+                .lifecycle
+                .auto_start = index % 2 == 0;
+        })
+        .await;
     }
     assert!(
         inspector.history(0).is_err(),
@@ -297,4 +330,22 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
     source.stop().await.expect("topology stop");
     query.stop().await.expect("query stop");
     drasi.shutdown().await.expect("shutdown");
+}
+
+async fn apply_topology(drasi: &DrasiLib, edit: impl FnOnce(&mut DesiredTopology)) {
+    let mut current = drasi.desired_configuration().expect("owned configuration");
+    edit(&mut current.desired.topology);
+    drasi
+        .apply_desired_state(
+            current.revision,
+            format!("inspection-{}", current.revision),
+            current.desired,
+        )
+        .await
+        .expect("configuration acceptance");
+    let status = drasi
+        .reconcile_desired_state()
+        .await
+        .expect("reconciliation");
+    assert!(status.applied && status.error.is_none(), "{status:?}");
 }

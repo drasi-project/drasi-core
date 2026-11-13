@@ -14,6 +14,9 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
@@ -231,12 +234,8 @@ fn envelope(sequence: u64, operations: Vec<ChangeOperation>) -> Envelope {
 }
 
 fn entry(key: &str, value: ContextValue) -> ContextEntry {
-    ContextEntry::try_new(
-        ComponentId::try_new("transform").expect("valid fixture contributor"),
-        key,
-        value,
-    )
-    .expect("valid fixture context entry")
+    ContextEntry::try_new(fixture_support::component_id(429), key, value)
+        .expect("valid fixture context entry")
 }
 
 #[test]
@@ -253,7 +252,7 @@ fn public_identifiers_and_schema_versions_reject_invalid_inputs_without_repair()
         assert!(ChangeSetId::try_new(value, Bytes::from_static(b"x")).is_err());
         assert!(EnvelopeId::try_new(value, Bytes::from_static(b"x")).is_err());
         assert!(ContextEntry::try_new(
-            ComponentId::try_new("test").unwrap(),
+            fixture_support::component_id(81),
             value,
             ContextValue::Bool(true)
         )
@@ -668,7 +667,11 @@ fn context_branches_append_without_mutating_siblings_and_share_data() {
         history.iter().map(ContextEntry::key).collect::<Vec<_>>(),
         ["key", "key"]
     );
-    assert_eq!(history[0].contributor(), "transform");
+    assert_eq!(
+        history[0].contributor(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ad")
+            .expect("fixture UUID")
+    );
     assert!(
         matches!(history[0].value(), ContextValue::Bytes(value) if Arc::ptr_eq(&value, &bytes))
     );
@@ -817,7 +820,7 @@ fn port_negotiation_checks_directions_full_schema_and_both_requirements() {
     assert_eq!(fifo.supported().len(), 2);
     assert!(matches!(
         ComponentDescriptor::try_new(
-            ComponentId::try_new("duplicate").unwrap(),
+            fixture_support::component_id(1017),
             vec![
                 input.clone(),
                 PortDescriptor::new(
@@ -865,13 +868,10 @@ struct Lifecycle {
 }
 
 impl Lifecycle {
-    fn new(name: &str, ports: Vec<PortDescriptor>) -> Self {
+    fn new(id: ComponentId, ports: Vec<PortDescriptor>) -> Self {
         Self {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new(name).expect("valid fixture component ID"),
-                ports,
-            )
-            .expect("valid fixture component descriptor"),
+            descriptor: ComponentDescriptor::try_new(id, ports)
+                .expect("valid fixture component descriptor"),
             running: false,
         }
     }
@@ -988,7 +988,7 @@ impl EnvelopeSink for CustomSink {
 fn custom_sink(completion: SinkCompletion, observed: Arc<AtomicUsize>) -> Box<dyn EnvelopeSink> {
     Box::new(CustomSink {
         lifecycle: Lifecycle::new(
-            "sink",
+            fixture_support::component_id(3),
             vec![port("in", PortDirection::Input, PipeRequirements::default())],
         ),
         completion,
@@ -1000,7 +1000,7 @@ fn custom_sink(completion: SinkCompletion, observed: Arc<AtomicUsize>) -> Box<dy
 async fn external_stateful_components_are_object_safe_and_support_zero_one_many_outputs() {
     let mut source: Box<dyn EnvelopeSource> = Box::new(CustomSource {
         lifecycle: Lifecycle::new(
-            "source",
+            fixture_support::component_id(1),
             vec![port("out", PortDirection::Output, PipeRequirements::default())],
         ),
         events: VecDeque::from([
@@ -1011,7 +1011,7 @@ async fn external_stateful_components_are_object_safe_and_support_zero_one_many_
     });
     let mut transform: Box<dyn Transformer> = Box::new(CustomTransformer {
         lifecycle: Lifecycle::new(
-            "transform",
+            fixture_support::component_id(2),
             vec![
                 port("in", PortDirection::Input, PipeRequirements::default()),
                 port("out", PortDirection::Output, PipeRequirements::default()),
@@ -1025,7 +1025,10 @@ async fn external_stateful_components_are_object_safe_and_support_zero_one_many_
     source.start().await.unwrap();
     transform.start().await.unwrap();
     sink.start().await.unwrap();
-    assert_eq!(transform.descriptor().id().as_str(), "transform");
+    assert_eq!(
+        transform.descriptor().id(),
+        &fixture_support::component_id(2)
+    );
     let mut next_sequence = 0;
     for count in 0..3 {
         let input = source.next().await.unwrap().unwrap();

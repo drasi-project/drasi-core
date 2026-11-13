@@ -17,7 +17,6 @@
 //! coalesced batching, including the render-error fallback path.
 
 mod mock_server;
-mod mock_source;
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -27,20 +26,35 @@ use std::time::Duration;
 use chrono::Utc;
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::Reaction;
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{ComponentId, ComponentName, Query};
 use drasi_reaction_http::{
     AdaptiveBatchConfig, HttpCallExt, HttpQueryConfig, HttpReaction, TemplateSpec,
 };
-use mock_source::{MockSource, PropertyMapBuilder};
 use serde_json::json;
+use shared_tests::{
+    mock_source::PropertyMapBuilder, recovery_test_helpers::build_core_with_reaction,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
 
-fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
-    QueryResult::new(query_id.to_string(), 0, Utc::now(), diffs, HashMap::new())
+const Q1_ID: &str = "00000000-0000-0000-0000-00000000002b";
+const Q1_PATH: &str = "/changes/00000000-0000-0000-0000-00000000002b";
+
+fn make_query_result(query_id: drasi_core::ComponentId, diffs: Vec<ResultDiff>) -> QueryResult {
+    let name = match query_id.as_str() {
+        Q1_ID => "q1",
+        "00000000-0000-0000-0000-0000000003b4" => "source.orders",
+        "00000000-0000-0000-0000-0000000000e3" => "orders",
+        "00000000-0000-0000-0000-0000000003c9" => "shipments",
+        id => panic!("missing explicit fixture query name for {id}"),
+    };
+    let mut result = QueryResult::new(query_id, 0, Utc::now(), diffs, HashMap::new());
+    result.query_name =
+        Some(drasi_core::ComponentName::try_new(name).expect("fixture component name"));
+    result
 }
 
-async fn enqueue_add(r: &HttpReaction, query_id: &str, data: serde_json::Value) {
+async fn enqueue_add(r: &HttpReaction, query_id: drasi_core::ComponentId, data: serde_json::Value) {
     let qr = make_query_result(
         query_id,
         vec![ResultDiff::Add {
@@ -53,7 +67,7 @@ async fn enqueue_add(r: &HttpReaction, query_id: &str, data: serde_json::Value) 
 
 async fn enqueue_update(
     r: &HttpReaction,
-    query_id: &str,
+    query_id: drasi_core::ComponentId,
     before: serde_json::Value,
     after: serde_json::Value,
 ) {
@@ -70,7 +84,11 @@ async fn enqueue_update(
     r.enqueue_query_result(qr).await.expect("enqueue");
 }
 
-async fn enqueue_delete(r: &HttpReaction, query_id: &str, data: serde_json::Value) {
+async fn enqueue_delete(
+    r: &HttpReaction,
+    query_id: drasi_core::ComponentId,
+    data: serde_json::Value,
+) {
     let qr = make_query_result(
         query_id,
         vec![ResultDiff::Delete {
@@ -100,80 +118,6 @@ async fn wait_for_requests(server: &wiremock::MockServer, expected: usize, max_m
     }
 }
 
-#[tokio::test]
-async fn end_to_end_through_drasilib_delivers_to_http_server() -> Result<()> {
-    let server = mock_server::start().await;
-    Mock::given(method("POST"))
-        .and(path("/changes/people-query"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&server)
-        .await;
-
-    let (mock_source, handle) = MockSource::new("test-source")?;
-    let query = Query::cypher("people-query")
-        .query(
-            r#"
-            MATCH (p:Person)
-            RETURN p.name AS name, p.age AS age
-            "#,
-        )
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
-    let reaction = HttpReaction::builder("http-e2e")
-        .with_base_url(server.uri())
-        .with_query("people-query")
-        .build()?;
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_query_factory(
-                drasi_lib::computation::v1::FactoryRegistry::standard()
-                    .get(
-                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
-                            "drasi/continuous-query",
-                            "1",
-                        )
-                        .expect("reference query identity"),
-                    )
-                    .expect("reference query factory")
-                    .clone(),
-            )
-            .with_id("http-e2e-core")
-            .with_source(mock_source)
-            .with_query(query)
-            .with_reaction(reaction)
-            .build()
-            .await?,
-    );
-
-    core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let props = PropertyMapBuilder::new()
-        .with_string("name", "Ada")
-        .with_integer("age", 36)
-        .build();
-    handle
-        .send_node_insert("person-1", vec!["Person"], props)
-        .await?;
-
-    wait_for_requests(&server, 1, 5000).await;
-    core.stop().await?;
-
-    let reqs = server.received_requests().await.unwrap();
-    assert_eq!(reqs[0].url.path(), "/changes/people-query");
-    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
-    assert_eq!(body.get("operation"), Some(&json!("ADD")));
-    assert_eq!(body.get("queryId"), Some(&json!("people-query")));
-    assert_eq!(
-        body.get("after").and_then(|a| a.get("name")),
-        Some(&json!("Ada"))
-    );
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Standard mode
 // ---------------------------------------------------------------------------
@@ -182,26 +126,37 @@ async fn end_to_end_through_drasilib_delivers_to_http_server() -> Result<()> {
 async fn standard_default_fallback_posts_to_changes_query() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("standard-default")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000bb")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     assert!(!reqs.is_empty(), "expected at least one request");
-    assert_eq!(reqs[0].url.path(), "/changes/q1");
+    assert_eq!(reqs[0].url.path(), Q1_PATH);
     assert_eq!(reqs[0].method.as_str(), "POST");
     assert_eq!(
         reqs[0]
@@ -213,7 +168,8 @@ async fn standard_default_fallback_posts_to_changes_query() {
     // With no template, the body is the DefaultChangeNotification envelope.
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(body.get("operation"), Some(&json!("ADD")));
-    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("queryId"), Some(&json!(Q1_ID)));
+    assert_eq!(body.get("queryName"), Some(&json!("q1")));
     assert_eq!(body.get("after"), Some(&json!({"id": 1})));
     assert!(body.get("before").is_none(), "ADD must omit 'before'");
     let ts = body
@@ -243,21 +199,32 @@ async fn standard_uses_per_query_template() {
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("standard-template")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    added: Some(spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000bc")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                added: Some(spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 42})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 42}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
@@ -291,21 +258,32 @@ async fn standard_body_render_error_uses_default_envelope_on_configured_route() 
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("standard-fallback")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    added: Some(bad_spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000bd")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                added: Some(bad_spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
@@ -318,28 +296,39 @@ async fn standard_body_render_error_uses_default_envelope_on_configured_route() 
     );
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(body.get("operation"), Some(&json!("ADD")));
-    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("queryId"), Some(&json!(Q1_ID)));
 }
 
 #[tokio::test]
 async fn standard_authorization_header_sent_when_token_set() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("standard-auth")
-            .with_base_url(server.uri())
-            .with_token("xyz")
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000be")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_token("xyz")
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
@@ -375,23 +364,29 @@ async fn standard_update_template_receives_before_and_after() {
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("standard-update")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    updated: Some(spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000bf")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                updated: Some(spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
     enqueue_update(
         &r,
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         json!({"id":1,"v":"old"}),
         json!({"id":1,"v":"new"}),
     )
@@ -424,21 +419,32 @@ async fn standard_delete_template_receives_before() {
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("standard-delete")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    deleted: Some(spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c0")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                deleted: Some(spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_delete(&r, "q1", json!({"id":7})).await;
+    enqueue_delete(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id":7}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
@@ -457,7 +463,7 @@ async fn standard_delete_template_receives_before() {
 async fn standard_continues_after_server_error_under_auto_skip_gap() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(500))
         .mount(&server)
         .await;
@@ -466,21 +472,38 @@ async fn standard_continues_after_server_error_under_auto_skip_gap() {
     // running (favoring uptime). Under the default Strict policy the reaction
     // would fail-stop instead — see `standard_fail_stops_on_server_error_under_strict`.
     let r = Arc::new(
-        HttpReaction::builder("standard-5xx")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_recovery_policy(drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap)
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c1")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_recovery_policy(drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap)
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     // First result gets a 500; the reaction should log and keep running.
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
 
     // A second result must still be attempted (the loop did not exit).
-    enqueue_add(&r, "q1", json!({"id": 2})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 2}),
+    )
+    .await;
     wait_for_requests(&server, 4, 3000).await;
     r.stop().await.unwrap();
 
@@ -501,7 +524,7 @@ async fn standard_continues_after_server_error_under_auto_skip_gap() {
 async fn standard_fail_stops_on_server_error_under_strict() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(500))
         .mount(&server)
         .await;
@@ -510,15 +533,26 @@ async fn standard_fail_stops_on_server_error_under_strict() {
     // reaction to Error without advancing the checkpoint, so it replays from the
     // outbox on restart.
     let r = Arc::new(
-        HttpReaction::builder("standard-5xx-strict")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c2")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
 
     // The reaction should transition to Error within the retry window.
     let mut errored = false;
@@ -542,18 +576,21 @@ async fn standard_fail_stops_on_server_error_under_strict() {
 
 #[tokio::test]
 async fn adaptive_without_batch_endpoint_is_rejected() {
-    let err = HttpReaction::builder("adaptive-no-batch")
-        .with_base_url("http://localhost")
-        .with_query("q1")
-        .with_adaptive(AdaptiveBatchConfig {
-            adaptive_min_batch_size: 1,
-            adaptive_max_batch_size: 16,
-            adaptive_window_size: 10,
-            adaptive_batch_timeout_ms: 50,
-        })
-        .build()
-        .err()
-        .expect("adaptive mode should require batchEndpoint");
+    let err = HttpReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c3")
+            .expect("fixture UUID"),
+    )
+    .with_base_url("http://localhost")
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_adaptive(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 1,
+        adaptive_max_batch_size: 16,
+        adaptive_window_size: 10,
+        adaptive_batch_timeout_ms: 50,
+    })
+    .build()
+    .err()
+    .expect("adaptive mode should require batchEndpoint");
     assert!(
         err.to_string().contains("batchEndpoint"),
         "error should mention batchEndpoint: {err}"
@@ -570,24 +607,30 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("adaptive-batch")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_adaptive(AdaptiveBatchConfig {
-                adaptive_min_batch_size: 5,
-                adaptive_max_batch_size: 16,
-                adaptive_window_size: 10,
-                adaptive_batch_timeout_ms: 100,
-            })
-            .with_batch_endpoint("/batch")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c4")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 5,
+            adaptive_max_batch_size: 16,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 100,
+        })
+        .with_batch_endpoint("/batch")
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     // Send a burst quickly so the batcher coalesces into a multi-item batch.
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         (0..5)
             .map(|i| ResultDiff::Add {
                 data: json!({"id": i}),
@@ -634,7 +677,7 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
         );
         assert_eq!(
             item.get("queryId"),
-            Some(&json!("q1")),
+            Some(&json!(Q1_ID)),
             "item {i} should carry queryId"
         );
         assert_eq!(
@@ -680,24 +723,30 @@ async fn adaptive_with_output_template_renders_batch_items() {
     };
 
     let r = Arc::new(
-        HttpReaction::builder("adaptive-templated")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template("q1", template)
-            .with_adaptive(AdaptiveBatchConfig {
-                adaptive_min_batch_size: 3,
-                adaptive_max_batch_size: 16,
-                adaptive_window_size: 10,
-                adaptive_batch_timeout_ms: 100,
-            })
-            .with_batch_endpoint("/batch")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c5")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template("q1", template)
+        .with_adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 3,
+            adaptive_max_batch_size: 16,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 100,
+        })
+        .with_batch_endpoint("/batch")
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         (0..3)
             .map(|i| ResultDiff::Add {
                 data: json!({"id": i}),
@@ -755,24 +804,35 @@ async fn adaptive_flushes_partial_batch_on_timeout_below_min_size() {
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("adaptive-partial-flush")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_adaptive(AdaptiveBatchConfig {
-                // min is intentionally larger than what we will send, so the
-                // batch can only be emitted via the timeout path.
-                adaptive_min_batch_size: 10,
-                adaptive_max_batch_size: 100,
-                adaptive_window_size: 10,
-                adaptive_batch_timeout_ms: 100,
-            })
-            .with_batch_endpoint("/batch")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c6")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_adaptive(AdaptiveBatchConfig {
+            // min is intentionally larger than what we will send, so the
+            // batch can only be emitted via the timeout path.
+            adaptive_min_batch_size: 10,
+            adaptive_max_batch_size: 100,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 100,
+        })
+        .with_batch_endpoint("/batch")
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
 
     // 2 s is generous relative to the 100 ms timeout, eliminating flakiness
     // from CI scheduler jitter while still detecting a real regression.
@@ -793,7 +853,7 @@ async fn adaptive_flushes_partial_batch_on_timeout_below_min_size() {
         .expect("partial flush should still use BatchEnvelope");
     assert_eq!(batch.len(), 1);
     assert_eq!(batch[0].get("operation"), Some(&json!("ADD")));
-    assert_eq!(batch[0].get("queryId"), Some(&json!("q1")));
+    assert_eq!(batch[0].get("queryId"), Some(&json!(Q1_ID)));
     assert_eq!(batch[0].get("after"), Some(&json!({"id": 1})));
 }
 
@@ -840,26 +900,32 @@ async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
     };
 
     let r = Arc::new(
-        HttpReaction::builder("ssrf-guard")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    added: Some(ssrf_add),
-                    deleted: Some(safe_delete),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c7")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                added: Some(ssrf_add),
+                deleted: Some(safe_delete),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     // Single QueryResult with two diffs guarantees in-order processing by the
     // standard loop: SSRF first (rejected), then the safe Delete (delivered).
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         vec![
             ResultDiff::Add {
                 data: json!({"id": 1}),
@@ -899,20 +965,31 @@ async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
 async fn default_envelope_delete_carries_before_only() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("default-delete")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c8")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_delete(&r, "q1", json!({"id": 7})).await;
+    enqueue_delete(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 7}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
@@ -920,7 +997,7 @@ async fn default_envelope_delete_carries_before_only() {
     assert_eq!(reqs.len(), 1);
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(body.get("operation"), Some(&json!("DELETE")));
-    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("queryId"), Some(&json!(Q1_ID)));
     assert_eq!(body.get("before"), Some(&json!({"id": 7})));
     assert!(body.get("after").is_none(), "DELETE must omit 'after'");
 }
@@ -929,22 +1006,28 @@ async fn default_envelope_delete_carries_before_only() {
 async fn default_envelope_update_carries_before_and_after() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("default-update")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000c9")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
     enqueue_update(
         &r,
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         json!({"id": 1, "v": "old"}),
         json!({"id": 1, "v": "new"}),
     )
@@ -956,7 +1039,7 @@ async fn default_envelope_update_carries_before_and_after() {
     assert_eq!(reqs.len(), 1);
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(body.get("operation"), Some(&json!("UPDATE")));
-    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("queryId"), Some(&json!(Q1_ID)));
     assert_eq!(body.get("before"), Some(&json!({"id": 1, "v": "old"})));
     assert_eq!(body.get("after"), Some(&json!({"id": 1, "v": "new"})));
 }
@@ -965,23 +1048,29 @@ async fn default_envelope_update_carries_before_and_after() {
 async fn default_envelope_aggregation_first_emission_maps_to_update_without_before() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("default-agg")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000ca")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     // First emission of a grouping key (no prior value).
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         vec![ResultDiff::Aggregation {
             before: None,
             after: json!({"region": "north", "count": 1}),
@@ -997,7 +1086,7 @@ async fn default_envelope_aggregation_first_emission_maps_to_update_without_befo
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     // Aggregation is delivered as UPDATE (matches gRPC, Azure Storage, RabbitMQ).
     assert_eq!(body.get("operation"), Some(&json!("UPDATE")));
-    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("queryId"), Some(&json!(Q1_ID)));
     assert_eq!(
         body.get("after"),
         Some(&json!({"region": "north", "count": 1}))
@@ -1012,22 +1101,28 @@ async fn default_envelope_aggregation_first_emission_maps_to_update_without_befo
 async fn default_envelope_aggregation_change_carries_prior_aggregate_as_before() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("default-agg-change")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000cb")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         vec![ResultDiff::Aggregation {
             before: Some(json!({"region": "north", "count": 10})),
             after: json!({"region": "north", "count": 11}),
@@ -1058,17 +1153,22 @@ async fn noop_results_are_silently_dropped_without_emitting_requests() {
     // Only the safe ADD path is mounted. If Noops produced a request, it would
     // 404 against this server but still appear in received_requests().
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("noop-skip")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000cc")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
@@ -1077,7 +1177,8 @@ async fn noop_results_are_silently_dropped_without_emitting_requests() {
     // synchronization barrier proving the Noop has been processed
     // (and skipped, since only one request lands).
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         vec![
             ResultDiff::Noop,
             ResultDiff::Add {
@@ -1108,24 +1209,30 @@ async fn noop_results_are_silently_dropped_without_emitting_requests() {
 async fn default_envelope_carries_sequence_id_and_metadata() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("default-seq-meta")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000cd")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     let mut metadata = HashMap::new();
     metadata.insert("source".to_string(), json!("sensors"));
-    let qr = QueryResult::new(
-        "q1".to_string(),
+    let mut qr = QueryResult::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         99,
         Utc::now(),
         vec![ResultDiff::Add {
@@ -1134,6 +1241,7 @@ async fn default_envelope_carries_sequence_id_and_metadata() {
         }],
         metadata,
     );
+    qr.query_name = Some(drasi_core::ComponentName::try_new("q1").expect("fixture component name"));
     r.enqueue_query_result(qr).await.expect("enqueue");
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
@@ -1167,25 +1275,31 @@ async fn template_context_exposes_query_id_metadata_and_operation() {
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("ctx")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    added: Some(spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000ce")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                added: Some(spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     let mut metadata = HashMap::new();
     metadata.insert("source".to_string(), json!("sensors"));
-    let qr = QueryResult::new(
-        "q1".to_string(),
+    let mut qr = QueryResult::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         1,
         Utc::now(),
         vec![ResultDiff::Add {
@@ -1194,13 +1308,14 @@ async fn template_context_exposes_query_id_metadata_and_operation() {
         }],
         metadata,
     );
+    qr.query_name = Some(drasi_core::ComponentName::try_new("q1").expect("fixture component name"));
     r.enqueue_query_result(qr).await.expect("enqueue");
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
-    assert_eq!(body.get("q"), Some(&json!("q1")));
+    assert_eq!(body.get("q"), Some(&json!(Q1_ID)));
     assert_eq!(body.get("src"), Some(&json!("sensors")));
     assert_eq!(body.get("op"), Some(&json!("ADD")));
 }
@@ -1218,7 +1333,7 @@ async fn route_resolves_via_last_dotted_segment() {
         .mount(&server)
         .await;
 
-    // Route keyed by the bare segment "orders"; the wire query id is dotted.
+    // Route keyed by the bare segment "orders"; the query name is dotted.
     let spec = TemplateSpec {
         template: r#"{"ok":true}"#.to_string(),
         extension: HttpCallExt {
@@ -1228,21 +1343,32 @@ async fn route_resolves_via_last_dotted_segment() {
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("seg")
-            .with_base_url(server.uri())
-            .with_query("source.orders")
-            .with_query_template(
-                "orders",
-                HttpQueryConfig {
-                    added: Some(spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000cf")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("source.orders").expect("fixture component name"),
+        )
+        .with_query_template(
+            "orders",
+            HttpQueryConfig {
+                added: Some(spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "source.orders", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b4")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
@@ -1251,7 +1377,7 @@ async fn route_resolves_via_last_dotted_segment() {
     assert_eq!(
         reqs[0].url.path(),
         "/seg",
-        "the segment-keyed route should have matched the dotted query id"
+        "the segment-keyed route should have matched the dotted query name"
     );
 }
 
@@ -1264,27 +1390,38 @@ async fn standard_retries_transient_failure_then_succeeds() {
     let server = mock_server::start().await;
     // First matching request gets 503 (retryable), then 200.
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(503))
         .up_to_n_times(1)
         .with_priority(1)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("retry-then-ok")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d0")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 2, 3000).await;
     r.stop().await.unwrap();
 
@@ -1300,23 +1437,40 @@ async fn standard_retries_transient_failure_then_succeeds() {
 async fn standard_drops_permanent_4xx_and_continues() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(400))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("perm-4xx")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d1")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
     // Two separate events: a permanent 4xx must be dropped (not retried) and
     // processing must continue to the next event.
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
-    enqueue_add(&r, "q1", json!({"id": 2})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 2}),
+    )
+    .await;
     wait_for_requests(&server, 2, 3000).await;
     // Allow time for any (incorrect) retries to surface before asserting.
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1339,21 +1493,32 @@ async fn standard_auth_rejection_fail_stops_and_does_not_drop_event() {
     // Strict policy the reaction fail-stops so the un-acked event survives.
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(401))
         .mount(&server)
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("auth-401")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d2")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
 
     let mut errored = false;
     for _ in 0..50 {
@@ -1384,22 +1549,33 @@ async fn adaptive_auth_rejection_fail_stops_and_does_not_drop_event() {
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("adaptive-auth-401")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_adaptive(AdaptiveBatchConfig {
-                adaptive_min_batch_size: 1,
-                adaptive_max_batch_size: 16,
-                adaptive_window_size: 10,
-                adaptive_batch_timeout_ms: 50,
-            })
-            .with_batch_endpoint("/batch")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d3")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 16,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 50,
+        })
+        .with_batch_endpoint("/batch")
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
 
     let mut errored = false;
     for _ in 0..50 {
@@ -1436,21 +1612,32 @@ async fn standard_absolute_url_matching_base_is_allowed() {
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("abs-ok")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    added: Some(spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d4")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                added: Some(spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
@@ -1463,7 +1650,7 @@ async fn standard_absolute_url_matching_base_is_allowed() {
 async fn standard_url_render_failure_falls_back_to_changes_endpoint() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path(Q1_PATH))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
@@ -1479,27 +1666,38 @@ async fn standard_url_render_failure_falls_back_to_changes_endpoint() {
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("url-fallback")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    added: Some(spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d5")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                added: Some(spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
-    assert_eq!(reqs[0].url.path(), "/changes/q1");
+    assert_eq!(reqs[0].url.path(), Q1_PATH);
 }
 
 #[tokio::test]
@@ -1523,21 +1721,32 @@ async fn standard_header_render_failure_drops_only_that_header() {
         },
     };
     let r = Arc::new(
-        HttpReaction::builder("hdr-drop")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_query_template(
-                "q1",
-                HttpQueryConfig {
-                    added: Some(spec),
-                    ..Default::default()
-                },
-            )
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d6")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_query_template(
+            "q1",
+            HttpQueryConfig {
+                added: Some(spec),
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
@@ -1575,18 +1784,37 @@ async fn standard_routes_two_queries_to_distinct_endpoints() {
         ..Default::default()
     };
     let r = Arc::new(
-        HttpReaction::builder("multi-route")
-            .with_base_url(server.uri())
-            .with_query("orders")
-            .with_query("shipments")
-            .with_query_template("orders", route("/orders"))
-            .with_query_template("shipments", route("/shipments"))
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d7")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("orders").expect("fixture component name"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("shipments").expect("fixture component name"),
+        )
+        .with_query_template("orders", route("/orders"))
+        .with_query_template("shipments", route("/shipments"))
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "orders", json!({"id": 1})).await;
-    enqueue_add(&r, "shipments", json!({"id": 2})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003c9")
+            .expect("fixture UUID"),
+        json!({"id": 2}),
+    )
+    .await;
     wait_for_requests(&server, 2, 3000).await;
     r.stop().await.unwrap();
 
@@ -1615,22 +1843,33 @@ async fn adaptive_sends_bearer_token_on_batch() {
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("adaptive-auth")
-            .with_base_url(server.uri())
-            .with_token("sk-123")
-            .with_query("q1")
-            .with_adaptive(AdaptiveBatchConfig {
-                adaptive_min_batch_size: 1,
-                adaptive_max_batch_size: 16,
-                adaptive_window_size: 10,
-                adaptive_batch_timeout_ms: 100,
-            })
-            .with_batch_endpoint("/batch")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d8")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_token("sk-123")
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 16,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 100,
+        })
+        .with_batch_endpoint("/batch")
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(
+        &r,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
+        json!({"id": 1}),
+    )
+    .await;
     wait_for_requests(&server, 1, 3000).await;
     r.stop().await.unwrap();
 
@@ -1654,25 +1893,31 @@ async fn adaptive_never_exceeds_max_batch_size() {
         .await;
 
     let r = Arc::new(
-        HttpReaction::builder("adaptive-cap")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_adaptive(AdaptiveBatchConfig {
-                adaptive_min_batch_size: 1,
-                adaptive_max_batch_size: 2,
-                adaptive_window_size: 10,
-                adaptive_batch_timeout_ms: 50,
-            })
-            .with_batch_endpoint("/batch")
-            .build()
-            .unwrap(),
+        HttpReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000d9")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(server.uri())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 2,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 50,
+        })
+        .with_batch_endpoint("/batch")
+        .build()
+        .unwrap(),
     );
     r.start().await.unwrap();
 
     // One QueryResult expands to 5 items; with max_batch_size = 2 they must be
     // split across multiple batches, none larger than 2.
     let qr = make_query_result(
-        "q1",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID"),
         (0..5)
             .map(|i| ResultDiff::Add {
                 data: json!({ "id": i }),
@@ -1719,6 +1964,66 @@ async fn adaptive_never_exceeds_max_batch_size() {
 }
 
 #[tokio::test]
+async fn end_to_end_through_drasilib_delivers_to_http_server() -> Result<()> {
+    let server = mock_server::start().await;
+    let query_name = ComponentName::try_new("people-query")?;
+    let query = Query::cypher(query_name.clone())
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name, p.age AS age
+            "#,
+        )
+        .from_input_by_name(ComponentName::try_new("test-source")?)
+        .auto_start(true)
+        .build()?;
+    let reaction = HttpReaction::builder(ComponentId::generate())
+        .with_base_url(server.uri())
+        .with_query_by_name(query_name.clone())
+        .build()?;
+    let (core, handle, _) = build_core_with_reaction(
+        "test",
+        query,
+        &ComponentName::try_new("http-e2e")?,
+        reaction,
+    )
+    .await?;
+    let query_id = core.component_by_name(&query_name)?.id().clone();
+    let expected_path = format!("/changes/{query_id}");
+    Mock::given(method("POST"))
+        .and(path(expected_path.clone()))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    core.start().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let props = PropertyMapBuilder::new()
+        .with_string("name", "Ada")
+        .with_integer("age", 36)
+        .build();
+    handle
+        .send_node_insert("person-1", vec!["Person"], props)
+        .await?;
+
+    wait_for_requests(&server, 1, 5000).await;
+    core.shutdown().await?;
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs[0].url.path(), expected_path);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("ADD")));
+    assert_eq!(body.get("queryId"), Some(&json!(query_id)));
+    assert_eq!(
+        body.get("after").and_then(|a| a.get("name")),
+        Some(&json!("Ada"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn adaptive_end_to_end_through_drasilib_delivers_batch() -> Result<()> {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
@@ -1727,20 +2032,20 @@ async fn adaptive_end_to_end_through_drasilib_delivers_batch() -> Result<()> {
         .mount(&server)
         .await;
 
-    let (mock_source, handle) = MockSource::new("batch-source")?;
-    let query = Query::cypher("people-query")
+    let query_name = ComponentName::try_new("people-query")?;
+    let query = Query::cypher(query_name.clone())
         .query(
             r#"
             MATCH (p:Person)
             RETURN p.name AS name, p.age AS age
             "#,
         )
-        .from_input("batch-source")
+        .from_input_by_name(ComponentName::try_new("batch-source")?)
         .auto_start(true)
-        .build();
-    let reaction = HttpReaction::builder("http-batch-e2e")
+        .build()?;
+    let reaction = HttpReaction::builder(ComponentId::generate())
         .with_base_url(server.uri())
-        .with_query("people-query")
+        .with_query_by_name(query_name.clone())
         .with_adaptive(AdaptiveBatchConfig {
             adaptive_min_batch_size: 1,
             adaptive_max_batch_size: 16,
@@ -1749,28 +2054,14 @@ async fn adaptive_end_to_end_through_drasilib_delivers_batch() -> Result<()> {
         })
         .with_batch_endpoint("/batch")
         .build()?;
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_query_factory(
-                drasi_lib::computation::v1::FactoryRegistry::standard()
-                    .get(
-                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
-                            "drasi/continuous-query",
-                            "1",
-                        )
-                        .expect("reference query identity"),
-                    )
-                    .expect("reference query factory")
-                    .clone(),
-            )
-            .with_id("http-batch-e2e-core")
-            .with_source(mock_source)
-            .with_query(query)
-            .with_reaction(reaction)
-            .build()
-            .await?,
-    );
+    let (core, handle, _) = build_core_with_reaction(
+        "batch",
+        query,
+        &ComponentName::try_new("http-batch-e2e")?,
+        reaction,
+    )
+    .await?;
+    let query_id = core.component_by_name(&query_name)?.id().clone();
     core.start().await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -1783,7 +2074,7 @@ async fn adaptive_end_to_end_through_drasilib_delivers_batch() -> Result<()> {
         .await?;
 
     wait_for_requests(&server, 1, 5000).await;
-    core.stop().await?;
+    core.shutdown().await?;
 
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs[0].url.path(), "/batch");
@@ -1794,7 +2085,7 @@ async fn adaptive_end_to_end_through_drasilib_delivers_batch() -> Result<()> {
         .expect("Pattern C batch container");
     assert!(!batch.is_empty(), "batch must contain the delivered change");
     assert_eq!(batch[0].get("operation"), Some(&json!("ADD")));
-    assert_eq!(batch[0].get("queryId"), Some(&json!("people-query")));
+    assert_eq!(batch[0].get("queryId"), Some(&json!(query_id)));
     assert_eq!(
         batch[0].get("after").and_then(|a| a.get("name")),
         Some(&json!("Grace"))

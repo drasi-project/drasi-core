@@ -182,7 +182,7 @@ impl GrpcSink {
         let result = self.deliver(&batch).await;
         self.config.failure_policy.delivery(
             result,
-            self.descriptor.id().as_str(),
+            self.descriptor.id(),
             &batch.key.endpoint(),
             batch.seen_sequence,
         )
@@ -239,7 +239,7 @@ impl GrpcSink {
                 Err(error) => {
                     self.config.failure_policy.delivery(
                         Err(error),
-                        self.descriptor.id().as_str(),
+                        self.descriptor.id(),
                         &label,
                         sequence,
                     )?;
@@ -252,7 +252,7 @@ impl GrpcSink {
             if overhead.saturating_add(item_bytes) > self.config.max_request_bytes {
                 self.config.failure_policy.delivery(
                     Err(anyhow::anyhow!("gRPC change exceeds maxRequestBytes")),
-                    self.descriptor.id().as_str(),
+                    self.descriptor.id(),
                     &label,
                     sequence,
                 )?;

@@ -7,7 +7,7 @@ use std::{
 };
 
 use drasi_computation_contracts::{
-    validate_identifier, validate_query_joins, ComputationQueryLanguage, InputBinding,
+    validate_identifier, validate_query_joins, ComponentId, ComputationQueryLanguage, InputBinding,
     InputEnvelope, PortId, QueryExecutionSettings, QueryInputConfig, StreamId,
 };
 use drasi_core::{
@@ -83,7 +83,7 @@ impl QueryExecutionSettingsExt for QueryExecutionSettings {
             builder = builder.with_source_middleware(Arc::new(config.clone()));
         }
         for input in &self.inputs {
-            builder = builder.with_source_pipeline(&input.component, &input.pipeline);
+            builder = builder.with_component_pipeline(input.component.clone(), &input.pipeline);
         }
         Ok(builder.with_joins(self.joins.iter().cloned().map(Into::into).collect()))
     }
@@ -115,10 +115,10 @@ pub fn query_builder(
     )
 }
 
-pub type QueryInputScopes = BTreeMap<(PortId, StreamId), Arc<str>>;
+pub type QueryInputScopes = BTreeMap<(PortId, StreamId), ComponentId>;
 
 pub fn query_input_scopes(
-    query: &str,
+    query: &ComponentId,
     inputs: &[QueryInputConfig],
     bindings: &[InputBinding],
 ) -> anyhow::Result<QueryInputScopes> {
@@ -126,7 +126,7 @@ pub fn query_input_scopes(
     for input in inputs {
         aliases.insert(
             drasi_computation_contracts::query_source_component_id(query, &input.component)?,
-            Arc::<str>::from(input.component.as_str()),
+            input.component.clone(),
         );
     }
     let mut scopes = BTreeMap::new();
@@ -134,7 +134,7 @@ pub fn query_input_scopes(
         let scope = aliases
             .get(&binding.output.component)
             .cloned()
-            .unwrap_or_else(|| Arc::from(binding.output.component.as_str()));
+            .unwrap_or_else(|| binding.output.component.clone());
         let key = (binding.input_port.clone(), binding.stream.clone());
         if let Some(previous) = scopes.insert(key, scope.clone()) {
             anyhow::ensure!(
@@ -151,7 +151,7 @@ pub fn query_input_scopes(
 pub fn query_input_scope(
     scopes: Option<&QueryInputScopes>,
     input: &InputEnvelope,
-) -> anyhow::Result<Option<Arc<str>>> {
+) -> anyhow::Result<Option<ComponentId>> {
     scopes
         .map(|scopes| {
             scopes

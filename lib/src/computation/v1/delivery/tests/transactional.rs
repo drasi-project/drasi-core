@@ -309,12 +309,13 @@ async fn handling_modes_cannot_change_calls_or_reinterpret_persisted_progress() 
         } else {
             delivery.deliver(&batch, &mut external).await?;
         }
+        let metadata_key = delivery.metadata_key();
         let rows = delivery
             .transaction
             .resources()
             .outbox_writer()
             .expect("outbox")
-            .read_from(METADATA_KEY, 0)
+            .read_from(&metadata_key, 0)
             .await?;
         let saved: serde_json::Value = serde_json::from_slice(&rows[0].1)?;
         assert_eq!(
@@ -527,13 +528,14 @@ async fn damaged_handling_modes_reject_before_state_mutation() -> anyhow::Result
         delivery
             .deliver_transactional(&batch, &Stateful::default())
             .await?;
+        let metadata_key = delivery.metadata_key();
         delivery.shutdown().await?;
         drop(delivery);
         let transaction = ComputationTransaction::try_new(indexes(path.path()).await)?;
         let outbox = transaction.resources().outbox_writer().expect("outbox");
         transaction
             .run(async {
-                let rows = outbox.read_from(METADATA_KEY, 0).await?;
+                let rows = outbox.read_from(&metadata_key, 0).await?;
                 let mut ledger: serde_json::Value =
                     serde_json::from_slice(&rows[0].1).expect("ledger");
                 let fields = ledger.as_object_mut().expect("ledger object");
@@ -544,7 +546,7 @@ async fn damaged_handling_modes_reject_before_state_mutation() -> anyhow::Result
                 }
                 outbox
                     .append(
-                        METADATA_KEY,
+                        &metadata_key,
                         1,
                         &serde_json::to_vec(&ledger).expect("encode"),
                     )

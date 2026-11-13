@@ -21,8 +21,17 @@ use serde_json::{json, Value};
 
 #[test]
 fn test_grpc_builder_defaults() {
-    let reaction = GrpcReactionBuilder::new("test-reaction").build().unwrap();
-    assert_eq!(reaction.id(), "test-reaction");
+    let reaction = GrpcReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .build()
+    .unwrap();
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
     let props = reaction.properties();
     assert_eq!(
         props.get("endpoint"),
@@ -39,7 +48,12 @@ fn test_grpc_builder_defaults() {
 #[test]
 fn test_grpc_recovery_archetype_defaults() {
     use drasi_lib::recovery::ReactionRecoveryPolicy;
-    let reaction = GrpcReactionBuilder::new("test-reaction").build().unwrap();
+    let reaction = GrpcReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .build()
+    .unwrap();
     // gRPC is a stateless at-least-once trigger reaction (archetype 2a).
     assert!(!reaction.is_durable());
     assert!(!reaction.needs_snapshot_on_fresh_start());
@@ -52,10 +66,13 @@ fn test_grpc_recovery_archetype_defaults() {
 #[test]
 fn test_grpc_builder_recovery_policy_override() {
     use drasi_lib::recovery::ReactionRecoveryPolicy;
-    let reaction = GrpcReactionBuilder::new("test-reaction")
-        .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
-        .build()
-        .unwrap();
+    let reaction = GrpcReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
+    .build()
+    .unwrap();
     assert_eq!(
         reaction.base.recovery_policy,
         Some(ReactionRecoveryPolicy::AutoSkipGap)
@@ -64,16 +81,30 @@ fn test_grpc_builder_recovery_policy_override() {
 
 #[test]
 fn test_grpc_builder_custom_values() {
-    let reaction = GrpcReaction::builder("test-reaction")
-        .with_endpoint("grpc://api.example.com:50052")
-        .with_timeout_ms(10000)
-        .with_fixed_batching(200, 500)
-        .with_queries(vec!["query1".to_string()])
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("grpc://api.example.com:50052")
+    .with_timeout_ms(10000)
+    .with_fixed_batching(200, 500)
+    .with_queries_by_name(vec![
+        drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+    ])
+    .build()
+    .unwrap();
 
-    assert_eq!(reaction.id(), "test-reaction");
-    assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+        )]
+    );
     match reaction.config().batching {
         BatchingConfig::Fixed {
             batch_size,
@@ -89,20 +120,39 @@ fn test_grpc_builder_custom_values() {
 #[test]
 fn test_grpc_new_constructor() {
     let config = GrpcReactionConfig::default();
-    let reaction = GrpcReaction::new("test-reaction", vec!["query1".to_string()], config)
-        .expect("valid config");
-    assert_eq!(reaction.id(), "test-reaction");
-    assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+    let reaction = GrpcReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )],
+        config,
+    )
+    .expect("valid config");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+        )]
+    );
 }
 
 #[tokio::test]
 async fn test_grpc_trait_surface() {
     use drasi_lib::channels::ComponentStatus;
 
-    let reaction = GrpcReaction::builder("surface")
-        .from_query("q1")
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000289")
+            .expect("fixture UUID"),
+    )
+    .from_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()
+    .unwrap();
     assert_eq!(reaction.type_name(), "grpc");
     // auto_start defaults to true.
     assert!(reaction.auto_start());
@@ -110,21 +160,27 @@ async fn test_grpc_trait_surface() {
     assert_eq!(reaction.status().await, ComponentStatus::Stopped);
 
     // auto_start is controllable through the builder.
-    let no_auto = GrpcReaction::builder("surface-no-auto")
-        .from_query("q1")
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let no_auto = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028a")
+            .expect("fixture UUID"),
+    )
+    .from_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_auto_start(false)
+    .build()
+    .unwrap();
     assert!(!no_auto.auto_start());
 }
 
 #[test]
 fn test_adaptive_builder() {
-    let reaction = GrpcReaction::builder("adaptive-reaction")
-        .with_endpoint("grpc://localhost:50053")
-        .with_adaptive_batching(AdaptiveBatchConfig::default())
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028b")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("grpc://localhost:50053")
+    .with_adaptive_batching(AdaptiveBatchConfig::default())
+    .build()
+    .unwrap();
     assert!(matches!(
         reaction.config().batching,
         BatchingConfig::Adaptive { .. }
@@ -292,22 +348,44 @@ async fn test_descriptor_creates_reaction_with_templates() {
 
     let descriptor = GrpcReactionDescriptor;
     let reaction = descriptor
-        .create_reaction("test-id", vec!["query-x".into()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000001e0")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_lib::ComponentName::try_new("query-x").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .expect("create_reaction succeeds");
-    assert_eq!(reaction.id(), "test-id");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000001e0")
+            .expect("fixture UUID")
+    );
 }
 
 #[test]
 fn test_from_query_alias_appends_queries() {
-    let reaction = GrpcReaction::builder("t")
-        .from_query("q1")
-        .from_query("q2")
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028c")
+            .expect("fixture UUID"),
+    )
+    .from_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .from_query_by_name(drasi_core::ComponentName::try_new("q2").expect("fixture component name"))
+    .build()
+    .unwrap();
     assert_eq!(
-        reaction.query_ids(),
-        vec!["q1".to_string(), "q2".to_string()]
+        reaction.query_inputs(),
+        vec![
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+            ),
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q2").expect("fixture component name")
+            )
+        ]
     );
 }
 
@@ -326,10 +404,13 @@ fn test_builder_rejects_invalid_template_at_construction() {
         }),
         routes: std::collections::HashMap::new(),
     };
-    let err = match GrpcReaction::builder("t")
-        .with_query("q1")
-        .with_output_templates(templates)
-        .build()
+    let err = match GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_output_templates(templates)
+    .build()
     {
         Ok(_) => panic!("expected build to reject the invalid template"),
         Err(e) => e,
@@ -360,10 +441,13 @@ fn test_builder_rejects_unknown_route_key_at_construction() {
         default_template: None,
         routes,
     };
-    let err = match GrpcReaction::builder("t")
-        .with_query("q1")
-        .with_output_templates(templates)
-        .build()
+    let err = match GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_output_templates(templates)
+    .build()
     {
         Ok(_) => panic!("expected build to reject the unknown route key"),
         Err(e) => e,
@@ -396,14 +480,17 @@ fn test_dto_metadata_accepts_static_and_env_config_values() {
 
 #[test]
 fn test_builder_sets_connection_and_retry_fields() {
-    let reaction = GrpcReaction::builder("conn")
-        .with_endpoint("grpc://host:9")
-        .with_timeout_ms(1111)
-        .with_max_retries(7)
-        .with_connection_retry_attempts(4)
-        .with_initial_connection_timeout_ms(2222)
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028d")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("grpc://host:9")
+    .with_timeout_ms(1111)
+    .with_max_retries(7)
+    .with_connection_retry_attempts(4)
+    .with_initial_connection_timeout_ms(2222)
+    .build()
+    .unwrap();
     let cfg = reaction.config();
     assert_eq!(cfg.endpoint, "grpc://host:9");
     assert_eq!(cfg.timeout_ms, 1111);
@@ -414,20 +501,26 @@ fn test_builder_sets_connection_and_retry_fields() {
 
 #[test]
 fn test_builder_metadata_accumulates_then_replaces() {
-    let reaction = GrpcReaction::builder("meta")
-        .with_metadata("a", "1")
-        .with_metadata("b", "2")
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028e")
+            .expect("fixture UUID"),
+    )
+    .with_metadata("a", "1")
+    .with_metadata("b", "2")
+    .build()
+    .unwrap();
     assert_eq!(reaction.config().metadata.len(), 2);
 
     let mut replacement = std::collections::HashMap::new();
     replacement.insert("only".to_string(), "x".to_string());
-    let reaction = GrpcReaction::builder("meta2")
-        .with_metadata("dropped", "y")
-        .with_all_metadata(replacement)
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028f")
+            .expect("fixture UUID"),
+    )
+    .with_metadata("dropped", "y")
+    .with_all_metadata(replacement)
+    .build()
+    .unwrap();
     assert_eq!(reaction.config().metadata.len(), 1);
     assert_eq!(
         reaction.config().metadata.get("only").map(String::as_str),
@@ -441,10 +534,13 @@ fn test_builder_metadata_accumulates_then_replaces() {
 
 #[test]
 fn test_builder_sets_output_format() {
-    let reaction = GrpcReaction::builder("of")
-        .with_output_format(OutputFormat::Proto)
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000290")
+            .expect("fixture UUID"),
+    )
+    .with_output_format(OutputFormat::Proto)
+    .build()
+    .unwrap();
     assert_eq!(reaction.config().output_format, OutputFormat::Proto);
 }
 
@@ -453,10 +549,13 @@ fn test_builder_min_batch_size_switches_fixed_to_adaptive() {
     // Documented side-effect: calling an adaptive setter on a builder that
     // still holds the default Fixed config flips it to Adaptive, taking
     // defaults for the unset adaptive fields.
-    let reaction = GrpcReaction::builder("adapt-side")
-        .with_min_batch_size(5)
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000291")
+            .expect("fixture UUID"),
+    )
+    .with_min_batch_size(5)
+    .build()
+    .unwrap();
     match reaction.config().batching {
         BatchingConfig::Adaptive {
             adaptive_min_batch_size,
@@ -475,13 +574,16 @@ fn test_builder_min_batch_size_switches_fixed_to_adaptive() {
 
 #[test]
 fn test_builder_adaptive_setters_accumulate_on_same_config() {
-    let reaction = GrpcReaction::builder("adapt-chain")
-        .with_min_batch_size(5)
-        .with_max_batch_size(50)
-        .with_window_size(12)
-        .with_batch_timeout_ms(250)
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000292")
+            .expect("fixture UUID"),
+    )
+    .with_min_batch_size(5)
+    .with_max_batch_size(50)
+    .with_window_size(12)
+    .with_batch_timeout_ms(250)
+    .build()
+    .unwrap();
     match reaction.config().batching {
         BatchingConfig::Adaptive {
             adaptive_min_batch_size,
@@ -500,10 +602,13 @@ fn test_builder_adaptive_setters_accumulate_on_same_config() {
 
 #[test]
 fn test_builder_with_adaptive_defaults() {
-    let reaction = GrpcReaction::builder("adapt-def")
-        .with_adaptive_defaults()
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000293")
+            .expect("fixture UUID"),
+    )
+    .with_adaptive_defaults()
+    .build()
+    .unwrap();
     assert!(matches!(
         reaction.config().batching,
         BatchingConfig::Adaptive { .. }
@@ -517,21 +622,27 @@ fn test_builder_with_config_replaces_entire_config() {
         timeout_ms: 4242,
         ..Default::default()
     };
-    let reaction = GrpcReaction::builder("cfg")
-        .with_endpoint("grpc://will-be-overwritten:2")
-        .with_config(custom)
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000294")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("grpc://will-be-overwritten:2")
+    .with_config(custom)
+    .build()
+    .unwrap();
     assert_eq!(reaction.config().endpoint, "grpc://replaced:1");
     assert_eq!(reaction.config().timeout_ms, 4242);
 }
 
 #[test]
 fn test_builder_with_fixed_batching_helper() {
-    let reaction = GrpcReaction::builder("fixed")
-        .with_fixed_batching(33, 44)
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000295")
+            .expect("fixture UUID"),
+    )
+    .with_fixed_batching(33, 44)
+    .build()
+    .unwrap();
     assert_eq!(
         reaction.config().batching,
         BatchingConfig::Fixed {
@@ -543,12 +654,19 @@ fn test_builder_with_fixed_batching_helper() {
 
 #[tokio::test]
 async fn test_builder_with_priority_queue_capacity_builds() {
-    let reaction = GrpcReaction::builder("pq")
-        .from_query("q1")
-        .with_priority_queue_capacity(256)
-        .build()
-        .unwrap();
-    assert_eq!(reaction.id(), "pq");
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000296")
+            .expect("fixture UUID"),
+    )
+    .from_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_priority_queue_capacity(256)
+    .build()
+    .unwrap();
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000296")
+            .expect("fixture UUID")
+    );
     assert_eq!(
         reaction.status().await,
         drasi_lib::channels::ComponentStatus::Stopped
@@ -558,14 +676,26 @@ async fn test_builder_with_priority_queue_capacity_builds() {
 #[test]
 fn test_with_priority_queue_capacity_constructor() {
     let reaction = GrpcReaction::with_priority_queue_capacity(
-        "pqc",
-        vec!["q1".to_string()],
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000297")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
         GrpcReactionConfig::default(),
         128,
     )
     .expect("valid config");
-    assert_eq!(reaction.id(), "pqc");
-    assert_eq!(reaction.query_ids(), vec!["q1".to_string()]);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000297")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+        )]
+    );
 }
 
 #[test]
@@ -574,7 +704,12 @@ fn test_new_constructor_rejects_invalid_endpoint() {
         endpoint: "not a uri".to_string(),
         ..Default::default()
     };
-    let err = match GrpcReaction::new("bad", vec![], config) {
+    let err = match GrpcReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+            .expect("fixture UUID"),
+        vec![],
+        config,
+    ) {
         Ok(_) => panic!("expected new() to reject the invalid endpoint"),
         Err(e) => e,
     };
@@ -583,9 +718,12 @@ fn test_new_constructor_rejects_invalid_endpoint() {
 
 #[test]
 fn test_builder_rejects_invalid_endpoint_at_build() {
-    let err = match GrpcReaction::builder("bad")
-        .with_endpoint("not a uri")
-        .build()
+    let err = match GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000001c5")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("not a uri")
+    .build()
     {
         Ok(_) => panic!("expected build() to reject the invalid endpoint"),
         Err(e) => e,
@@ -636,20 +774,14 @@ mod integration {
         }
     }
 
-    fn query_result(query_id: &str, count: usize) -> QueryResult {
+    fn query_result(query_id: drasi_core::ComponentId, count: usize) -> QueryResult {
         let results = (0..count)
             .map(|i| ResultDiff::Add {
                 data: serde_json::json!({ "id": i }),
                 row_signature: 0,
             })
             .collect();
-        QueryResult::new(
-            query_id.to_string(),
-            1,
-            chrono::Utc::now(),
-            results,
-            HashMap::new(),
-        )
+        QueryResult::new(query_id, 1, chrono::Utc::now(), results, HashMap::new())
     }
 
     // ---- send_batch_with_retry (#19) ------------------------------------
@@ -661,7 +793,8 @@ mod integration {
         let result = send_batch_with_retry(
             &mut client,
             vec![item(), item()],
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &HashMap::new(),
             0,
             &server.endpoint,
@@ -683,7 +816,8 @@ mod integration {
         let result = send_batch_with_retry(
             &mut client,
             vec![item()],
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &HashMap::new(),
             3,
             &server.endpoint,
@@ -704,7 +838,8 @@ mod integration {
         let result = send_batch_with_retry(
             &mut client,
             vec![item()],
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &HashMap::new(),
             0,
             &server.endpoint,
@@ -731,7 +866,8 @@ mod integration {
         send_batch_with_retry(
             &mut client,
             vec![item()],
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &metadata,
             0,
             &server.endpoint,
@@ -770,7 +906,8 @@ mod integration {
         send_batch_with_retry(
             &mut client,
             vec![item()],
-            "q1",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             &metadata,
             0,
             &server.endpoint,
@@ -793,7 +930,13 @@ mod integration {
     // ---- fixed runner (#20) ---------------------------------------------
 
     fn running_base() -> ReactionBase {
-        ReactionBase::new(ReactionBaseParams::new("test-grpc", vec!["q1".to_string()]))
+        ReactionBase::new(ReactionBaseParams::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+        ))
     }
 
     /// A base wired to an in-memory state store (via the runtime context) and
@@ -805,12 +948,17 @@ mod integration {
         let (updates, _rx) = tokio::sync::mpsc::channel(64);
         let context = drasi_lib::context::ReactionRuntimeContext::new(
             "test-instance",
-            "test-grpc",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
+            vec![
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ],
             Some(store),
             updates,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
         set_running(&base).await;
         base
     }
@@ -831,14 +979,14 @@ mod integration {
     impl drasi_lib::StateStoreProvider for FailAlwaysStore {
         async fn get(
             &self,
-            store_id: &str,
+            store_id: &drasi_core::interface::StorePartition,
             key: &str,
         ) -> drasi_lib::StateStoreResult<Option<Vec<u8>>> {
             self.inner.get(store_id, key).await
         }
         async fn set(
             &self,
-            store_id: &str,
+            store_id: &drasi_core::interface::StorePartition,
             key: &str,
             _value: Vec<u8>,
         ) -> drasi_lib::StateStoreResult<()> {
@@ -847,26 +995,30 @@ mod integration {
                 "injected write failure".into(),
             ))
         }
-        async fn delete(&self, store_id: &str, key: &str) -> drasi_lib::StateStoreResult<bool> {
+        async fn delete(
+            &self,
+            store_id: &drasi_core::interface::StorePartition,
+            key: &str,
+        ) -> drasi_lib::StateStoreResult<bool> {
             self.inner.delete(store_id, key).await
         }
         async fn contains_key(
             &self,
-            store_id: &str,
+            store_id: &drasi_core::interface::StorePartition,
             key: &str,
         ) -> drasi_lib::StateStoreResult<bool> {
             self.inner.contains_key(store_id, key).await
         }
         async fn get_many(
             &self,
-            store_id: &str,
+            store_id: &drasi_core::interface::StorePartition,
             keys: &[&str],
         ) -> drasi_lib::StateStoreResult<HashMap<String, Vec<u8>>> {
             self.inner.get_many(store_id, keys).await
         }
         async fn set_many(
             &self,
-            store_id: &str,
+            store_id: &drasi_core::interface::StorePartition,
             entries: &[(&str, &[u8])],
         ) -> drasi_lib::StateStoreResult<()> {
             let _ = (store_id, entries);
@@ -876,21 +1028,33 @@ mod integration {
         }
         async fn delete_many(
             &self,
-            store_id: &str,
+            store_id: &drasi_core::interface::StorePartition,
             keys: &[&str],
         ) -> drasi_lib::StateStoreResult<usize> {
             self.inner.delete_many(store_id, keys).await
         }
-        async fn clear_store(&self, store_id: &str) -> drasi_lib::StateStoreResult<usize> {
+        async fn clear_store(
+            &self,
+            store_id: &drasi_core::interface::StorePartition,
+        ) -> drasi_lib::StateStoreResult<usize> {
             self.inner.clear_store(store_id).await
         }
-        async fn list_keys(&self, store_id: &str) -> drasi_lib::StateStoreResult<Vec<String>> {
+        async fn list_keys(
+            &self,
+            store_id: &drasi_core::interface::StorePartition,
+        ) -> drasi_lib::StateStoreResult<Vec<String>> {
             self.inner.list_keys(store_id).await
         }
-        async fn store_exists(&self, store_id: &str) -> drasi_lib::StateStoreResult<bool> {
+        async fn store_exists(
+            &self,
+            store_id: &drasi_core::interface::StorePartition,
+        ) -> drasi_lib::StateStoreResult<bool> {
             self.inner.store_exists(store_id).await
         }
-        async fn key_count(&self, store_id: &str) -> drasi_lib::StateStoreResult<usize> {
+        async fn key_count(
+            &self,
+            store_id: &drasi_core::interface::StorePartition,
+        ) -> drasi_lib::StateStoreResult<usize> {
             self.inner.key_count(store_id).await
         }
     }
@@ -901,19 +1065,28 @@ mod integration {
         let (updates, _rx) = tokio::sync::mpsc::channel(64);
         let context = drasi_lib::context::ReactionRuntimeContext::new(
             "test-instance",
-            "test-grpc",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
+            vec![
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            ],
             Some(store),
             updates,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
         set_running(&base).await;
         base
     }
 
     /// Build a `QueryResult` with an explicit per-query sequence and `count`
     /// Add diffs.
-    fn query_result_seq(query_id: &str, count: usize, sequence: u64) -> QueryResult {
+    fn query_result_seq(
+        query_id: drasi_core::ComponentId,
+        count: usize,
+        sequence: u64,
+    ) -> QueryResult {
         let results = (0..count)
             .map(|i| ResultDiff::Add {
                 data: serde_json::json!({ "id": i }),
@@ -921,7 +1094,7 @@ mod integration {
             })
             .collect();
         QueryResult::new(
-            query_id.to_string(),
+            query_id,
             sequence,
             chrono::Utc::now(),
             results,
@@ -947,7 +1120,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 2,
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
@@ -958,9 +1132,14 @@ mod integration {
         }));
 
         // A result at sequence 7 with two diffs flushes one batch.
-        base.enqueue_query_result(query_result_seq("q1", 2, 7))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result_seq(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+            7,
+        ))
+        .await
+        .unwrap();
 
         let total = server
             .recorder
@@ -969,7 +1148,14 @@ mod integration {
         assert_eq!(total, 2);
 
         // The checkpoint should advance to the delivered sequence.
-        let cp = wait_for_checkpoint(&base, "q1", 7, Duration::from_secs(5)).await;
+        let cp = wait_for_checkpoint(
+            &base,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            7,
+            Duration::from_secs(5),
+        )
+        .await;
         assert_eq!(cp, Some(7), "checkpoint must persist the acked sequence");
 
         let _ = sd_tx.send(());
@@ -994,7 +1180,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 2,
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
@@ -1004,9 +1191,14 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result_seq("q1", 3, 9))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result_seq(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            3,
+            9,
+        ))
+        .await
+        .unwrap();
 
         // All three items are delivered (across two batches).
         let total = server
@@ -1017,7 +1209,14 @@ mod integration {
 
         // Only after the terminal item is acked does the checkpoint reach 9 —
         // never a partial/over-advanced value.
-        let cp = wait_for_checkpoint(&base, "q1", 9, Duration::from_secs(5)).await;
+        let cp = wait_for_checkpoint(
+            &base,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            9,
+            Duration::from_secs(5),
+        )
+        .await;
         assert_eq!(cp, Some(9));
 
         let _ = sd_tx.send(());
@@ -1036,7 +1235,8 @@ mod integration {
             BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
@@ -1046,9 +1246,14 @@ mod integration {
         }));
 
         // A result at sequence 7 with two diffs is delivered as a coalesced batch.
-        base.enqueue_query_result(query_result_seq("q1", 2, 7))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result_seq(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+            7,
+        ))
+        .await
+        .unwrap();
         let total = server
             .recorder
             .wait_for_items(2, Duration::from_secs(5))
@@ -1056,7 +1261,14 @@ mod integration {
         assert_eq!(total, 2);
 
         // The batcher advances the checkpoint to the acked sequence.
-        let cp = wait_for_checkpoint(&base, "q1", 7, Duration::from_secs(5)).await;
+        let cp = wait_for_checkpoint(
+            &base,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            7,
+            Duration::from_secs(5),
+        )
+        .await;
         assert_eq!(
             cp,
             Some(7),
@@ -1081,7 +1293,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 2,
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
@@ -1091,9 +1304,14 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result_seq("q1", 2, 7))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result_seq(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+            7,
+        ))
+        .await
+        .unwrap();
         let total = server
             .recorder
             .wait_for_items(2, Duration::from_secs(5))
@@ -1107,7 +1325,13 @@ mod integration {
             "Strict must fail-stop when write_checkpoint fails after ack"
         );
         assert!(
-            base.read_checkpoint("q1").await.unwrap().is_none(),
+            base.read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "failed checkpoint write must not advance the durable sequence"
         );
 
@@ -1129,7 +1353,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 2,
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
@@ -1139,9 +1364,14 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
         }));
 
-        base.enqueue_query_result(query_result_seq("q1", 2, 7))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result_seq(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+            7,
+        ))
+        .await
+        .unwrap();
         let total = server
             .recorder
             .wait_for_items(2, Duration::from_secs(5))
@@ -1153,7 +1383,14 @@ mod integration {
             ComponentStatus::Running,
             "AutoSkipGap must not fail-stop on a checkpoint write failure"
         );
-        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(base
+            .read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
 
         let _ = sd_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
@@ -1170,7 +1407,8 @@ mod integration {
             BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
@@ -1179,9 +1417,14 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result_seq("q1", 2, 7))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result_seq(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+            7,
+        ))
+        .await
+        .unwrap();
         let total = server
             .recorder
             .wait_for_items(2, Duration::from_secs(5))
@@ -1191,7 +1434,14 @@ mod integration {
             wait_for_status(&base, ComponentStatus::Error, Duration::from_secs(5)).await,
             "adaptive Strict must fail-stop when write_checkpoint fails after ack"
         );
-        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(base
+            .read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
 
         let _ = sd_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
@@ -1208,7 +1458,8 @@ mod integration {
             BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
@@ -1217,9 +1468,14 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
         }));
 
-        base.enqueue_query_result(query_result_seq("q1", 2, 7))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result_seq(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+            7,
+        ))
+        .await
+        .unwrap();
         let total = server
             .recorder
             .wait_for_items(2, Duration::from_secs(5))
@@ -1227,7 +1483,14 @@ mod integration {
         assert_eq!(total, 2);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(base.get_status().await, ComponentStatus::Running);
-        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(base
+            .read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
 
         let _ = sd_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
@@ -1255,7 +1518,8 @@ mod integration {
             BatchingConfig::adaptive(adaptive.clone()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             adaptive,
             base: base.clone_shared(),
             config,
@@ -1264,9 +1528,14 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result_seq("q1", 3, 9))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result_seq(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            3,
+            9,
+        ))
+        .await
+        .unwrap();
 
         // All three items are delivered (possibly across two coalesced batches).
         let total = server
@@ -1277,7 +1546,14 @@ mod integration {
 
         // The final checkpoint reaches exactly 9 — proving the terminal item's
         // sequence was the one checkpointed, not an intermediate value.
-        let cp = wait_for_checkpoint(&base, "q1", 9, Duration::from_secs(5)).await;
+        let cp = wait_for_checkpoint(
+            &base,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            9,
+            Duration::from_secs(5),
+        )
+        .await;
         assert_eq!(cp, Some(9));
 
         let _ = sd_tx.send(());
@@ -1288,7 +1564,7 @@ mod integration {
     /// Poll the persisted checkpoint until it reaches `expected` or times out.
     async fn wait_for_checkpoint(
         base: &ReactionBase,
-        query_id: &str,
+        query_id: &drasi_core::ComponentId,
         expected: u64,
         timeout: Duration,
     ) -> Option<u64> {
@@ -1340,7 +1616,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 2,
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
@@ -1350,9 +1627,13 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result("q1", 2))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+        ))
+        .await
+        .unwrap();
 
         let total = server
             .recorder
@@ -1380,7 +1661,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 100,
             batch_flush_timeout_ms: 100,
             base: base.clone_shared(),
@@ -1391,9 +1673,13 @@ mod integration {
         }));
 
         // One item, well below batch_size — only the flush timer can deliver it.
-        base.enqueue_query_result(query_result("q1", 1))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            1,
+        ))
+        .await
+        .unwrap();
 
         let total = server
             .recorder
@@ -1421,7 +1707,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 100,
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
@@ -1431,12 +1718,20 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result("query-a", 3))
-            .await
-            .unwrap();
-        base.enqueue_query_result(query_result("query-b", 1))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000078")
+                .expect("fixture UUID"),
+            3,
+        ))
+        .await
+        .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000079")
+                .expect("fixture UUID"),
+            1,
+        ))
+        .await
+        .unwrap();
 
         // Dequeuing query-b flushes the buffered query-a batch deterministically.
         let total = server
@@ -1445,7 +1740,7 @@ mod integration {
             .await;
         assert_eq!(total, 3);
         let batches = server.recorder.batches().await;
-        assert_eq!(batches[0].query_id, "query-a");
+        assert_eq!(batches[0].query_id, "00000000-0000-0000-0000-000000000078");
         assert_eq!(batches[0].item_count, 3);
 
         let _ = sd_tx.send(());
@@ -1475,7 +1770,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 1,
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
@@ -1486,9 +1782,13 @@ mod integration {
         }));
 
         // First batch: the server rejects every retry, so the batch is dropped.
-        base.enqueue_query_result(query_result("q1", 1))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            1,
+        ))
+        .await
+        .unwrap();
         // Wait past the retry/backoff window so the failed flush resolves.
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(
@@ -1499,9 +1799,13 @@ mod integration {
 
         // Later batch: the server now accepts, so it is delivered — proof the
         // reaction kept running after dropping the first batch.
-        base.enqueue_query_result(query_result("q1", 2))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+        ))
+        .await
+        .unwrap();
         let total = server
             .recorder
             .wait_for_items(1, Duration::from_secs(5))
@@ -1532,7 +1836,8 @@ mod integration {
             },
         );
         let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             batch_size: 1,
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
@@ -1542,9 +1847,13 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result("q1", 1))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            1,
+        ))
+        .await
+        .unwrap();
 
         // The reaction should transition to Error within the retry/backoff window.
         let errored = wait_for_status(&base, ComponentStatus::Error, Duration::from_secs(5)).await;
@@ -1572,7 +1881,8 @@ mod integration {
             BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
@@ -1582,9 +1892,13 @@ mod integration {
         }));
 
         // >= 100 items for one query triggers the early forward path.
-        base.enqueue_query_result(query_result("q1", 100))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            100,
+        ))
+        .await
+        .unwrap();
 
         let total = server
             .recorder
@@ -1609,7 +1923,8 @@ mod integration {
             BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
@@ -1618,12 +1933,20 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result("query-a", 3))
-            .await
-            .unwrap();
-        base.enqueue_query_result(query_result("query-b", 1))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000078")
+                .expect("fixture UUID"),
+            3,
+        ))
+        .await
+        .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000079")
+                .expect("fixture UUID"),
+            1,
+        ))
+        .await
+        .unwrap();
 
         let total = server
             .recorder
@@ -1655,7 +1978,8 @@ mod integration {
             BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
@@ -1665,9 +1989,13 @@ mod integration {
         }));
 
         // First item: every retry is rejected, so the batch is dropped.
-        base.enqueue_query_result(query_result("q1", 1))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            1,
+        ))
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(
             base.get_status().await,
@@ -1676,9 +2004,13 @@ mod integration {
         );
 
         // Later item: the server now accepts, proving the reaction kept running.
-        base.enqueue_query_result(query_result("q1", 2))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            2,
+        ))
+        .await
+        .unwrap();
         let total = server
             .recorder
             .wait_for_items(1, Duration::from_secs(5))
@@ -1705,7 +2037,8 @@ mod integration {
             BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
-            reaction_name: "test-grpc".to_string(),
+            reaction_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000298")
+                .expect("fixture UUID"),
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
@@ -1714,9 +2047,13 @@ mod integration {
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
-        base.enqueue_query_result(query_result("q1", 1))
-            .await
-            .unwrap();
+        base.enqueue_query_result(query_result(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            1,
+        ))
+        .await
+        .unwrap();
 
         let errored = wait_for_status(&base, ComponentStatus::Error, Duration::from_secs(5)).await;
         assert!(

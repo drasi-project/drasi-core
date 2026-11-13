@@ -7,11 +7,35 @@ use drasi_lib::computation::v1::{
     ComponentId, ComputationComponent, EnvelopeSource, GraphChangeCodec, SourceTransactionCodec,
     StreamId,
 };
-use testcontainers::{runners::AsyncRunner, ImageExt};
+use shared_tests::fixture_attribution::{Attribution, Fixture};
+use testcontainers::{runners::AsyncRunner, ContainerRequest, ImageExt};
 use testcontainers_modules::mysql::Mysql;
 mod rows;
 mod shared;
 mod snapshot;
+
+async fn start_mysql_fixture(
+    mut request: ContainerRequest<Mysql>,
+    fixture_source: &'static str,
+) -> Result<testcontainers::ContainerAsync<Mysql>> {
+    let attribution = Attribution::from_env(Fixture::new(
+        "mysql",
+        request.descriptor(),
+        fixture_source,
+        1,
+    ))?;
+    if let Some(owner) = &attribution {
+        request = request
+            .with_container_name(owner.container_name(1))
+            .with_labels(owner.labels(1));
+        owner.record_intent(1)?;
+    }
+    let container = request.start().await?;
+    if let Some(owner) = &attribution {
+        owner.record_started(1, container.id())?;
+    }
+    Ok(container)
+}
 
 pub(super) fn config(port: u16, output: MySqlOutput) -> MySqlConfig {
     MySqlConfig {
@@ -79,7 +103,7 @@ fn native_settings_reject_unsafe_replay_and_redact_passwords() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Docker"]
 async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> Result<()> {
-    let container = Mysql::default()
+    let request = Mysql::default()
         .with_env_var("MYSQL_DATABASE", "test")
         .with_env_var("MYSQL_ROOT_PASSWORD", "root")
         .with_cmd(vec![
@@ -88,9 +112,9 @@ async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> R
             "--binlog-row-image=FULL",
             "--binlog-row-metadata=FULL",
             "--server-id=1",
-        ])
-        .start()
-        .await?;
+        ]);
+    let container =
+        start_mysql_fixture(request, "components/sources/mysql/src/native/tests.rs").await?;
     let port = container.get_host_port_ipv4(3306).await?;
     let settings = config(port, MySqlOutput::Transactions);
     let mut admin = connection::Connection::connect(
@@ -103,7 +127,7 @@ async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> R
         .execute("CREATE TABLE items (id VARBINARY(8) PRIMARY KEY, value VARCHAR(80) NOT NULL)")
         .await?;
     let mut source = MySqlSource::new(
-        ComponentId::try_new("mysql")?,
+        ComponentId::try_new("334de629-0dc2-56d8-a5a8-7c5475721769")?,
         StreamId::try_new("mysql-changes")?,
         settings.clone(),
         None,
@@ -155,7 +179,7 @@ async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> R
     );
     source.stop().await?;
     let mut fast = MySqlSource::new(
-        ComponentId::try_new("mysql")?,
+        ComponentId::try_new("334de629-0dc2-56d8-a5a8-7c5475721769")?,
         StreamId::try_new("mysql-fast")?,
         config(port, MySqlOutput::Changes),
         None,
@@ -404,7 +428,7 @@ async fn native_column_types_preserve_values_and_unsupported_types_fail_before_s
     database.settings.replay = None;
     database.settings.start = MySqlStartPosition::End;
     let mut source = MySqlSource::new(
-        ComponentId::try_new("mysql")?,
+        ComponentId::try_new("334de629-0dc2-56d8-a5a8-7c5475721769")?,
         StreamId::try_new("types")?,
         database.settings.clone(),
         None,
@@ -507,15 +531,16 @@ async fn native_column_types_preserve_values_and_unsupported_types_fail_before_s
         .fetch(&mut cursor)
         .await?
         .context("snapshot type row")?;
-    let initial = crate::decoder::MySqlDecoder::new("mysql", &[]).native_snapshot_element(
-        "test",
-        "items",
-        &cursor.columns,
-        row,
-        &["id".into()],
-        element.get_metadata().effective_from,
-        database.settings.max_protocol_bytes.get(),
-    )?;
+    let initial = crate::decoder::MySqlDecoder::new(source.descriptor().id().as_str(), &[])
+        .native_snapshot_element(
+            "test",
+            "items",
+            &cursor.columns,
+            row,
+            &["id".into()],
+            element.get_metadata().effective_from,
+            database.settings.max_protocol_bytes.get(),
+        )?;
     assert_eq!(initial.get_reference(), element.get_reference());
     for column in &cursor.columns {
         let name = std::str::from_utf8(column.name_ref())?;
@@ -550,7 +575,7 @@ async fn cancelled_native_start_closes_owned_handshake_and_requires_cleanup_befo
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let settings = config(listener.local_addr()?.port(), MySqlOutput::Changes);
     let mut source = MySqlSource::new(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("93512f85-f44f-5305-95b6-2da879375a03")?,
         StreamId::try_new("changes")?,
         settings,
         None,
@@ -596,7 +621,7 @@ impl drasi_lib::computation::v1::ConfigurationResolver for Settings {
 
 impl Database {
     async fn new(retention: MySqlRetention) -> Result<Self> {
-        let container = Mysql::default()
+        let request = Mysql::default()
             .with_env_var("MYSQL_DATABASE", "test")
             .with_env_var("MYSQL_ROOT_PASSWORD", "root")
             .with_cmd(vec![
@@ -606,9 +631,9 @@ impl Database {
                 "--binlog-row-metadata=FULL",
                 "--server-id=1",
                 "--binlog-expire-logs-seconds=0",
-            ])
-            .start()
-            .await?;
+            ]);
+        let container =
+            start_mysql_fixture(request, "components/sources/mysql/src/native/tests.rs").await?;
         let port = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(port) = container.ports().await?.map_to_host_port_ipv4(3306) {
@@ -657,7 +682,7 @@ fn progress() -> Result<std::sync::Arc<drasi_lib::computation::v1::QuerySourcePr
     Ok(std::sync::Arc::new(
         drasi_lib::computation::v1::QuerySourceProgress::new(
             "native-mysql",
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("b0e6fdc2-2ec6-5c2c-ad55-b7f65a302c81")?,
         )?,
     ))
 }
@@ -686,7 +711,7 @@ async fn query_with_recovery(
     ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: "native-mysql".into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new("b0e6fdc2-2ec6-5c2c-ad55-b7f65a302c81")?,
             query: "MATCH (n:items) RETURN n.id AS id, n.value AS value".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("results")?,
@@ -719,7 +744,7 @@ fn source(
     progress: std::sync::Arc<drasi_lib::computation::v1::QuerySourceProgress>,
 ) -> Result<MySqlSource> {
     MySqlSource::new(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("93512f85-f44f-5305-95b6-2da879375a03")?,
         StreamId::try_new("changes")?,
         settings,
         Some(progress),
@@ -899,6 +924,7 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
     for (factory_created, initialize) in
         [(false, false), (true, false), (false, true), (true, true)]
     {
+        let source_id = ComponentId::try_new("93512f85-f44f-5305-95b6-2da879375a03")?;
         let mut database = Database::new(MySqlRetention::UntilProcessed).await?;
         if factory_created && initialize {
             database
@@ -920,7 +946,7 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
                 lock_timeout_ms: NonZeroU64::new(2000).unwrap(),
             };
             Some(Arc::new(MySqlSnapshot::new(
-                ComponentId::try_new("source")?,
+                source_id.clone(),
                 StreamId::try_new("changes")?,
                 database.settings.clone(),
                 owner.clone(),
@@ -933,22 +959,30 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
             query = query.with_bootstrap(bootstrap.clone());
         }
         let (sink, mut received) = drasi_reaction_application::NativeApplicationReaction::channel(
-            "sink",
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             QueryChangeCodec::schema().descriptor().clone(),
             NonZeroUsize::new(1).unwrap(),
         )?;
+        let query_id = query.descriptor().id().clone();
+        let sink_id = sink.descriptor().id().clone();
         let graph = ComputationGraph::builder("native-mysql")
-            .transformer(Box::new(query))
-            .sink(Box::new(sink));
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                    .expect("fixture component name"),
+                Box::new(sink),
+            );
         let graph = if factory_created {
             let factory = Arc::new(MySqlSourceFactory::default());
             let resource = ResourceId::try_new("progress")?;
             let settings = ResourceId::try_new("settings")?;
             let mut spec = ComponentSpecification {
-                descriptor: MySqlSource::describe(
-                    ComponentId::try_new("source")?,
-                    MySqlOutput::Transactions,
-                )?,
+                descriptor: MySqlSource::describe(source_id.clone(), MySqlOutput::Transactions)?,
                 role: ComponentRole::Source,
                 completion: None,
                 implementation: factory.descriptor().implementation.clone(),
@@ -988,7 +1022,7 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
             invalid = spec.clone();
             let schema = GraphChangeCodec::schema();
             invalid.descriptor = ComponentDescriptor::try_new(
-                ComponentId::try_new("source")?,
+                source_id.clone(),
                 vec![PortDescriptor::new(
                     PortId::try_new("out")?,
                     PortDirection::Output,
@@ -1048,11 +1082,16 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
             } else {
                 graph
             };
-            graph.component(spec, factory)
+            graph.component(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                    .expect("fixture component name"),
+                spec,
+                factory,
+            )
         } else {
             let source = if let Some(bootstrap) = bootstrap {
                 MySqlSource::with_snapshot(
-                    ComponentId::try_new("source")?,
+                    source_id.clone(),
                     StreamId::try_new("changes")?,
                     database.settings.clone(),
                     owner,
@@ -1061,23 +1100,24 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
             } else {
                 source(database.settings.clone(), owner)?
             };
-            graph.source(Box::new(source))
-        };
-        let endpoint = |component: &str, port: &str| {
-            Endpoint::new(
-                ComponentId::try_new(component).unwrap(),
-                PortId::try_new(port).unwrap(),
+            graph.source(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                    .expect("fixture component name"),
+                Box::new(source),
             )
         };
+        let endpoint = |component: &ComponentId, port: &str| {
+            Endpoint::new(component.clone(), PortId::try_new(port).unwrap())
+        };
         let mut graph = graph
-            .bind_stream(endpoint("source", "out"), StreamId::try_new("changes")?)
-            .bind_stream(endpoint("query", "out"), StreamId::try_new("results")?)
+            .bind_stream(endpoint(&source_id, "out"), StreamId::try_new("changes")?)
+            .bind_stream(endpoint(&query_id, "out"), StreamId::try_new("results")?)
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+                EdgeDefinition::new(endpoint(&source_id, "out"), endpoint(&query_id, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+                EdgeDefinition::new(endpoint(&query_id, "out"), endpoint(&sink_id, "in")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()?;

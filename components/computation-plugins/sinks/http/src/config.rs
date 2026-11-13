@@ -66,7 +66,7 @@ impl HttpSinkConfig {
         };
         use serde_json::json;
         ConfigDefinition::try_new([
-            Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming graph edge is accepted whether or not it is aliased; the graph supplies the producing component, output port and stream. An unaliased output is named after its producing component. The alias names the output in URLs and templates."),
+            Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming graph edge is accepted whether or not it is aliased; the graph supplies the producing component, output port and stream. An unaliased output is named after its producing component. The alias names the output in URLs and templates.").constraint(drasi_computation_contracts::ConfigurationConstraint::output_aliases()),
             Field::new("url", String, false, "Fixed default HTTP destination; supply url or baseUrl."),
             Field::new("baseUrl", String, false, "Base URL for default /changes/{alias}, template paths and the batch endpoint."),
             Field::new("token", String, false, "Bearer authentication token, preserved in privileged configuration snapshots."),
@@ -173,8 +173,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const OUTPUT_COMPONENT_ID: &str = "63d14bfc-2827-577e-aed6-d4e1f755df25";
+
     fn outputs() -> Value {
-        json!({"q": {"component": "q", "port": "out"}})
+        json!({"q": {"component": OUTPUT_COMPONENT_ID, "port": "out"}})
     }
 
     #[test]
@@ -200,11 +202,11 @@ mod tests {
         assert!(serde_json::to_value(&config)?.get("outputs").is_none());
         for stale in [
             json!({"queryId": "q", "url": "http://localhost/events"}),
-            json!({"producer": "q", "url": "http://localhost/events"}),
-            json!({"producers": {"q": "q/out"}, "url": "http://localhost/events"}),
-            json!({"outputs": {"q": {"component": "q", "stream": "q/out"}}, "url": "http://localhost/events"}),
-            json!({"outputs": {"q": {"component": "q", "port": "out", "stream": "q/out"}}, "url": "http://localhost/events"}),
-            json!({"outputs": {"bad id": {"component": "q"}}, "url": "http://localhost/events"}),
+            json!({"producer": OUTPUT_COMPONENT_ID, "url": "http://localhost/events"}),
+            json!({"producers": {"q": format!("{OUTPUT_COMPONENT_ID}/out")}, "url": "http://localhost/events"}),
+            json!({"outputs": {"q": {"component": OUTPUT_COMPONENT_ID, "stream": "q/out"}}, "url": "http://localhost/events"}),
+            json!({"outputs": {"q": {"component": OUTPUT_COMPONENT_ID, "port": "out", "stream": "q/out"}}, "url": "http://localhost/events"}),
+            json!({"outputs": {"bad id": {"component": OUTPUT_COMPONENT_ID}}, "url": "http://localhost/events"}),
         ] {
             assert!(HttpSinkConfig::parse(stale.clone()).is_err(), "{stale}");
         }

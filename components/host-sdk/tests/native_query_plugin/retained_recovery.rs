@@ -53,7 +53,7 @@ impl ComputationIndexProvider for GatedProvider {
     async fn create_indexes(
         &self,
         graph: &str,
-        component: &str,
+        component: &drasi_core_types::ComponentId,
     ) -> Result<ComputationIndexes, IndexError> {
         let indexes = self.inner.create_indexes(graph, component).await?;
         let inner = indexes.cleanup().expect("actual RocksDB cleanup").clone();
@@ -136,7 +136,7 @@ pub(super) fn sink(progress: Arc<dyn ConsumerProgressStore>) -> Result<Checkpoin
     Ok(CheckpointedSink::new(
         Box::new(Destination {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("destination")?,
+                ComponentId::try_new("6f8a6e68-eeee-539e-b571-5b0a05c0ea2f")?,
                 vec![PortDescriptor::new(
                     PortId::try_new("in")?,
                     PortDirection::Input,
@@ -157,8 +157,8 @@ pub(super) fn replay(
     policy: ConsumerRecoveryPolicy,
 ) -> Result<QueryReplayTransformer> {
     Ok(QueryReplayTransformer::with_reader(
-        ComponentId::try_new("replay")?,
-        COMPONENT.into(),
+        ComponentId::try_new("5503cf54-4f17-5fb9-a8f7-7c39938da163")?,
+        ComponentId::try_new(COMPONENT_ID)?,
         StreamId::try_new("replay/out")?,
         reader,
         progress,
@@ -195,7 +195,7 @@ fn create_profile(path: &Path, profile: &str) -> Result<NativeComponentProxy> {
         _ => anyhow::bail!("unknown test profile"),
     };
     factory()?.create_component_with_processing_publication(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({
             "query": QUERY, "outbox_capacity": 2, "volatile": profile == "memory",
             "publication": if profile == "non_atomic" { "non_atomic" } else { "atomic" },
@@ -211,6 +211,7 @@ async fn retained_consumers() -> Result<()> {
     for profile in ["memory", "atomic", "non_atomic"] {
         let directory = tempfile::tempdir()?;
         let mut query = create_profile(directory.path(), profile)?;
+        query.initialize().await?;
         let reader = Arc::new(CountedReader {
             inner: query
                 .query_api()
@@ -247,13 +248,13 @@ async fn retained_consumers() -> Result<()> {
         assert_eq!(initial.len(), 1);
         assert!(QueryChangeCodec::is_snapshot(&initial[0].envelope));
         assert!(
-            progress.load(COMPONENT).await?.is_none(),
+            progress.load(&component_id()?).await?.is_none(),
             "reading cannot acknowledge delivery"
         );
         deliver(&mut destination, initial).await?;
         assert_eq!(
             progress
-                .load(COMPONENT)
+                .load(&component_id()?)
                 .await?
                 .context("handled snapshot")?
                 .sequence,
@@ -324,7 +325,7 @@ async fn retained_consumers() -> Result<()> {
         );
         assert_eq!(
             progress
-                .load(COMPONENT)
+                .load(&component_id()?)
                 .await?
                 .context("handled output")?
                 .sequence,
@@ -343,7 +344,7 @@ async fn retained_consumers() -> Result<()> {
             let stale = Arc::new(MemoryConsumerProgress::default());
             stale
                 .commit_handled(
-                    COMPONENT,
+                    &component_id()?,
                     ConsumerCheckpoint {
                         identity: head.identity.clone(),
                         generation: head.generation,
@@ -361,7 +362,7 @@ async fn retained_consumers() -> Result<()> {
                     .is_some());
                 assert_eq!(
                     stale
-                        .load(COMPONENT)
+                        .load(&component_id()?)
                         .await?
                         .context("unchanged checkpoint")?
                         .sequence,
@@ -380,7 +381,7 @@ async fn retained_consumers() -> Result<()> {
                 deliver(&mut destination, output).await?;
                 assert_eq!(
                     stale
-                        .load(COMPONENT)
+                        .load(&component_id()?)
                         .await?
                         .context("recovered checkpoint")?
                         .sequence,
@@ -388,7 +389,7 @@ async fn retained_consumers() -> Result<()> {
                 );
             }
         }
-        query.deprovision().await?;
+        query.delete_owned_resources().await?;
         assert!(matches!(
             reader.recovery_head().await,
             Err(OutputReadError::Retired)
@@ -415,6 +416,7 @@ async fn failed_native_query_does_not_expose_uncertain_retained_state() -> Resul
         "MATCH (n:Item) RETURN abs(n.value) AS value",
         1,
     )?;
+    query.initialize().await?;
     let reader = query
         .query_api()
         .context("query API")?
@@ -459,7 +461,7 @@ async fn retained_query_reads_require_completed_host_cleanup_after_plugin_stop()
         resume: Notify::new(),
     });
     let mut query = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": QUERY}),
         scope(1),
         Arc::new(GatedProvider {
@@ -467,6 +469,7 @@ async fn retained_query_reads_require_completed_host_cleanup_after_plugin_stop()
             gate: gate.clone(),
         }),
     )?;
+    query.initialize().await?;
     let recovery = query
         .query_api()
         .context("query API")?

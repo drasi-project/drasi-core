@@ -5,6 +5,7 @@ use super::*;
 use std::num::NonZeroUsize;
 
 const TEXT: &str = "MATCH (n:Selected) RETURN n.value AS value";
+const SOURCE_ID: &str = "1386fd15-7c70-53b2-b727-5b28f3d05f3f";
 
 fn settings(component: &str, from: &str) -> serde_json::Value {
     json!({
@@ -45,26 +46,41 @@ fn foreign_item(id: &str, value: i64, time: u64) -> Element {
 async fn parity_and_aliases() -> Result<()> {
     for alias in [false, true] {
         let directory = tempfile::tempdir()?;
-        let configuration = configured("source", "Item");
-        let execution: QueryExecutionSettings = serde_json::from_value(settings("source", "Item"))?;
+        let configuration = configured(SOURCE_ID, "Item");
+        let execution: QueryExecutionSettings =
+            serde_json::from_value(settings(SOURCE_ID, "Item"))?;
         let mut native = factory()?.create_component_with_processing(
-            ComponentId::try_new(COMPONENT)?,
+            component_id()?,
             configuration,
             scope(1),
             provider(&directory.path().join("native"))?,
         )?;
-        let mut ordinary_config = drasi_lib::Query::cypher(COMPONENT)
+        native.initialize().await?;
+        let mut ordinary_config = drasi_lib::Query::cypher(component_name()?)
             .query(TEXT)
-            .from_input("source")
+            .from_input_by_id(ComponentId::try_new(SOURCE_ID)?)
             .enable_bootstrap(false)
             .with_outbox_capacity(8)
-            .build();
-        ordinary_config.inputs = execution.inputs.clone();
+            .build()?
+            .with_assigned_id(component_id()?);
+        ordinary_config.inputs = execution
+            .inputs
+            .iter()
+            .cloned()
+            .map(|input| {
+                let mut authored = drasi_lib::config::QueryInputConfig::by_id(input.component);
+                authored.port = input.port;
+                authored.nodes = input.nodes;
+                authored.relations = input.relations;
+                authored.pipeline = input.pipeline;
+                Ok::<_, anyhow::Error>(authored)
+            })
+            .collect::<Result<Vec<_>>>()?;
         ordinary_config.middleware = execution.middleware.clone();
         let mut linked = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: GRAPH.into(),
-                id: ComponentId::try_new(COMPONENT)?,
+                id: component_id()?,
                 query: TEXT.into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new(format!("{COMPONENT}/out"))?,
@@ -78,13 +94,19 @@ async fn parity_and_aliases() -> Result<()> {
         .await?
         .with_query_configuration(ordinary_config)?;
         let source = if alias {
-            drasi_computation_contracts::query_source_component_id(COMPONENT, "source")?
+            drasi_computation_contracts::query_source_component_id(
+                &component_id()?,
+                &ComponentId::try_new(SOURCE_ID)?,
+            )?
         } else {
-            ComponentId::try_new("source")?
+            ComponentId::try_new("1386fd15-7c70-53b2-b727-5b28f3d05f3f")?
         };
         let bindings = [
             binding(source, "source/out")?,
-            binding(ComponentId::try_new("other")?, "other/out")?,
+            binding(
+                ComponentId::try_new("9f18b4c1-22a3-554b-9340-2b7cca8b7a6c")?,
+                "other/out",
+            )?,
         ];
         native.bind_inputs(&bindings).await?;
         linked.bind_inputs(&bindings).await?;
@@ -141,20 +163,26 @@ async fn parity_and_aliases() -> Result<()> {
 async fn derived_input_scope() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut upstream = factory()?.create_component_with_processing(
-        ComponentId::try_new("upstream")?,
-        json!({"query":"MATCH (n:Item) RETURN n.value AS value", "result":{"label":"UpstreamRow"}}),
+        ComponentId::try_new("d668f414-da7d-5265-a2ef-c3e2d55dfdec")?,
+        json!({"query":"MATCH (n:Item) RETURN n.value AS value", "result":{"label":"UpstreamRow"},
+            "stream":"upstream/out"}),
         scope(1),
         provider(&directory.path().join("upstream"))?,
     )?;
     let mut downstream = factory()?.create_component_with_processing(
-        ComponentId::try_new(COMPONENT)?,
-        configured("upstream", "UpstreamRow"),
+        component_id()?,
+        configured("d668f414-da7d-5265-a2ef-c3e2d55dfdec", "UpstreamRow"),
         scope(1),
         provider(&directory.path().join("downstream"))?,
     )?;
     downstream
-        .bind_inputs(&[binding(ComponentId::try_new("upstream")?, "upstream/out")?])
+        .bind_inputs(&[binding(
+            ComponentId::try_new("d668f414-da7d-5265-a2ef-c3e2d55dfdec")?,
+            "upstream/out",
+        )?])
         .await?;
+    upstream.initialize().await?;
+    downstream.initialize().await?;
     upstream.start().await?;
     downstream.start().await?;
     for sequence in 1..=2 {
@@ -216,11 +244,11 @@ async fn shared_query_middleware_uses_actual_query_producer_scope() -> Result<()
 #[test]
 fn shared_query_middleware_rejects_unknown_factory_before_opening_indexes() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let mut configuration = configured("source", "Item");
+    let mut configuration = configured("1386fd15-7c70-53b2-b727-5b28f3d05f3f", "Item");
     configuration["middleware"][0]["kind"] = json!("missing-middleware");
     let error = factory()?
         .create_component_with_processing(
-            ComponentId::try_new(COMPONENT)?,
+            component_id()?,
             configuration,
             scope(1),
             provider(directory.path())?,
@@ -260,7 +288,7 @@ impl ComputationBootstrapProvider for ScopedBootstrap {
             "unexpected snapshot stream"
         );
         Ok(Some(OutputEndpoint::new(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("1386fd15-7c70-53b2-b727-5b28f3d05f3f")?,
             PortId::try_new("out")?,
         )))
     }
@@ -275,18 +303,22 @@ async fn bootstrap_origin_and_live_binding() -> Result<()> {
             factory.metadata().implementation.name.as_ref() == "drasi.experimental/provider-query"
         })
         .context("missing provider query factory")?;
-    let mut configuration = configured("source", "Item");
+    let mut configuration = configured(SOURCE_ID, "Item");
     configuration["volatile"] = json!(true);
     let mut query = factory.create_component_with_bootstrap(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         configuration,
         scope(1),
         Arc::new(computation::NativeBootstrapResource(Arc::new(
             ScopedBootstrap,
         ))),
     )?;
+    query.initialize().await?;
     query
-        .bind_inputs(&[binding(ComponentId::try_new("source")?, "source/out")?])
+        .bind_inputs(&[binding(
+            ComponentId::try_new("1386fd15-7c70-53b2-b727-5b28f3d05f3f")?,
+            "source/out",
+        )?])
         .await?;
     query.start().await?;
     let readers = query.output_readers();
@@ -369,22 +401,26 @@ async fn custom_factory_and_actual_index(persistent: bool) -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut configuration = json!({
         "query":"MATCH (n:Item) RETURN n.visits AS visits, n.factory AS factory",
-        "inputs":[{"component":"source","pipeline":["custom"]}],
+        "inputs":[{"component":"1386fd15-7c70-53b2-b727-5b28f3d05f3f","pipeline":["custom"]}],
         "middleware":[{"name":"custom","kind":"query-custom","config":{}}]
     });
     let mut query = if persistent {
         factory.create_component_with_processing(
-            ComponentId::try_new(COMPONENT)?,
+            component_id()?,
             configuration,
             scope(1),
             provider(directory.path())?,
         )?
     } else {
         configuration["volatile"] = json!(true);
-        factory.create_component(ComponentId::try_new(COMPONENT)?, configuration)?
+        factory.create_component(component_id()?, configuration)?
     };
+    query.initialize().await?;
     query
-        .bind_inputs(&[binding(ComponentId::try_new("source")?, "source/out")?])
+        .bind_inputs(&[binding(
+            ComponentId::try_new("1386fd15-7c70-53b2-b727-5b28f3d05f3f")?,
+            "source/out",
+        )?])
         .await?;
     query.start().await?;
     let mut instance = None;

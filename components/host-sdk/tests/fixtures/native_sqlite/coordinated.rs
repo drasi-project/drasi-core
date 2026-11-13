@@ -275,7 +275,12 @@ async fn graph_with_options(
         ),
     ]);
     builder = builder
-        .component(source, factory)
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("source")
+                .expect("fixture component name"),
+            source,
+            factory,
+        )
         .bind_stream(endpoint("source", "out"), StreamId::try_new("sqlite/out")?);
     builder = provide(
         builder,
@@ -287,15 +292,30 @@ async fn graph_with_options(
             Arc::new(QueryResultsCatalog::new(ComponentBatch::GRAPH_ID)?),
         ),
     )?;
-    let query_factory = Arc::new(ContinuousQueryFactory::default());
-    let outlet_factory = Arc::new(QueryResultsOutletFactory::default());
+    let factories = FactoryRegistry::standard();
+    let query_factory = factories
+        .get(
+            &ContinuousQueryFactory::default()
+                .descriptor()
+                .implementation,
+        )
+        .context("reference query factory")?
+        .clone();
+    let outlet_factory = factories
+        .get(
+            &QueryResultsOutletFactory::default()
+                .descriptor()
+                .implementation,
+        )
+        .context("query results outlet factory")?
+        .clone();
     let mut superseded: Vec<Arc<dyn ComputationBootstrapProvider>> = Vec::new();
     for (index, (name, owner)) in names.iter().zip(&owners).enumerate() {
         let bootstrap_id = format!("{name}-bootstrap");
         if options.supersede_stopped {
             let previous = bootstrap.create_paired_query_provider(
                 id(name),
-                json!({"source":"source","stream":"sqlite/out"}),
+                json!({"source":id("source"),"stream":"sqlite/out"}),
                 scope(),
                 owner.clone(),
                 coordinator.clone(),
@@ -305,7 +325,7 @@ async fn graph_with_options(
         }
         let inner = bootstrap.create_paired_query_provider(
             id(name),
-            json!({"source":"source","stream":"sqlite/out"}),
+            json!({"source":id("source"),"stream":"sqlite/out"}),
             scope(),
             owner.clone(),
             coordinator.clone(),
@@ -385,8 +405,18 @@ async fn graph_with_options(
             dependencies: BTreeMap::from([("catalog".into(), vec![resource("catalog")?])]),
         };
         builder = builder
-            .component(query, query_factory.clone())
-            .component(sink, outlet_factory.clone())
+            .component(
+                drasi_lib::computation::v1::ComponentName::try_new(*name)
+                    .expect("fixture component name"),
+                query,
+                query_factory.clone(),
+            )
+            .component(
+                drasi_lib::computation::v1::ComponentName::try_new(output.as_str())
+                    .expect("fixture component name"),
+                sink,
+                outlet_factory.clone(),
+            )
             .bind_stream(
                 endpoint(name, "out"),
                 StreamId::try_new(format!("{name}/out"))?,
@@ -402,6 +432,7 @@ async fn graph_with_options(
     }
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -433,7 +464,9 @@ async fn wait_rows(graph: &Graph, expected: &[Value]) -> Result<()> {
         loop {
             let mut complete = true;
             for name in &graph.names {
-                let mut actual = graph.core.get_query_results(name).await?;
+                let name = drasi_core_types::ComponentName::try_new(*name)
+                    .expect("fixture component name");
+                let mut actual = graph.core.get_query_results_by_name(&name).await?;
                 actual.sort_by_key(|row| row["id"].as_i64());
                 complete &= actual == expected;
             }
@@ -467,54 +500,78 @@ async fn snapshot_live_restart() -> Result<()> {
                 shared,
             )
             .await?;
-            let result =
-                async {
-                    opened.core.start().await?;
-                    tokio::time::timeout(
-                        DEADLINE,
-                        opened.core.computation_component("source")?.wait_started(),
+            let result = async {
+                opened.core.start().await?;
+                tokio::time::timeout(
+                    DEADLINE,
+                    opened
+                        .core
+                        .component_by_name(
+                            &drasi_core_types::ComponentName::try_new("source")
+                                .expect("fixture component name"),
+                        )?
+                        .wait_started(),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "snapshot source startup (dynamic={dynamic}, shared={shared}): {:?}",
+                        opened
+                            .core
+                            .computation_control()
+                            .map(|control| control.observed())
                     )
-                    .await??;
-                    wait_rows(
-                        &opened,
-                        &[
-                            json!({"id":1,"value":"initial"}),
-                            json!({"id":2,"value":"before"}),
-                        ],
-                    )
-                    .await?;
-                    for owner in &opened.owners {
-                        let state = owner.snapshot();
-                        anyhow::ensure!(
-                            state.persistent && state.bootstrap_complete,
-                            "paired initialization is not committed"
-                        );
-                        let watermark = state
-                            .checkpoints
-                            .get(&SourceProgressKey::Source("source".into()))
-                            .context("source watermark")?;
-                        anyhow::ensure!(
-                            watermark.sequence == 0 && watermark.source_position.is_some(),
-                            "initial snapshot has no real journal boundary"
-                        );
-                    }
-                    let url = format!("http://127.0.0.1:{port}/api/batch");
-                    client.post(url).json(&json!({"operations":[
-                    {"op":"update","table":"items","id":"1","data":{"id":10,"value":"rekey"}},
-                    {"op":"delete","table":"items","id":"2"},
-                    {"op":"insert","table":"items","data":{"id":3,"value":"live"}}
-                ]})).send().await?.error_for_status()?;
-                    wait_rows(
-                        &opened,
-                        &[
-                            json!({"id":3,"value":"live"}),
-                            json!({"id":10,"value":"rekey"}),
-                        ],
-                    )
-                    .await?;
-                    Ok::<_, anyhow::Error>(())
+                })??;
+                wait_rows(
+                    &opened,
+                    &[
+                        json!({"id":1,"value":"initial"}),
+                        json!({"id":2,"value":"before"}),
+                    ],
+                )
+                .await?;
+                for owner in &opened.owners {
+                    let state = owner.snapshot();
+                    anyhow::ensure!(
+                        state.persistent && state.bootstrap_complete,
+                        "paired initialization is not committed"
+                    );
+                    let watermark = state
+                        .checkpoints
+                        .get(&SourceProgressKey::Source(
+                            drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                        ))
+                        .context("source watermark")?;
+                    anyhow::ensure!(
+                        watermark.sequence == 0 && watermark.source_position.is_some(),
+                        "initial snapshot has no real journal boundary"
+                    );
                 }
-                .await;
+                let url = format!("http://127.0.0.1:{port}/api/batch");
+                client
+                    .post(url)
+                    .json(&json!({"operations":[
+                        {"op":"update","table":"items","id":"1","data":{"id":10,"value":"rekey"}},
+                        {"op":"delete","table":"items","id":"2"},
+                        {"op":"insert","table":"items","data":{"id":3,"value":"live"}}
+                    ]}))
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                wait_rows(
+                    &opened,
+                    &[
+                        json!({"id":3,"value":"live"}),
+                        json!({"id":10,"value":"rekey"}),
+                    ],
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
             let cleanup = opened.core.shutdown().await;
             result?;
             cleanup?;
@@ -534,10 +591,19 @@ async fn snapshot_live_restart() -> Result<()> {
                     DEADLINE,
                     restarted
                         .core
-                        .computation_component("source")?
+                        .component_by_name(
+                            &drasi_core_types::ComponentName::try_new("source")
+                                .expect("fixture component name"),
+                        )?
                         .wait_started(),
                 )
-                .await??;
+                .await
+                .with_context(|| {
+                    format!(
+                    "snapshot restarted source startup (dynamic={dynamic}, shared={shared}): {:?}",
+                    restarted.core.computation_control().map(|control| control.observed())
+                )
+                })??;
                 wait_rows(
                     &restarted,
                     &[
@@ -634,7 +700,7 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_provider(
                         id("first"),
-                        json!({"source":"source","stream":"sqlite/out"}),
+                        json!({"source":id("source"),"stream":"sqlite/out"}),
                         Some(scope()),
                         Some(owner.clone())
                     )
@@ -649,7 +715,7 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_paired_query_provider(
                         id("first"),
-                        json!({"source":"source","stream":"sqlite/out"}),
+                        json!({"source":id("source"),"stream":"sqlite/out"}),
                         scope(),
                         substitute,
                         coordinator.clone()
@@ -658,8 +724,8 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 "same-name query substituted for actual owner"
             );
             for configuration in [
-                json!({"source":"different","stream":"sqlite/out"}),
-                json!({"source":"source","stream":"different"}),
+                json!({"source":id("second"),"stream":"sqlite/out"}),
+                json!({"source":id("source"),"stream":"different"}),
             ] {
                 anyhow::ensure!(
                     bootstrap
@@ -676,7 +742,7 @@ async fn binding_identity_and_retirement() -> Result<()> {
             }
             let provider = bootstrap.create_paired_query_provider(
                 id("first"),
-                json!({"source":"source","stream":"sqlite/out"}),
+                json!({"source":id("source"),"stream":"sqlite/out"}),
                 scope(),
                 owner.clone(),
                 coordinator.clone(),
@@ -685,7 +751,7 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_paired_query_provider(
                         id("first"),
-                        json!({"source":"source","stream":"sqlite/out"}),
+                        json!({"source":id("source"),"stream":"sqlite/out"}),
                         scope(),
                         owner.clone(),
                         coordinator.clone()
@@ -783,7 +849,7 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_paired_query_provider(
                         id("first"),
-                        json!({"source":"source","stream":"sqlite/out"}),
+                        json!({"source":id("source"),"stream":"sqlite/out"}),
                         scope(),
                         owner.clone(),
                         coordinator.clone(),
@@ -809,7 +875,7 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_paired_query_provider(
                         id("first"),
-                        json!({"source":"source","stream":"sqlite/out"}),
+                        json!({"source":id("source"),"stream":"sqlite/out"}),
                         scope(),
                         owner,
                         coordinator.clone()
@@ -920,7 +986,13 @@ async fn retained_provider_replacement() -> Result<()> {
                 .await??;
                 tokio::time::timeout(
                     DEADLINE,
-                    graph.core.computation_component("source")?.wait_started(),
+                    graph
+                        .core
+                        .component_by_name(
+                            &drasi_core_types::ComponentName::try_new("source")
+                                .expect("fixture component name"),
+                        )?
+                        .wait_started(),
                 )
                 .await??;
                 wait_rows(
@@ -969,7 +1041,9 @@ async fn expect_failed_initialization(graph: &Graph) -> Result<()> {
         Err(error) => error.into(),
         Ok(()) => graph
             .core
-            .computation_component("first")?
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("first").expect("fixture component name"),
+            )?
             .wait_started()
             .await
             .err()
@@ -1045,7 +1119,12 @@ async fn incomplete_initialization(cancel: bool) -> Result<()> {
             }
             let strict = graph_with_options(&plugins, &path, &indexes, port()?, options).await?;
             let result =
-                tokio::time::timeout(DEADLINE, expect_failed_initialization(&strict)).await;
+                tokio::time::timeout(DEADLINE, expect_failed_initialization(&strict))
+                    .await
+                    .with_context(|| format!(
+                        "strict incomplete startup (dynamic={dynamic}, shared={shared}, cancel={cancel}): {:?}",
+                        strict.core.computation_control().map(|control| control.observed())
+                    ));
             let cleanup = strict.core.shutdown().await;
             result??;
             cleanup?;
@@ -1059,10 +1138,17 @@ async fn incomplete_initialization(cancel: bool) -> Result<()> {
                     DEADLINE,
                     recovered
                         .core
-                        .computation_component("source")?
+                        .component_by_name(
+                            &drasi_core_types::ComponentName::try_new("source")
+                                .expect("fixture component name"),
+                        )?
                         .wait_started(),
                 )
-                .await??;
+                .await
+                .with_context(|| format!(
+                    "reconstructed source startup (dynamic={dynamic}, shared={shared}, cancel={cancel}): {:?}",
+                    recovered.core.computation_control().map(|control| control.observed())
+                ))??;
                 let expected = (1..=3)
                     .map(|id| json!({"id":id,"value":value}))
                     .collect::<Vec<_>>();
@@ -1133,9 +1219,24 @@ async fn enroll_and_remove_members() -> Result<()> {
                 opened.core.start().await?;
                 tokio::time::timeout(
                     DEADLINE,
-                    opened.core.computation_component("source")?.wait_started(),
+                    opened
+                        .core
+                        .component_by_name(
+                            &drasi_core_types::ComponentName::try_new("source")
+                                .expect("fixture component name"),
+                        )?
+                        .wait_started(),
                 )
-                .await??;
+                .await
+                .with_context(|| {
+                    format!(
+                        "membership source did not start (dynamic={dynamic}, round={round}): {:?}",
+                        opened
+                            .core
+                            .computation_control()
+                            .map(|control| control.observed())
+                    )
+                })??;
                 wait_rows(&opened, &expected).await?;
                 let row = json!({"id":round + 1,"value":format!("round-{round}")});
                 client

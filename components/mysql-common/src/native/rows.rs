@@ -112,7 +112,7 @@ pub fn checkpoint(
 ) -> Result<Option<RowPosition>> {
     let Some(checkpoint) = state
         .checkpoints
-        .get(&SourceProgressKey::Source(source.to_string()))
+        .get(&SourceProgressKey::Source(source.clone()))
     else {
         return Ok(None);
     };
@@ -201,7 +201,7 @@ impl Iterator for Emission {
                 sequence,
             };
             let event = SourceEventWrapper::new(
-                self.source.to_string(),
+                self.source.clone(),
                 SourceEvent::Change(change),
                 self.timestamp,
                 sequence,

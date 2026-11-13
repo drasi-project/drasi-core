@@ -28,7 +28,7 @@ impl Capture {
         Ok((
             Self {
                 descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new("capture")?,
+                    ComponentId::try_new(CAPTURE_ID)?,
                     vec![PortDescriptor::new(
                         PortId::try_new("in")?,
                         PortDirection::Input,
@@ -98,7 +98,11 @@ async fn receiver_core_controlled(
     let (mut capture, captured) = Capture::new(config.delivery)?;
     capture.gate = gate;
     let mut specification = config.specification(ComponentRole::Source)?;
-    let mut builder = ComponentBatch::builder().sink(Box::new(capture));
+    let mut builder = ComponentBatch::builder().sink(
+        drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+            .expect("fixture component name"),
+        Box::new(capture),
+    );
     if let Some(control) = control {
         let resource = ResourceId::try_new("ingress-control")?;
         specification
@@ -132,13 +136,19 @@ async fn receiver_core_controlled(
         None
     };
     let batch = builder
-        .component(specification, crate::factories()[0].clone())
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            specification,
+            crate::factories()[0].clone(),
+        )
         .bind_stream(
             endpoint("bridge-in", "out"),
             StreamId::try_new("receiver/in")?,
         )
         .build()?;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -223,7 +233,7 @@ impl EnvelopeSource for AdmissionOnly {
 
 fn source_descriptor(schema: PortableDelivery) -> Result<ComponentDescriptor> {
     Ok(ComponentDescriptor::try_new(
-        ComponentId::try_new("input")?,
+        ComponentId::try_new(INPUT_ID)?,
         vec![PortDescriptor::new(
             PortId::try_new("out")?,
             PortDirection::Output,
@@ -262,11 +272,17 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
             receiver_core(&source_config, &directory.path().join("right")).await?;
         let (send, receive) = mpsc::channel(1);
         let batch = ComponentBatch::builder()
-            .source(Box::new(InputSource {
-                descriptor: source_descriptor(schema)?,
-                receive,
-            }))
+            .source(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                    .expect("fixture component name"),
+                Box::new(InputSource {
+                    descriptor: source_descriptor(schema)?,
+                    receive,
+                }),
+            )
             .component(
+                drasi_lib::computation::v1::ComponentName::try_new("bridge-out")
+                    .expect("fixture component name"),
                 sink_config.specification(ComponentRole::Sink)?,
                 crate::factories()[1].clone(),
             )
@@ -277,6 +293,7 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
             .bind_stream(endpoint("input", "out"), StreamId::try_new("sender/out")?)
             .build()?;
         let left = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -345,11 +362,20 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
         .dependencies
         .insert("state".into(), vec![ResourceId::try_new("sender-mapping")?]);
     let batch = ComponentBatch::builder()
-        .source(Box::new(AdmissionOnly {
-            descriptor: source_descriptor(schema)?,
-            admission: admission.clone(),
-        }))
-        .component(specification, crate::factories()[1].clone())
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-2")
+                .expect("fixture component name"),
+            Box::new(AdmissionOnly {
+                descriptor: source_descriptor(schema)?,
+                admission: admission.clone(),
+            }),
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
+                .expect("fixture component name"),
+            specification,
+            crate::factories()[1].clone(),
+        )
         .declare_resource(declaration("upstream", ResourceRole::StateStore))?
         .provide_resource(ResourceId::try_new("upstream")?, upstream.resource())?
         .declare_resource(declaration("sender-mapping", ResourceRole::IndexBackend))?
@@ -373,6 +399,7 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
         .bind_stream(endpoint("input", "out"), StreamId::try_new("sender/out")?)
         .build()?;
     let left = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -391,7 +418,9 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
         .await?;
     left.start().await?;
     let session = admission
-        .register_producer(ComponentId::try_new("producer")?)
+        .register_producer(ComponentId::try_new(
+            "5c6211b3-1846-54ce-bdc7-b69d9960aee2",
+        )?)
         .await?;
     let original = transaction_input(44)?;
     admission.admit(&session, 1, &original).await?;
@@ -507,7 +536,9 @@ async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() 
 async fn upstream_input(path: &Path, envelope: &ChangeEnvelope) -> Result<ChangeEnvelope> {
     let journal = channel(path, "sender/out", "left", "input", "caller", 4).await?;
     let session = journal
-        .register_producer(ComponentId::try_new("upstream")?)
+        .register_producer(ComponentId::try_new(
+            "d28ac94c-67b6-5869-8d34-60a39a578437",
+        )?)
         .await?;
     journal.admit(&session, 1, envelope).await?;
     let id = ResourceId::try_new("upstream")?;
@@ -650,7 +681,7 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
     );
     let mut conflict = original.clone();
     conflict.append_annotation(ContextEntry::try_new(
-        ComponentId::try_new("test")?,
+        ComponentId::try_new("6098fde0-6751-5c81-8647-31b2b083b961")?,
         "content-changed",
         ContextValue::Bool(true),
     )?)?;
@@ -823,7 +854,7 @@ async fn malformed_peer_and_stale_connections_do_not_stop_the_receiver_or_contro
     assert_eq!(receipt.admission.sequence, 1);
     let mut conflict = input.clone();
     conflict.append_annotation(ContextEntry::try_new(
-        ComponentId::try_new("peer")?,
+        ComponentId::try_new("4dcfb628-d01f-5e06-9283-e7d224b41ec7")?,
         "conflict",
         ContextValue::Bool(true),
     )?)?;
@@ -871,7 +902,7 @@ async fn transactional_sender_mapping_persists_gaps_rejects_expiry_and_configura
     );
     let session = ProducerSession {
         incarnation: uuid::Uuid::new_v4(),
-        producer: ComponentId::try_new("test")?,
+        producer: ComponentId::try_new("6098fde0-6751-5c81-8647-31b2b083b961")?,
         epoch: 1,
     };
     let mut state = SenderState::new(

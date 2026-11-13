@@ -109,13 +109,16 @@ fn definition(reader: Arc<Reader>) -> anyhow::Result<sdk::PluginDefinition> {
 async fn source_schema_matrix() -> anyhow::Result<()> {
     let state = Arc::new(Reader::default());
     let plugin = NativePlugin::from_definition(definition(state.clone())?)?;
-    let mut source =
-        plugin.factories()[0].create_component(ComponentId::try_new("source")?, json!({}))?;
+    let mut source = plugin.factories()[0].create_component(
+        ComponentId::try_new("feaea727-66a5-5a02-b022-8c47b3173cca")?,
+        json!({}),
+    )?;
     let reader = source
         .source_schema_reader()
         .expect("negotiated capability");
     assert_eq!(state.calls.load(Ordering::Acquire), 0);
     assert!(reader.describe_schema().await.is_err());
+    source.initialize().await?;
     source.start().await?;
     {
         let mut next = Box::pin(source.next());
@@ -236,7 +239,10 @@ unsafe extern "C" fn invalid_extension() -> *const abi::source_schema::PluginSou
 #[test]
 fn source_schema_extension_is_optional_and_validated() -> anyhow::Result<()> {
     let old = unsafe { NativePlugin::from_entry_points(metadata, entry)? };
-    let source = old.factories()[0].create_component(ComponentId::try_new("source")?, json!({}))?;
+    let source = old.factories()[0].create_component(
+        ComponentId::try_new("feaea727-66a5-5a02-b022-8c47b3173cca")?,
+        json!({}),
+    )?;
     assert!(source.source_schema_reader().is_none());
     assert!(unsafe {
         NativePlugin::from_entry_points_with_source_schema(metadata, entry, Some(invalid_extension))

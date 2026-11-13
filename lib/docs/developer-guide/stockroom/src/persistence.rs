@@ -175,7 +175,7 @@ impl ComputationComponent for DurableAlerts {
         saved_reorders(&mut *self.runner.lock().await).await?;
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn dispose(&mut self) -> anyhow::Result<()> {
         self.runner.lock().await.shutdown().await
     }
 }
@@ -237,12 +237,9 @@ impl PersistentStockroom {
             max_bytes: size(1024 * 1024),
             max_duration_ms: NonZeroU64::new(5_000).expect("positive duration"),
         };
-        let progress = Arc::new(QuerySourceProgress::new(
-            GRAPH,
-            ComponentId::try_new("low-stock")?,
-        )?);
+        let progress = Arc::new(QuerySourceProgress::new(GRAPH, component_id(757))?);
         let (source, bootstrap) = SqliteSource::coordinated(
-            ComponentId::try_new("inventory")?,
+            component_id(758),
             StreamId::try_new("inventory/out")?,
             SqliteConfig {
                 path: Some(directory.join("inventory.sqlite")),
@@ -266,7 +263,7 @@ impl PersistentStockroom {
         let query = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: GRAPH.into(),
-                id: ComponentId::try_new("low-stock")?,
+                id: component_id(757),
                 query: LOW_STOCK.into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new("low-stock/out")?,
@@ -296,7 +293,7 @@ impl PersistentStockroom {
                 retention: RetentionPolicy::Backpressure,
                 subscribers: [("alerts".into(), SubscriptionStart::Earliest)].into(),
             },
-            provider.create_indexes(GRAPH, "output-journal").await?,
+            provider.create_indexes(GRAPH, &component_id(767)).await?,
             codec()?,
             "low-stock",
             QosRecoveryOptions::Replay(ReplayOptions {
@@ -307,14 +304,10 @@ impl PersistentStockroom {
         .await?;
         // ANCHOR_END: output-journal
         // ANCHOR: delivery-runner
-        let indexes = provider.create_indexes(GRAPH, "reorder-completion").await?;
+        let indexes = provider.create_indexes(GRAPH, &component_id(759)).await?;
         let contract = ComponentRecovery::transactional_consumer(&indexes)?;
         let runner = Arc::new(Mutex::new(DeliveryRunner::new_transactional(
-            DeliveryScope::new(
-                INSTANCE.into(),
-                GRAPH.into(),
-                ComponentId::try_new("alerts")?,
-            )?,
+            DeliveryScope::new(INSTANCE.into(), GRAPH.into(), component_id(759))?,
             indexes,
             codec()?,
             DeliveryOptions {
@@ -340,23 +333,26 @@ impl PersistentStockroom {
         let handle = journal.resource();
         let journal_id = ResourceId::try_new("output-journal")?;
         let batch = ComponentBatch::builder()
-            .source(Box::new(source))
-            .transformer(Box::new(query))
-            .sink(Box::new(DurableAlerts {
-                descriptor: descriptor(
-                    "alerts",
-                    &[(
-                        "in",
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                    )],
-                )?,
-                runner: runner.clone(),
-                contract,
-                hold,
-                completed,
-                delivery_ready,
-            }))
+            .source(ComponentName::try_new("inventory")?, Box::new(source))
+            .transformer(ComponentName::try_new("low-stock")?, Box::new(query))
+            .sink(
+                ComponentName::try_new("alerts")?,
+                Box::new(DurableAlerts {
+                    descriptor: descriptor(
+                        component_id(759),
+                        &[(
+                            "in",
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                        )],
+                    )?,
+                    runner: runner.clone(),
+                    contract,
+                    hold,
+                    completed,
+                    delivery_ready,
+                }),
+            )
             .declare_resource(ResourceSpecification {
                 id: journal_id.clone(),
                 role: handle.role(),
@@ -365,23 +361,30 @@ impl PersistentStockroom {
             })?
             .provide_resource(journal_id.clone(), handle)?
             .bind_stream(
-                endpoint("inventory", "out")?,
+                endpoint(component_id(758), "out")?,
                 StreamId::try_new("inventory/out")?,
             )
             .bind_stream(
-                endpoint("low-stock", "out")?,
+                endpoint(component_id(757), "out")?,
                 StreamId::try_new("low-stock/out")?,
             )
             .connect(
-                EdgeDefinition::new(endpoint("inventory", "out")?, endpoint("low-stock", "in")?),
+                EdgeDefinition::new(
+                    endpoint(component_id(758), "out")?,
+                    endpoint(component_id(757), "in")?,
+                ),
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("low-stock", "out")?, endpoint("alerts", "in")?),
+                EdgeDefinition::new(
+                    endpoint(component_id(757), "out")?,
+                    endpoint(component_id(759), "in")?,
+                ),
                 Box::new(journal.definition().pipe(journal_id, "alerts")),
             )
             .build()?;
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_id(INSTANCE)
             .with_components(batch)
             .build()
@@ -453,10 +456,7 @@ impl PersistentStockroom {
             let stopped = control
                 .stop_components(
                     revision,
-                    GraphSelection::Exact(vec![
-                        ComponentId::try_new("inventory")?,
-                        ComponentId::try_new("low-stock")?,
-                    ]),
+                    GraphSelection::Exact(vec![component_id(758), component_id(757)]),
                 )
                 .await?;
             if stopped.summary != OperationSummary::Completed {
@@ -566,7 +566,7 @@ pub(super) async fn run(
                 result = app.completion.changed() => {
                     result.context("persistent alert owner closed")?;
                     println!("low-stock: {}", serde_json::to_string(
-                        &app.core.get_query_results("low-stock").await?)?);
+                        &app.core.get_query_results_by_name(&ComponentName::try_new("low-stock")?).await?)?);
                 }
             }
         }
@@ -578,10 +578,9 @@ pub(super) async fn run(
         Ok(()) => {
             async {
                 let control = app.core.computation_control()?;
-                let mut members =
-                    vec![ComponentId::try_new("inventory")?, ComponentId::try_new("low-stock")?];
+                let mut members = vec![component_id(758), component_id(757)];
                 if !hold {
-                    members.push(ComponentId::try_new("alerts")?);
+                    members.push(component_id(759));
                 }
                 tokio::time::timeout(
                     Duration::from_secs(10),
@@ -711,6 +710,51 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn durable_consumer_stop_start_keeps_its_state_owner() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let input = directory.path().join("inventory.json");
+        tokio::fs::write(
+            &input,
+            r#"[{"sku":"bolts","quantity":3,"minimum":5,"warehouse":"west"}]"#,
+        )
+        .await?;
+        let mut app = PersistentStockroom::open(directory.path(), false).await?;
+        let work = async {
+            app.apply_file(&input).await?;
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                app.completion.wait_for(|sequence| *sequence > 0),
+            )
+            .await??;
+            let alerts = app
+                .core
+                .component_by_name(&ComponentName::try_new("alerts")?)?;
+            let generation = alerts.generation();
+            alerts.stop().await?;
+            ensure!(saved_reorders(&mut *app.runner.lock().await)
+                .await?
+                .is_some());
+            alerts.start().await?;
+            ensure!(alerts.generation() == generation);
+            tokio::fs::write(
+                &input,
+                r#"[{"sku":"bolts","quantity":8,"minimum":5,"warehouse":"west"}]"#,
+            )
+            .await?;
+            app.apply_file(&input).await?;
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                app.completion.wait_for(|sequence| *sequence >= 2),
+            )
+            .await??;
+            ensure!(saved_reorders(&mut *app.runner.lock().await).await? == Some(Vec::new()));
+            Ok(())
+        }
+        .await;
+        app.finish(work).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn held_alert_recovers_without_resubmission() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let input = directory.path().join("inventory.json");
@@ -751,7 +795,9 @@ mod tests {
             )
             .await??;
             ensure!(
-                app.core.get_query_results("low-stock").await?
+                app.core
+                    .get_query_results_by_name(&ComponentName::try_new("low-stock")?)
+                    .await?
                     == vec![serde_json::json!({"sku":"bolts","quantity":3})]
             );
             ensure!(
@@ -772,7 +818,9 @@ mod tests {
             let progress = app.journal.progress().await?;
             ensure!(progress.processed.get("alerts").copied() == Some(progress.accepted));
             ensure!(
-                app.core.get_query_results("low-stock").await?
+                app.core
+                    .get_query_results_by_name(&ComponentName::try_new("low-stock")?)
+                    .await?
                     == vec![serde_json::json!({"sku":"bolts","quantity":3})]
             );
             ensure!(

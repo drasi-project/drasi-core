@@ -114,7 +114,7 @@ fn paired(
 ) -> Result<(PostgresTransactionSource, Option<Arc<PostgresSnapshot>>)> {
     if initialize {
         let (source, snapshot) = PostgresTransactionSource::coordinated(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("9822e285-3fa0-54e3-82b5-58fa220b5f79")?,
             StreamId::try_new("changes")?,
             config,
             owner,
@@ -148,6 +148,7 @@ pub(super) async fn retired(database: &Database) -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_verified_tls_streams_initial_and_live_state_and_recovers() -> Result<()> {
     let certificates = Certificates::new(false)?;
     for initialize in [false, true] {
@@ -219,6 +220,7 @@ async fn postgres_verified_tls_streams_initial_and_live_state_and_recovers() -> 
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_tls_rejects_untrusted_wrong_host_and_invalid_ca_without_progress() -> Result<()> {
     let certificates = Certificates::new(false)?;
     let database = certificates.database().await?;
@@ -270,6 +272,7 @@ async fn postgres_tls_rejects_untrusted_wrong_host_and_invalid_ca_without_progre
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_tls_rejects_expired_certificates_without_plaintext_retry() -> Result<()> {
     let certificates = Certificates::new(true)?;
     let database = certificates.database().await?;

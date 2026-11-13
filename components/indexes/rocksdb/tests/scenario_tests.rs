@@ -48,13 +48,19 @@ impl RocksDbQueryConfig {
     #[allow(clippy::unwrap_used)]
     pub fn build_future_queue(
         &self,
-        query_id: &str,
+        query_id: &drasi_core_types::ComponentId,
     ) -> (
         RocksDbFutureQueue,
         Arc<dyn drasi_core::interface::SessionControl>,
     ) {
         let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
-        let db = open_unified_db(&self.url, query_id, &options).unwrap();
+        let db = open_unified_db(
+            &self.url,
+            &drasi_core_types::StorageScope::default(),
+            query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
         (
@@ -76,11 +82,17 @@ impl Drop for RocksDbQueryConfig {
 impl QueryTestConfig for RocksDbQueryConfig {
     async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
         log::info!("using in RocksDb indexes");
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core_types::ComponentId::generate();
 
         let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
 
-        let db = open_unified_db(&self.url, &query_id, &options).unwrap();
+        let db = open_unified_db(
+            &self.url,
+            &drasi_core_types::StorageScope::default(),
+            &query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
 
         let element_index =
@@ -405,7 +417,8 @@ mod index {
     #[serial]
     async fn future_queue_push_always() {
         let test_config = RocksDbQueryConfig::new();
-        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let query_id = drasi_core_types::ComponentId::generate();
+        let (fqi, sc) = test_config.build_future_queue(&query_id);
         fqi.clear().await.unwrap();
         shared_tests::index::future_queue::push_always(&fqi, &sc).await;
     }
@@ -414,7 +427,8 @@ mod index {
     #[serial]
     async fn future_queue_push_not_exists() {
         let test_config = RocksDbQueryConfig::new();
-        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let query_id = drasi_core_types::ComponentId::generate();
+        let (fqi, sc) = test_config.build_future_queue(&query_id);
         fqi.clear().await.unwrap();
         shared_tests::index::future_queue::push_not_exists(&fqi, &sc).await;
     }
@@ -423,7 +437,8 @@ mod index {
     #[serial]
     async fn future_queue_clear_removes_all() {
         let test_config = RocksDbQueryConfig::new();
-        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let query_id = drasi_core_types::ComponentId::generate();
+        let (fqi, sc) = test_config.build_future_queue(&query_id);
         shared_tests::index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
 
@@ -431,7 +446,8 @@ mod index {
     #[serial]
     async fn future_queue_push_overwrite() {
         let test_config = RocksDbQueryConfig::new();
-        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let query_id = drasi_core_types::ComponentId::generate();
+        let (fqi, sc) = test_config.build_future_queue(&query_id);
         fqi.clear().await.unwrap();
         shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
     }
@@ -542,9 +558,15 @@ mod session {
     #[serial]
     async fn session_rollback_discards_writes() {
         let url = format!("test-data/{}", Uuid::new_v4());
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core_types::ComponentId::generate();
         let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
-        let db = open_unified_db(&url, &query_id, &options).unwrap();
+        let db = open_unified_db(
+            &url,
+            &drasi_core_types::StorageScope::default(),
+            &query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let element_index =
             RocksDbElementIndex::new(db.clone(), options.clone(), session_state.clone());
@@ -613,9 +635,15 @@ mod session {
     #[serial]
     async fn session_commit_persists_writes() {
         let url = format!("test-data/{}", Uuid::new_v4());
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core_types::ComponentId::generate();
         let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
-        let db = open_unified_db(&url, &query_id, &options).unwrap();
+        let db = open_unified_db(
+            &url,
+            &drasi_core_types::StorageScope::default(),
+            &query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let element_index =
             RocksDbElementIndex::new(db.clone(), options.clone(), session_state.clone());
@@ -736,9 +764,15 @@ mod checkpoint_tests {
     #[tokio::test]
     async fn sequence_counter() {
         let config = RocksDbQueryConfig::new();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core_types::ComponentId::generate();
         let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
-        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let db = open_unified_db(
+            &config.url,
+            &drasi_core_types::StorageScope::default(),
+            &query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
         let subject = RocksDbCheckpointStore::new(db, session_state);
@@ -751,9 +785,15 @@ mod checkpoint_tests {
     #[tokio::test]
     async fn checkpoint_round_trip() {
         let config = RocksDbQueryConfig::new();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core_types::ComponentId::generate();
         let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
-        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let db = open_unified_db(
+            &config.url,
+            &drasi_core_types::StorageScope::default(),
+            &query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
         let subject = RocksDbCheckpointStore::new(db, session_state);
@@ -766,9 +806,15 @@ mod checkpoint_tests {
     #[tokio::test]
     async fn result_sequence_counter() {
         let config = RocksDbQueryConfig::new();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core_types::ComponentId::generate();
         let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
-        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let db = open_unified_db(
+            &config.url,
+            &drasi_core_types::StorageScope::default(),
+            &query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
         let subject = RocksDbResultIndex::new(db, session_state, options);
@@ -787,9 +833,15 @@ mod checkpoint_tests {
         use bytes::Bytes;
 
         let config = RocksDbQueryConfig::new();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core_types::ComponentId::generate();
         let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
-        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let db = open_unified_db(
+            &config.url,
+            &drasi_core_types::StorageScope::default(),
+            &query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
         let subject = RocksDbCheckpointStore::new(db, session_state);
@@ -799,13 +851,27 @@ mod checkpoint_tests {
 
         let pos_pg = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
         subject
-            .stage_checkpoint("source-pg", 10, Some(&pos_pg))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000333")
+                        .expect("fixture UUID"),
+                ),
+                10,
+                Some(&pos_pg),
+            )
             .await
             .unwrap();
 
         let pos_mssql = Bytes::from(vec![0xAA; 20]);
         subject
-            .stage_checkpoint("source-mssql", 20, Some(&pos_mssql))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000334")
+                        .expect("fixture UUID"),
+                ),
+                20,
+                Some(&pos_mssql),
+            )
             .await
             .unwrap();
 
@@ -814,7 +880,10 @@ mod checkpoint_tests {
 
         // --- Read individual checkpoints without a session ---
         let cp_pg = subject
-            .read_checkpoint("source-pg")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000333")
+                    .expect("fixture UUID"),
+            ))
             .await
             .expect("read_checkpoint should succeed without a session")
             .expect("expected checkpoint for source-pg");
@@ -822,7 +891,10 @@ mod checkpoint_tests {
         assert_eq!(cp_pg.source_position.as_ref(), Some(&pos_pg));
 
         let cp_mssql = subject
-            .read_checkpoint("source-mssql")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000334")
+                    .expect("fixture UUID"),
+            ))
             .await
             .expect("read_checkpoint should succeed without a session")
             .expect("expected checkpoint for source-mssql");
@@ -831,7 +903,10 @@ mod checkpoint_tests {
 
         // Non-existent source returns None
         let cp_none = subject
-            .read_checkpoint("source-nonexistent")
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000335")
+                    .expect("fixture UUID"),
+            ))
             .await
             .expect("read_checkpoint should succeed without a session");
         assert!(cp_none.is_none());
@@ -842,11 +917,38 @@ mod checkpoint_tests {
             .await
             .expect("read_all_checkpoints should succeed without a session");
         assert_eq!(all.len(), 2);
-        assert_eq!(all["source-pg"].sequence, 10);
-        assert_eq!(all["source-pg"].source_position.as_ref(), Some(&pos_pg));
-        assert_eq!(all["source-mssql"].sequence, 20);
         assert_eq!(
-            all["source-mssql"].source_position.as_ref(),
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000333")
+                    .expect("fixture UUID")
+            )]
+                .sequence,
+            10
+        );
+        assert_eq!(
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000333")
+                    .expect("fixture UUID")
+            )]
+                .source_position
+                .as_ref(),
+            Some(&pos_pg)
+        );
+        assert_eq!(
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000334")
+                    .expect("fixture UUID")
+            )]
+                .sequence,
+            20
+        );
+        assert_eq!(
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000334")
+                    .expect("fixture UUID")
+            )]
+                .source_position
+                .as_ref(),
             Some(&pos_mssql)
         );
     }
@@ -859,9 +961,15 @@ mod checkpoint_tests {
         use bytes::Bytes;
 
         let config = RocksDbQueryConfig::new();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core_types::ComponentId::generate();
         let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
-        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let db = open_unified_db(
+            &config.url,
+            &drasi_core_types::StorageScope::default(),
+            &query_id,
+            &options,
+        )
+        .unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
         let subject = RocksDbCheckpointStore::new(db, session_state);
@@ -883,13 +991,26 @@ mod checkpoint_tests {
         session_control.begin().await.unwrap();
         let pos = Bytes::from_static(&[0xFF; 10]);
         subject
-            .stage_checkpoint("src-1", 5, Some(&pos))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                Some(&pos),
+            )
             .await
             .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it's there
-        let cp = subject.read_checkpoint("src-1").await.unwrap();
+        let cp = subject
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
         assert!(cp.is_some());
 
         // Clear without a session
@@ -899,7 +1020,13 @@ mod checkpoint_tests {
             .expect("clear_checkpoints should succeed without a session");
 
         // Verify everything is gone
-        let cp = subject.read_checkpoint("src-1").await.unwrap();
+        let cp = subject
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
         assert!(cp.is_none());
         let all = subject.read_all_checkpoints().await.unwrap();
         assert!(all.is_empty());

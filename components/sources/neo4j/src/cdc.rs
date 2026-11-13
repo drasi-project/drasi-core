@@ -60,12 +60,18 @@ pub fn build_selectors(labels: &[String], rel_types: &[String]) -> Vec<HashMap<S
 
 pub async fn determine_start_cursor(
     graph: &Graph,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &Neo4jSourceConfig,
     state_store: Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<String> {
     if let Some(state_store) = state_store {
-        match state_store.get(source_id, CURSOR_STATE_KEY).await {
+        match state_store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                CURSOR_STATE_KEY,
+            )
+            .await
+        {
             Ok(Some(raw)) => {
                 let state: Neo4jCdcState = serde_json::from_slice(&raw)?;
                 if state.database == config.database {
@@ -95,7 +101,7 @@ pub async fn determine_start_cursor(
 }
 
 pub async fn persist_cursor(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     database: &str,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     cursor: &str,
@@ -108,7 +114,14 @@ pub async fn persist_cursor(
 
         match serde_json::to_vec(&state) {
             Ok(payload) => {
-                if let Err(e) = state_store.set(source_id, CURSOR_STATE_KEY, payload).await {
+                if let Err(e) = state_store
+                    .set(
+                        &drasi_lib::StorePartition::component(source_id.clone()),
+                        CURSOR_STATE_KEY,
+                        payload,
+                    )
+                    .await
+                {
                     log::warn!("Failed to persist CDC cursor to state store: {e}");
                 }
             }

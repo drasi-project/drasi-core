@@ -40,7 +40,7 @@ impl Observed {
     }
 
     pub fn has_checkpoint(&self, source: &ComponentId) -> bool {
-        let key = SourceProgressKey::Source(source.to_string());
+        let key = SourceProgressKey::Source(source.clone());
         match self {
             Self::Single(state) => state.checkpoints.contains_key(&key),
             Self::Group(states) => states

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::events::Timestamped;
+use super::events::{OrderingStream, Timestamped};
 use log::{debug, trace};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -27,7 +27,7 @@ pub(crate) trait QueueOrder {
     fn priority_rank(&self) -> Option<(usize, u64)> {
         None
     }
-    fn priority_stream(&self) -> Option<(&str, u64)> {
+    fn priority_stream(&self) -> Option<(OrderingStream, u64)> {
         None
     }
 }
@@ -39,7 +39,7 @@ impl<T: Timestamped> QueueOrder for T {
     fn priority_rank(&self) -> Option<(usize, u64)> {
         self.ordering_tie_breaker()
     }
-    fn priority_stream(&self) -> Option<(&str, u64)> {
+    fn priority_stream(&self) -> Option<(OrderingStream, u64)> {
         self.ordering_stream()
     }
 }
@@ -111,7 +111,7 @@ where
 enum StreamKey {
     Unordered,
     Ranked(usize),
-    Named(String),
+    Producer(OrderingStream),
 }
 
 type Head = (
@@ -152,7 +152,7 @@ impl<T: QueueOrder + Clone + Send + Sync + 'static> OrderedHeap<T> {
         let key = match event.priority_rank() {
             Some((rank, _)) => StreamKey::Ranked(rank),
             None => match event.priority_stream() {
-                Some((source, _)) => StreamKey::Named(source.to_owned()),
+                Some((source, _)) => StreamKey::Producer(source),
                 None => StreamKey::Unordered,
             },
         };

@@ -15,7 +15,6 @@
 use clap::Parser;
 
 use std::{env, sync::Arc};
-use uuid::Uuid;
 
 use drasi_core::{
     evaluation::functions::FunctionRegistry,
@@ -78,7 +77,7 @@ async fn main() {
         println!(" - Scenario Config: \n{scenario_config:?}\n");
         println!(" - Initializing Scenario...");
 
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
         let parser = Arc::new(CypherParser::new(function_registry.clone()));
@@ -124,7 +123,13 @@ async fn main() {
                 Ok(p) => p,
                 Err(_) => "test-data".to_string(),
             };
-            let db = open_unified_db(&path, &query_id, &options).unwrap();
+            let db = open_unified_db(
+                &path,
+                &drasi_core::interface::StorageScope::default(),
+                &query_id,
+                &options,
+            )
+            .unwrap();
             let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
             (Some(db), Some(session_state), Some(options))
         } else {
@@ -137,7 +142,13 @@ async fn main() {
             IndexType::Redis => {
                 let con = redis_connection.clone().unwrap();
                 let session_state = garnet_session_state.clone().unwrap();
-                let element_index = GarnetElementIndex::new(&query_id, con, false, session_state);
+                let element_index = GarnetElementIndex::new(
+                    &drasi_core::interface::StorageScope::default(),
+                    &query_id,
+                    con,
+                    false,
+                    session_state,
+                );
 
                 builder.with_element_index(Arc::new(element_index))
             }
@@ -158,7 +169,12 @@ async fn main() {
             IndexType::Redis => {
                 let con = redis_connection.clone().unwrap();
                 let session_state = garnet_session_state.clone().unwrap();
-                let ari = GarnetResultIndex::new(&query_id, con, session_state);
+                let ari = GarnetResultIndex::new(
+                    &drasi_core::interface::StorageScope::default(),
+                    &query_id,
+                    con,
+                    session_state,
+                );
 
                 builder.with_result_index(Arc::new(ari))
             }

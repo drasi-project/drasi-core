@@ -39,16 +39,16 @@ pub struct SqsReaction {
 }
 
 impl SqsReaction {
-    pub fn builder(id: impl Into<String>) -> SqsReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> SqsReactionBuilder {
         SqsReactionBuilder::new(id)
     }
 
     pub(crate) fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: SqsReactionConfig,
     ) -> Self {
-        let id = id.into();
+        let id = id.clone();
         let params = ReactionBaseParams::new(id, queries);
         Self {
             base: ReactionBase::new(params),
@@ -58,12 +58,12 @@ impl SqsReaction {
     }
 
     pub(crate) fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: SqsReactionConfig,
         priority_queue_capacity: usize,
     ) -> Self {
-        let id = id.into();
+        let id = id.clone();
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
         Self {
@@ -74,8 +74,8 @@ impl SqsReaction {
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: SqsReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -115,27 +115,23 @@ impl SqsReaction {
     }
 
     fn resolve_query_config<'a>(
-        query_id: &str,
+        alias: Option<&str>,
         routes: &'a HashMap<String, QueryConfig>,
         default_template: &'a Option<QueryConfig>,
     ) -> Option<&'a QueryConfig> {
-        routes
-            .get(query_id)
-            .or_else(|| {
-                if query_id.contains('.') {
-                    query_id
-                        .rsplit('.')
-                        .next()
-                        .and_then(|name| routes.get(name))
-                } else {
-                    None
-                }
+        alias
+            .and_then(|alias| {
+                routes.get(alias).or_else(|| {
+                    alias
+                        .rsplit_once('.')
+                        .and_then(|(_, last)| routes.get(last))
+                })
             })
             .or(default_template.as_ref())
     }
 
     fn build_context(
-        query_id: &str,
+        emission: &drasi_lib::channels::QueryResult,
         operation: &str,
         result: &ResultDiff,
         timestamp: i64,
@@ -160,11 +156,14 @@ impl SqsReaction {
             }
             ResultDiff::Noop => {}
         }
-        context.insert("query_id".to_string(), Value::String(query_id.to_string()));
-        let query_name = query_id.rsplit('.').next().unwrap_or(query_id);
+        context.insert("query_id".to_string(), serde_json::json!(emission.query_id));
         context.insert(
             "query_name".to_string(),
-            Value::String(query_name.to_string()),
+            serde_json::json!(emission.query_name),
+        );
+        context.insert(
+            "input_alias".to_string(),
+            serde_json::json!(emission.input_alias),
         );
         context.insert(
             "operation".to_string(),
@@ -253,7 +252,7 @@ impl SqsReaction {
         queue_url: &str,
         body: String,
         operation: &str,
-        query_id: &str,
+        query_id: &drasi_lib::ComponentId,
         custom_attributes: HashMap<String, String>,
         fifo_queue: bool,
         message_group_id: Option<String>,
@@ -292,7 +291,7 @@ impl SqsReaction {
 
 #[async_trait]
 impl Reaction for SqsReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -325,7 +324,7 @@ impl Reaction for SqsReaction {
         props
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -333,8 +332,8 @@ impl Reaction for SqsReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -410,7 +409,11 @@ impl Reaction for SqsReaction {
 
                 let query_id = &query_result.query_id;
                 let Some(query_config) =
-                    Self::resolve_query_config(query_id, &routes, &default_template)
+                    Self::resolve_query_config(
+                        drasi_lib::reactions::common::input_alias(query_result.input_alias.as_deref(), query_result.query_name.as_ref()),
+                        &routes,
+                        &default_template,
+                    )
                 else {
                     debug!(
                         "[{reaction_id}] No route/default template configured for query '{query_id}', skipping"
@@ -424,7 +427,7 @@ impl Reaction for SqsReaction {
                         continue;
                     };
                     let timestamp = chrono::Utc::now().timestamp_millis();
-                    let context = Self::build_context(query_id, operation, result, timestamp);
+                    let context = Self::build_context(query_result, operation, result, timestamp);
 
                     let body = match Self::render_body(&handlebars, spec, &context, result) {
                         Ok(body) => body,
@@ -460,7 +463,7 @@ impl Reaction for SqsReaction {
                                             warn!(
                                                 "[{reaction_id}] message_group_id_template rendered empty, falling back to query_id"
                                             );
-                                            Some(query_id.clone())
+                                            Some(query_id.to_string())
                                         } else {
                                             Some(trimmed)
                                         }
@@ -469,11 +472,11 @@ impl Reaction for SqsReaction {
                                         error!(
                                         "[{reaction_id}] Failed rendering message group id template '{template}': {e}"
                                     );
-                                        Some(query_id.clone())
+                                        Some(query_id.to_string())
                                     }
                                 }
                             }
-                            None => Some(query_id.clone()),
+                            None => Some(query_id.to_string()),
                         }
                     } else {
                         None
@@ -541,6 +544,22 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn emission(name: &str) -> drasi_lib::channels::QueryResult {
+        drasi_lib::channels::QueryResult {
+            query_name: Some(
+                drasi_lib::ComponentName::try_new(name).expect("fixture component name"),
+            ),
+            input_alias: None,
+            query_id: drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+            sequence: 1,
+            timestamp: chrono::Utc::now(),
+            results: Vec::new(),
+            metadata: Default::default(),
+            profiling: None,
+        }
+    }
     use crate::config::{QueryConfig, TemplateSpec};
 
     #[test]
@@ -554,7 +573,7 @@ mod tests {
             },
         );
         let default = None;
-        let result = SqsReaction::resolve_query_config("q1", &routes, &default);
+        let result = SqsReaction::resolve_query_config(Some("q1"), &routes, &default);
         assert!(result.is_some());
         assert_eq!(result.unwrap().added.as_ref().unwrap().body, "body-q1");
     }
@@ -570,7 +589,7 @@ mod tests {
             },
         );
         let default = None;
-        let result = SqsReaction::resolve_query_config("source.q1", &routes, &default);
+        let result = SqsReaction::resolve_query_config(Some("source.q1"), &routes, &default);
         assert!(result.is_some());
         assert_eq!(result.unwrap().added.as_ref().unwrap().body, "body-q1");
     }
@@ -582,7 +601,7 @@ mod tests {
             added: Some(TemplateSpec::new("default-body")),
             ..Default::default()
         });
-        let result = SqsReaction::resolve_query_config("unknown", &routes, &default);
+        let result = SqsReaction::resolve_query_config(Some("unknown"), &routes, &default);
         assert!(result.is_some());
         assert_eq!(result.unwrap().added.as_ref().unwrap().body, "default-body");
     }
@@ -591,7 +610,7 @@ mod tests {
     fn resolve_query_config_no_match_no_default_returns_none() {
         let routes = HashMap::new();
         let default = None;
-        let result = SqsReaction::resolve_query_config("unknown", &routes, &default);
+        let result = SqsReaction::resolve_query_config(Some("unknown"), &routes, &default);
         assert!(result.is_none());
     }
 
@@ -639,19 +658,20 @@ mod tests {
     }
 
     #[test]
-    fn build_context_query_name_is_short_name() {
+    fn build_context_query_name_preserves_complete_name() {
         let result = ResultDiff::Add {
             data: serde_json::json!({}),
             row_signature: 0,
         };
-        let context = SqsReaction::build_context("namespace.my-query", "ADD", &result, 12345);
+        let emission = emission("namespace.my-query");
+        let context = SqsReaction::build_context(&emission, "ADD", &result, 12345);
         assert_eq!(
             context.get("query_id"),
-            Some(&Value::String("namespace.my-query".to_string()))
+            Some(&Value::String(emission.query_id.to_string()))
         );
         assert_eq!(
             context.get("query_name"),
-            Some(&Value::String("my-query".to_string()))
+            Some(&Value::String("namespace.my-query".to_string()))
         );
     }
 
@@ -661,7 +681,8 @@ mod tests {
             data: serde_json::json!({}),
             row_signature: 0,
         };
-        let context = SqsReaction::build_context("simple-query", "ADD", &result, 12345);
+        let emission = emission("simple-query");
+        let context = SqsReaction::build_context(&emission, "ADD", &result, 12345);
         assert_eq!(
             context.get("query_name"),
             Some(&Value::String("simple-query".to_string()))

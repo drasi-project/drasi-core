@@ -51,6 +51,7 @@ use tempfile::TempDir;
 #[derive(Clone)]
 struct TestSourceHandle {
     base: Arc<SourceBase>,
+    namespace: Arc<str>,
 }
 
 impl TestSourceHandle {
@@ -63,7 +64,7 @@ impl TestSourceHandle {
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(self.base.get_id()),
+                    namespace: self.namespace.clone(),
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(Into::into).collect::<Vec<_>>()),
@@ -82,16 +83,22 @@ struct TestSource {
 }
 
 impl TestSource {
-    fn new(id: &str) -> Result<(Self, TestSourceHandle)> {
+    fn new(
+        id: drasi_core::ComponentId,
+        namespace: impl Into<Arc<str>>,
+    ) -> Result<(Self, TestSourceHandle)> {
         let base = Arc::new(SourceBase::new(SourceBaseParams::new(id))?);
-        let handle = TestSourceHandle { base: base.clone() };
+        let handle = TestSourceHandle {
+            base: base.clone(),
+            namespace: namespace.into(),
+        };
         Ok((Self { base }, handle))
     }
 }
 
 #[async_trait]
 impl Source for TestSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -135,8 +142,8 @@ impl Source for TestSource {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     fn dispatch_mode(&self) -> DispatchMode {
@@ -170,8 +177,8 @@ async fn build_provider_from_config(
         .expect("descriptor should build a RocksDB index backend from config")
 }
 
-fn test_source(id: &str) -> Result<(TestSource, TestSourceHandle)> {
-    TestSource::new(id)
+fn test_source(id: drasi_core::ComponentId) -> Result<(TestSource, TestSourceHandle)> {
+    TestSource::new(id, "people")
 }
 
 async fn insert_person(handle: &TestSourceHandle, id: &str, name: &str, age: i64) -> Result<()> {
@@ -183,24 +190,27 @@ async fn insert_person(handle: &TestSourceHandle, id: &str, name: &str, age: i64
 }
 
 fn person_query(storage_backend: &str) -> drasi_lib::config::QueryConfig {
-    Query::cypher("people")
+    Query::cypher(drasi_core::ComponentName::try_new("people").expect("fixture component name"))
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_input("people-src")
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("people-src").expect("fixture component name"),
+        )
         .auto_start(true)
         .enable_bootstrap(true)
         .with_storage_backend(StorageBackendRef::Named(storage_backend.to_string()))
         .build()
+        .expect("valid people query")
 }
 
 /// Poll the query results until `expected` rows are present (or time out).
 async fn wait_for_results(
     core: &DrasiLib,
-    query_id: &str,
+    query_id: &drasi_core::ComponentName,
     expected: usize,
 ) -> Vec<serde_json::Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        match core.get_query_results(query_id).await {
+        match core.get_query_results_by_name(query_id).await {
             Ok(results) if results.len() >= expected => return results,
             Ok(results) if tokio::time::Instant::now() >= deadline => return results,
             // Query may still be transitioning to Running, or results not yet
@@ -212,10 +222,14 @@ async fn wait_for_results(
 }
 
 /// Poll until the query reaches the expected status (or time out).
-async fn wait_for_query_status(core: &DrasiLib, query_id: &str, expected: ComponentStatus) {
+async fn wait_for_query_status(
+    core: &DrasiLib,
+    query_id: &drasi_core::ComponentName,
+    expected: ComponentStatus,
+) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(status) = core.get_query_status(query_id).await {
+        if let Ok(status) = core.get_query_status_by_name(query_id).await {
             if status == expected {
                 return;
             }
@@ -243,25 +257,41 @@ async fn static_rocksdb_descriptor_drives_query() -> Result<()> {
 
     let provider = build_provider_from_config(&backend_config).await;
 
-    let (source, handle) = test_source("people-src")?;
+    let (source, handle) = test_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000427")
+            .expect("fixture UUID"),
+    )?;
 
     let core = Arc::new(
         lib_integration_tests::query_builder()
             .with_id("static-rocksdb")
             .with_index_provider("rocks-1", provider)
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("people-src").expect("fixture component name"),
+                source,
+            )
             .with_query(person_query("rocks-1"))
             .build()
             .await?,
     );
 
     core.start().await?;
-    wait_for_query_status(&core, "people", ComponentStatus::Running).await;
+    wait_for_query_status(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     insert_person(&handle, "p1", "Alice", 30).await?;
     insert_person(&handle, "p2", "Bob", 25).await?;
 
-    let results = wait_for_results(&core, "people", 2).await;
+    let results = wait_for_results(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        2,
+    )
+    .await;
     assert_eq!(
         results.len(),
         2,
@@ -293,46 +323,83 @@ async fn static_rocksdb_index_persists_across_restart() -> Result<()> {
     });
 
     let provider = build_provider_from_config(&backend_config).await;
-    let (source, handle) = test_source("people-src")?;
+    let (source, handle) = test_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000427")
+            .expect("fixture UUID"),
+    )?;
     let core = Arc::new(
         lib_integration_tests::query_builder()
             .with_id("static-rocksdb")
             .with_index_provider("rocks-1", provider)
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("people-src").expect("fixture component name"),
+                source,
+            )
             // Bootstrap disabled so that, after restart, the rows can only come
             // from the persisted RocksDB index — proving durability rather than
             // re-bootstrap.
             .with_query(
-                Query::cypher("people")
-                    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-                    .from_input("people-src")
-                    .auto_start(true)
-                    .enable_bootstrap(false)
-                    .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
-                    .build(),
+                Query::cypher(
+                    drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+                )
+                .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+                .from_input_by_name(
+                    drasi_core::ComponentName::try_new("people-src")
+                        .expect("fixture component name"),
+                )
+                .auto_start(true)
+                .enable_bootstrap(false)
+                .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
+                .build()?,
             )
             .build()
             .await?,
     );
 
     core.start().await?;
-    wait_for_query_status(&core, "people", ComponentStatus::Running).await;
+    wait_for_query_status(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Ingest 3 rows as live source changes.
     insert_person(&handle, "p1", "Alice", 30).await?;
     insert_person(&handle, "p2", "Bob", 25).await?;
     insert_person(&handle, "p3", "Carol", 41).await?;
-    let results = wait_for_results(&core, "people", 3).await;
+    let results = wait_for_results(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        3,
+    )
+    .await;
     assert_eq!(results.len(), 3, "first run should ingest 3 rows");
 
     // Restart the query: in-memory state is discarded, the RocksDB index is
     // re-opened from disk.
-    core.stop_query("people").await?;
-    wait_for_query_status(&core, "people", ComponentStatus::Stopped).await;
-    core.start_query("people").await?;
+    core.stop_query_by_name(
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+    )
+    .await?;
+    wait_for_query_status(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        ComponentStatus::Stopped,
+    )
+    .await;
+    core.start_query_by_name(
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+    )
+    .await?;
 
     // No re-ingestion: results must be recovered from the persisted index.
-    let recovered = wait_for_results(&core, "people", 3).await;
+    let recovered = wait_for_results(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        3,
+    )
+    .await;
     let names: Vec<&str> = recovered
         .iter()
         .filter_map(|r| r["name"].as_str())
@@ -375,35 +442,60 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
 
     // ---- First engine: ingest rows, then shut down permanently. ----
     let provider1 = build_provider_from_config(&backend_config).await;
-    let (source1, handle1) = test_source("people-src")?;
+    let (source1, handle1) = test_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000427")
+            .expect("fixture UUID"),
+    )?;
     let core1 = Arc::new(
         lib_integration_tests::query_builder()
             .with_id("static-rocksdb-reopen")
             .with_index_provider("rocks-1", provider1)
-            .with_source(source1)
+            .with_source(
+                drasi_core::ComponentName::try_new("people-src").expect("fixture component name"),
+                source1,
+            )
             // Bootstrap disabled so that, after reopen, rows can only come from the
             // persisted RocksDB index — proving durability rather than re-bootstrap.
             .with_query(
-                Query::cypher("people")
-                    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-                    .from_input("people-src")
-                    .auto_start(true)
-                    .enable_bootstrap(false)
-                    .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
-                    .build(),
+                Query::cypher(
+                    drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+                )
+                .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+                .from_input_by_name(
+                    drasi_core::ComponentName::try_new("people-src")
+                        .expect("fixture component name"),
+                )
+                .auto_start(true)
+                .enable_bootstrap(false)
+                .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
+                .build()?,
             )
             .build()
             .await?,
     );
 
     core1.start().await?;
-    wait_for_query_status(&core1, "people", ComponentStatus::Running).await;
+    wait_for_query_status(
+        &core1,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     insert_person(&handle1, "p1", "Alice", 30).await?;
     insert_person(&handle1, "p2", "Bob", 25).await?;
     insert_person(&handle1, "p3", "Carol", 41).await?;
-    let results = wait_for_results(&core1, "people", 3).await;
+    let results = wait_for_results(
+        &core1,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        3,
+    )
+    .await;
     assert_eq!(results.len(), 3, "first engine should ingest 3 rows");
+    let query_id = core1
+        .component_by_name(&drasi_core::ComponentName::try_new("people")?)?
+        .id()
+        .clone();
 
     // Permanent teardown — this must release the RocksDB lock even though `core1`
     // (and its provider) remain alive below.
@@ -413,20 +505,32 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     // A fresh provider on the same on-disk path; this open acquires the RocksDB
     // LOCK, which only succeeds if the first engine's `shutdown()` released it.
     let provider2 = build_provider_from_config(&backend_config).await;
-    let (source2, _handle2) = test_source("people-src")?;
+    let (source2, _handle2) = test_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000427")
+            .expect("fixture UUID"),
+    )?;
     let core2 = Arc::new(
         lib_integration_tests::query_builder()
             .with_id("static-rocksdb-reopen")
             .with_index_provider("rocks-1", provider2)
-            .with_source(source2)
+            .with_source(
+                drasi_core::ComponentName::try_new("people-src").expect("fixture component name"),
+                source2,
+            )
             .with_query(
-                Query::cypher("people")
-                    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-                    .from_input("people-src")
-                    .auto_start(true)
-                    .enable_bootstrap(false)
-                    .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
-                    .build(),
+                Query::cypher(
+                    drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+                )
+                .with_id(query_id.clone())
+                .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+                .from_input_by_name(
+                    drasi_core::ComponentName::try_new("people-src")
+                        .expect("fixture component name"),
+                )
+                .auto_start(true)
+                .enable_bootstrap(false)
+                .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
+                .build()?,
             )
             .build()
             .await?,
@@ -440,7 +544,12 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
         .expect("second engine should open the same RocksDB path after shutdown released the lock");
 
     // No re-ingestion: results must be recovered from the persisted index.
-    let recovered = wait_for_results(&core2, "people", 3).await;
+    let recovered = wait_for_results(
+        &core2,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        3,
+    )
+    .await;
     let names: Vec<&str> = recovered
         .iter()
         .filter_map(|r| r["name"].as_str())
@@ -474,33 +583,54 @@ async fn static_rocksdb_default_provider_backs_unspecified_query() -> Result<()>
     });
 
     let provider = build_provider_from_config(&backend_config).await;
-    let (source, handle) = test_source("people-src")?;
+    let (source, handle) = test_source(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000427")
+            .expect("fixture UUID"),
+    )?;
     let core = Arc::new(
         lib_integration_tests::query_builder()
             .with_id("static-rocksdb")
             // As drasi-server does when persist_index is enabled: register the
             // provider as the default for any query without an explicit backend.
             .with_default_index_provider("rocksdb", provider)
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("people-src").expect("fixture component name"),
+                source,
+            )
             // Note: NO with_storage_backend — relies entirely on the default.
             .with_query(
-                Query::cypher("people")
-                    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-                    .from_input("people-src")
-                    .auto_start(true)
-                    .enable_bootstrap(false)
-                    .build(),
+                Query::cypher(
+                    drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+                )
+                .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+                .from_input_by_name(
+                    drasi_core::ComponentName::try_new("people-src")
+                        .expect("fixture component name"),
+                )
+                .auto_start(true)
+                .enable_bootstrap(false)
+                .build()?,
             )
             .build()
             .await?,
     );
 
     core.start().await?;
-    wait_for_query_status(&core, "people", ComponentStatus::Running).await;
+    wait_for_query_status(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     insert_person(&handle, "p1", "Alice", 30).await?;
     insert_person(&handle, "p2", "Bob", 25).await?;
-    let results = wait_for_results(&core, "people", 2).await;
+    let results = wait_for_results(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        2,
+    )
+    .await;
     assert_eq!(
         results.len(),
         2,
@@ -510,11 +640,27 @@ async fn static_rocksdb_default_provider_backs_unspecified_query() -> Result<()>
     // Restart the query: with bootstrap disabled, recovered rows can only come
     // from the persisted RocksDB index — proving the default provider really is
     // persistent (not in-memory).
-    core.stop_query("people").await?;
-    wait_for_query_status(&core, "people", ComponentStatus::Stopped).await;
-    core.start_query("people").await?;
+    core.stop_query_by_name(
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+    )
+    .await?;
+    wait_for_query_status(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        ComponentStatus::Stopped,
+    )
+    .await;
+    core.start_query_by_name(
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+    )
+    .await?;
 
-    let recovered = wait_for_results(&core, "people", 2).await;
+    let recovered = wait_for_results(
+        &core,
+        &drasi_core::ComponentName::try_new("people").expect("fixture component name"),
+        2,
+    )
+    .await;
     let names: Vec<&str> = recovered
         .iter()
         .filter_map(|r| r["name"].as_str())

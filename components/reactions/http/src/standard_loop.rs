@@ -31,7 +31,7 @@ use drasi_lib::reactions::common::{CheckpointState, FailureAction};
 /// shutdown signal fires or the queue is closed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_standard_loop(
-    reaction_name: String,
+    reaction_id: drasi_lib::ComponentId,
     base: ReactionBase,
     config: HttpReactionConfig,
     client: Client,
@@ -46,7 +46,7 @@ pub(crate) async fn run_standard_loop(
         let query_result_arc = tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
-                debug!("[{reaction_name}] Received shutdown signal, exiting standard loop");
+                debug!("[{reaction_id}] Received shutdown signal, exiting standard loop");
                 break;
             }
             result = base.priority_queue.dequeue() => result,
@@ -57,11 +57,11 @@ pub(crate) async fn run_standard_loop(
             continue;
         }
 
-        let query_name = &query_result.query_id;
+        let query_id = &query_result.query_id;
         let seq = query_result.sequence;
 
         debug!(
-            "[{reaction_name}] Processing {} results from query '{query_name}'",
+            "[{reaction_id}] Processing {} results from query '{query_id}'",
             query_result.results.len()
         );
 
@@ -73,7 +73,8 @@ pub(crate) async fn run_standard_loop(
                 None => continue,
             };
 
-            let outcome = match config.get_template_spec(query_name, notification.operation_type())
+            let outcome = match config
+                .get_result_template_spec(query_result, notification.operation_type())
             {
                 Some(spec) => {
                     process_result(
@@ -83,8 +84,7 @@ pub(crate) async fn run_standard_loop(
                         &config.token,
                         spec,
                         &notification,
-                        query_name,
-                        &reaction_name,
+                        reaction_id.as_str(),
                     )
                     .await
                 }
@@ -94,15 +94,14 @@ pub(crate) async fn run_standard_loop(
                         &config.base_url,
                         &config.token,
                         &notification,
-                        query_name,
-                        &reaction_name,
+                        reaction_id.as_str(),
                     )
                     .await
                 }
             };
 
             if let Err(e) = outcome {
-                error!("[{reaction_name}] Failed to process result: {e}");
+                error!("[{reaction_id}] Failed to process result: {e}");
                 delivery_failed = true;
                 // Under fail-stop, don't keep emitting the rest of this result.
                 if FailureAction::from_policy(policy) == FailureAction::Stop {
@@ -115,14 +114,14 @@ pub(crate) async fn run_standard_loop(
             match FailureAction::from_policy(policy) {
                 FailureAction::Stop => {
                     error!(
-                        "[{reaction_name}] Delivery failed for query '{query_name}' (seq {seq}); \
+                        "[{reaction_id}] Delivery failed for query '{query_id}' (seq {seq}); \
                          stopping per Strict recovery policy — the result replays from the outbox on restart"
                     );
                     status_handle
                         .set_status(
                             ComponentStatus::Error,
                             Some(format!(
-                                "HTTP delivery failed for query '{query_name}' (seq {seq}); \
+                                "HTTP delivery failed for query '{query_id}' (seq {seq}); \
                                  stopped per recovery policy"
                             )),
                         )
@@ -131,14 +130,14 @@ pub(crate) async fn run_standard_loop(
                 }
                 FailureAction::SkipAndContinue => {
                     warn!(
-                        "[{reaction_name}] Delivery failed for query '{query_name}' (seq {seq}); \
+                        "[{reaction_id}] Delivery failed for query '{query_id}' (seq {seq}); \
                          skipping and advancing checkpoint per AutoSkipGap recovery policy"
                     );
                     if checkpoint_advance(
                         &mut checkpoints,
                         &base,
-                        &reaction_name,
-                        query_name,
+                        &reaction_id,
+                        query_id,
                         seq,
                         policy,
                     )
@@ -153,22 +152,15 @@ pub(crate) async fn run_standard_loop(
         }
 
         // All diffs delivered: advance the checkpoint after the side effect.
-        if checkpoint_advance(
-            &mut checkpoints,
-            &base,
-            &reaction_name,
-            query_name,
-            seq,
-            policy,
-        )
-        .await
-        .is_err()
+        if checkpoint_advance(&mut checkpoints, &base, &reaction_id, query_id, seq, policy)
+            .await
+            .is_err()
         {
             status_handle
                 .set_status(
                     ComponentStatus::Error,
                     Some(format!(
-                        "HTTP checkpoint write failed for query '{query_name}' (seq {seq}); \
+                        "HTTP checkpoint write failed for query '{query_id}' (seq {seq}); \
                          stopped per recovery policy"
                     )),
                 )
@@ -177,7 +169,7 @@ pub(crate) async fn run_standard_loop(
         }
     }
 
-    info!("[{reaction_name}] HTTP standard loop stopped");
+    info!("[{reaction_id}] HTTP standard loop stopped");
     status_handle
         .set_status(
             ComponentStatus::Stopped,
@@ -191,8 +183,8 @@ pub(crate) async fn run_standard_loop(
 async fn checkpoint_advance(
     checkpoints: &mut CheckpointState,
     base: &ReactionBase,
-    reaction_name: &str,
-    query_id: &str,
+    reaction_id: &drasi_lib::ComponentId,
+    query_id: &drasi_lib::ComponentId,
     sequence: u64,
     policy: ReactionRecoveryPolicy,
 ) -> anyhow::Result<()> {
@@ -201,7 +193,7 @@ async fn checkpoint_advance(
         .await
     {
         error!(
-            "[{reaction_name}] Failed to write checkpoint for query '{query_id}' (seq {sequence}): {e}"
+            "[{reaction_id}] Failed to write checkpoint for query '{query_id}' (seq {sequence}): {e}"
         );
         return Err(e);
     }

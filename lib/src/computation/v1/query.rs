@@ -60,7 +60,6 @@ use super::{
 };
 
 pub(crate) const QUERY_CONFIGURATION: &str = "\0computation:query-configuration:v1";
-const INPUT_PREFIX: &str = "computation:input:";
 const BOOTSTRAP: &str = "\0computation:query-bootstrap:v1";
 pub(crate) use drasi_query_common::query_reset_key;
 use drasi_query_common::{QueryPublicationCheckpoint, PENDING_QUERY_OUTPUT as PENDING_OUTPUT};
@@ -101,7 +100,7 @@ use crate::metrics::query_metrics::QueryOperationTimer as TransactionTimer;
 
 struct InputProgress {
     graph: super::producer_progress::GraphInputProgress,
-    source_id: String,
+    input_origin: drasi_computation_contracts::QueryInputOrigin,
     profiling: Option<ProfilingMetadata>,
 }
 
@@ -120,48 +119,42 @@ impl std::ops::DerefMut for InputProgress {
 
 fn input_progress(input: &super::ChangeEnvelope) -> anyhow::Result<InputProgress> {
     let raw = GraphChangeCodec::source_metadata(input)?;
-    let source_id = raw
+    let input_origin = raw
         .as_ref()
-        .map(|metadata| metadata.source_id.clone())
-        .unwrap_or_else(|| input.system().stream().as_str().to_owned());
+        .map(|metadata| {
+            drasi_computation_contracts::QueryInputOrigin::Source(metadata.source_id.clone())
+        })
+        .unwrap_or_else(|| {
+            drasi_computation_contracts::QueryInputOrigin::Stream(input.system().stream().clone())
+        });
     Ok(InputProgress {
         graph: super::producer_progress::GraphInputProgress::for_query(input, None)?,
-        source_id,
+        input_origin,
         profiling: raw.and_then(|metadata| metadata.profiling),
     })
 }
 
-pub(crate) fn progress_key(stream: &str, source: Option<&str>) -> String {
-    let key = match source {
-        Some(source) => format!("source:{source}"),
-        None => format!("stream:{stream}"),
-    };
-    format!(
-        "{INPUT_PREFIX}{}",
-        key.bytes()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
+pub(crate) fn progress_key(
+    stream: &StreamId,
+    source: Option<&ComponentId>,
+) -> drasi_core::interface::CheckpointKey {
+    match source {
+        Some(source) => drasi_core::interface::CheckpointKey::Source(source.clone()),
+        None => drasi_core::interface::CheckpointKey::Stream(stream.clone()),
+    }
 }
 
-pub(crate) fn progress_identity(key: &str) -> anyhow::Result<SourceProgressKey> {
-    let key = key
-        .strip_prefix(INPUT_PREFIX)
-        .ok_or_else(|| anyhow::anyhow!("invalid source checkpoint prefix"))?;
-    if key.len() % 2 != 0 || !key.is_ascii() {
-        anyhow::bail!("invalid source checkpoint identity");
-    }
-    let decoded = (0..key.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&key[index..index + 2], 16))
-        .collect::<Result<Vec<_>, _>>()?;
-    let decoded = String::from_utf8(decoded)?;
-    if let Some(source) = decoded.strip_prefix("source:") {
-        Ok(SourceProgressKey::Source(source.to_owned()))
-    } else if let Some(stream) = decoded.strip_prefix("stream:") {
-        Ok(SourceProgressKey::Stream(StreamId::try_new(stream)?))
-    } else {
-        anyhow::bail!("invalid source checkpoint identity");
+pub(crate) fn progress_identity(
+    key: &drasi_core::interface::CheckpointKey,
+) -> anyhow::Result<SourceProgressKey> {
+    match key {
+        drasi_core::interface::CheckpointKey::Source(source) => {
+            Ok(SourceProgressKey::Source(source.clone()))
+        }
+        drasi_core::interface::CheckpointKey::Stream(stream) => {
+            Ok(SourceProgressKey::Stream(stream.clone()))
+        }
+        _ => anyhow::bail!("metadata is not an input progress checkpoint"),
     }
 }
 
@@ -181,8 +174,8 @@ fn validate_watermarks(
             "persistent query cannot bootstrap from a volatile output"
         );
         if !sources.insert(progress_key(
-            watermark.stream.as_str(),
-            watermark.source_id.as_deref(),
+            &watermark.stream,
+            watermark.source_id.as_ref(),
         )) {
             anyhow::bail!("bootstrap contains duplicate source watermarks");
         }
@@ -204,15 +197,16 @@ pub struct ContinuousQueryTransformer {
     options: QueryOptions,
     bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
     bootstrap_complete: AtomicBool,
-    watermarks: Mutex<HashMap<String, u64>>,
-    input_producers: Mutex<HashMap<String, super::GraphProducerIdentity>>,
-    input_scopes: Option<BTreeMap<(PortId, StreamId), Arc<str>>>,
+    watermarks: Mutex<HashMap<drasi_core::interface::CheckpointKey, u64>>,
+    input_producers:
+        Mutex<HashMap<drasi_core::interface::CheckpointKey, super::GraphProducerIdentity>>,
+    input_scopes: Option<drasi_query_common::QueryInputScopes>,
     source_progress: Option<Arc<QuerySourceProgress>>,
     execution: QueryExecutionSettings,
     middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
     registration: Option<super::query_catalog::QueryRegistration>,
     catalog: Option<super::QueryResultsCatalog>,
-    api_configuration: Option<crate::config::QueryConfig>,
+    api_configuration: Option<crate::config::ResolvedQueryConfig>,
     api_view: std::sync::OnceLock<Arc<super::QueryApi>>,
     metrics: Option<Arc<crate::metrics::QueryOutputMetrics>>,
     reset_configuration: bool,
@@ -416,7 +410,7 @@ impl ContinuousQueryTransformer {
         if catalog.graph_id() != self.definition.graph_id {
             anyhow::bail!("query catalogue belongs to another graph");
         }
-        let configuration = self.api_configuration();
+        let configuration = self.api_configuration()?;
         let hash = self.definition.configuration_hash(&self.execution)?;
         catalog.configure_delivery(
             &configuration,
@@ -442,11 +436,11 @@ impl ContinuousQueryTransformer {
 
     pub fn with_query_configuration(
         mut self,
-        configuration: crate::config::QueryConfig,
+        configuration: crate::config::AssignedQueryConfig,
     ) -> anyhow::Result<Self> {
         self.api_view.take();
         anyhow::ensure!(
-            configuration.id == self.definition.id.as_str()
+            configuration.id == self.definition.id
                 && configuration.query == self.definition.query
                 && configuration.outbox_capacity.clamp(1, 1_000_000)
                     == self.definition.outbox_capacity.get()
@@ -460,24 +454,25 @@ impl ContinuousQueryTransformer {
                         ComputationQueryLanguage::Gql
                     )
                 )
-                && serde_json::to_value(QueryExecutionSettings::from_legacy_config(
+                && serde_json::to_value(QueryExecutionSettings::from_configuration(
                     &configuration
-                ))? == serde_json::to_value(&self.execution)?,
+                )?)? == serde_json::to_value(&self.execution)?,
             "query API configuration does not describe the executing query"
         );
-        self.api_configuration = Some(configuration);
+        self.api_configuration = Some(configuration.into_resolved()?);
         Ok(self)
     }
 
-    fn api_configuration(&self) -> crate::config::QueryConfig {
-        self.api_configuration.clone().unwrap_or_else(|| {
-            super::query_configuration::query_configuration(
+    fn api_configuration(&self) -> anyhow::Result<crate::config::ResolvedQueryConfig> {
+        match self.api_configuration.clone() {
+            Some(configuration) => Ok(configuration),
+            None => super::query_configuration::query_configuration(
                 &self.execution,
                 &self.definition,
                 self.bootstrap.is_some(),
                 self.options.recovery,
-            )
-        })
+            ),
+        }
     }
 
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
@@ -532,9 +527,12 @@ impl ContinuousQueryTransformer {
             store.is_some_and(|store| store.is_persistent()) && !self.provider.is_volatile();
         if let Some(store) = store {
             for (key, checkpoint) in store.read_all_checkpoints().await? {
-                if key.starts_with(INPUT_PREFIX) {
+                if key.is_progress() {
                     checkpoints.insert(progress_identity(&key)?, checkpoint);
-                } else if key.starts_with(super::producer_progress::INPUT_TRANSPORT_PREFIX) {
+                } else if key
+                    .associated_checkpoint(super::producer_progress::INPUT_TRANSPORT_PREFIX)
+                    .is_some()
+                {
                     transport_sequences.insert(
                         super::producer_progress::transport_identity(&key, &checkpoint)?,
                         checkpoint.sequence,
@@ -583,7 +581,7 @@ impl ContinuousQueryTransformer {
             .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? = None;
         let resources = self
             .provider
-            .create_indexes(&self.definition.graph_id, self.definition.id.as_str())
+            .create_indexes(&self.definition.graph_id, &self.definition.id)
             .await?;
         self.output_persistent = !self.provider.is_volatile()
             && resources
@@ -692,7 +690,12 @@ impl ContinuousQueryTransformer {
         if self.output_persistent {
             self.load_delivery_bindings().await?;
         }
-        if let Some(marker) = checkpoint.read_checkpoint(BOOTSTRAP).await? {
+        if let Some(marker) = checkpoint
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                BOOTSTRAP.to_owned(),
+            ))
+            .await?
+        {
             if marker.sequence > 1 || marker.source_position.is_some() {
                 return Err(
                     QueryRecoveryError::Inconsistent("invalid bootstrap marker".into()).into(),
@@ -704,7 +707,12 @@ impl ContinuousQueryTransformer {
             self.bootstrap_complete.store(true, Ordering::Release);
         }
         if QueryPublicationCheckpoint::is_incomplete(
-            checkpoint.read_checkpoint(PENDING_OUTPUT).await?.as_ref(),
+            checkpoint
+                .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                    PENDING_OUTPUT.to_owned(),
+                ))
+                .await?
+                .as_ref(),
         ) {
             return Err(QueryRecoveryError::PendingPublication.into());
         }
@@ -713,13 +721,15 @@ impl ContinuousQueryTransformer {
             return Err(QueryRecoveryError::IncompleteReset.into());
         }
         let generation = checkpoint
-            .read_output_generation(self.definition.id.as_str())
+            .read_output_generation(&self.output_key())
             .await?
             .unwrap_or(0)
             .max(reset.as_ref().map_or(0, |marker| marker.generation));
         let configuration = self.definition.configuration_bytes(&self.execution)?;
         let stored = checkpoint
-            .read_checkpoint(QUERY_CONFIGURATION)
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                QUERY_CONFIGURATION.to_owned(),
+            ))
             .await
             .with_context(|| {
                 format!("query {} cannot read its configuration", self.definition.id)
@@ -747,25 +757,23 @@ impl ContinuousQueryTransformer {
                 .read_all_checkpoints()
                 .await?
                 .into_iter()
-                .filter(|(key, _)| key.starts_with(INPUT_PREFIX))
+                .filter(|(key, _)| key.is_progress())
                 .map(|(key, checkpoint)| (key, checkpoint.sequence))
                 .collect();
             return Ok(());
         }
-        let sequence = checkpoint
-            .read_result_sequence(self.definition.id.as_str())
-            .await?;
+        let sequence = checkpoint.read_result_sequence(&self.output_key()).await?;
         let outbox = query
             .resources()
             .outbox_writer()
             .ok_or_else(|| anyhow::anyhow!("missing output store"))?
-            .read_from(self.definition.id.as_str(), 0)
+            .read_from(&self.output_key(), 0)
             .await?;
         let live = query
             .resources()
             .live_results_writer()
             .ok_or_else(|| anyhow::anyhow!("missing live-result store"))?
-            .read_snapshot(self.definition.id.as_str())
+            .read_snapshot(&self.definition.id)
             .await?;
         if sequence.is_none() && (!outbox.is_empty() || !live.is_empty()) {
             return Err(QueryRecoveryError::Inconsistent(
@@ -826,7 +834,7 @@ impl ContinuousQueryTransformer {
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))? = saved
             .into_iter()
-            .filter(|(key, _)| key.starts_with(INPUT_PREFIX))
+            .filter(|(key, _)| key.is_progress())
             .map(|(key, checkpoint)| (key, checkpoint.sequence))
             .collect();
         Ok(())
@@ -841,11 +849,21 @@ impl ContinuousQueryTransformer {
         query
             .resource_transaction(|| async {
                 checkpoint
-                    .stage_checkpoint(QUERY_CONFIGURATION, 1, Some(configuration))
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(
+                            QUERY_CONFIGURATION.to_owned(),
+                        ),
+                        1,
+                        Some(configuration),
+                    )
                     .await
             })
             .await?;
         Ok(())
+    }
+
+    fn output_key(&self) -> drasi_core::interface::OutputPartition {
+        drasi_core::interface::OutputPartition::Component(self.definition.id.clone())
     }
 
     async fn stage_output(&self, output: &super::ChangeEnvelope) -> Result<(), IndexError> {
@@ -853,7 +871,7 @@ impl ContinuousQueryTransformer {
             .query()
             .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
         let bytes = self.codec.encode(output).map_err(IndexError::other)?;
-        let id = self.definition.id.as_str();
+        let id = self.output_key();
         let resources = query.resources();
         let sequence = output.system().sequence();
         let retain_from = sequence
@@ -870,13 +888,13 @@ impl ContinuousQueryTransformer {
         resources
             .outbox_writer()
             .ok_or(IndexError::NotSupported)?
-            .append_and_trim(id, sequence, &bytes, retain_from)
+            .append_and_trim(&id, sequence, &bytes, retain_from)
             .await?;
         self.stage_projection(output).await?;
         resources
             .checkpoint_store()
             .ok_or(IndexError::NotSupported)?
-            .stage_result_sequence(id, sequence)
+            .stage_result_sequence(&id, sequence)
             .await?;
         self.stage_delivery().await
     }
@@ -890,7 +908,7 @@ impl ContinuousQueryTransformer {
             .resources()
             .live_results_writer()
             .ok_or(IndexError::NotSupported)?
-            .apply_mutations(self.definition.id.as_str(), &mutations)
+            .apply_mutations(&self.definition.id, &mutations)
             .await
     }
 
@@ -968,7 +986,8 @@ impl ContinuousQueryTransformer {
             .graph
             .with_consumer_boundary(&input.envelope, self.source_progress.as_deref())?;
         if let Some(source) = &prepared_input.source_id {
-            progress.source_id = source.clone();
+            progress.input_origin =
+                drasi_computation_contracts::QueryInputOrigin::Source(source.clone());
         }
         let saved = if let Some(checkpoint) = query.resources().checkpoint_store() {
             progress
@@ -1049,7 +1068,7 @@ impl ContinuousQueryTransformer {
         let prepared = Mutex::new(None);
         let operation = QueryOperation::from_metadata(
             &input.envelope,
-            progress.source_id.clone(),
+            progress.input_origin.clone(),
             progress.profiling.clone(),
         );
         let hook = |results: Arc<[drasi_core::evaluation::context::QueryPartEvaluationContext]>| {
@@ -1223,14 +1242,16 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
-        let inputs = self
+        let inputs: Vec<_> = self
             .api_configuration
             .as_ref()
-            .map(|config| config.inputs.as_slice())
-            .unwrap_or_default();
+            .into_iter()
+            .flat_map(|config| &config.inputs)
+            .cloned()
+            .collect();
         self.input_scopes = Some(drasi_query_common::query_input_scopes(
-            self.definition.id.as_str(),
-            inputs,
+            &self.definition.id,
+            &inputs,
             bindings,
         )?);
         Ok(())
@@ -1255,11 +1276,18 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     fn query_api(&self) -> Option<Arc<super::QueryApi>> {
+        let config = match self.api_configuration() {
+            Ok(config) => config,
+            Err(error) => {
+                log::error!("Query configuration has unresolved component identities: {error:#}");
+                return None;
+            }
+        };
         Some(
             self.api_view
                 .get_or_init(|| {
                     Arc::new(super::QueryApi {
-                        config: self.api_configuration(),
+                        config,
                         catalog: self.catalog.clone(),
                         metrics: self.metrics.clone().expect("query metrics"),
                         native_progress: Default::default(),
@@ -1390,8 +1418,8 @@ impl ComputationComponent for ContinuousQueryTransformer {
         Ok(())
     }
 
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
-        self.deprovision_state().await
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        self.delete_owned_state().await
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
@@ -1712,7 +1740,11 @@ impl Default for ContinuousQueryFactory {
         .map(|(name, value_type, required)| {
             (
                 Arc::from(name),
-                ConfigurationField {
+                ConfigurationField { constraint: match name {
+                        "execution" => Some(drasi_computation_contracts::ConfigurationConstraint::query_execution()),
+                        "query_config" => Some(drasi_computation_contracts::ConfigurationConstraint::assigned_query_identity()),
+                        _ => None,
+                    },
                     value_type,
                     required,
                     secret: false,
@@ -1876,7 +1908,7 @@ impl ContinuousQueryFactory {
     pub(crate) fn query_configuration(
         spec: &ComponentSpecification,
         graph_id: &str,
-    ) -> anyhow::Result<crate::config::QueryConfig> {
+    ) -> anyhow::Result<crate::config::ResolvedQueryConfig> {
         let mut values = BTreeMap::new();
         for (name, value) in &spec.configuration {
             if let ConfigurationValue::Literal(value) = value {
@@ -1918,12 +1950,12 @@ impl ContinuousQueryFactory {
             output_stream: StreamId::try_new(stream)?,
             outbox_capacity: outbox,
         };
-        Ok(super::query_configuration::query_configuration(
+        super::query_configuration::query_configuration(
             &execution,
             &definition,
             spec.dependencies.contains_key("bootstrap"),
             options(&values)?.recovery,
-        ))
+        )
     }
 }
 
@@ -1939,7 +1971,7 @@ impl super::QueryAuthoring for ContinuousQueryFactory {
         &self,
         spec: &ComponentSpecification,
         graph_id: &str,
-    ) -> anyhow::Result<crate::config::QueryConfig> {
+    ) -> anyhow::Result<crate::config::ResolvedQueryConfig> {
         Self::query_configuration(spec, graph_id)
     }
 
@@ -1957,11 +1989,26 @@ impl super::QueryAuthoring for ContinuousQueryFactory {
 
 #[async_trait]
 impl ComponentFactory for ContinuousQueryFactory {
+    fn supports_query_reconstruction(&self) -> bool {
+        self.constructor
+            .as_ref()
+            .is_some_and(|constructor| constructor.supports_query_reconstruction())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
     fn query_authoring(&self) -> Option<&dyn super::QueryAuthoring> {
         Some(self)
+    }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<super::ComponentUpdatePlan> {
+        self.constructor
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("query factory does not support configuration updates"))?
+            .plan_update(current, proposed)
     }
     fn specification_from_config(
         &self,
@@ -2268,7 +2315,7 @@ mod profiling_tests {
         async fn create_indexes(
             &self,
             graph: &str,
-            query: &str,
+            query: &ComponentId,
         ) -> Result<ComputationIndexes, IndexError> {
             let original = self.inner.create_indexes(graph, query).await?;
             let indexes = original.indexes();
@@ -2330,7 +2377,7 @@ mod profiling_tests {
             let gate = Arc::new(CommitGate::default());
             let definition = ContinuousQueryDefinition {
                 graph_id: "post-commit-profiling".into(),
-                id: ComponentId::try_new("query").unwrap(),
+                id: crate::test_helpers::component_id(46),
                 query: "MATCH (n:Person) RETURN n.name AS name".into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new("query/out").unwrap(),
@@ -2359,13 +2406,14 @@ mod profiling_tests {
                 .unwrap()
                 .clone();
             let results = query.results();
+            let output_key = query.output_key();
             let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024).unwrap());
             codec.register_schema(QueryChangeCodec::schema()).unwrap();
             let input = InputEnvelope {
                 port: PortId::try_new("in").unwrap(),
                 envelope: GraphChangeCodec::encode_source_event(
                     Arc::new(crate::channels::SourceEventWrapper::with_sequence(
-                        "people".into(),
+                        crate::test_helpers::component_id(772),
                         crate::channels::SourceEvent::Change(SourceChange::Insert {
                             element: Element::Node {
                                 metadata: ElementMetadata {
@@ -2389,7 +2437,7 @@ mod profiling_tests {
                             ..Default::default()
                         }),
                     )),
-                    &ComponentId::try_new("source-adapter").unwrap(),
+                    &crate::test_helpers::component_id(772),
                     StreamId::try_new("people/out").unwrap(),
                     100,
                     None,
@@ -2416,7 +2464,7 @@ mod profiling_tests {
             .unwrap();
             assert_eq!(results.snapshot().unwrap().as_of_sequence, 0);
             assert!(results.replay(0).unwrap().is_empty());
-            let before_publication = outbox.read_from("query", 0).await.unwrap();
+            let before_publication = outbox.read_from(&output_key, 0).await.unwrap();
             if publication == QueryPublicationMode::Atomic {
                 assert_eq!(before_publication.len(), 1);
                 let staged = codec.decode(&before_publication[0].1).unwrap();
@@ -2449,7 +2497,7 @@ mod profiling_tests {
             assert_eq!(profiling.source_receive_ns, Some(12));
             assert_eq!(profiling.source_send_ns, Some(13));
 
-            let persisted = outbox.read_from("query", 0).await.unwrap();
+            let persisted = outbox.read_from(&output_key, 0).await.unwrap();
             assert_eq!(persisted.len(), 1);
             if publication == QueryPublicationMode::Atomic {
                 assert_eq!(

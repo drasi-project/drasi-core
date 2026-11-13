@@ -4,12 +4,12 @@
 use super::*;
 use drasi_computation_contracts::{
     ComputationQueryLanguage, GraphProducerIdentity, GraphProducerProgress, OutputCursor,
-    OutputEnvelope, OutputReplay, OutputSnapshot, PortId, QueryChangeCodec, QueryExecutionSettings,
-    QueryOutputMetadata, QueryRecoveryIdentity, StreamId, SystemMetadata,
+    OutputEnvelope, OutputReplay, OutputSnapshot, PortId, QueryChangeCodec, QueryDescription,
+    QueryExecutionSettings, QueryOutputMetadata, QueryRecoveryIdentity, StreamId, SystemMetadata,
 };
 use std::{
     num::NonZeroUsize,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 struct Reader {
@@ -17,6 +17,7 @@ struct Reader {
     cursor: OutputCursor,
     active: AtomicBool,
     observations: bool,
+    capacity: AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -25,7 +26,10 @@ impl QueryViewProvider for Reader {
         self.observations
     }
     fn description(&self) -> QueryDescription {
-        self.description.clone()
+        let mut description = self.description.clone();
+        description.outbox_capacity =
+            NonZeroUsize::new(self.capacity.load(Ordering::Acquire)).unwrap();
+        description
     }
     async fn query_head(&self) -> Result<(OutputCursor, u64), OutputReadError> {
         if self.active.load(Ordering::Acquire) {
@@ -57,7 +61,7 @@ impl QueryViewProvider for Reader {
 }
 
 fn reader(observations: bool) -> anyhow::Result<(ComponentId, Arc<Reader>)> {
-    let id = ComponentId::try_new("query")?;
+    let id = ComponentId::generate();
     let stream = StreamId::try_new("query/out")?;
     let execution = QueryExecutionSettings::default();
     let definition = drasi_query_common::ContinuousQueryDefinition {
@@ -93,6 +97,7 @@ fn reader(observations: bool) -> anyhow::Result<(ComponentId, Arc<Reader>)> {
         )?,
         active: AtomicBool::new(true),
         observations,
+        capacity: AtomicUsize::new(8),
     });
     Ok((id, reader))
 }
@@ -109,8 +114,8 @@ fn emission(reader: &Reader, sequence: u64, transport: u64) -> anyhow::Result<Ou
             row_signature: sequence,
         }],
         QueryOutputMetadata {
-            query_id: id.as_str().into(),
-            source_id: None,
+            query_id: id.clone(),
+            input_origin: None,
             timestamp: chrono::Utc::now(),
             metadata: Default::default(),
             profiling: None,
@@ -131,6 +136,33 @@ fn emission(reader: &Reader, sequence: u64, transport: u64) -> anyhow::Result<Ou
         port: PortId::try_new("out")?,
         envelope: envelope.reemit(transport)?,
     })
+}
+
+#[tokio::test]
+async fn retained_native_reader_uses_updated_capacity_without_replacing_api_or_metrics(
+) -> anyhow::Result<()> {
+    let (id, reader) = reader(true)?;
+    let api = QueryApi::from_native_reader(id, reader.clone(), None)?;
+    api.initialize_native_progress().await?;
+    let output = api.output.clone();
+    let metrics = api.output_metrics().unwrap();
+    let progress = api.native_progress.clone();
+    let mut observation = reader.query_observation().await?;
+    observation.cursor = observation.cursor.at_sequence(20);
+    observation.outbox_size = 20;
+    observation.oldest_sequence = Some(1);
+    let emitted = [emission(&reader, 20, 20)?];
+    assert!(api
+        .observe_native_progress(&emitted, Some(&observation))
+        .is_err());
+    reader.capacity.store(32, Ordering::Release);
+    api.observe_native_progress(&emitted, Some(&observation))?;
+    assert_eq!(metrics.snapshot().outbox_size, 20);
+    assert_eq!(api.generation().await?, 9);
+    assert!(Arc::ptr_eq(&output, &api.output));
+    assert!(Arc::ptr_eq(&metrics, &api.output_metrics().unwrap()));
+    assert!(Arc::ptr_eq(&progress, &api.native_progress));
+    Ok(())
 }
 
 #[tokio::test]

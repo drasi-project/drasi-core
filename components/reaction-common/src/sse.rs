@@ -184,14 +184,14 @@ impl SseRenderer {
         timestamp: i64,
         mut report_error: impl FnMut(String),
     ) -> Vec<SseEvent> {
-        let config = self
-            .routes
-            .get(&result.query_id)
-            .or_else(|| {
-                result
-                    .query_id
-                    .rsplit_once('.')
-                    .and_then(|(_, last)| self.routes.get(last))
+        let alias = crate::input_alias(result.input_alias.as_deref(), result.query_name.as_ref());
+        let config = alias
+            .and_then(|alias| {
+                self.routes.get(alias).or_else(|| {
+                    alias
+                        .rsplit_once('.')
+                        .and_then(|(_, last)| self.routes.get(last))
+                })
             })
             .or(self.default_template.as_ref());
         let Some(config) = config else {
@@ -239,7 +239,8 @@ impl SseRenderer {
                 ResultDiff::Noop => unreachable!("no-op filtered above"),
             }
             context.insert("query_id".into(), json!(result.query_id));
-            context.insert("query_name".into(), json!(result.query_id));
+            context.insert("query_name".into(), json!(result.query_name));
+            context.insert("input_alias".into(), json!(result.input_alias));
             context.insert("operation".into(), json!(operation));
             context.insert("timestamp".into(), json!(timestamp));
             context.insert("metadata".into(), json!(result.metadata));

@@ -15,10 +15,11 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_core::interface::{
-    CheckpointStore, CreatedIndexes, IndexBackendPlugin, IndexError, SourceCheckpoint,
+    CheckpointKey, CheckpointStore, CreatedIndexes, IndexBackendPlugin, IndexError,
+    SourceCheckpoint, StorageScope,
 };
 use drasi_index_rocksdb::RocksDbIndexProvider;
-use drasi_lib::computation::v1::{PortId, SourceProgressKey};
+use drasi_lib::computation::v1::PortId;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -30,19 +31,30 @@ use std::{
 /// Inspect the actual native checkpoint format, not the retired linked-query keys.
 pub async fn native_source_checkpoints(
     store: &dyn CheckpointStore,
-) -> Result<BTreeMap<String, SourceCheckpoint>> {
+) -> Result<BTreeMap<drasi_core::ComponentId, SourceCheckpoint>> {
     let mut sources = BTreeMap::new();
     for (key, checkpoint) in store.read_all_checkpoints().await? {
-        let Some(encoded) = key.strip_prefix("\0computation:processing-input:v1:") else {
+        let CheckpointKey::Associated {
+            checkpoint: identity,
+            name,
+        } = key
+        else {
             continue;
         };
-        let (_, key): (Option<PortId>, SourceProgressKey) =
-            serde_json::from_str(encoded).context("decode native input checkpoint key")?;
-        if let SourceProgressKey::Source(source) = key {
-            anyhow::ensure!(
-                sources.insert(source, checkpoint).is_none(),
-                "fixture has duplicate source checkpoint owners"
-            );
+        let Some(encoded) = name.strip_prefix("\0computation:processing-input:v1:") else {
+            continue;
+        };
+        let _: PortId =
+            serde_json::from_str(encoded).context("decode native input checkpoint port")?;
+        match *identity {
+            CheckpointKey::Source(source) => {
+                anyhow::ensure!(
+                    sources.insert(source, checkpoint).is_none(),
+                    "fixture has duplicate source checkpoint owners"
+                );
+            }
+            CheckpointKey::Stream(_) => {}
+            _ => anyhow::bail!("native input checkpoint has an invalid identity domain"),
         }
     }
     Ok(sources)
@@ -50,45 +62,53 @@ pub async fn native_source_checkpoints(
 
 #[derive(Deserialize, Serialize)]
 struct IndexLocation {
-    storage_scope: String,
-    query_id: String,
+    storage_scope: StorageScope,
+    query_id: drasi_core::ComponentId,
 }
 
 pub struct ObservedIndexProvider {
     inner: Arc<dyn IndexBackendPlugin>,
     location: PathBuf,
-    query_id: String,
+    query_id: drasi_core::ComponentId,
 }
 
 impl ObservedIndexProvider {
-    pub fn new(inner: Arc<dyn IndexBackendPlugin>, root: &Path, query_id: &str) -> Self {
+    pub fn new(
+        inner: Arc<dyn IndexBackendPlugin>,
+        root: &Path,
+        query_id: drasi_core::ComponentId,
+    ) -> Self {
         Self {
             inner,
             location: root.join("observed-query-index.json"),
-            query_id: query_id.to_owned(),
+            query_id,
         }
     }
 }
 
 #[async_trait]
 impl IndexBackendPlugin for ObservedIndexProvider {
-    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
-        self.create_scoped_indexes(query_id, query_id).await
+    async fn create_indexes(
+        &self,
+        query_id: &drasi_core::ComponentId,
+    ) -> Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(&StorageScope::default(), query_id)
+            .await
     }
 
     async fn create_scoped_indexes(
         &self,
-        storage_scope: &str,
-        query_id: &str,
+        storage_scope: &drasi_core::interface::StorageScope,
+        query_id: &drasi_core::ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         let indexes = self
             .inner
             .create_scoped_indexes(storage_scope, query_id)
             .await?;
-        if query_id == self.query_id {
+        if query_id == &self.query_id {
             let location = IndexLocation {
-                storage_scope: storage_scope.to_owned(),
-                query_id: query_id.to_owned(),
+                storage_scope: storage_scope.clone(),
+                query_id: query_id.clone(),
             };
             let bytes = serde_json::to_vec(&location).map_err(IndexError::other)?;
             let mut file = std::fs::File::create(&self.location).map_err(IndexError::other)?;
@@ -111,14 +131,18 @@ impl IndexBackendPlugin for ObservedIndexProvider {
     }
 }
 
-pub async fn open_query_indexes(root: &Path, query_id: &str) -> Result<CreatedIndexes> {
+pub async fn open_query_indexes(
+    root: &Path,
+    query_id: &drasi_core::ComponentId,
+) -> Result<CreatedIndexes> {
     let location: IndexLocation = serde_json::from_slice(
         &std::fs::read(root.join("observed-query-index.json"))
             .context("read the runtime's observed index partition")?,
     )
     .context("decode the observed index partition")?;
     anyhow::ensure!(
-        location.query_id == query_id && location.storage_scope != query_id,
+        &location.query_id == query_id
+            && location.storage_scope != drasi_core::interface::StorageScope::default(),
         "query must use its own observed computation storage partition"
     );
     RocksDbIndexProvider::new(root, false, false)

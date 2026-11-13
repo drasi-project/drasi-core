@@ -13,13 +13,17 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{config::ComponentId, DrasiLib, Query};
 use drasi_reaction_file::{FileReaction, QueryConfig, TemplateSpec, WriteMode};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
+
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
 
 async fn wait_for_file(path: &Path, timeout: Duration) -> Result<String> {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -79,16 +83,20 @@ async fn setup_drasi_for_mode(
     filename_template: &str,
     default_template: Option<QueryConfig>,
 ) -> Result<(DrasiLib, drasi_source_application::ApplicationSourceHandle)> {
+    let source_name = "test-source";
     let (app_source, app_handle) = ApplicationSource::new(
-        "test-source",
+        component_id(29).clone(),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: None,
         },
     )?;
 
-    let mut builder = FileReaction::builder("file-reaction")
-        .with_query("test-query")
+    let reaction_name = "file-reaction";
+    let mut builder = FileReaction::builder(component_id(952).clone())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        )
         .with_output_path(output_dir)
         .with_write_mode(write_mode)
         .with_filename_template(filename_template);
@@ -99,14 +107,19 @@ async fn setup_drasi_for_mode(
 
     let file_reaction = builder.build()?;
 
-    let query = Query::cypher("test-query")
-        .query("MATCH (n:Item) RETURN n.id AS id, n.name AS name")
-        .from_input("test-source")
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+    )
+    .query("MATCH (n:Item) RETURN n.id AS id, n.name AS name")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .build()?;
 
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -120,9 +133,15 @@ async fn setup_drasi_for_mode(
                 .clone(),
         )
         .with_id("file-reaction-integration")
-        .with_source(app_source)
+        .with_source(
+            drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+            app_source,
+        )
         .with_query(query)
-        .with_reaction(file_reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("file-reaction").expect("fixture component name"),
+            file_reaction,
+        )
         .build()
         .await?;
 
@@ -149,7 +168,7 @@ async fn test_file_reaction_append_insert_update_delete() -> Result<()> {
     let (drasi, app_handle) = setup_drasi_for_mode(
         &output_dir,
         WriteMode::Append,
-        "{{query_name}}.ndjson",
+        "{{input_alias}}.ndjson",
         Some(default_template),
     )
     .await?;
@@ -292,7 +311,7 @@ async fn test_file_reaction_fallback_raw_json() -> Result<()> {
     let output_dir = temp.path().to_string_lossy().to_string();
 
     let (drasi, app_handle) =
-        setup_drasi_for_mode(&output_dir, WriteMode::Append, "{{query_name}}.log", None).await?;
+        setup_drasi_for_mode(&output_dir, WriteMode::Append, "{{input_alias}}.log", None).await?;
 
     drasi.start().await?;
 
@@ -320,8 +339,9 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
     let temp = TempDir::new()?;
     let output_dir = temp.path().to_string_lossy().to_string();
 
+    let source_name = "test-source";
     let (app_source, app_handle) = ApplicationSource::new(
-        "test-source",
+        component_id(29).clone(),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: None,
@@ -340,22 +360,30 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
         )),
     };
 
-    let file_reaction = FileReaction::builder("file-reaction")
-        .with_query("agg-query")
+    let reaction_name = "file-reaction";
+    let file_reaction = FileReaction::builder(component_id(952).clone())
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+        )
         .with_output_path(&output_dir)
         .with_write_mode(WriteMode::Append)
-        .with_filename_template("{{query_name}}.ndjson")
+        .with_filename_template("{{input_alias}}.ndjson")
         .with_default_template(default_template)
         .build()?;
 
-    let query = Query::cypher("agg-query")
-        .query("MATCH (n:Item) RETURN n.category AS category, count(n) AS item_count")
-        .from_input("test-source")
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+    )
+    .query("MATCH (n:Item) RETURN n.category AS category, count(n) AS item_count")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .build()?;
 
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -369,9 +397,15 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
                 .clone(),
         )
         .with_id("file-reaction-agg-test")
-        .with_source(app_source)
+        .with_source(
+            drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+            app_source,
+        )
         .with_query(query)
-        .with_reaction(file_reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("file-reaction").expect("fixture component name"),
+            file_reaction,
+        )
         .build()
         .await?;
 
@@ -447,7 +481,7 @@ async fn test_file_reaction_append_recovers_from_partial_line() -> Result<()> {
     let (drasi, app_handle) = setup_drasi_for_mode(
         &output_dir,
         WriteMode::Append,
-        "{{query_name}}.ndjson",
+        "{{input_alias}}.ndjson",
         Some(default_template),
     )
     .await?;
@@ -504,7 +538,7 @@ async fn test_file_reaction_append_fsync_produces_valid_ndjson() -> Result<()> {
     let (drasi, app_handle) = setup_drasi_for_mode(
         &output_dir,
         WriteMode::Append,
-        "{{query_name}}.ndjson",
+        "{{input_alias}}.ndjson",
         Some(default_template),
     )
     .await?;

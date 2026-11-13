@@ -14,6 +14,9 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use drasi_core::{
     computation::ComputationIndexProvider,
     interface::{CreatedIndexes, IndexBackendPlugin, IndexError},
@@ -25,7 +28,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 fn definition(query: &str) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: "legacy-index".into(),
-        id: ComponentId::try_new("query").expect("id"),
+        id: fixture_support::component_id(46),
         query: query.into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("query/out").expect("stream"),
@@ -71,7 +74,11 @@ async fn ordinary_rocks_plugin_proves_atomic_output_and_recovers_in_an_isolated_
     let adapter = LegacyIndexProviderAdapter::new(plugin.clone());
     {
         let resources = adapter
-            .create_indexes("capability", "query")
+            .create_indexes(
+                "capability",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            )
             .await
             .expect("adapted indexes");
         assert!(
@@ -126,13 +133,22 @@ async fn ordinary_rocks_plugin_proves_atomic_output_and_recovers_in_an_isolated_
         query.stop().await.expect("stop");
     }
     let legacy = plugin
-        .create_indexes("query")
+        .create_indexes(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
+        )
         .await
         .expect("ordinary legacy namespace");
     assert!(legacy
         .outbox_writer
         .expect("outbox")
-        .read_from("query", 0)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
         .await
         .expect("legacy read")
         .is_empty());
@@ -143,8 +159,19 @@ struct UndeclaredAtomicity(Arc<dyn IndexBackendPlugin>);
 
 #[async_trait::async_trait]
 impl IndexBackendPlugin for UndeclaredAtomicity {
-    async fn create_indexes(&self, id: &str) -> std::result::Result<CreatedIndexes, IndexError> {
+    async fn create_indexes(
+        &self,
+        id: &drasi_core_types::ComponentId,
+    ) -> std::result::Result<CreatedIndexes, IndexError> {
         self.0.create_indexes(id).await
+    }
+
+    async fn create_scoped_indexes(
+        &self,
+        scope: &drasi_core_types::StorageScope,
+        id: &drasi_core_types::ComponentId,
+    ) -> std::result::Result<CreatedIndexes, IndexError> {
+        self.0.create_scoped_indexes(scope, id).await
     }
 
     fn is_volatile(&self) -> bool {
@@ -159,7 +186,11 @@ async fn output_atomicity_is_not_inferred_from_the_presence_of_persistent_writer
         drasi_index_rocksdb::RocksDbIndexProvider::new(temp.path(), false, false),
     ))));
     let resources = adapter
-        .create_indexes("unproven", "query")
+        .create_indexes(
+            "unproven",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
+        )
         .await
         .expect("resources");
     assert!(resources.atomic_result_transaction().is_err());

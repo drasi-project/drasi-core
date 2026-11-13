@@ -103,9 +103,18 @@ pub fn build_handlebars() -> Handlebars<'static> {
 fn build_context(notification: &DefaultChangeNotification) -> Map<String, Value> {
     let mut context = Map::new();
 
-    let query_name = Value::String(notification.query_id.clone());
-    context.insert("query_name".to_string(), query_name.clone());
-    context.insert("query_id".to_string(), query_name);
+    context.insert(
+        "query_name".to_string(),
+        serde_json::json!(notification.query_name),
+    );
+    context.insert(
+        "query_id".to_string(),
+        serde_json::json!(notification.query_id),
+    );
+    context.insert(
+        "input_alias".to_string(),
+        serde_json::json!(notification.input_alias),
+    );
     context.insert(
         "operation".to_string(),
         Value::String(notification.op_str().to_string()),
@@ -165,8 +174,17 @@ pub fn render_batch_item(
     notification: &DefaultChangeNotification,
     reaction_name: &str,
 ) -> Value {
-    let query_name = &notification.query_id;
-    let spec = config.get_template_spec(query_name, notification.operation_type());
+    let alias = drasi_reaction_common::input_alias(
+        notification.input_alias.as_deref(),
+        notification.query_name.as_ref(),
+    );
+    let spec = match alias {
+        Some(alias) => config.get_template_spec(alias, notification.operation_type()),
+        None => config.default_template().and_then(|template| {
+            HttpReactionConfig::get_spec_from_config(template, notification.operation_type())
+        }),
+    };
+    let query_id = &notification.query_id;
 
     let template = match spec {
         Some(spec) if !spec.template.is_empty() => &spec.template,
@@ -179,7 +197,7 @@ pub fn render_batch_item(
             Ok(value) => value,
             Err(e) => {
                 warn!(
-                    "[{reaction_name}] Batch body template for query '{query_name}' ({}) rendered invalid JSON: {e} — using default envelope",
+                    "[{reaction_name}] Batch body template for query '{query_id}' ({}) rendered invalid JSON: {e} — using default envelope",
                     notification.op_str()
                 );
                 default_item(notification)
@@ -187,7 +205,7 @@ pub fn render_batch_item(
         },
         Err(e) => {
             warn!(
-                "[{reaction_name}] Batch body template render failed for query '{query_name}' ({}): {e} — using default envelope",
+                "[{reaction_name}] Batch body template render failed for query '{query_id}' ({}): {e} — using default envelope",
                 notification.op_str()
             );
             default_item(notification)
@@ -215,7 +233,6 @@ pub async fn process_result(
     token: &Option<String>,
     call_spec: &HttpCallSpec,
     notification: &DefaultChangeNotification,
-    query_name: &str,
     reaction_name: &str,
 ) -> Result<DeliveryOutcome> {
     let Some(request) = render_request(
@@ -224,7 +241,6 @@ pub async fn process_result(
         token,
         call_spec,
         notification,
-        query_name,
         reaction_name,
     )?
     else {
@@ -257,7 +273,6 @@ pub fn render_request(
     token: &Option<String>,
     call_spec: &HttpCallSpec,
     notification: &DefaultChangeNotification,
-    query_name: &str,
     reaction_name: &str,
 ) -> Result<Option<RenderedRequest>> {
     render_request_with_context(
@@ -267,7 +282,7 @@ pub fn render_request(
         call_spec,
         &build_context(notification),
         || Ok(serde_json::to_string(notification)?),
-        query_name,
+        notification.query_id.as_str(),
         notification.op_str(),
         reaction_name,
     )
@@ -402,17 +417,17 @@ pub fn render_request_with_context(
     }))
 }
 
-/// `POST {base_url}/changes/{query_name}` with the standard
+/// `POST {base_url}/changes/{query_id}` with the standard
 /// [`DefaultChangeNotification`] envelope as the JSON body.
 pub async fn post_default_notification(
     client: &Client,
     base_url: &str,
     token: &Option<String>,
     notification: &DefaultChangeNotification,
-    query_name: &str,
     reaction_name: &str,
 ) -> Result<DeliveryOutcome> {
-    let full_url = format!("{base_url}/changes/{query_name}");
+    let query_id = &notification.query_id;
+    let full_url = format!("{base_url}/changes/{query_id}");
     let body = serde_json::to_string(notification)?;
 
     let mut headers = HeaderMap::new();
@@ -424,7 +439,7 @@ pub async fn post_default_notification(
             }
             Err(e) => {
                 error!(
-                    "[{reaction_name}] Invalid auth token for query '{query_name}': {e} — dropping event"
+                    "[{reaction_name}] Invalid auth token for query '{query_id}': {e} — dropping event"
                 );
                 return Ok(DeliveryOutcome::Dropped);
             }
@@ -596,7 +611,17 @@ mod tests {
         diff: ResultDiff,
     ) -> DefaultChangeNotification {
         let ts = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let qr = QueryResult::new("source.q1".to_string(), 7, ts, vec![diff], metadata);
+        let mut qr = QueryResult::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ba")
+                .expect("fixture UUID"),
+            7,
+            ts,
+            vec![diff],
+            metadata,
+        );
+        qr.query_name = Some(
+            drasi_core_types::ComponentName::try_new("source.q1").expect("fixture query name"),
+        );
         DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap()
     }
 
@@ -611,7 +636,10 @@ mod tests {
         );
         let ctx = build_context(&n);
         assert_eq!(ctx.get("query_name"), Some(&json!("source.q1")));
-        assert_eq!(ctx.get("query_id"), Some(&json!("source.q1")));
+        assert_eq!(
+            ctx.get("query_id"),
+            Some(&json!("00000000-0000-0000-0000-0000000000ba"))
+        );
         assert_eq!(ctx.get("operation"), Some(&json!("ADD")));
         assert!(ctx.get("timestamp").and_then(|t| t.as_str()).is_some());
         assert_eq!(ctx.get("metadata"), Some(&json!({})));

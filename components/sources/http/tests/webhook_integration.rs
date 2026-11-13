@@ -157,13 +157,16 @@ async fn test_webhook_mode_health_check() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("test-webhook")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014c")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
 
@@ -220,13 +223,16 @@ async fn test_webhook_mode_disables_standard_endpoints() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("test-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -281,13 +287,16 @@ async fn test_webhook_simple_payload_processing() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("test-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -352,13 +361,16 @@ async fn test_webhook_with_path_parameters() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("test-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -397,13 +409,16 @@ async fn test_webhook_with_hmac_signature() {
     let port = find_available_port().await;
     let webhook_config = create_github_webhook_config();
 
-    let source = HttpSourceBuilder::new("github-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014d")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -492,13 +507,16 @@ async fn test_webhook_with_bearer_token() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("api-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014e")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -624,13 +642,16 @@ async fn test_webhook_condition_matching() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("github-source-cond")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000014f")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -737,13 +758,16 @@ async fn test_webhook_unmatched_route_returns_404() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("test-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -770,12 +794,15 @@ async fn test_standard_mode_works_without_webhooks() {
     let port = find_available_port().await;
 
     // Create source without webhook config (standard mode)
-    let source = HttpSourceBuilder::new("standard-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000150")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -786,7 +813,8 @@ async fn test_standard_mode_works_without_webhooks() {
     // Standard endpoint should work
     let response = client
         .post(format!(
-            "http://127.0.0.1:{port}/sources/standard-source/events"
+            "http://127.0.0.1:{port}/sources/{}/events",
+            source.id()
         ))
         .header("Content-Type", "application/json")
         .body(
@@ -836,13 +864,16 @@ async fn test_webhook_yaml_content_type() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("yaml-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000151")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -899,13 +930,16 @@ async fn test_webhook_method_filtering() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("method-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000152")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -985,13 +1019,16 @@ async fn test_webhook_cors_preflight() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("cors-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000153")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();
@@ -1072,13 +1109,16 @@ async fn test_webhook_cors_wildcard_origin() {
         }],
     };
 
-    let source = HttpSourceBuilder::new("cors-wildcard-source")
-        .with_host("127.0.0.1")
-        .with_port(port)
-        .with_webhooks(webhook_config)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let source = HttpSourceBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000154")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(port)
+    .with_webhooks(webhook_config)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
     let source = Arc::new(source);
     source.start().await.unwrap();

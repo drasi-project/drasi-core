@@ -352,7 +352,7 @@ impl QueryOutputOwner {
             .as_ref()
             .ok_or(QueryHistoryError::MissingIdentity)?;
         anyhow::ensure!(
-            identity.query_id() == component.as_str(),
+            identity.query_id() == component,
             "query output belongs to another component"
         );
         QueryChangeCodec::set_generation(output, component, state.generation)?;

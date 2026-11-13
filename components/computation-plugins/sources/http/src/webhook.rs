@@ -112,14 +112,14 @@ pub(crate) async fn handle(
         headers: header_values,
         method: method.to_string(),
         path: uri.path().to_string(),
-        source_id: ingress.config.source_id.clone(),
+        source_id: ingress.source_id.clone(),
     };
     let mut changes = Vec::with_capacity(mappings.len());
     let mut errors = Vec::new();
     for mapping in mappings {
         match webhooks
             .engine
-            .process_mapping(mapping, &context, &ingress.config.source_id)
+            .process_mapping(mapping, &context, ingress.source_id.as_str())
         {
             Ok(change) => changes.push(change),
             Err(error) => {

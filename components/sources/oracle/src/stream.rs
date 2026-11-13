@@ -59,9 +59,9 @@ struct OracleChangeEvent {
 }
 
 pub(crate) async fn run_logminer_stream(
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     config: OracleSourceConfig,
-    subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
+    subscriber_resume_scns: Arc<RwLock<HashMap<drasi_lib::ComponentId, Scn>>>,
     base: SourceBase,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -130,9 +130,9 @@ pub(crate) async fn run_logminer_stream(
 }
 
 async fn run_stream_session(
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     config: OracleSourceConfig,
-    subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
+    subscriber_resume_scns: Arc<RwLock<HashMap<drasi_lib::ComponentId, Scn>>>,
     base: SourceBase,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -199,9 +199,9 @@ async fn dispatch_batch(
 }
 
 fn run_logminer_poll_loop(
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     config: OracleSourceConfig,
-    subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
+    subscriber_resume_scns: Arc<RwLock<HashMap<drasi_lib::ComponentId, Scn>>>,
     base: SourceBase,
     shutdown_rx: watch::Receiver<bool>,
     batch_tx: mpsc::UnboundedSender<(Vec<SourceChange>, Scn)>,
@@ -305,7 +305,7 @@ fn run_logminer_poll_loop(
 }
 
 fn convert_events_to_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     conn: &Connection,
     pk_cache: &PrimaryKeyCache,
     events: &[OracleChangeEvent],
@@ -333,7 +333,7 @@ fn convert_events_to_changes(
 
 fn materialize_group(
     indices: &[usize],
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     conn: &Connection,
     pk_cache: &PrimaryKeyCache,
     events: &[OracleChangeEvent],
@@ -432,7 +432,7 @@ fn latest_row_state(
 }
 
 fn make_insert_or_update_change(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     pk_cache: &PrimaryKeyCache,
     event: &OracleChangeEvent,
     properties: ElementPropertyMap,
@@ -448,7 +448,7 @@ fn make_insert_or_update_change(
         .unwrap_or(0);
     let element = Element::Node {
         metadata: ElementMetadata {
-            reference: ElementReference::new(source_id, &element_id),
+            reference: ElementReference::new(source_id.as_str(), &element_id),
             labels: Arc::from([Arc::from(label.as_str())]),
             effective_from,
         },
@@ -463,7 +463,7 @@ fn make_insert_or_update_change(
 }
 
 fn make_delete_change(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     pk_cache: &PrimaryKeyCache,
     event: &OracleChangeEvent,
     properties: &ElementPropertyMap,
@@ -477,7 +477,7 @@ fn make_delete_change(
         .unwrap_or(0);
     Ok(SourceChange::Delete {
         metadata: ElementMetadata {
-            reference: ElementReference::new(source_id, &element_id),
+            reference: ElementReference::new(source_id.as_str(), &element_id),
             labels: Arc::from([Arc::from(label.as_str())]),
             effective_from,
         },

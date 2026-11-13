@@ -164,7 +164,7 @@ impl SourcePluginDescriptor for KafkaSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         _auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -180,7 +180,7 @@ impl SourcePluginDescriptor for KafkaSourceDescriptor {
             .await?
             .into();
 
-        let mut builder = KafkaSource::builder(id)
+        let mut builder = KafkaSource::builder(id.clone())
             .bootstrap_servers(bootstrap_servers)
             .topic(topic)
             .group_id(group_id)

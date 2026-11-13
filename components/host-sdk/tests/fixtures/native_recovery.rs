@@ -39,6 +39,7 @@ impl Factory for SqliteFactory {
                     (
                         name.into(),
                         sdk::ConfigField {
+                            constraint: None,
                             value_type,
                             required,
                             secret: false,
@@ -49,7 +50,8 @@ impl Factory for SqliteFactory {
                 allow_additional: false,
             },
             ports: SqliteSource::describe(
-                ComponentId::try_new("source").expect("constant source identity"),
+                ComponentId::try_new("8d798992-213b-5b0c-88d8-e73cf16e55bb")
+                    .expect("constant source identity"),
                 drasi_source_sqlite::native::SqliteOutput::Transactions,
             )
             .expect("fixed SQLite transaction descriptor")

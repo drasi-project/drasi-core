@@ -148,6 +148,8 @@ members = [
   "components/computation-plugins/sinks/capture",
   "components/computation-plugins/sinks/grpc",
   "components/computation-plugins/sinks/http",
+  "components/computation-plugins/sinks/log",
+  "components/computation-plugins/sinks/profiler",
   "components/computation-plugins/sinks/sse",
   "components/computation-plugins/sinks/storedproc-mysql",
   "components/computation-plugins/sinks/storedproc-mssql",

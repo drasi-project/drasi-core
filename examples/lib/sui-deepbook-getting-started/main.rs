@@ -110,10 +110,10 @@ async fn main() -> Result<()> {
             .query_factory()?,
         )
         .with_id("sui-deepbook-orderbook")
-        .with_source(source)
+        .with_source(drasi_lib::Source::id(&source).to_owned(), source)
         .with_query(event_feed)
         .with_query(pool_tracker)
-        .with_reaction(sse)
+        .with_reaction(drasi_lib::Reaction::id(&sse).to_owned(), sse)
         .build()
         .await?;
 

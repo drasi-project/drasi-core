@@ -29,6 +29,7 @@ pub use drasi_core_types::interface::{
 pub use drasi_core_types::interface::{
     MiddlewareError, MiddlewareSetupError, SourceMiddleware, SourceMiddlewareFactory,
 };
+pub use drasi_core_types::{CheckpointKey, OutputPartition, StorageScope, StorePartition};
 use drasi_query_ast::api::QueryParseError;
 pub use durability::{DurabilityRequirementError, FailureMode, FailureSurvival, StorageDurability};
 pub use index_backend::CreatedIndexes;

@@ -31,6 +31,7 @@ configuration = ["dep:anyhow", "dep:chacha20poly1305", "dep:serde", "dep:serde_j
 
 [dependencies]
 drasi-lib.workspace = true
+drasi-core-types.workspace = true
 
 redb = "2.6.3"
 async-trait = "0.1"

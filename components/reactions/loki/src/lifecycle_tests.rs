@@ -65,20 +65,23 @@ async fn receiver(count: usize, error_body: bool) -> Receiver {
 }
 
 fn reaction(endpoint: &str) -> LokiReaction {
-    LokiReaction::builder("loki-lifecycle")
-        .with_query("q1")
-        .with_endpoint(endpoint)
-        .with_timeout_ms(30_000)
-        .with_token("test-token")
-        .with_tenant_id("test-tenant")
-        .with_label("job", "lifecycle")
-        .with_label("generation", "{{after.generation}}")
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("{{json after}}")),
-            ..Default::default()
-        })
-        .build()
-        .unwrap()
+    LokiReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029b")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_endpoint(endpoint)
+    .with_timeout_ms(30_000)
+    .with_token("test-token")
+    .with_tenant_id("test-tenant")
+    .with_label("job", "lifecycle")
+    .with_label("generation", "{{after.generation}}")
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("{{json after}}")),
+        ..Default::default()
+    })
+    .build()
+    .unwrap()
 }
 
 async fn arrived(server: &mut Receiver, sequence: u64) {
@@ -89,8 +92,14 @@ async fn arrived(server: &mut Receiver, sequence: u64) {
     let streams = payload["streams"].as_array().unwrap();
     assert_eq!(streams.len(), 1);
     let stream = &streams[0];
-    assert_eq!(stream["stream"]["query_id"], "q1");
-    assert_eq!(stream["stream"]["reaction_id"], "loki-lifecycle");
+    assert_eq!(
+        stream["stream"]["query_id"],
+        support::result(sequence).query_id.to_string()
+    );
+    assert_eq!(
+        stream["stream"]["reaction_id"],
+        "00000000-0000-0000-0000-00000000029b"
+    );
     assert_eq!(stream["stream"]["operation"], "ADD");
     assert_eq!(stream["stream"]["job"], "lifecycle");
     assert_eq!(stream["stream"]["generation"], sequence.to_string());

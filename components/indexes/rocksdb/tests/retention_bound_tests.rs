@@ -28,12 +28,19 @@ use drasi_index_rocksdb::{open_unified_db, RocksDbMemoryBudget, RocksIndexOption
 fn effective_retention_is_the_explicit_bound_on_every_cf() {
     let dir = tempfile::tempdir().expect("tempdir");
     let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
-    let db =
-        open_unified_db(dir.path().to_str().unwrap(), "retention-test", &options).expect("open db");
+    let owner = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003ad")
+        .expect("fixture UUID");
+    let db = open_unified_db(
+        dir.path().to_str().unwrap(),
+        &drasi_core_types::StorageScope::default(),
+        &owner,
+        &options,
+    )
+    .expect("open db");
 
     // RocksDB persists the effective options at open; read the newest
     // OPTIONS-* file from the DB directory.
-    let db_dir = dir.path().join("retention-test");
+    let db_dir = dir.path().join(owner.as_str());
     let options_file = std::fs::read_dir(&db_dir)
         .expect("read db dir")
         .filter_map(|e| e.ok())

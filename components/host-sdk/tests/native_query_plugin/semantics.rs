@@ -69,6 +69,7 @@ async fn semantics() -> Result<()> {
                     },
                     provider,
                 )?;
+                query.initialize().await?;
                 let reader = query
                     .output_readers()
                     .ports()
@@ -79,7 +80,7 @@ async fn semantics() -> Result<()> {
                 case.exercise(&mut query, reader).await.with_context(|| {
                     format!(
                         "{} (loaded={loaded}, persistent={persistent})",
-                        case.config.id
+                        case.config.name
                     )
                 })?;
             }

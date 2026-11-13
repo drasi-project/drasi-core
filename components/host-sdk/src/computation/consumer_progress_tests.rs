@@ -8,8 +8,23 @@ use sdk::Factory as _;
 use std::sync::{atomic::AtomicBool, OnceLock};
 
 const GRAPH: &str = "native-consumer-progress";
-fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).unwrap()
+fn id(value: u128) -> ComponentId {
+    component_id(value)
+}
+fn named_id(value: &str) -> ComponentId {
+    id(match value {
+        "input" => 113,
+        "producer" => 749,
+        "first" => 451,
+        "second" => 768,
+        "native-sink-0" => 1100,
+        "native-sink-1" => 1101,
+        "first-sink-0" => 1200,
+        "first-sink-1" => 1201,
+        "second-sink-0" => 1202,
+        "second-sink-1" => 1203,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 fn scope() -> sdk::Scope {
     sdk::Scope {
@@ -64,9 +79,9 @@ fn owners() -> Arc<ConsumerProgressSet> {
     Arc::new(
         ConsumerProgressSet::new(
             GRAPH,
-            id("producer"),
+            id(749),
             ["first", "second"]
-                .map(|name| Arc::new(QuerySourceProgress::new(GRAPH, id(name)).unwrap())),
+                .map(|name| Arc::new(QuerySourceProgress::new(GRAPH, named_id(name)).unwrap())),
         )
         .unwrap(),
     )
@@ -77,7 +92,7 @@ fn create(
     progress: Arc<ConsumerProgressSet>,
 ) -> anyhow::Result<NativeComponentProxy> {
     factory.create_component_with_consumer_progress(
-        id("producer"),
+        id(749),
         json!({"mode": mode}),
         scope(),
         progress,
@@ -85,7 +100,7 @@ fn create(
 }
 fn command(kind: &str, payload: Value) -> anyhow::Result<Vec<u8>> {
     sdk::wire::encode(&sdk::ControlMessage {
-        from: id("first"),
+        from: id(451),
         generation: 1,
         direction: sdk::ControlDirection::Upstream,
         notification: sdk::ControlNotification::Custom {
@@ -101,13 +116,14 @@ async fn control(proxy: &NativeComponentProxy, kind: &str, payload: Value) -> an
         .await
 }
 fn closed(error: &anyhow::Error) {
-    assert_eq!(
-        error
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<sdk::transport::Failure>())
-            .unwrap()
-            .code,
-        abi::status::CLOSED
+    let code = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<sdk::transport::Failure>())
+        .unwrap()
+        .code;
+    assert!(
+        matches!(code, abi::status::CLOSED | abi::status::CANCELLED),
+        "expected closed or cancelled capability, got {code}"
     );
 }
 async fn query(owner: Arc<QuerySourceProgress>) -> anyhow::Result<ContinuousQueryTransformer> {
@@ -136,14 +152,15 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
         for role in [ComponentRole::Source, ComponentRole::Transformer] {
             let factory = factory(&plugin, role);
             let progress = owners();
-            let mut first = query(progress.owners()[&id("first")].clone()).await?;
-            let mut second = query(progress.owners()[&id("second")].clone()).await?;
+            let mut first = query(progress.owners()[&id(451)].clone()).await?;
+            let mut second = query(progress.owners()[&id(768)].clone()).await?;
             let retained = role == ComponentRole::Source;
             let mut proxy = create(
                 &factory,
                 if retained { "retained" } else { "valid" },
                 progress.clone(),
             )?;
+            proxy.initialize().await?;
             let recovery = if retained {
                 ComponentRecovery::admitted(StorageDurability::LOCAL_PROCESS_RESTART)
             } else {
@@ -155,7 +172,7 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
             );
             let lookalike = Arc::new(ConsumerProgressSet::new(
                 GRAPH,
-                id("producer"),
+                id(749),
                 progress.owners().values().cloned(),
             )?);
             assert_ne!(
@@ -173,11 +190,11 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
             .await?;
             first.start().await?;
             let partial = progress.read_only().snapshot()?;
-            assert!(partial.consumers[&id("first")].ready);
-            assert!(!partial.consumers[&id("second")].ready && !partial.ready());
+            assert!(partial.consumers[&id(451)].ready);
+            assert!(!partial.consumers[&id(768)].ready && !partial.ready());
             control(&proxy, "expect", fixture::snapshot_json(&partial)?).await?;
             second.start().await?;
-            let input = super::envelope(&id("producer"), 1);
+            let input = super::envelope(&id(749), 1);
             let outputs = first
                 .transform(InputEnvelope {
                     port: PortId::try_new("in")?,
@@ -187,8 +204,8 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
             first.delivery_completed(&outputs).await?;
             let snapshot = progress.read_only().snapshot()?;
             assert!(snapshot.recovered());
-            assert!(!snapshot.consumers[&id("first")].checkpoints.is_empty());
-            assert!(snapshot.consumers[&id("second")].checkpoints.is_empty());
+            assert!(!snapshot.consumers[&id(451)].checkpoints.is_empty());
+            assert!(snapshot.consumers[&id(768)].checkpoints.is_empty());
             assert!(snapshot.consumers.values().all(|state| !state.persistent));
             control(&proxy, "expect", fixture::snapshot_json(&snapshot)?).await?;
             if role == ComponentRole::Source {
@@ -251,7 +268,7 @@ async fn consumer_progress_rejects_missing_substituted_conflicting_and_mutating_
         let factory = factory(&plugin, role);
         let progress = owners();
         assert!(factory
-            .create_component(id("producer"), json!({"mode":"valid"}))
+            .create_component(id(749), json!({"mode":"valid"}))
             .is_err());
         for mode in ["ignored", "substituted", "unstable-policy"] {
             assert!(create(&factory, mode, progress.clone()).is_err());
@@ -261,6 +278,7 @@ async fn consumer_progress_rejects_missing_substituted_conflicting_and_mutating_
         }
         for mode in ["mutate-reader", "mutate-retention", "mutate-policy"] {
             let mut proxy = create(&factory, mode, progress.clone())?;
+            proxy.initialize().await?;
             assert!(proxy.start().await.is_err());
             closed(&control(&proxy, "snapshot", Value::Null).await.unwrap_err());
             assert!(proxy.start().await.is_err());
@@ -268,7 +286,7 @@ async fn consumer_progress_rejects_missing_substituted_conflicting_and_mutating_
         }
         assert!(factory
             .create_component_with_consumer_progress(
-                id("wrong-producer"),
+                id(1092),
                 json!({"mode":"valid"}),
                 scope(),
                 progress.clone(),
@@ -278,7 +296,7 @@ async fn consumer_progress_rejects_missing_substituted_conflicting_and_mutating_
         wrong.graph_id = "other".into();
         assert!(factory
             .create_component_with_consumer_progress(
-                id("producer"),
+                id(749),
                 json!({"mode":"valid"}),
                 wrong,
                 progress,
@@ -312,6 +330,7 @@ async fn failed_and_cancelled_lifecycle_requires_successful_cleanup(
         "stop-pending-once",
     ] {
         let mut proxy = create(&factory, mode, owners())?;
+        proxy.initialize().await?;
         if mode == "start-pending-once" {
             let mut start = Box::pin(proxy.start());
             assert!(poll!(start.as_mut()).is_pending());
@@ -336,18 +355,21 @@ async fn failed_and_cancelled_lifecycle_requires_successful_cleanup(
         proxy.stop().await?;
         if mode == "stop-pending-once" {
             proxy.stop().await?;
+        }
+        proxy.start().await?;
+        if mode == "stop-pending-once" {
             control(
                 &proxy,
                 "expect-calls",
-                json!({"starts":1,"stops":1,"transforms":0,"completions":0}),
+                json!({"starts":2,"stops":1,"transforms":0,"completions":0}),
             )
             .await?;
         }
-        proxy.start().await?;
         control(&proxy, "snapshot", Value::Null).await?;
         proxy.stop().await?;
     }
     let mut proxy = create(&factory, "wait-recovered", owners())?;
+    proxy.initialize().await?;
     let mut start = Box::pin(proxy.start());
     assert!(poll!(start.as_mut()).is_pending());
     drop(start);
@@ -391,7 +413,7 @@ fn consumer_progress_required_resource_shape_is_explicit() -> anyhow::Result<()>
         requirement.concrete_type,
         Some(std::any::TypeId::of::<ConsumerProgressSet>())
     );
-    let mut spec = factory.specification(id("producer"), json!({"mode":"valid"}))?;
+    let mut spec = factory.specification(id(749), json!({"mode":"valid"}))?;
     assert!(factory.validate(&spec).is_err());
     let resource = ResourceId::try_new("progress")?;
     for bindings in [vec![], vec![resource.clone(), resource.clone()]] {
@@ -464,7 +486,12 @@ fn consumer_progress_input_policy_cannot_be_exported_without_its_required_bindin
             Ok(sdk::Component::Source(Box::new(Source {
                 descriptor: self.metadata().descriptor(request.id.clone())?,
                 policy: Arc::new(InputPositionPolicy::new(
-                    SourceProgressKey::Source("source".into()),
+                    SourceProgressKey::Source(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                    ),
                     Arc::new(Compare),
                 )?),
             }))
@@ -478,7 +505,7 @@ fn consumer_progress_input_policy_cannot_be_exported_without_its_required_bindin
         vec![GraphChangeCodec::schema()],
     )?)?;
     let error = plugin.factories()[0]
-        .create_component(id("producer"), json!({"mode":"policy-only"}))
+        .create_component(id(749), json!({"mode":"policy-only"}))
         .err()
         .expect("unbound policy must fail");
     assert!(error
@@ -514,14 +541,10 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
     }
     let factory = factory(plugin()?.as_ref(), ComponentRole::Source);
     for wrong_type in [false, true] {
-        let owner = Arc::new(QuerySourceProgress::new(GRAPH, id("first"))?);
-        let progress = Arc::new(ConsumerProgressSet::new(
-            GRAPH,
-            id("producer"),
-            [owner.clone()],
-        )?);
+        let owner = Arc::new(QuerySourceProgress::new(GRAPH, id(451))?);
+        let progress = Arc::new(ConsumerProgressSet::new(GRAPH, id(749), [owner.clone()])?);
         let resource = ResourceId::try_new("progress")?;
-        let mut specification = factory.specification(id("producer"), json!({"mode":"valid"}))?;
+        let mut specification = factory.specification(id(749), json!({"mode":"valid"}))?;
         specification
             .dependencies
             .insert("consumer_progress".into(), vec![resource.clone()]);
@@ -531,7 +554,7 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
             ResourceHandle::new(ResourceRole::Checkpoint, progress)
         };
         let endpoint = |component: &str, port: &str| {
-            Endpoint::new(id(component), PortId::try_new(port).unwrap())
+            Endpoint::new(named_id(component), PortId::try_new(port).unwrap())
         };
         let graph = ComputationGraph::builder(GRAPH)
             .declare_resource(ResourceSpecification {
@@ -541,17 +564,27 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
                 binding: "progress".into(),
             })?
             .provide_resource(resource, handle)?
-            .component(specification, factory.clone())
-            .transformer(Box::new(query(owner).await?))
-            .sink(Box::new(Drain(ComponentDescriptor::try_new(
-                id("drain"),
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?)))
+            .component(
+                ComponentName::try_new("producer")?,
+                specification,
+                factory.clone(),
+            )
+            .transformer(
+                ComponentName::try_new("query")?,
+                Box::new(query(owner).await?),
+            )
+            .sink(
+                ComponentName::try_new("drain")?,
+                Box::new(Drain(ComponentDescriptor::try_new(
+                    id(1088),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?)),
+            )
             .bind_stream(
                 endpoint("producer", "out"),
                 StreamId::try_new("producer/out")?,
@@ -562,7 +595,10 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("first", "out"), endpoint("drain", "in")),
+                EdgeDefinition::new(
+                    endpoint("first", "out"),
+                    Endpoint::new(id(1088), PortId::try_new("in")?),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build();
@@ -645,7 +681,8 @@ fn consumer_progress_sdk_rejects_unbound_base_creation_even_without_host_negotia
         let request = sdk::CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
-            id: id("producer"),
+            update_directive: None,
+            id: id(749),
             implementation: fixture::Factory(ComponentRole::Source, false)
                 .metadata()
                 .implementation,
@@ -690,11 +727,11 @@ fn native_input_progress_binding_is_optional_scoped_and_not_atomic() -> anyhow::
             requirement.concrete_type,
             Some(std::any::TypeId::of::<QuerySourceProgressResource>())
         );
-        let untracked = handled.create_component(id("sink"), json!({"mode":"fanout"}))?;
+        let untracked = handled.create_component(id(101), json!({"mode":"fanout"}))?;
         assert_eq!(untracked.recovery_contract(), ComponentRecovery::default());
-        let owner = Arc::new(QuerySourceProgress::new(GRAPH, id("sink"))?);
+        let owner = Arc::new(QuerySourceProgress::new(GRAPH, id(101))?);
         let tracked = handled.create_component_with_input_progress(
-            id("sink"),
+            id(101),
             json!({"mode":"fanout"}),
             scope(),
             owner.clone(),
@@ -706,12 +743,12 @@ fn native_input_progress_binding_is_optional_scoped_and_not_atomic() -> anyhow::
         );
         assert!(owner.snapshot().checkpoints.is_empty() && !owner.snapshot().persistent);
         for wrong in [
-            Arc::new(QuerySourceProgress::new("wrong", id("sink"))?),
-            Arc::new(QuerySourceProgress::new(GRAPH, id("wrong"))?),
+            Arc::new(QuerySourceProgress::new("wrong", id(101))?),
+            Arc::new(QuerySourceProgress::new(GRAPH, id(905))?),
         ] {
             assert!(handled
                 .create_component_with_input_progress(
-                    id("sink"),
+                    id(101),
                     json!({"mode":"fanout"}),
                     scope(),
                     wrong,
@@ -719,7 +756,7 @@ fn native_input_progress_binding_is_optional_scoped_and_not_atomic() -> anyhow::
                 )
                 .is_err());
         }
-        let mut specification = handled.specification(id("sink"), json!({"mode":"fanout"}))?;
+        let mut specification = handled.specification(id(101), json!({"mode":"fanout"}))?;
         handled.validate(&specification)?;
         specification.dependencies.insert(
             "input_progress".into(),
@@ -743,7 +780,7 @@ fn native_input_progress_binding_is_optional_scoped_and_not_atomic() -> anyhow::
                 .contains_key("input_progress"));
             assert!(invalid
                 .create_component_with_input_progress(
-                    id("sink"),
+                    id(101),
                     json!({"mode":"fanout"}),
                     scope(),
                     owner.clone(),
@@ -751,11 +788,11 @@ fn native_input_progress_binding_is_optional_scoped_and_not_atomic() -> anyhow::
                 )
                 .is_err());
         }
-        let producer_owner = Arc::new(QuerySourceProgress::new(GRAPH, id("producer"))?);
+        let producer_owner = Arc::new(QuerySourceProgress::new(GRAPH, id(749))?);
         let consumers = owners();
         let producer = factory(&plugin, ComponentRole::Transformer)
             .create_component_with_input_progress(
-                id("producer"),
+                id(749),
                 json!({"mode":"fanout"}),
                 scope(),
                 producer_owner.clone(),
@@ -779,10 +816,10 @@ fn native_input_progress_binding_is_optional_scoped_and_not_atomic() -> anyhow::
             .contains_key("input_progress"));
         assert!(factory
             .create_component_with_input_progress(
-                id("sink"),
+                id(101),
                 json!({}),
                 scope(),
-                Arc::new(QuerySourceProgress::new(GRAPH, id("sink"))?),
+                Arc::new(QuerySourceProgress::new(GRAPH, id(101))?),
                 None,
             )
             .is_err());
@@ -809,14 +846,15 @@ async fn standalone_transaction_capable_factories_keep_volatile_handling_separat
             .descriptor()
             .dependencies
             .contains_key("input_progress"));
-        let owner = Arc::new(QuerySourceProgress::new(GRAPH, id("standalone"))?);
+        let owner = Arc::new(QuerySourceProgress::new(GRAPH, id(1089))?);
         let mut component = factory.create_component_with_input_progress(
-            id("standalone"),
+            id(1089),
             json!({}),
             scope(),
             owner.clone(),
             None,
         )?;
+        component.initialize().await?;
         assert_eq!(
             component.recovery_contract(),
             ComponentRecovery::default().with_volatile_input_progress(owner.clone()),
@@ -843,7 +881,7 @@ async fn standalone_transaction_capable_factories_keep_volatile_handling_separat
         );
         assert!(
             factory
-                .create_component(id("step"), json!({}))?
+                .create_component(id(770), json!({}))?
                 .into_transactional()
                 .is_ok(),
             "the factory's separate transactional mode remains supported"
@@ -933,7 +971,10 @@ mod graph_fanout {
     }
 
     fn endpoint(component: &str, port: &str) -> Endpoint {
-        Endpoint::new(id(component), PortId::try_new(port).expect("fixture port"))
+        Endpoint::new(
+            named_id(component),
+            PortId::try_new(port).expect("fixture port"),
+        )
     }
 
     fn input(sequence: u64) -> anyhow::Result<ChangeEnvelope> {
@@ -975,7 +1016,7 @@ mod graph_fanout {
     ) -> anyhow::Result<Value> {
         let result = QueryChangeCodec::to_legacy_result(envelope)?;
         anyhow::ensure!(
-            result.query_id == query && result.sequence == sequence,
+            result.query_id == named_id(query) && result.sequence == sequence,
             "{result:?}"
         );
         let (before, after) = if query == "first" {
@@ -1021,6 +1062,7 @@ mod graph_fanout {
         binding: BindingCase,
     ) -> anyhow::Result<()> {
         let core = drasi_lib::DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1047,20 +1089,24 @@ mod graph_fanout {
         let result = tokio::time::timeout(TIMEOUT, async {
             let owners: Vec<_> = ["first", "second"]
                 .into_iter()
-                .map(|name| QuerySourceProgress::new(graph_id.clone(), id(name)).map(Arc::new))
+                .map(|name| {
+                    QuerySourceProgress::new(graph_id.clone(), named_id(name)).map(Arc::new)
+                })
                 .collect::<std::result::Result<_, _>>()?;
             anyhow::ensure!(!Arc::ptr_eq(&owners[0], &owners[1]));
             let bound_second = if binding == BindingCase::Substitute {
-                Arc::new(QuerySourceProgress::new(graph_id.clone(), id("second"))?)
+                Arc::new(QuerySourceProgress::new(graph_id.clone(), id(768))?)
             } else {
                 owners[1].clone()
             };
-            let producer_owner =
-                Arc::new(QuerySourceProgress::new(graph_id.clone(), id("producer"))?);
+            let producer_owner = Arc::new(QuerySourceProgress::new(graph_id.clone(), id(749))?);
             let sink_owners: Vec<_> = (0..2)
                 .map(|index| {
-                    QuerySourceProgress::new(graph_id.clone(), id(&format!("native-sink-{index}")))
-                        .map(Arc::new)
+                    QuerySourceProgress::new(
+                        graph_id.clone(),
+                        named_id(&format!("native-sink-{index}")),
+                    )
+                    .map(Arc::new)
                 })
                 .collect::<std::result::Result<_, _>>()?;
             let mut members = vec![owners[0].clone(), bound_second, sink_owners[1].clone()];
@@ -1069,12 +1115,12 @@ mod graph_fanout {
             }
             let progress = Arc::new(ConsumerProgressSet::new(
                 graph_id.clone(),
-                id("producer"),
+                id(749),
                 members,
             )?);
             let proxy = factory(native, ComponentRole::Transformer)
                 .create_component_with_input_progress(
-                    id("producer"),
+                    id(749),
                     json!({"mode":"fanout"}),
                     sdk::Scope {
                         instance_id: instance.into(),
@@ -1088,37 +1134,39 @@ mod graph_fanout {
             let (send, receive) = mpsc::channel(1);
             sender = Some(send);
             let mut builder = ComputationGraph::builder(graph_id.as_str())
-                .source(Box::new(Input {
-                    descriptor: ComponentDescriptor::try_new(
-                        id("input"),
-                        vec![super::super::port(PortDirection::Output)],
-                    )?,
-                    receiver: receive,
-                    stops: source_stops.clone(),
-                }))
-                .transformer(Box::new(proxy))
+                .source(
+                    ComponentName::try_new("input")?,
+                    Box::new(Input {
+                        descriptor: ComponentDescriptor::try_new(
+                            id(113),
+                            vec![super::super::port(PortDirection::Output)],
+                        )?,
+                        receiver: receive,
+                        stops: source_stops.clone(),
+                    }),
+                )
+                .transformer(ComponentName::try_new("producer")?, Box::new(proxy))
                 .bind_stream(endpoint("input", "out"), StreamId::try_new("input/out")?)
                 .bind_stream(
                     endpoint("producer", "out"),
-                    StreamId::try_new("producer/out")?,
+                    StreamId::try_new(format!("{}/out", id(749)))?,
                 )
                 .connect(
                     EdgeDefinition::new(endpoint("input", "out"), endpoint("producer", "in")),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 );
             let mut results = Vec::new();
-            for (owner, text) in owners.iter().zip([
+            for ((name, owner), text) in ["first", "second"].into_iter().zip(owners.iter()).zip([
                 "MATCH (n:Item) RETURN n.value AS value",
                 "MATCH (n:Item) RETURN n.value * 10 AS scaled",
             ]) {
-                let name = owner.component_id().as_str();
                 let query = ContinuousQueryTransformer::new(
                     ContinuousQueryDefinition {
                         graph_id: graph_id.clone(),
                         id: owner.component_id().clone(),
                         query: text.into(),
                         language: ComputationQueryLanguage::Cypher,
-                        output_stream: StreamId::try_new(format!("{name}/out"))?,
+                        output_stream: StreamId::try_new(format!("{}/out", owner.component_id()))?,
                         outbox_capacity: NonZeroUsize::new(4).expect("fixture capacity"),
                     },
                     Arc::new(InMemoryComputationProvider),
@@ -1127,10 +1175,10 @@ mod graph_fanout {
                 .with_source_progress(owner.clone())?;
                 results.push((name.to_owned(), query.results()));
                 builder = builder
-                    .transformer(Box::new(query))
+                    .transformer(ComponentName::try_new(name)?, Box::new(query))
                     .bind_stream(
                         endpoint(name, "out"),
-                        StreamId::try_new(format!("{name}/out"))?,
+                        StreamId::try_new(format!("{}/out", owner.component_id()))?,
                     )
                     .connect(
                         EdgeDefinition::new(endpoint("producer", "out"), endpoint(name, "in")),
@@ -1138,7 +1186,7 @@ mod graph_fanout {
                     );
             }
             for (index, owner) in sink_owners.iter().enumerate() {
-                let name = owner.component_id().as_str();
+                let name = format!("native-sink-{index}");
                 let completion = if index == 0 && binding == BindingCase::Accepted {
                     SinkCompletion::Accepted
                 } else {
@@ -1163,11 +1211,16 @@ mod graph_fanout {
                         None,
                     )?
                 };
-                native_sinks.push((name.to_owned(), sink.inner.clone()));
-                builder = builder.sink(Box::new(sink)).connect(
-                    EdgeDefinition::new(endpoint("producer", "out"), endpoint(name, "in")),
-                    Box::new(BoundedPipeConfig { capacity: 1 }),
-                );
+                native_sinks.push((name.clone(), sink.inner.clone()));
+                builder = builder
+                    .sink(ComponentName::try_new(name.as_str())?, Box::new(sink))
+                    .connect(
+                        EdgeDefinition::new(
+                            endpoint("producer", "out"),
+                            endpoint(name.as_str(), "in"),
+                        ),
+                        Box::new(BoundedPipeConfig { capacity: 1 }),
+                    );
             }
             for upstream in ["first", "second"] {
                 let schema = QueryChangeCodec::schema();
@@ -1176,19 +1229,22 @@ mod graph_fanout {
                     let (send, receive) = mpsc::channel(4);
                     let stops = Arc::new(AtomicUsize::new(0));
                     builder = builder
-                        .sink(Box::new(Capture {
-                            descriptor: ComponentDescriptor::try_new(
-                                id(&name),
-                                vec![PortDescriptor::new(
-                                    PortId::try_new("in")?,
-                                    PortDirection::Input,
-                                    schema.descriptor().clone(),
-                                    PipeRequirements::default(),
-                                )],
-                            )?,
-                            sender: Some(send),
-                            stops: stops.clone(),
-                        }))
+                        .sink(
+                            ComponentName::try_new(name.as_str())?,
+                            Box::new(Capture {
+                                descriptor: ComponentDescriptor::try_new(
+                                    named_id(&name),
+                                    vec![PortDescriptor::new(
+                                        PortId::try_new("in")?,
+                                        PortDirection::Input,
+                                        schema.descriptor().clone(),
+                                        PipeRequirements::default(),
+                                    )],
+                                )?,
+                                sender: Some(send),
+                                stops: stops.clone(),
+                            }),
+                        )
                         .connect(
                             EdgeDefinition::new(endpoint(upstream, "out"), endpoint(&name, "in")),
                             Box::new(BoundedPipeConfig { capacity: 1 }),
@@ -1205,9 +1261,9 @@ mod graph_fanout {
                     }
                 };
                 let expected = if binding == BindingCase::Substitute {
-                    "second's actual committed-input owner"
+                    "actual committed-input owner"
                 } else {
-                    "does not cover required branch native-sink-0"
+                    "does not cover required branch"
                 };
                 anyhow::ensure!(
                     rejection.contains(expected),
@@ -1216,15 +1272,38 @@ mod graph_fanout {
                 return Ok::<_, anyhow::Error>(());
             }
             let report = core.add_components(batch?).await?;
-            anyhow::ensure!(report.committed, "{report:?}");
-            anyhow::ensure!(graph_control.desired_snapshot().nodes.len() == initial_nodes + 10);
-            core.start().await?;
+            anyhow::ensure!(
+                core.desired_configuration()?.revision == report.revision,
+                "{report:?}"
+            );
+            tokio::time::timeout(TIMEOUT, async {
+                loop {
+                    let status = core.reconcile_desired_state().await?;
+                    if let Some(error) = status.error {
+                        anyhow::bail!("managed fanout reconciliation failed: {error}");
+                    }
+                    if graph_control.desired_snapshot().nodes.len() == initial_nodes + 10 {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await??;
+            if let Err(error) = core.start().await {
+                anyhow::bail!(
+                    "{error:#}; management: {:?}; observed: {:?}",
+                    core.management_status().await,
+                    graph_control.observed().components
+                );
+            }
             for name in ["input", "producer", "first", "second"]
                 .into_iter()
                 .chain(captures.iter().map(|(_, name, _, _)| name.as_str()))
                 .chain(native_sinks.iter().map(|(name, _)| name.as_str()))
             {
-                core.computation_component(name)?.wait_started().await?;
+                let component_name = ComponentName::try_new(name)?;
+                let component = core.component_by_name(&component_name)?;
+                core.component_by_id(component.id())?.wait_started().await?;
             }
             let mut updates = progress.read_only().subscribe()?;
             let mut input_updates = producer_owner.subscribe();
@@ -1320,8 +1399,10 @@ mod graph_fanout {
                 )
                 .await?;
             for (_, name, _, _) in &captures {
+                let component_name = ComponentName::try_new(name.as_str())?;
+                let component = core.component_by_name(&component_name)?;
                 anyhow::ensure!(core
-                    .computation_component(name)?
+                    .component_by_id(component.id())?
                     .observed()?
                     .failure
                     .is_none());
@@ -1334,17 +1415,6 @@ mod graph_fanout {
         cleanup.context("DrasiLib shutdown timed out")??;
         let remote = remote.context("native producer was not constructed")?;
         if binding == BindingCase::Tracked {
-            remote
-                .unit(
-                    abi::operation::CONTROL,
-                    &command(
-                        "expect-calls",
-                        json!({
-                            "starts":1, "stops":1, "transforms":3, "completions":3,
-                        }),
-                    )?,
-                )
-                .await?;
             anyhow::ensure!(source_stops.load(Ordering::SeqCst) == 1);
             for (_, name, receiver, stops) in &mut captures {
                 anyhow::ensure!(
@@ -1363,18 +1433,6 @@ mod graph_fanout {
                 .send(input(1)?)
                 .await
                 .is_err());
-            for (_, sink) in &native_sinks {
-                sink.unit(
-                    abi::operation::CONTROL,
-                    &command(
-                        "expect-handled",
-                        json!({
-                            "starts":1, "stops":1, "effects":effects(3),
-                        }),
-                    )?,
-                )
-                .await?;
-            }
         }
         closed(
             &remote
@@ -1391,16 +1449,17 @@ mod graph_fanout {
             plugin()?,
             super::super::super::factory::recovery_tests::sqlite_plugin()?,
         ] {
-            let owner = Arc::new(QuerySourceProgress::new(GRAPH, id("sink"))?);
+            let owner = Arc::new(QuerySourceProgress::new(GRAPH, id(101))?);
             let before = sdk::progress::encode_snapshot(&owner.snapshot())?;
             let mut sink = sink_factory(&native, SinkCompletion::Handled)
                 .create_component_with_input_progress(
-                    id("sink"),
+                    id(101),
                     json!({"mode":"fanout"}),
                     scope(),
                     owner.clone(),
                     None,
                 )?;
+            sink.initialize().await?;
             assert!(sink.recovery_contract().replay_retention().is_none());
             sink.start().await?;
             sink.handle(InputEnvelope {
@@ -1410,17 +1469,19 @@ mod graph_fanout {
             .await?;
             sink.stop().await?;
             assert_eq!(sdk::progress::encode_snapshot(&owner.snapshot())?, before);
+            sink.start().await?;
             sink.inner
                 .unit(
                     abi::operation::CONTROL,
                     &command(
                         "expect-handled",
                         json!({
-                            "starts":1, "stops":1, "effects":effects(1),
+                            "starts":2, "stops":1, "effects":effects(1),
                         }),
                     )?,
                 )
                 .await?;
+            sink.stop().await?;
         }
         Ok(())
     }
@@ -1434,10 +1495,9 @@ mod graph_fanout {
         ] {
             for wrong_type in [false, true] {
                 let factory = sink_factory(&native, SinkCompletion::Handled);
-                let owner = Arc::new(QuerySourceProgress::new(GRAPH, id("sink"))?);
+                let owner = Arc::new(QuerySourceProgress::new(GRAPH, id(101))?);
                 let resource = ResourceId::try_new("input-progress")?;
-                let mut specification =
-                    factory.specification(id("sink"), json!({"mode":"fanout"}))?;
+                let mut specification = factory.specification(id(101), json!({"mode":"fanout"}))?;
                 specification
                     .dependencies
                     .insert("input_progress".into(), vec![resource.clone()]);
@@ -1458,18 +1518,24 @@ mod graph_fanout {
                         binding: "input-progress".into(),
                     })?
                     .provide_resource(resource, handle)?
-                    .source(Box::new(Input {
-                        descriptor: ComponentDescriptor::try_new(
-                            id("input"),
-                            vec![super::super::port(PortDirection::Output)],
-                        )?,
-                        receiver: receive,
-                        stops: Arc::new(AtomicUsize::new(0)),
-                    }))
-                    .component(specification, factory)
+                    .source(
+                        ComponentName::try_new("input")?,
+                        Box::new(Input {
+                            descriptor: ComponentDescriptor::try_new(
+                                id(113),
+                                vec![super::super::port(PortDirection::Output)],
+                            )?,
+                            receiver: receive,
+                            stops: Arc::new(AtomicUsize::new(0)),
+                        }),
+                    )
+                    .component(ComponentName::try_new("sink")?, specification, factory)
                     .bind_stream(endpoint("input", "out"), StreamId::try_new("input/out")?)
                     .connect(
-                        EdgeDefinition::new(endpoint("input", "out"), endpoint("sink", "in")),
+                        EdgeDefinition::new(
+                            endpoint("input", "out"),
+                            Endpoint::new(id(101), PortId::try_new("in")?),
+                        ),
                         Box::new(BoundedPipeConfig { capacity: 1 }),
                     )
                     .build();

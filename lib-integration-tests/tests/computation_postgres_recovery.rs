@@ -21,6 +21,7 @@ use testcontainers_modules::postgres::Postgres;
 
 const SOURCE: &str = "postgres";
 const QUERY: &str = "items";
+const QUERY_UUID: &str = "00000000-0000-0000-0000-0000000001b3";
 const SLOT: &str = "computation_recovery";
 #[allow(dead_code)]
 mod index_observation;
@@ -35,13 +36,17 @@ struct ObservedIndexes {
 
 #[async_trait]
 impl IndexBackendPlugin for ObservedIndexes {
-    async fn create_indexes(&self, id: &str) -> std::result::Result<CreatedIndexes, IndexError> {
-        self.create_scoped_indexes(id, id).await
+    async fn create_indexes(
+        &self,
+        id: &drasi_core::ComponentId,
+    ) -> std::result::Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(&drasi_core::interface::StorageScope::default(), id)
+            .await
     }
     async fn create_scoped_indexes(
         &self,
-        scope: &str,
-        id: &str,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
     ) -> std::result::Result<CreatedIndexes, IndexError> {
         let indexes = self.inner.create_scoped_indexes(scope, id).await?;
         *self.checkpoints.lock().expect("checkpoint observation") =
@@ -70,20 +75,30 @@ impl ObservedIndexes {
             .context("query checkpoint store is unavailable")?;
         index_observation::native_source_checkpoints(store.as_ref())
             .await?
-            .remove(SOURCE)
+            .remove(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002d8")
+                    .expect("fixture UUID"),
+            )
             .context("source checkpoint is absent")
     }
 }
 
 async fn stopped_checkpoint(root: &Path) -> Result<SourceCheckpoint> {
-    let indexes = index_observation::open_query_indexes(&root.join("indexes"), QUERY).await?;
+    let indexes = index_observation::open_query_indexes(
+        &root.join("indexes"),
+        &drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+    )
+    .await?;
     let store = indexes
         .checkpoint_store
         .as_ref()
         .context("stopped query checkpoint store")?;
     index_observation::native_source_checkpoints(store.as_ref())
         .await?
-        .remove(SOURCE)
+        .remove(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002d8")
+                .expect("fixture UUID"),
+        )
         .context("stopped query source checkpoint is absent")
 }
 
@@ -145,45 +160,65 @@ async fn open(root: &Path, host: &str, port: u16) -> Result<(DrasiLib, Arc<Obser
                 false,
             )),
             &root.join("indexes"),
-            QUERY,
+            drasi_core::ComponentId::try_new(QUERY_UUID)?,
         ),
         checkpoints: Mutex::new(None),
     });
-    let source = PostgresReplicationSource::builder(SOURCE)
-        .with_host(host)
-        .with_port(port)
-        .with_user("postgres")
-        .with_password("postgres")
-        .with_database("postgres")
-        .with_ssl_mode(SslMode::Disable)
-        .with_tables(vec!["items".into()])
-        .with_slot_name(SLOT)
-        .with_publication_name("items_publication")
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002d8")
+            .expect("fixture UUID"),
+    )
+    .with_host(host)
+    .with_port(port)
+    .with_user("postgres")
+    .with_password("postgres")
+    .with_database("postgres")
+    .with_ssl_mode(SslMode::Disable)
+    .with_tables(vec!["items".into()])
+    .with_slot_name(SLOT)
+    .with_publication_name("items_publication")
+    .build()?;
     let core = lib_integration_tests::query_builder()
         .with_id("postgres-crash-recovery")
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("postgres").expect("fixture component name"),
+            source,
+        )
         .with_query(
-            Query::cypher(QUERY)
-                .query("MATCH (n:items) RETURN n.id AS id, n.name AS name")
-                .from_input(SOURCE)
-                .enable_bootstrap(false)
-                .with_outbox_capacity(32)
-                .with_storage_backend(StorageBackendRef::Named("rocks".into()))
-                .build(),
+            Query::cypher(
+                drasi_core::ComponentName::try_new(QUERY).expect("fixture component name"),
+            )
+            .with_id(drasi_core::ComponentId::try_new(QUERY_UUID)?)
+            .query("MATCH (n:items) RETURN n.id AS id, n.name AS name")
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("postgres").expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .with_outbox_capacity(32)
+            .with_storage_backend(StorageBackendRef::Named("rocks".into()))
+            .build()?,
         )
         .with_index_provider("rocks", indexes.clone())
         .build()
         .await?;
     core.start().await?;
-    tokio::time::timeout(DEADLINE, core.computation_component(QUERY)?.wait_started()).await??;
+    tokio::time::timeout(
+        DEADLINE,
+        core.component_by_name(
+            &drasi_core::ComponentName::try_new("items").expect("fixture component name"),
+        )?
+        .wait_started(),
+    )
+    .await??;
     Ok((core, indexes))
 }
 
 async fn rows(core: &DrasiLib) -> Result<(BTreeMap<i64, String>, u64)> {
     let query = core
         .query_manager()
-        .get_query_instance(QUERY)
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("items").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
@@ -280,7 +315,9 @@ async fn wait_for_live_feedback(
 }
 
 async fn data_volume(container: &str) -> Result<String> {
-    let inspected = tokio::process::Command::new("docker").args([
+    let inspected = tokio::process::Command::new(
+        std::env::var_os("DRASI_TEST_CONTAINER_CLI").unwrap_or_else(|| "docker".into()),
+    ).args([
         "inspect", "--format",
         "{{range .Mounts}}{{if eq .Destination \"/var/lib/postgresql/data\"}}{{.Name}}{{end}}{{end}}",
         container,
@@ -293,15 +330,16 @@ async fn data_volume(container: &str) -> Result<String> {
     let name = String::from_utf8(inspected.stdout)?.trim().to_owned();
     anyhow::ensure!(
         !name.is_empty(),
-        "PostgreSQL must use its image-declared Docker volume"
+        "PostgreSQL must use its image-declared container volume"
     );
     Ok(name)
 }
 
 #[tokio::test]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn actual_postgres_crash_keeps_offline_query_changes_and_recovers_exact_rows() -> Result<()> {
     let root = tempfile::tempdir()?;
-    // Docker's automatic host-port assignment changes on container restart.
+    // The container runtime's automatic host-port assignment changes on restart.
     let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = reservation.local_addr()?.port();
     let name = format!("computation-postgres-recovery-{}", std::process::id());
@@ -353,7 +391,10 @@ async fn actual_postgres_crash_keeps_offline_query_changes_and_recovers_exact_ro
         wait_for_live_feedback(&admin.client, &indexes.checkpoint().await?, false)
             .await
             .context("wait for actual acknowledgement of the committed prefix")?;
-        core.stop_query(QUERY).await?;
+        core.stop_query_by_name(
+            &drasi_core::ComponentName::try_new("items").expect("fixture component name"),
+        )
+        .await?;
         let saved = stopped_checkpoint(root.path()).await?;
         admin
             .client
@@ -371,10 +412,12 @@ async fn actual_postgres_crash_keeps_offline_query_changes_and_recovers_exact_ro
             saved,
             "stopped query must not acknowledge unseen data"
         );
-        let killed = tokio::process::Command::new("docker")
-            .args(["kill", "--signal=KILL", container.id()])
-            .output()
-            .await?;
+        let killed = tokio::process::Command::new(
+            std::env::var_os("DRASI_TEST_CONTAINER_CLI").unwrap_or_else(|| "docker".into()),
+        )
+        .args(["kill", "--signal=KILL", container.id()])
+        .output()
+        .await?;
         anyhow::ensure!(
             killed.status.success(),
             "owned PostgreSQL kill failed: {}",
@@ -396,7 +439,7 @@ async fn actual_postgres_crash_keeps_offline_query_changes_and_recovers_exact_ro
         let restarted_port = container.get_host_port_ipv4(5432).await?;
         anyhow::ensure!(
             restarted_port == port,
-            "Docker reassigned the PostgreSQL port from {port} to {restarted_port}"
+            "container runtime reassigned the PostgreSQL port from {port} to {restarted_port}"
         );
         let admin = Admin::connect(&host, port)
             .await
@@ -417,9 +460,11 @@ async fn actual_postgres_crash_keeps_offline_query_changes_and_recovers_exact_ro
             ])
         );
         assert_eq!(stopped_checkpoint(root.path()).await?, saved);
-        core.start_query(QUERY)
-            .await
-            .context("resume query after database restart")?;
+        core.start_query_by_name(
+            &drasi_core::ComponentName::try_new("items").expect("fixture component name"),
+        )
+        .await
+        .context("resume query after database restart")?;
         wait_rows(
             &core,
             &[(1, "alpha-updated"), (3, "gamma"), (4, "delta")],

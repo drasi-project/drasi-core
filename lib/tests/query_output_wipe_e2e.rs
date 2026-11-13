@@ -19,7 +19,6 @@ mod mock_source;
 use anyhow::Result;
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::queries::FetchError;
 use drasi_lib::{DrasiLib, IndexBackendPlugin, Query, StorageBackendRef};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::sync::Arc;
@@ -32,14 +31,24 @@ const QUERY_V1: &str = "MATCH (p:Person) RETURN p.name AS name, p.age AS age";
 const QUERY_V2: &str = "MATCH (p:Person) RETURN p.name AS name, p.age AS age, p.age AS age2";
 
 fn persistent_query(text: &str) -> drasi_lib::config::QueryConfig {
-    Query::cypher(QUERY_ID)
-        .query(text)
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .with_outbox_capacity(100)
-        .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-        .build()
+    let mut query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .query(text)
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .with_outbox_capacity(100)
+    .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+    .build()
+    .expect("valid persistent query");
+    query.id = Some(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("explicit persistent owner UUID"),
+    );
+    query
 }
 
 async fn insert_person(handle: &MockSourceHandle, id: &str, name: &str, age: i64) -> Result<()> {
@@ -50,10 +59,14 @@ async fn insert_person(handle: &MockSourceHandle, id: &str, name: &str, age: i64
     handle.send_node_insert(id, vec!["Person"], props).await
 }
 
-async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
+async fn wait_for_status(
+    core: &DrasiLib,
+    id: &drasi_core_types::ComponentName,
+    expected: ComponentStatus,
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if core.get_query_status(id).await? == expected {
+        if core.get_query_status_by_name(id).await? == expected {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -68,7 +81,9 @@ async fn wait_for_seq(core: &DrasiLib, min_seq: u64) -> Result<u64> {
     loop {
         let query = core
             .query_manager()
-            .get_query_instance(QUERY_ID)
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )
             .await
             .map_err(anyhow::Error::msg)?;
         let snapshot = query.fetch_snapshot().await?;
@@ -90,6 +105,7 @@ async fn build_core(tmp: &TempDir, query_text: &str) -> Result<(DrasiLib, MockSo
     let rocks: Arc<dyn IndexBackendPlugin> =
         Arc::new(RocksDbIndexProvider::new(tmp.path(), false, false));
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -103,18 +119,27 @@ async fn build_core(tmp: &TempDir, query_text: &str) -> Result<(DrasiLib, MockSo
                 .clone(),
         )
         .with_id("query-output-wipe-e2e")
-        .with_source(mock_source)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+            mock_source,
+        )
         .with_query(persistent_query(query_text))
         .with_index_provider("rocks", rocks)
         .build()
         .await?;
     core.start().await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
     Ok((core, handle))
 }
 
 #[tokio::test]
-async fn update_query_text_wipes_output_in_process() -> Result<()> {
+async fn unassessed_query_change_preserves_output_in_process() -> Result<()> {
     let tmp = TempDir::new()?;
     let (core, handle) = build_core(&tmp, QUERY_V1).await?;
 
@@ -125,7 +150,9 @@ async fn update_query_text_wipes_output_in_process() -> Result<()> {
 
     let query = core
         .query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let before = query.fetch_outbox(0).await?;
@@ -139,31 +166,37 @@ async fn update_query_text_wipes_output_in_process() -> Result<()> {
     );
     let hash_v1 = before.config_hash;
 
-    core.update_query(QUERY_ID, persistent_query(QUERY_V2))
-        .await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    let error = core
+        .update_query_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            persistent_query(QUERY_V2),
+        )
+        .await
+        .expect_err("the registered factory does not assess semantic updates");
+    assert!(format!("{error:#}").contains("does not support configuration updates"));
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
 
     let query = core
         .query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
     assert_eq!(snapshot.as_of_sequence, 3);
-    assert!(
-        snapshot.is_empty(),
-        "snapshot must not contain old-config rows: {:?}",
-        snapshot.to_vec()
-    );
-    assert_ne!(snapshot.config_hash, hash_v1);
-    assert!(matches!(
-        query.fetch_outbox(0).await,
-        Err(FetchError::OutboxGap(_))
-    ));
+    assert_eq!(snapshot.len(), 3, "rejection must retain committed rows");
+    assert_eq!(snapshot.config_hash, hash_v1);
+    assert_eq!(query.fetch_outbox(0).await?.results.len(), 3);
     let outbox = query.fetch_outbox(3).await?;
     assert!(
         outbox.results.is_empty(),
-        "the new generation must not return old-config QueryResults"
+        "no new result is produced by a rejected configuration"
     );
     assert_eq!(outbox.latest_sequence, 3);
 
@@ -189,13 +222,23 @@ async fn delete_and_recreate_same_query_id_starts_at_sequence_zero() -> Result<(
     insert_person(&handle, "p2", "Bob", 25).await?;
     assert_eq!(wait_for_seq(&core, 2).await?, 2);
 
-    core.remove_query(QUERY_ID).await?;
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .await?;
     core.add_query(persistent_query(QUERY_V1)).await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
 
     let query = core
         .query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
@@ -222,19 +265,31 @@ async fn delete_and_recreate_advances_output_generation() -> Result<()> {
     let gen_before = {
         let query = core
             .query_manager()
-            .get_query_instance(QUERY_ID)
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            )
             .await
             .map_err(anyhow::Error::msg)?;
         query.fetch_snapshot().await?.output_generation
     };
 
-    core.remove_query(QUERY_ID).await?;
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .await?;
     core.add_query(persistent_query(QUERY_V1)).await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
 
     let query = core
         .query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
@@ -257,14 +312,32 @@ async fn stop_query_same_config_preserves_output() -> Result<()> {
     insert_person(&handle, "p2", "Bob", 25).await?;
     assert_eq!(wait_for_seq(&core, 2).await?, 2);
 
-    core.stop_query(QUERY_ID).await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Stopped).await?;
-    core.start_query(QUERY_ID).await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    core.stop_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Stopped,
+    )
+    .await?;
+    core.start_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
 
     let query = core
         .query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
@@ -288,19 +361,42 @@ async fn stop_query_same_config_preserves_output() -> Result<()> {
 }
 
 #[tokio::test]
-async fn update_query_twice_in_quick_succession_does_not_lock() -> Result<()> {
+async fn rejected_change_followed_by_unchanged_query_does_not_lock() -> Result<()> {
     let tmp = TempDir::new()?;
     let (core, handle) = build_core(&tmp, QUERY_V1).await?;
 
     insert_person(&handle, "p1", "Alice", 30).await?;
     assert_eq!(wait_for_seq(&core, 1).await?, 1);
 
-    core.update_query(QUERY_ID, persistent_query(QUERY_V2))
-        .await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
-    core.update_query(QUERY_ID, persistent_query(QUERY_V1))
-        .await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    let error = core
+        .update_query_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+            persistent_query(QUERY_V2),
+        )
+        .await
+        .expect_err("semantic change needs a factory assessment");
+    assert!(format!("{error:#}").contains("does not support configuration updates"));
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
+    let unchanged = core
+        .get_query_config_by_name(&drasi_lib::ComponentName::try_new("q1")?)
+        .await?
+        .into_authoring();
+    core.update_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        unchanged,
+    )
+    .await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
 
     insert_person(&handle, "p2", "Bob", 25).await?;
     assert_eq!(wait_for_seq(&core, 2).await?, 2);
@@ -310,19 +406,24 @@ async fn update_query_twice_in_quick_succession_does_not_lock() -> Result<()> {
 }
 
 fn volatile_query(text: &str) -> drasi_lib::config::QueryConfig {
-    Query::cypher(QUERY_ID)
+    Query::cypher(drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"))
         .query(text)
-        .from_input(SOURCE_ID)
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+        )
         .auto_start(true)
         .enable_bootstrap(false)
         .with_outbox_capacity(100)
         .build()
+        .expect("valid volatile query")
 }
 
 #[tokio::test]
-async fn volatile_reconfigure_and_remove_succeed() -> Result<()> {
+async fn volatile_recreation_and_removal_succeed() -> Result<()> {
     let (mock_source, handle) = MockSource::new(SOURCE_ID)?;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -336,32 +437,59 @@ async fn volatile_reconfigure_and_remove_succeed() -> Result<()> {
                 .clone(),
         )
         .with_id("query-output-wipe-volatile")
-        .with_source(mock_source)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+            mock_source,
+        )
         .with_query(volatile_query(QUERY_V1))
         .build()
         .await?;
     core.start().await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
 
     insert_person(&handle, "p1", "Alice", 30).await?;
     insert_person(&handle, "p2", "Bob", 25).await?;
     assert_eq!(wait_for_seq(&core, 2).await?, 2);
 
-    core.update_query(QUERY_ID, volatile_query(QUERY_V2))
-        .await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .await?;
+    core.add_query(volatile_query(QUERY_V2)).await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
     let query = core
         .query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let snapshot = query.fetch_snapshot().await?;
     assert_eq!(snapshot.as_of_sequence, 0);
     assert!(snapshot.is_empty());
 
-    core.remove_query(QUERY_ID).await?;
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+    )
+    .await?;
     core.add_query(volatile_query(QUERY_V1)).await?;
-    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(
+        &core,
+        &drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await?;
     insert_person(&handle, "p3", "Carol", 40).await?;
     assert_eq!(wait_for_seq(&core, 1).await?, 1);
 

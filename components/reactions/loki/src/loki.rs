@@ -57,41 +57,38 @@ pub struct LokiReaction {
 }
 
 impl LokiReaction {
-    pub fn builder(id: impl Into<String>) -> LokiReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> LokiReactionBuilder {
         LokiReactionBuilder::new(id)
     }
 
     pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: LokiReactionConfig,
     ) -> Result<Self> {
-        Self::from_builder(id.into(), queries, config, None, true)
+        Self::from_builder(id.clone(), queries, config, None, true)
     }
 
     pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: LokiReactionConfig,
         priority_queue_capacity: usize,
     ) -> Result<Self> {
-        Self::from_builder(
-            id.into(),
-            queries,
-            config,
-            Some(priority_queue_capacity),
-            true,
-        )
+        Self::from_builder(id, queries, config, Some(priority_queue_capacity), true)
     }
 
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: LokiReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
-        Self::validate_config(&queries, &config)?;
+        Self::validate_config(
+            &drasi_lib::reactions::common::input_aliases(&queries),
+            &config,
+        )?;
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
@@ -190,7 +187,7 @@ impl LokiReaction {
     }
 
     fn build_context(
-        query_name: &str,
+        emission: &drasi_lib::channels::QueryResult,
         operation: &str,
         result: &ResultDiff,
         timestamp: chrono::DateTime<Utc>,
@@ -198,7 +195,12 @@ impl LokiReaction {
         let mut context = Map::new();
         context.insert(
             "query_name".to_string(),
-            Value::String(query_name.to_string()),
+            serde_json::json!(emission.query_name),
+        );
+        context.insert("query_id".to_string(), serde_json::json!(emission.query_id));
+        context.insert(
+            "input_alias".to_string(),
+            serde_json::json!(emission.input_alias),
         );
         context.insert(
             "operation".to_string(),
@@ -259,17 +261,17 @@ impl LokiReaction {
     }
 
     fn query_template<'a>(
-        query_name: &str,
+        alias: Option<&str>,
         routes: &'a HashMap<String, QueryConfig>,
         default_template: &'a Option<QueryConfig>,
     ) -> Option<&'a QueryConfig> {
-        routes
-            .get(query_name)
-            .or_else(|| {
-                query_name
-                    .split('.')
-                    .next_back()
-                    .and_then(|name| routes.get(name))
+        alias
+            .and_then(|alias| {
+                routes.get(alias).or_else(|| {
+                    alias
+                        .rsplit_once('.')
+                        .and_then(|(_, last)| routes.get(last))
+                })
             })
             .or(default_template.as_ref())
     }
@@ -375,7 +377,7 @@ impl LokiReaction {
 
 #[async_trait]
 impl Reaction for LokiReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -390,7 +392,7 @@ impl Reaction for LokiReaction {
             .properties_or_serialize(&LokiReactionConfigDto::from(&self.config))
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -398,8 +400,8 @@ impl Reaction for LokiReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -497,8 +499,12 @@ impl Reaction for LokiReaction {
                     continue;
                 }
 
-                let query_name = &query_result.query_id;
-                let query_template = Self::query_template(query_name, &routes, &default_template);
+                let query_id = &query_result.query_id;
+                let query_template = Self::query_template(
+                    drasi_lib::reactions::common::input_alias(query_result.input_alias.as_deref(), query_result.query_name.as_ref()),
+                    &routes,
+                    &default_template,
+                );
                 let base_timestamp_ns: i64 = query_result
                     .timestamp
                     .timestamp_nanos_opt()
@@ -512,14 +518,14 @@ impl Reaction for LokiReaction {
                         Some(op) => op,
                         None => continue,
                     };
-                    debug!("[{reaction_name}] processing diff - query: '{query_name}', operation: {operation}");
+                    debug!("[{reaction_name}] processing diff - query: '{query_id}', operation: {operation}");
 
                     let context =
-                        Self::build_context(query_name, operation, result, query_result.timestamp);
+                        Self::build_context(query_result, operation, result, query_result.timestamp);
                     let mut rendered_labels =
-                        Self::render_labels(&handlebars, &labels, &context, &reaction_name);
-                    rendered_labels.insert("query_id".to_string(), query_name.clone());
-                    rendered_labels.insert("reaction_id".to_string(), reaction_name.clone());
+                        Self::render_labels(&handlebars, &labels, &context, reaction_name.as_str());
+                    rendered_labels.insert("query_id".to_string(), query_id.to_string());
+                    rendered_labels.insert("reaction_id".to_string(), reaction_name.to_string());
                     rendered_labels.insert("operation".to_string(), operation.to_string());
 
                     let log_line = match Self::render_log_line(
@@ -536,7 +542,7 @@ impl Reaction for LokiReaction {
                         Ok(None) => continue,
                         Err(e) => {
                             warn!(
-                                    "[{reaction_name}] failed to render log line for query '{query_name}': {e}"
+                                    "[{reaction_name}] failed to render log line for query '{query_id}': {e}"
                                 );
                             continue;
                         }
@@ -546,7 +552,7 @@ impl Reaction for LokiReaction {
                         Ok(k) => k,
                         Err(e) => {
                             warn!(
-                                "[{reaction_name}] failed to compute stream key for query '{query_name}': {e}"
+                                "[{reaction_name}] failed to compute stream key for query '{query_id}': {e}"
                             );
                             continue;
                         }
@@ -568,7 +574,7 @@ impl Reaction for LokiReaction {
 
                 if streams.is_empty() {
                     debug!(
-                        "[{reaction_name}] no streams to push for query '{query_name}', skipping"
+                        "[{reaction_name}] no streams to push for query '{query_id}', skipping"
                     );
                     continue;
                 }
@@ -600,12 +606,12 @@ impl Reaction for LokiReaction {
                 .await
                 {
                     warn!(
-                        "[{reaction_name}] failed to push query '{query_name}' results to Loki (streams: {}, values: {total_values}): {e}",
+                        "[{reaction_name}] failed to push query '{query_id}' results to Loki (streams: {}, values: {total_values}): {e}",
                         payload.streams.len()
                     );
                 } else {
                     info!(
-                        "[{reaction_name}] pushed query '{query_name}' to Loki - streams: {}",
+                        "[{reaction_name}] pushed query '{query_id}' to Loki - streams: {}",
                         payload.streams.len()
                     );
                 }
@@ -690,7 +696,17 @@ mod tests {
             data: serde_json::json!({"id": "sensor-1", "temperature": 42.1}),
             row_signature: 0,
         };
-        let context = LokiReaction::build_context("q1", "ADD", &result, Utc::now());
+        let mut emission = drasi_lib::channels::QueryResult::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000071")
+                .expect("fixture UUID"),
+            1,
+            Utc::now(),
+            Vec::new(),
+            HashMap::new(),
+        );
+        emission.query_name =
+            Some(drasi_lib::ComponentName::try_new("q1").expect("fixture component name"));
+        let context = LokiReaction::build_context(&emission, "ADD", &result, Utc::now());
         let query_config = QueryConfig {
             added: Some(super::super::TemplateSpec::new(
                 "[{{operation}}] {{after.id}}={{after.temperature}}",

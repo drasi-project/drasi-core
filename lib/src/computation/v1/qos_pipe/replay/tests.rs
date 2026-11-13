@@ -11,6 +11,19 @@ use drasi_core::{
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use std::{path::Path, time::Duration};
 
+const JOURNAL: &str = "journal";
+
+fn journal_partition() -> drasi_core_types::OutputPartition {
+    drasi_core_types::OutputPartition::Journal(JOURNAL.into())
+}
+
+fn journal_checkpoint() -> drasi_core_types::CheckpointKey {
+    drasi_core_types::CheckpointKey::Journal {
+        journal: journal_partition(),
+        key: "qos-state".into(),
+    }
+}
+
 fn definition(capacity: usize) -> QosChannelDefinition {
     QosChannelDefinition {
         stream: StreamId::try_new("out").unwrap(),
@@ -38,14 +51,15 @@ fn codec() -> EnvelopeCodec {
 }
 
 async fn resources(path: &Path) -> ComputationIndexes {
+    let channel_id = crate::test_helpers::component_id(297);
     LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false)))
-        .create_indexes("replay", "channel")
+        .create_indexes("replay", &channel_id)
         .await
         .unwrap()
 }
 
 async fn open(path: &Path, definition: QosChannelDefinition) -> Arc<QosChannel> {
-    QosChannel::persistent(definition, resources(path).await, codec(), "journal")
+    QosChannel::persistent(definition, resources(path).await, codec(), JOURNAL)
         .await
         .unwrap()
 }
@@ -54,7 +68,7 @@ fn persistent_identity() -> GraphProducerIdentity {
     GraphProducerIdentity::new(
         "scope".into(),
         "graph".into(),
-        ComponentId::try_new("producer").unwrap(),
+        crate::test_helpers::component_id(749),
         StreamId::try_new("out").unwrap(),
         true,
     )
@@ -83,7 +97,7 @@ fn graph_output(producer: &GraphProducerIdentity, sequence: u64) -> ChangeEnvelo
 }
 
 fn query_output(input: Option<&ChangeEnvelope>, sequence: u64) -> ChangeEnvelope {
-    let component = ComponentId::try_new("query").unwrap();
+    let component = crate::test_helpers::component_id(46);
     let mut envelope = QueryChangeCodec::encode_evaluation(
         input,
         &component,
@@ -94,8 +108,11 @@ fn query_output(input: Option<&ChangeEnvelope>, sequence: u64) -> ChangeEnvelope
             row_signature: sequence,
         }],
         QueryOutputMetadata {
-            query_id: "query".into(),
-            source_id: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002e",
+            )
+            .expect("fixture UUID"),
+            input_origin: None,
             timestamp: chrono::DateTime::from_timestamp(1, 0).unwrap(),
             metadata: Default::default(),
             profiling: None,
@@ -131,7 +148,7 @@ fn replay_receipt_and_identifier_limits_match_the_metadata_budget() {
         GraphProducerIdentity::new(
             "x".repeat(256),
             "x".repeat(256),
-            ComponentId::try_new("x".repeat(256)).unwrap(),
+            crate::test_helpers::component_id(775),
             definition.stream.clone(),
             true,
         )
@@ -142,7 +159,7 @@ fn replay_receipt_and_identifier_limits_match_the_metadata_budget() {
         GraphProducerIdentity::new(
             "x".repeat(257),
             "graph".into(),
-            ComponentId::try_new("producer").unwrap(),
+            crate::test_helpers::component_id(749),
             definition.stream.clone(),
             true,
         )
@@ -272,8 +289,14 @@ async fn graph_connected_replay_reuses_one_multicast_acceptance() {
     let channel = open(directory.path(), definition.clone()).await;
     channel.enable_replay(options(2)).await.unwrap();
     let describe = |id, port, direction| {
+        let component_id = match id {
+            "producer" => crate::test_helpers::component_id(749),
+            "first" => crate::test_helpers::component_id(750),
+            "second" => crate::test_helpers::component_id(751),
+            other => panic!("missing explicit fixture component ID for {other}"),
+        };
         ComponentDescriptor::try_new(
-            ComponentId::try_new(id).unwrap(),
+            component_id,
             vec![PortDescriptor::new(
                 PortId::try_new(port).unwrap(),
                 direction,
@@ -286,7 +309,7 @@ async fn graph_connected_replay_reuses_one_multicast_acceptance() {
     let output = graph_output(&persistent_identity(), 1);
     let replayed = output.reemit(2).unwrap();
     let source = GraphEndpoint::new(
-        ComponentId::try_new("producer").unwrap(),
+        crate::test_helpers::component_id(749),
         PortId::try_new("out").unwrap(),
     );
     let resource = ResourceId::try_new("channel").unwrap();
@@ -302,22 +325,32 @@ async fn graph_connected_replay_reuses_one_multicast_acceptance() {
         .unwrap()
         .provide_resource(resource.clone(), channel.resource())
         .unwrap()
-        .source(Box::new(ReplaySource {
-            descriptor: describe("producer", "out", PortDirection::Output),
-            outputs: [output, replayed].into(),
-        }))
+        .source(
+            crate::computation::v1::ComponentName::try_new("producer").unwrap(),
+            Box::new(ReplaySource {
+                descriptor: describe("producer", "out", PortDirection::Output),
+                outputs: [output, replayed].into(),
+            }),
+        )
         .bind_stream(source.clone(), definition.stream.clone());
     for (id, seen) in [("first", first.clone()), ("second", second.clone())] {
         builder = builder
-            .sink(Box::new(ReplaySink {
-                descriptor: describe(id, "in", PortDirection::Input),
-                seen,
-            }))
+            .sink(
+                crate::computation::v1::ComponentName::try_new(id).unwrap(),
+                Box::new(ReplaySink {
+                    descriptor: describe(id, "in", PortDirection::Input),
+                    seen,
+                }),
+            )
             .connect(
                 EdgeDefinition::new(
                     source.clone(),
                     GraphEndpoint::new(
-                        ComponentId::try_new(id).unwrap(),
+                        match id {
+                            "first" => crate::test_helpers::component_id(750),
+                            "second" => crate::test_helpers::component_id(751),
+                            other => panic!("missing explicit fixture component ID for {other}"),
+                        },
                         PortId::try_new("in").unwrap(),
                     ),
                 ),
@@ -380,7 +413,7 @@ async fn replay_receipts_survive_transport_changes_pruning_and_reconstruction() 
         changed
             .append_annotation(
                 ContextEntry::try_new(
-                    ComponentId::try_new("branch").unwrap(),
+                    crate::test_helpers::component_id(776),
                     "decision",
                     ContextValue::Bool(true),
                 )
@@ -446,7 +479,7 @@ fn replay_identity_ignores_only_transport_and_immediate_query_completion_timings
     let mut input = query_output(None, 3);
     QueryChangeCodec::append_post_commit_profiling(
         &mut input,
-        &ComponentId::try_new("query").unwrap(),
+        &crate::test_helpers::component_id(46),
         10,
         11,
     )
@@ -455,7 +488,7 @@ fn replay_identity_ignores_only_transport_and_immediate_query_completion_timings
     let mut live = original.reemit(20).unwrap();
     QueryChangeCodec::append_post_commit_profiling(
         &mut live,
-        &ComponentId::try_new("query").unwrap(),
+        &crate::test_helpers::component_id(46),
         100,
         110,
     )
@@ -467,7 +500,7 @@ fn replay_identity_ignores_only_transport_and_immediate_query_completion_timings
     let mut changed_input = input.clone();
     QueryChangeCodec::append_post_commit_profiling(
         &mut changed_input,
-        &ComponentId::try_new("query").unwrap(),
+        &crate::test_helpers::component_id(46),
         12,
         13,
     )
@@ -481,7 +514,7 @@ fn replay_identity_ignores_only_transport_and_immediate_query_completion_timings
     let ancestor = GraphProducerIdentity::new(
         "scope".into(),
         "graph".into(),
-        ComponentId::try_new("source").unwrap(),
+        crate::test_helpers::component_id(77),
         StreamId::try_new("source").unwrap(),
         true,
     )
@@ -530,7 +563,7 @@ async fn replay_rejects_unstable_missing_foreign_and_recovery_only_output_identi
     let volatile = GraphProducerIdentity::volatile(
         "scope".into(),
         "graph".into(),
-        ComponentId::try_new("producer").unwrap(),
+        crate::test_helpers::component_id(749),
         StreamId::try_new("out").unwrap(),
     )
     .unwrap();
@@ -553,7 +586,7 @@ async fn replay_rejects_unstable_missing_foreign_and_recovery_only_output_identi
     channel.enable_replay(options(2)).await.unwrap();
     let stable = query_output(None, 1);
     channel.publish(&stable).await.unwrap();
-    let component = ComponentId::try_new("query").unwrap();
+    let component = crate::test_helpers::component_id(46);
     let mut changed = stable.clone();
     QueryChangeCodec::set_generation(&mut changed, &component, 1).unwrap();
     rejected(
@@ -580,7 +613,8 @@ async fn replay_rejects_unstable_missing_foreign_and_recovery_only_output_identi
     );
     let mut control = QueryChangeCodec::progress_envelope(
         &crate::computation::v1::ResultNodeProjector::try_new("test/replay/query", None).unwrap(),
-        "query",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID"),
         1,
         0,
         &component,
@@ -657,7 +691,7 @@ async fn replay_configuration_is_opt_in_immutable_and_durability_checked() {
                 .enable_admission(AdmissionOptions {
                     construction_scope: "scope".into(),
                     graph_id: "graph".into(),
-                    component_id: ComponentId::try_new("source").unwrap(),
+                    component_id: crate::test_helpers::component_id(77),
                     failure_scope: FailureMode::ProcessRestart,
                     max_producers: NonZeroUsize::new(1).unwrap(),
                     receipts_per_producer: NonZeroUsize::new(1).unwrap(),
@@ -695,7 +729,7 @@ async fn replay_configuration_is_opt_in_immutable_and_durability_checked() {
 }
 
 #[tokio::test]
-async fn replay_journal_identity_survives_reopen_and_legacy_receipt_upgrade() {
+async fn replay_journal_identity_survives_reopen_and_older_receipts_are_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let other_directory = tempfile::tempdir().unwrap();
     let channel = open(directory.path(), definition(2)).await;
@@ -714,13 +748,22 @@ async fn replay_journal_identity_survives_reopen_and_legacy_receipt_upgrade() {
     drop(channel);
     let channel = open(directory.path(), definition(2)).await;
     assert_eq!(channel.output_journal_identity(), Some(first));
+    assert_eq!(
+        channel
+            .publish(&output.reemit(2).unwrap())
+            .await
+            .unwrap()
+            .position(),
+        Some(1)
+    );
+    assert_eq!(channel.progress().await.unwrap().accepted, 1);
     channel.shutdown().await.unwrap();
     drop(channel);
 
     let indexes = resources(directory.path()).await;
     let checkpoint = indexes.checkpoint_store().unwrap().clone();
     let saved = checkpoint
-        .read_checkpoint("journal")
+        .read_checkpoint(&journal_checkpoint())
         .await
         .unwrap()
         .unwrap();
@@ -734,7 +777,7 @@ async fn replay_journal_identity_survives_reopen_and_legacy_receipt_upgrade() {
     owner
         .run(async {
             checkpoint
-                .stage_checkpoint("journal", 1, Some(&bytes))
+                .stage_checkpoint(&journal_checkpoint(), 1, Some(&bytes))
                 .await?;
             Ok(())
         })
@@ -743,23 +786,29 @@ async fn replay_journal_identity_survives_reopen_and_legacy_receipt_upgrade() {
     owner.shutdown().await.unwrap();
     drop((owner, checkpoint));
 
-    let channel = open(directory.path(), definition(2)).await;
-    let upgraded = channel.output_journal_identity().unwrap();
-    assert_ne!(upgraded, first);
-    assert_eq!(
-        channel
-            .publish(&output.reemit(2).unwrap())
-            .await
-            .unwrap()
-            .position(),
-        Some(1)
-    );
-    assert_eq!(channel.progress().await.unwrap().accepted, 1);
-    channel.shutdown().await.unwrap();
-    drop(channel);
-    let channel = open(directory.path(), definition(2)).await;
-    assert_eq!(channel.output_journal_identity(), Some(upgraded));
-    channel.shutdown().await.unwrap();
+    assert!(QosChannel::persistent(
+        definition(2),
+        resources(directory.path()).await,
+        codec(),
+        JOURNAL,
+    )
+    .await
+    .is_err());
+    let indexes = resources(directory.path()).await;
+    let saved = indexes
+        .checkpoint_store()
+        .unwrap()
+        .read_checkpoint(&journal_checkpoint())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.sequence, 1);
+    assert_eq!(saved.source_position, Some(bytes));
+    ComputationTransaction::try_new(indexes)
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -802,7 +851,7 @@ async fn replay_reconstruction_rejects_corrupt_receipts_without_modifying_storag
         let indexes = resources(directory.path()).await;
         let checkpoint = indexes.checkpoint_store().unwrap().clone();
         let saved = checkpoint
-            .read_checkpoint("journal")
+            .read_checkpoint(&journal_checkpoint())
             .await
             .unwrap()
             .unwrap();
@@ -812,7 +861,7 @@ async fn replay_reconstruction_rejects_corrupt_receipts_without_modifying_storag
             let records = indexes
                 .outbox_writer()
                 .unwrap()
-                .read_from("journal", 0)
+                .read_from(&journal_partition(), 0)
                 .await
                 .unwrap();
             let envelope = codec().decode(&records[1].1).unwrap().reemit(1).unwrap();
@@ -846,11 +895,11 @@ async fn replay_reconstruction_rejects_corrupt_receipts_without_modifying_storag
                         .resources()
                         .outbox_writer()
                         .unwrap()
-                        .append("journal", 2, record)
+                        .append(&journal_partition(), 2, record)
                         .await?;
                 }
                 checkpoint
-                    .stage_checkpoint("journal", 2, Some(&corrupted))
+                    .stage_checkpoint(&journal_checkpoint(), 2, Some(&corrupted))
                     .await?;
                 Ok(())
             })
@@ -874,7 +923,7 @@ async fn replay_reconstruction_rejects_corrupt_receipts_without_modifying_storag
         let after = indexes
             .checkpoint_store()
             .unwrap()
-            .read_checkpoint("journal")
+            .read_checkpoint(&journal_checkpoint())
             .await
             .unwrap()
             .unwrap();
@@ -883,7 +932,7 @@ async fn replay_reconstruction_rejects_corrupt_receipts_without_modifying_storag
             let records = indexes
                 .outbox_writer()
                 .unwrap()
-                .read_from("journal", 0)
+                .read_from(&journal_partition(), 0)
                 .await
                 .unwrap();
             assert_eq!(records[1].1, record);

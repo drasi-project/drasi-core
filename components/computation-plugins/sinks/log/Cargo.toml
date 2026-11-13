@@ -1,0 +1,37 @@
+[package]
+rust-version.workspace = true
+name = "drasi-computation-sink-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native ComputationGraph log sink"
+readme = "README.md"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "3.0.0"
+kind = "sink-log"
+
+[dependencies]
+drasi-computation-plugin-sdk = { workspace = true }
+drasi-computation-contracts = { workspace = true }
+drasi-reaction-common = { workspace = true }
+anyhow = "1"
+async-trait = "0.1"
+handlebars = "5.1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+drasi-core-types = { workspace = true }
+
+[lints]
+workspace = true

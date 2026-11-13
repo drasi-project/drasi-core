@@ -13,8 +13,11 @@ mod support;
 
 fn reaction(endpoint: &str, adaptive: bool) -> GrpcReaction {
     GrpcReaction::new(
-        "grpc-lifecycle",
-        vec!["q1".into()],
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000287")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )],
         GrpcReactionConfig {
             endpoint: endpoint.into(),
             timeout_ms: 30_000,
@@ -65,7 +68,15 @@ async fn requests_survive_stop_and_three_restarts_in_both_modes() {
             );
             if sequence == 1 {
                 support::assert_incomplete_stop(&reaction, &reaction.base).await;
-                assert!(reaction.base.read_checkpoint("q1").await.unwrap().is_none());
+                assert!(reaction
+                    .base
+                    .read_checkpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                            .expect("fixture UUID")
+                    )
+                    .await
+                    .unwrap()
+                    .is_none());
             }
             server.recorder.release_responses(1);
             reaction.stop().await.unwrap();
@@ -74,7 +85,10 @@ async fn requests_survive_stop_and_three_restarts_in_both_modes() {
             assert_eq!(
                 reaction
                     .base
-                    .read_checkpoint("q1")
+                    .read_checkpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                            .expect("fixture UUID")
+                    )
                     .await
                     .unwrap()
                     .unwrap()
@@ -112,13 +126,24 @@ async fn checkpoint_writes_survive_stop_in_both_modes() {
             .unwrap();
         assert_eq!(server.recorder.total_items().await, 1);
         support::assert_incomplete_stop(&reaction, &reaction.base).await;
-        assert!(reaction.base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(reaction
+            .base
+            .read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
         store.release.add_permits(1);
         reaction.stop().await.unwrap();
         assert_eq!(
             reaction
                 .base
-                .read_checkpoint("q1")
+                .read_checkpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -147,7 +172,15 @@ async fn cancelled_start_and_checkpoint_panic_require_cleanup_in_both_modes() {
             .unwrap();
         store.release.add_permits(1);
         support::assert_panic_cleanup(&reaction, &reaction.base).await;
-        assert!(reaction.base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(reaction
+            .base
+            .read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .is_none());
         assert_eq!(server.recorder.total_items().await, 1);
         server.shutdown().await;
     }
@@ -183,7 +216,10 @@ async fn admitted_result_is_not_discarded_by_stopping_status() {
         assert_eq!(
             reaction
                 .base
-                .read_checkpoint("q1")
+                .read_checkpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID")
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -197,16 +233,19 @@ async fn admitted_result_is_not_discarded_by_stopping_status() {
 #[tokio::test(flavor = "current_thread")]
 async fn final_fixed_batch_remains_owned_until_acknowledged() {
     let server = test_server::start_held().await;
-    let reaction = GrpcReaction::builder("grpc-final-flush")
-        .with_query("q1")
-        .with_endpoint(&server.endpoint)
-        .with_timeout_ms(30_000)
-        .with_batching(BatchingConfig::Fixed {
-            batch_size: 10,
-            batch_flush_timeout_ms: 30_000,
-        })
-        .build()
-        .unwrap();
+    let reaction = GrpcReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000288")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_endpoint(&server.endpoint)
+    .with_timeout_ms(30_000)
+    .with_batching(BatchingConfig::Fixed {
+        batch_size: 10,
+        batch_flush_timeout_ms: 30_000,
+    })
+    .build()
+    .unwrap();
     support::initialize(&reaction, Arc::new(MemoryStateStoreProvider::new())).await;
     reaction.start().await.unwrap();
     // Let the interval's initial empty tick run before submitting a partial batch.
@@ -230,7 +269,10 @@ async fn final_fixed_batch_remains_owned_until_acknowledged() {
     assert_eq!(
         reaction
             .base
-            .read_checkpoint("q1")
+            .read_checkpoint(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID")
+            )
             .await
             .unwrap()
             .unwrap()

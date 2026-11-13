@@ -8,6 +8,7 @@ fn query(
     right: &Path,
     indexes: &Path,
     generation: u64,
+    sources: &[ComponentId; 2],
 ) -> Result<NativeComponentProxy> {
     let plugin = computation::load(sqlite::bootstrap_library())?;
     let bootstrap = plugin
@@ -18,16 +19,19 @@ fn query(
         })
         .context("missing file bootstrap")?;
     let mut members = Vec::new();
-    for (path, name, table) in [
+    for ((path, name, table), source) in [
         (left, "orders", "Orders"),
         (right, "customers", "Customers"),
-    ] {
+    ]
+    .into_iter()
+    .zip(sources)
+    {
         let mut configuration = sqlite::provider_configuration(path);
-        configuration["source"] = json!(name);
+        configuration["source"] = json!(source);
         configuration["stream"] = json!(format!("{name}/out"));
         configuration["settings"]["tables"] = json!([table]);
         let provider: Arc<dyn ComputationBootstrapProvider> = bootstrap.create_query_provider(
-            ComponentId::try_new(COMPONENT)?,
+            component_id()?,
             configuration,
             scope(generation),
             None,
@@ -37,12 +41,12 @@ fn query(
     let composite = Arc::new(CompositeBootstrapProvider::new(
         GRAPH,
         GRAPH,
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         members,
     )?);
-    let mut query = factory()?.create_component_with_processing(ComponentId::try_new(COMPONENT)?,
+    let mut query = factory()?.create_component_with_processing(component_id()?,
         json!({"query":"MATCH (o:Orders), (c:Customers) WHERE o.customer=c.id RETURN o.id AS id, c.name AS name, o.amount AS amount",
-            "bootstrap":true}), scope(generation), super::super::provider(indexes)?)?;
+            "bootstrap":true, "stream": format!("{COMPONENT}/out")}), scope(generation), super::super::provider(indexes)?)?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(composite)))?;
     Ok(query)
 }
@@ -64,6 +68,7 @@ async fn composite_bootstrap() -> Result<()> {
     let left = directory.path().join("orders.sqlite");
     let right = directory.path().join("customers.sqlite");
     let indexes = directory.path().join("indexes");
+    let sources = [ComponentId::generate(), ComponentId::generate()];
     rusqlite::Connection::open(&left)?.execute_batch(
         "CREATE TABLE Orders(id INTEGER PRIMARY KEY, customer INTEGER NOT NULL, amount INTEGER NOT NULL);
          INSERT INTO Orders VALUES(1,7,4);")?;
@@ -71,7 +76,8 @@ async fn composite_bootstrap() -> Result<()> {
         "CREATE TABLE Customers(id INTEGER PRIMARY KEY, name TEXT NOT NULL);
          INSERT INTO Customers VALUES(7,'Ada');",
     )?;
-    let mut loading = query(&left, &right, &indexes, 1)?;
+    let mut loading = query(&left, &right, &indexes, 1, &sources)?;
+    loading.initialize().await?;
     loading.start().await?;
     joined(&reader(&loading)?.snapshot().await?)?;
     assert!(
@@ -91,7 +97,8 @@ async fn composite_bootstrap() -> Result<()> {
         .is_empty());
     loading.stop().await?;
     drop(loading);
-    let mut restored = query(&left, &right, &indexes, 2)?;
+    let mut restored = query(&left, &right, &indexes, 2, &sources)?;
+    restored.initialize().await?;
     restored.start().await?;
     joined(&reader(&restored)?.snapshot().await?)?;
     restored.stop().await?;

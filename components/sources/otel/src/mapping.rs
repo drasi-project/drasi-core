@@ -786,7 +786,13 @@ mod tests {
                 &config,
                 5_000,
             );
-            let (changes, dropped, _) = lifecycle.apply("otel", &config, mapped.elements, 5_000);
+            let (changes, dropped, _) = lifecycle.apply(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                    .expect("fixture UUID"),
+                &config,
+                mapped.elements,
+                5_000,
+            );
             assert_eq!(dropped, 0);
             for change in changes {
                 if change.get_reference().element_id.as_ref() != "svc:checkout" {
@@ -870,12 +876,22 @@ mod tests {
         assert_eq!(checkout_events, vec![(0, 1_000), (1, 2_000)]);
 
         let mut lifecycle = LifecycleState::default();
-        let (changes, dropped, undo) =
-            lifecycle.apply("otel", &config, mapped.elements.clone(), 5_000);
+        let (changes, dropped, undo) = lifecycle.apply(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+            &config,
+            mapped.elements.clone(),
+            5_000,
+        );
         assert_eq!(dropped, 0);
         lifecycle.revert_apply(undo);
-        let (retried, dropped, _) =
-            lifecycle.apply("otel", &config, mapped.elements.clone(), 5_000);
+        let (retried, dropped, _) = lifecycle.apply(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+            &config,
+            mapped.elements.clone(),
+            5_000,
+        );
         assert_eq!(dropped, 0);
         assert_eq!(changes, retried);
 
@@ -883,8 +899,13 @@ mod tests {
             max_services: 2,
             ..config
         };
-        let (admitted, dropped, _) =
-            LifecycleState::default().apply("otel", &limited, mapped.elements, 5_000);
+        let (admitted, dropped, _) = LifecycleState::default().apply(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+            &limited,
+            mapped.elements,
+            5_000,
+        );
         assert_eq!(dropped, 1);
         let checkout = admitted
             .iter()
@@ -920,8 +941,13 @@ mod tests {
                 .count(),
             1
         );
-        let (_, dropped, _) =
-            LifecycleState::default().apply("otel", &config, mapped.elements, 5_000);
+        let (_, dropped, _) = LifecycleState::default().apply(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000007d")
+                .expect("fixture UUID"),
+            &config,
+            mapped.elements,
+            5_000,
+        );
         assert_eq!(dropped, 0);
     }
 

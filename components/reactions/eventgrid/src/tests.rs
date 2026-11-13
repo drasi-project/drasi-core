@@ -32,9 +32,13 @@ use crate::{EventGridReaction, EventGridReactionBuilder};
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn query_result(query_id: &str, sequence: u64, results: Vec<ResultDiff>) -> QueryResult {
+fn query_result(
+    query_id: drasi_core::ComponentId,
+    sequence: u64,
+    results: Vec<ResultDiff>,
+) -> QueryResult {
     QueryResult::new(
-        query_id.to_string(),
+        query_id,
         sequence,
         chrono::Utc::now(),
         results,
@@ -71,18 +75,29 @@ fn spec(template: &str) -> EventGridTemplateSpec {
     EventGridTemplateSpec::with_extension(template, EventGridTemplateExt::default())
 }
 
+fn reaction_id() -> drasi_core::ComponentId {
+    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051").expect("fixture UUID")
+}
+
 // ---------------------------------------------------------------------------
 // Builder & defaults
 // ---------------------------------------------------------------------------
 
 #[test]
 fn builder_defaults() {
-    let r = EventGridReactionBuilder::new("test")
-        .with_endpoint("https://topic.eastus-1.eventgrid.azure.net/api/events") // DevSkim: ignore DS137138
-        .with_access_key("k")
-        .build()
-        .unwrap();
-    assert_eq!(r.id(), "test");
+    let r = EventGridReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("https://topic.eastus-1.eventgrid.azure.net/api/events") // DevSkim: ignore DS137138
+    .with_access_key("k")
+    .build()
+    .unwrap();
+    assert_eq!(
+        r.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID")
+    );
     assert_eq!(r.type_name(), "eventgrid");
     let p = r.properties();
     assert_eq!(
@@ -95,12 +110,15 @@ fn builder_defaults() {
 
 #[test]
 fn builder_retains_access_key_in_properties() {
-    let r = EventGridReaction::builder("r")
-        .with_endpoint("https://topic.eastus-1.eventgrid.azure.net/api/events") // DevSkim: ignore DS137138
-        .with_access_key("super-secret")
-        .with_query("q1")
-        .build()
-        .unwrap();
+    let r = EventGridReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("https://topic.eastus-1.eventgrid.azure.net/api/events") // DevSkim: ignore DS137138
+    .with_access_key("super-secret")
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .build()
+    .unwrap();
     let p = r.properties();
     // Persistence contract: access key must be present in properties().
     assert_eq!(p.get("accessKey"), Some(&json!("super-secret")));
@@ -243,13 +261,62 @@ fn validate_rejects_route_for_unknown_query() {
 
 #[test]
 fn deterministic_id_is_stable() {
-    let a = deterministic_id("r", "q", 5, "i", 0);
-    let b = deterministic_id("r", "q", 5, "i", 0);
+    let a = deterministic_id(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+            .expect("fixture UUID"),
+        5,
+        "i",
+        0,
+    );
+    let b = deterministic_id(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+            .expect("fixture UUID"),
+        5,
+        "i",
+        0,
+    );
     assert_eq!(a, b);
     // Different tuple → different id.
-    assert_ne!(a, deterministic_id("r", "q", 5, "i", 1));
-    assert_ne!(a, deterministic_id("r", "q", 6, "i", 0));
-    assert_ne!(a, deterministic_id("r", "q", 5, "u", 0));
+    assert_ne!(
+        a,
+        deterministic_id(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            5,
+            "i",
+            1
+        )
+    );
+    assert_ne!(
+        a,
+        deterministic_id(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            6,
+            "i",
+            0
+        )
+    );
+    assert_ne!(
+        a,
+        deterministic_id(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            5,
+            "u",
+            0
+        )
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +326,8 @@ fn deterministic_id_is_stable() {
 #[test]
 fn unpacked_notification_maps_operations() {
     let qr = query_result(
-        "orders",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
         1,
         vec![
             add(json!({ "id": 1 })),
@@ -273,7 +341,10 @@ fn unpacked_notification_maps_operations() {
     assert_eq!(op, ChangeOp::Insert);
     assert_eq!(data["op"], "i");
     assert_eq!(data["payload"]["after"]["id"], 1);
-    assert_eq!(data["payload"]["source"]["queryId"], "orders");
+    assert_eq!(
+        data["payload"]["source"]["queryId"],
+        qr.query_id.to_string()
+    );
 
     let (op, data) = unpacked_notification(&qr, &qr.results[1]).unwrap();
     assert_eq!(op, ChangeOp::Update);
@@ -292,7 +363,8 @@ fn unpacked_notification_maps_operations() {
 #[test]
 fn unpacked_notification_aggregation_is_update() {
     let qr = query_result(
-        "agg",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003ab")
+            .expect("fixture UUID"),
         1,
         vec![ResultDiff::Aggregation {
             before: Some(json!({ "sum": 1 })),
@@ -315,7 +387,8 @@ fn sample_envelope() -> EventEnvelope {
     metadata.insert("category".into(), json!("inventory"));
     EventEnvelope {
         id: "id-1".into(),
-        subject: "orders".into(),
+        subject: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
         event_type: "Drasi.ChangeEvent".into(),
         time: "2026-07-10T00:00:00+00:00".into(),
         data: json!({ "op": "i" }),
@@ -328,10 +401,10 @@ fn cloudevents_schema_fields_and_extensions() {
     let (v, dropped) = sample_envelope().to_value(EventGridSchema::CloudEvents);
     assert!(!dropped);
     assert_eq!(v["id"], "id-1");
-    assert_eq!(v["source"], "orders");
+    assert_eq!(v["source"], "00000000-0000-0000-0000-0000000000e3");
     assert_eq!(v["type"], "Drasi.ChangeEvent");
     assert_eq!(v["specversion"], "1.0");
-    assert_eq!(v["subject"], "orders");
+    assert_eq!(v["subject"], "00000000-0000-0000-0000-0000000000e3");
     // Metadata flattened as extension attribute.
     assert_eq!(v["category"], "inventory");
 }
@@ -340,7 +413,7 @@ fn cloudevents_schema_fields_and_extensions() {
 fn eventgrid_schema_fields_and_dropped_metadata() {
     let (v, dropped) = sample_envelope().to_value(EventGridSchema::EventGrid);
     assert!(dropped, "metadata should be reported as dropped");
-    assert_eq!(v["subject"], "orders");
+    assert_eq!(v["subject"], "00000000-0000-0000-0000-0000000000e3");
     assert_eq!(v["eventType"], "Drasi.ChangeEvent");
     assert_eq!(v["dataVersion"], "1");
     // Native EventGrid schema does not carry extension attributes.
@@ -363,7 +436,7 @@ fn cloudevents_extension_keys_are_lowercased() {
     assert!(v.get("Category").is_none());
     // Reserved-key check applies to the normalized name, so `SubJect` (subject)
     // is dropped rather than overwriting the real `subject` attribute.
-    assert_eq!(v["subject"], "orders");
+    assert_eq!(v["subject"], "00000000-0000-0000-0000-0000000000e3");
 }
 
 // ---------------------------------------------------------------------------
@@ -380,15 +453,20 @@ fn build_events_packed_emits_single_event() {
         ..Default::default()
     };
     let qr = query_result(
-        "orders",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
         1,
         vec![add(json!({ "id": 1 })), add(json!({ "id": 2 }))],
     );
-    let events = build_events("r", &config, &hb, &qr, "r");
+    let events = build_events(&reaction_id(), &config, &hb, &qr);
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].subject, "orders");
+    assert_eq!(
+        events[0].subject,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID")
+    );
     // Packed data is the serialized QueryResult.
-    assert_eq!(events[0].data["query_id"], "orders");
+    assert_eq!(events[0].data["query_id"], qr.query_id.to_string());
 }
 
 #[test]
@@ -400,8 +478,13 @@ fn build_events_packed_skips_noop_only() {
         format: OutputFormat::Packed,
         ..Default::default()
     };
-    let qr = query_result("orders", 1, vec![ResultDiff::Noop]);
-    let events = build_events("r", &config, &hb, &qr, "r");
+    let qr = query_result(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
+        1,
+        vec![ResultDiff::Noop],
+    );
+    let events = build_events(&reaction_id(), &config, &hb, &qr);
     assert!(events.is_empty());
 }
 
@@ -415,7 +498,8 @@ fn build_events_unpacked_emits_per_diff() {
         ..Default::default()
     };
     let qr = query_result(
-        "orders",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
         1,
         vec![
             add(json!({ "id": 1 })),
@@ -423,7 +507,7 @@ fn build_events_unpacked_emits_per_diff() {
             ResultDiff::Noop,
         ],
     );
-    let events = build_events("r", &config, &hb, &qr, "r");
+    let events = build_events(&reaction_id(), &config, &hb, &qr);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].data["op"], "i");
     assert_eq!(events[1].data["op"], "d");
@@ -455,8 +539,15 @@ fn build_events_template_renders_data_and_metadata() {
         }),
         ..Default::default()
     };
-    let qr = query_result("orders", 1, vec![add(json!({ "id": 42 }))]);
-    let events = build_events("r", &config, &hb, &qr, "r");
+    let mut qr = query_result(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
+        1,
+        vec![add(json!({ "id": 42 }))],
+    );
+    qr.query_name =
+        Some(drasi_lib::ComponentName::try_new("orders").expect("fixture component name"));
+    let events = build_events(&reaction_id(), &config, &hb, &qr);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].data["productId"], 42);
     assert_eq!(
@@ -487,8 +578,15 @@ fn build_events_template_invalid_json_falls_back_to_unpacked() {
         }),
         ..Default::default()
     };
-    let qr = query_result("orders", 1, vec![add(json!({ "id": 7 }))]);
-    let events = build_events("r", &config, &hb, &qr, "r");
+    let mut qr = query_result(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
+        1,
+        vec![add(json!({ "id": 7 }))],
+    );
+    qr.query_name =
+        Some(drasi_lib::ComponentName::try_new("orders").expect("fixture component name"));
+    let events = build_events(&reaction_id(), &config, &hb, &qr);
     assert_eq!(events.len(), 1);
     // Fallback = unpacked notification.
     assert_eq!(events[0].data["op"], "i");
@@ -517,8 +615,15 @@ fn build_events_template_missing_template_falls_back_to_unpacked() {
         }),
         ..Default::default()
     };
-    let qr = query_result("orders", 1, vec![add(json!({ "id": 9 }))]);
-    let events = build_events("r", &config, &hb, &qr, "r");
+    let mut qr = query_result(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000e3")
+            .expect("fixture UUID"),
+        1,
+        vec![add(json!({ "id": 9 }))],
+    );
+    qr.query_name =
+        Some(drasi_lib::ComponentName::try_new("orders").expect("fixture component name"));
+    let events = build_events(&reaction_id(), &config, &hb, &qr);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].data["op"], "i");
 }
@@ -530,11 +635,14 @@ fn build_events_template_missing_template_falls_back_to_unpacked() {
 #[tokio::test]
 async fn recovery_defaults_are_non_durable_autoskipgap() {
     use drasi_lib::recovery::ReactionRecoveryPolicy;
-    let r = EventGridReaction::builder("r")
-        .with_endpoint("https://x.eventgrid.azure.net/api/events") // DevSkim: ignore DS137138
-        .with_access_key("k")
-        .build()
-        .unwrap();
+    let r = EventGridReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("https://x.eventgrid.azure.net/api/events") // DevSkim: ignore DS137138
+    .with_access_key("k")
+    .build()
+    .unwrap();
     assert!(!r.is_durable());
     assert!(!r.needs_snapshot_on_fresh_start());
     assert_eq!(
@@ -560,7 +668,15 @@ async fn descriptor_preserves_raw_config_for_lossless_properties() {
         "priorityQueueCapacity": 250
     });
     let r = d
-        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .unwrap();
     let p = r.properties();
@@ -583,9 +699,22 @@ async fn descriptor_builds_with_minimal_config() {
         "accessKey": "k"
     });
     let r = d
-        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .create_reaction(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+                .expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+            )],
+            &cfg,
+            true,
+        )
         .await
         .unwrap();
     assert_eq!(r.type_name(), "eventgrid");
-    assert_eq!(r.query_ids(), vec!["q1".to_string()]);
+    assert_eq!(
+        r.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+        )]
+    );
 }

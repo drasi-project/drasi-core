@@ -169,7 +169,7 @@ fn stream_sqlite_tables(
             let labels: Arc<[Arc<str>]> = vec![Arc::<str>::from(table.as_str())].into();
             let element = Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(&context.source_id, &element_id),
+                    reference: ElementReference::new(context.source_id.as_str(), &element_id),
                     labels,
                     effective_from: chrono::Utc::now().timestamp_millis() as u64,
                 },
@@ -422,9 +422,14 @@ mod tests {
         drop(conn);
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let context = BootstrapContext::new_minimal("server".to_string(), "src".to_string());
+        let context = BootstrapContext::new_minimal(
+            "server".to_string(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b6")
+                .expect("fixture UUID"),
+        );
         let request = BootstrapRequest {
-            query_id: "q1".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
             node_labels: vec!["sensors".to_string()],
             relation_labels: Vec::new(),
             request_id: "req-1".to_string(),
@@ -442,7 +447,11 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].source_id, "src");
+        assert_eq!(
+            events[0].source_id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b6")
+                .expect("fixture UUID")
+        );
         assert_eq!(events[0].sequence, 0);
         assert_eq!(events[1].sequence, 1);
 

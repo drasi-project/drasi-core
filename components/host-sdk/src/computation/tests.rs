@@ -52,6 +52,17 @@ mod snapshot_tests;
 #[path = "source_schema_tests.rs"]
 mod source_schema_tests;
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
+async fn initialized_component(
+    mut component: NativeComponentProxy,
+) -> anyhow::Result<NativeComponentProxy> {
+    component.initialize().await?;
+    Ok(component)
+}
+
 fn port(direction: PortDirection) -> PortDescriptor {
     PortDescriptor::new(
         PortId::try_new(if direction == PortDirection::Input {
@@ -119,6 +130,7 @@ impl sdk::Factory for TestFactory {
                 fields: BTreeMap::from([(
                     "count".into(),
                     ConfigField {
+                        constraint: None,
                         value_type: ConfigType::Integer,
                         required: false,
                         secret: false,
@@ -379,8 +391,11 @@ async fn statically_linked_components_retain_their_definition_after_registration
     assert_eq!(plugin.bootstrap_factories().len(), 2);
     let factory = plugin.factories()[0].clone();
     drop(plugin);
-    let mut source =
-        factory.create_component(ComponentId::try_new("linked")?, json!({"count": 2}))?;
+    let mut source = initialized_component(factory.create_component(
+        ComponentId::try_new("671f781e-e6e5-5f63-bd36-a5d180959ab6")?,
+        json!({"count": 2}),
+    )?)
+    .await?;
     drop(factory);
     source.start().await?;
     for sequence in [1, 2] {
@@ -399,7 +414,7 @@ async fn statically_linked_bootstrap_uses_the_existing_native_factory_contract(
 
     let plugin = NativePlugin::from_definition(definition()?)?;
     let bootstrap = plugin.bootstrap_factories()[0].create_provider(
-        ComponentId::try_new("linked-bootstrap")?,
+        ComponentId::try_new("5f8dd6ae-f262-517d-a98d-377d5a0b511f")?,
         json!({"mode": "no-snapshot", "count": 2}),
         None,
         None,
@@ -429,12 +444,16 @@ fn panic_code(error: &anyhow::Error) -> u32 {
 async fn native_start_data_and_configuration_panics_require_a_new_instance() {
     let plugin = plugin();
     for mode in ["panic_start", "panic_next", "panic_configuration"] {
-        let mut source = plugin.factories()[0]
-            .create_component(
-                ComponentId::try_new("quarantined").unwrap(),
-                json!({(mode): true}),
-            )
-            .unwrap();
+        let mut source = initialized_component(
+            plugin.factories()[0]
+                .create_component(
+                    ComponentId::try_new("94daa8cb-adda-54db-b8b7-3b6e96497e7a").unwrap(),
+                    json!({(mode): true}),
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         let error = if mode == "panic_start" {
             source.start().await.unwrap_err()
         } else {
@@ -466,9 +485,16 @@ async fn native_start_data_and_configuration_panics_require_a_new_instance() {
                 abi::status::PANICKED
             );
         }
-        let mut replacement = plugin.factories()[0]
-            .create_component(ComponentId::try_new("quarantined").unwrap(), json!({}))
-            .unwrap();
+        let mut replacement = initialized_component(
+            plugin.factories()[0]
+                .create_component(
+                    ComponentId::try_new("94daa8cb-adda-54db-b8b7-3b6e96497e7a").unwrap(),
+                    json!({}),
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         replacement.start().await.unwrap();
         assert!(replacement.next().await.unwrap().is_some());
         replacement.stop().await.unwrap();
@@ -478,12 +504,16 @@ async fn native_start_data_and_configuration_panics_require_a_new_instance() {
 #[tokio::test(flavor = "current_thread")]
 async fn native_control_panic_wakes_pending_data_and_cannot_be_cleared_by_stop() {
     let plugin = plugin();
-    let mut source = plugin.factories()[4]
-        .create_component(
-            ComponentId::try_new("controlled-panic").unwrap(),
-            json!({"count":3}),
-        )
-        .unwrap();
+    let mut source = initialized_component(
+        plugin.factories()[4]
+            .create_component(
+                ComponentId::try_new("84297d7c-4183-5071-8db7-4f45712bd7aa").unwrap(),
+                json!({"count":3}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     source.start().await.unwrap();
     source.next().await.unwrap().unwrap();
     let inner = source.inner.clone();
@@ -495,7 +525,7 @@ async fn native_control_panic_wakes_pending_data_and_cannot_be_cleared_by_stop()
     })
     .await;
     let request = sdk::wire::encode(&sdk::ControlMessage {
-        from: ComponentId::try_new("observer").unwrap(),
+        from: ComponentId::try_new("227abc0d-9226-577d-9d84-59b7b7268427").unwrap(),
         generation: 1,
         direction: sdk::ControlDirection::Upstream,
         notification: sdk::ControlNotification::Custom {
@@ -526,15 +556,36 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
     let plugin = plugin();
     assert_eq!(plugin.metadata().abi_version, abi::ABI_VERSION);
     assert_eq!(plugin.transactional_factories().len(), 1);
-    let mut source = plugin.factories()[0]
-        .create_component(ComponentId::try_new("s").unwrap(), json!({"count":2}))
-        .unwrap();
-    let mut transformer = plugin.factories()[1]
-        .create_component(ComponentId::try_new("t").unwrap(), json!({}))
-        .unwrap();
-    let mut sink = plugin.factories()[2]
-        .create_component(ComponentId::try_new("k").unwrap(), json!({}))
-        .unwrap();
+    let mut source = initialized_component(
+        plugin.factories()[0]
+            .create_component(
+                ComponentId::try_new("aa989511-472e-5619-b05c-e1f51dbefd73").unwrap(),
+                json!({"count":2}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut transformer = initialized_component(
+        plugin.factories()[1]
+            .create_component(
+                ComponentId::try_new("a39a8c15-faa9-556c-9da7-6ebbcbc88c98").unwrap(),
+                json!({}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut sink = initialized_component(
+        plugin.factories()[2]
+            .create_component(
+                ComponentId::try_new("5c20e1ac-6325-5907-95da-f24b88eb0ad4").unwrap(),
+                json!({}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(source.configuration().unwrap()["seen"], 0);
     assert!(
         source.next().await.is_err(),
@@ -572,12 +623,20 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
     source.stop().await.unwrap();
     transformer.stop().await.unwrap();
     sink.stop().await.unwrap();
-    let mut service = plugin.factories()[3]
-        .create_component(ComponentId::try_new("service").unwrap(), json!({}))
-        .unwrap();
+    let mut service = initialized_component(
+        plugin.factories()[3]
+            .create_component(
+                ComponentId::try_new("4c7ff434-671a-587b-a3f8-4e33cfc6090d").unwrap(),
+                json!({}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     service.start().await.unwrap();
     service.run().await.unwrap();
-    service.quiesce().await.unwrap();
+    service.pause_processing().await.unwrap();
+    service.resume_processing().await.unwrap();
     assert_eq!(service.configuration().unwrap()["seen"], 1);
     service.stop().await.unwrap();
 }
@@ -592,23 +651,34 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
         json!({"wrong_descriptor":true}),
     ] {
         assert!(source
-            .create_component(ComponentId::try_new("invalid").unwrap(), config)
+            .create_component(
+                ComponentId::try_new("0c20c829-5979-5705-972f-b031a1849264").unwrap(),
+                config
+            )
             .is_err());
     }
-    let mut failing = source
-        .create_component(
-            ComponentId::try_new("failed").unwrap(),
-            json!({"fail_start":true}),
-        )
-        .unwrap();
+    let mut failing = initialized_component(
+        source
+            .create_component(
+                ComponentId::try_new("d4958dcf-b97e-51c9-ab3f-e168524ceb59").unwrap(),
+                json!({"fail_start":true}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     assert!(failing.start().await.is_err());
     assert!(failing.next().await.is_err());
-    let mut blocked = source
-        .create_component(
-            ComponentId::try_new("blocked").unwrap(),
-            json!({"blocked":true}),
-        )
-        .unwrap();
+    let mut blocked = initialized_component(
+        source
+            .create_component(
+                ComponentId::try_new("606cea55-acf0-5d44-93f8-7272edca8963").unwrap(),
+                json!({"blocked":true}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     blocked.start().await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(10), blocked.next())
@@ -617,7 +687,10 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
     );
     assert_eq!(blocked.configuration().unwrap()["seen"], 0);
     blocked.stop().await.unwrap();
-    let original = envelope(&ComponentId::try_new("input").unwrap(), 1);
+    let original = envelope(
+        &ComponentId::try_new("9cce4786-2942-5ef4-b472-1d795da86139").unwrap(),
+        1,
+    );
     let bytes = blocked.codec.encode(&original).unwrap();
     assert_eq!(blocked.codec.decode(&bytes).unwrap().id(), original.id());
     let ChangeOperation::Added { after, .. } = &original.changes().operations()[0] else {
@@ -650,12 +723,16 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
     let mut bad = bytes.clone();
     bad[position + field.len()] = 123;
     assert!(blocked.codec.decode(&bad).is_err());
-    let mut transformer = plugin.factories()[1]
-        .create_component(
-            ComponentId::try_new("t").unwrap(),
-            json!({"fail_transform":true}),
-        )
-        .unwrap();
+    let mut transformer = initialized_component(
+        plugin.factories()[1]
+            .create_component(
+                ComponentId::try_new("a39a8c15-faa9-556c-9da7-6ebbcbc88c98").unwrap(),
+                json!({"fail_transform":true}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     transformer.start().await.unwrap();
     assert!(transformer
         .transform(InputEnvelope {
@@ -670,13 +747,23 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
 #[tokio::test]
 async fn deferred_native_operation_owns_input_after_the_begin_call_returns() {
     let plugin = plugin();
-    let mut sink = plugin.factories()[2]
-        .create_component(ComponentId::try_new("owned-input").unwrap(), json!({}))
-        .unwrap();
+    let mut sink = initialized_component(
+        plugin.factories()[2]
+            .create_component(
+                ComponentId::try_new("e3f53a0e-18cd-5e38-8f12-4f71f18141c8").unwrap(),
+                json!({}),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     sink.start().await.unwrap();
     let input = InputEnvelope {
         port: PortId::try_new("in").unwrap(),
-        envelope: envelope(&ComponentId::try_new("input").unwrap(), 1),
+        envelope: envelope(
+            &ComponentId::try_new("9cce4786-2942-5ef4-b472-1d795da86139").unwrap(),
+            1,
+        ),
     };
     let mut bytes =
         sdk::wire::encode(&sdk::wire::Envelope::input(&input, &sink.codec).unwrap()).unwrap();
@@ -731,12 +818,15 @@ async fn host_graph_factories_and_control_progress_while_native_data_is_pending(
     let plugin = plugin();
     let source = plugin.factories()[4].clone();
     let spec = source
-        .specification(ComponentId::try_new("native").unwrap(), json!({"count":3}))
+        .specification(
+            ComponentId::try_new("28284eed-3726-5eae-a212-da442f924b11").unwrap(),
+            json!({"count":3}),
+        )
         .unwrap();
     let seen = Arc::new(AtomicUsize::new(0));
     let sink = NotifyingSink {
         descriptor: ComponentDescriptor::try_new(
-            ComponentId::try_new("sink").unwrap(),
+            ComponentId::try_new("d3125ca4-de71-5853-baf7-cb13e4e5490d").unwrap(),
             vec![port(PortDirection::Input)],
         )
         .unwrap(),
@@ -747,16 +837,16 @@ async fn host_graph_factories_and_control_progress_while_native_data_is_pending(
     plugin.register_factories(&mut registry).unwrap();
     assert!(plugin.register_factories(&mut registry).is_err());
     let mut graph = ComputationGraph::builder("native-control-test")
-        .component(spec, source)
-        .sink(Box::new(sink))
+        .component(ComponentName::try_new("native").unwrap(), spec, source)
+        .sink(ComponentName::try_new("sink").unwrap(), Box::new(sink))
         .connect(
             EdgeDefinition {
                 from: Endpoint::new(
-                    ComponentId::try_new("native").unwrap(),
+                    ComponentId::try_new("28284eed-3726-5eae-a212-da442f924b11").unwrap(),
                     PortId::try_new("out").unwrap(),
                 ),
                 to: Endpoint::new(
-                    ComponentId::try_new("sink").unwrap(),
+                    ComponentId::try_new("d3125ca4-de71-5853-baf7-cb13e4e5490d").unwrap(),
                     PortId::try_new("in").unwrap(),
                 ),
             },
@@ -764,10 +854,10 @@ async fn host_graph_factories_and_control_progress_while_native_data_is_pending(
         )
         .bind_stream(
             Endpoint::new(
-                ComponentId::try_new("native").unwrap(),
+                ComponentId::try_new("28284eed-3726-5eae-a212-da442f924b11").unwrap(),
                 PortId::try_new("out").unwrap(),
             ),
-            StreamId::try_new("native/out").unwrap(),
+            StreamId::try_new("28284eed-3726-5eae-a212-da442f924b11/out").unwrap(),
         )
         .build()
         .unwrap();
@@ -803,7 +893,7 @@ fn strict_metadata_roles_versions_schema_and_required_fields() {
         ComponentSemanticKind::Query,
         "a native transformer may declare continuous-query semantics"
     );
-    let id = ComponentId::try_new("progress-origin").unwrap();
+    let id = ComponentId::try_new("ab0805ae-3611-5039-b178-9fe3a3348ed2").unwrap();
     let descriptor = transformer.descriptor(id.clone()).unwrap();
     assert_eq!(descriptor.output_progress(), Some(OutputProgress::Origin));
     assert!(transformer.validate_instance(&descriptor, &id).is_ok());
@@ -852,11 +942,14 @@ fn strict_metadata_roles_versions_schema_and_required_fields() {
     json["factories"][0]["capabilities"]["query_snapshot_outbox"] = json!(true);
     assert!(serde_json::from_value::<PluginMetadata>(json).is_err());
     let mut spec = plugin.factories()[0]
-        .specification(ComponentId::try_new("s").unwrap(), json!({}))
+        .specification(
+            ComponentId::try_new("aa989511-472e-5619-b05c-e1f51dbefd73").unwrap(),
+            json!({}),
+        )
         .unwrap();
     spec.configuration_version += 1;
     assert!(ComponentFactory::validate(plugin.factories()[0].as_ref(), &spec).is_err());
-    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.17.0");
+    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.19.0");
 }
 
 #[test]
@@ -867,12 +960,16 @@ fn transaction_factory_opt_in_and_linear_schema_contract_are_enforced() {
     registry.register(factory.clone()).unwrap();
     let mut definition = TransactionTransformerDefinition {
         graph_id: "native-transaction-contract".into(),
-        id: ComponentId::try_new("container").unwrap(),
+        id: ComponentId::try_new("7b39f4a9-9a34-5a19-af64-36f3debf4f77").unwrap(),
         output_stream: StreamId::try_new("container/out").unwrap(),
         steps: ["first", "second"]
             .into_iter()
             .map(|id| TransactionStepDefinition {
-                id: ComponentId::try_new(id).unwrap(),
+                id: component_id(match id {
+                    "first" => 1,
+                    "second" => 2,
+                    _ => unreachable!(),
+                }),
                 implementation: factory.implementation(),
                 configuration_version: 1,
                 configuration: json!({}),
@@ -936,7 +1033,7 @@ fn rejects_missing_or_incompatible_native_metadata_before_entry() {
         .unwrap_err_string();
     assert!(error.contains("incompatible native computation ABI header"));
 
-    const UNSUPPORTED_WIRE_MANIFEST: &[u8] = br#"{"abi_version":"1.0.0","wire_version":2,"plugin":{"id":"unsupported-wire-native","version":"1"},"factories":[],"schemas":[]}"#;
+    const UNSUPPORTED_WIRE_MANIFEST: &[u8] = br#"{"abi_version":"2.0.0","wire_version":3,"plugin":{"id":"unsupported-wire-native","version":"1"},"factories":[],"schemas":[]}"#;
     static UNSUPPORTED_WIRE: SharedMetadata = SharedMetadata(abi::Metadata {
         header: abi::Header::new::<abi::Metadata>(),
         target: abi::BorrowedBytes {

@@ -55,21 +55,21 @@ impl Timestamped for RankedSourceEvent {
 #[derive(Clone)]
 pub(crate) struct QueryEventQueue {
     queue: crate::channels::priority_queue::PriorityQueue<RankedSourceEvent>,
-    ranks: Arc<HashMap<String, usize>>,
+    ranks: Arc<HashMap<crate::ComponentId, usize>>,
     scheduled_rank: usize,
 }
 
 #[cfg(test)]
 impl QueryEventQueue {
-    pub(crate) fn new<'a>(
+    pub(crate) fn new(
         capacity: usize,
-        sources: impl IntoIterator<Item = &'a str>,
+        sources: impl IntoIterator<Item = crate::ComponentId>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(capacity > 0, "query input capacity must be nonzero");
         let mut ranks = HashMap::new();
         for (rank, source) in sources.into_iter().enumerate() {
             anyhow::ensure!(
-                ranks.insert(source.to_owned(), rank).is_none(),
+                ranks.insert(source.clone(), rank).is_none(),
                 "duplicate source subscription '{source}'"
             );
         }
@@ -136,14 +136,26 @@ mod tests {
     use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
     use std::sync::Arc;
 
+    fn source_id(name: &str) -> drasi_core_types::ComponentId {
+        let value = match name {
+            "a-source" => 1,
+            "z-source" => 2,
+            "earlier" => 3,
+            "source" => 4,
+            "__future_queue__" => 5,
+            other => panic!("missing explicit fixture component ID for {other}"),
+        };
+        crate::test_helpers::component_id(value)
+    }
+
     fn create_test_event(
-        source_id: &str,
+        source_id: drasi_core_types::ComponentId,
         timestamp: chrono::DateTime<Utc>,
     ) -> Arc<SourceEventWrapper> {
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(source_id, "test-node-1"),
+                    reference: ElementReference::new("test-source", "test-node-1"),
                     labels: Default::default(),
                     effective_from: 0,
                 },
@@ -152,7 +164,7 @@ mod tests {
         };
 
         Arc::new(SourceEventWrapper::new(
-            source_id.to_string(),
+            source_id,
             SourceEvent::Change(change),
             timestamp,
             1,
@@ -165,9 +177,21 @@ mod tests {
 
         // Create events with different timestamps
         let now = Utc::now();
-        let event1 = create_test_event("source1", now);
-        let event2 = create_test_event("source2", now - chrono::Duration::seconds(5));
-        let event3 = create_test_event("source3", now + chrono::Duration::seconds(5));
+        let event1 = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            now,
+        );
+        let event2 = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                .expect("fixture UUID"),
+            now - chrono::Duration::seconds(5),
+        );
+        let event3 = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e9")
+                .expect("fixture UUID"),
+            now + chrono::Duration::seconds(5),
+        );
 
         // Enqueue in random order
         pq.enqueue(event1).await;
@@ -176,13 +200,25 @@ mod tests {
 
         // Dequeue should return oldest first
         let dequeued1 = pq.try_dequeue().await.unwrap();
-        assert_eq!(dequeued1.source_id, "source2"); // Oldest
+        assert_eq!(
+            dequeued1.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                .expect("fixture UUID")
+        ); // Oldest
 
         let dequeued2 = pq.try_dequeue().await.unwrap();
-        assert_eq!(dequeued2.source_id, "source1"); // Middle
+        assert_eq!(
+            dequeued2.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID")
+        ); // Middle
 
         let dequeued3 = pq.try_dequeue().await.unwrap();
-        assert_eq!(dequeued3.source_id, "source3"); // Newest
+        assert_eq!(
+            dequeued3.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e9")
+                .expect("fixture UUID")
+        ); // Newest
     }
 
     #[tokio::test]
@@ -190,9 +226,21 @@ mod tests {
         let pq = PriorityQueue::new(2);
 
         let now = Utc::now();
-        let event1 = create_test_event("source1", now);
-        let event2 = create_test_event("source2", now);
-        let event3 = create_test_event("source3", now);
+        let event1 = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            now,
+        );
+        let event2 = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                .expect("fixture UUID"),
+            now,
+        );
+        let event3 = create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e9")
+                .expect("fixture UUID"),
+            now,
+        );
 
         // Enqueue up to capacity
         assert!(pq.enqueue(event1).await);
@@ -212,8 +260,18 @@ mod tests {
         let pq = PriorityQueue::new(100);
 
         let now = Utc::now();
-        pq.enqueue(create_test_event("source1", now)).await;
-        pq.enqueue(create_test_event("source2", now)).await;
+        pq.enqueue(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            now,
+        ))
+        .await;
+        pq.enqueue(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                .expect("fixture UUID"),
+            now,
+        ))
+        .await;
 
         let metrics = pq.metrics().await;
         assert_eq!(metrics.total_enqueued, 2);
@@ -235,13 +293,21 @@ mod tests {
         // Spawn a task that will enqueue after a delay
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let event = create_test_event("source1", Utc::now());
+            let event = create_test_event(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                    .expect("fixture UUID"),
+                Utc::now(),
+            );
             pq_clone.enqueue(event).await;
         });
 
         // This should block until the event arrives
         let event = pq.dequeue().await;
-        assert_eq!(event.source_id, "source1");
+        assert_eq!(
+            event.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
@@ -249,9 +315,24 @@ mod tests {
         let pq = PriorityQueue::new(100);
 
         let now = Utc::now();
-        pq.enqueue(create_test_event("source1", now)).await;
-        pq.enqueue(create_test_event("source2", now)).await;
-        pq.enqueue(create_test_event("source3", now)).await;
+        pq.enqueue(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            now,
+        ))
+        .await;
+        pq.enqueue(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e7")
+                .expect("fixture UUID"),
+            now,
+        ))
+        .await;
+        pq.enqueue(create_test_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e9")
+                .expect("fixture UUID"),
+            now,
+        ))
+        .await;
 
         let drained = pq.drain().await;
         assert_eq!(drained.len(), 3);
@@ -270,7 +351,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(source, sequence, time)| {
-            let mut event = create_test_event(source, time);
+            let mut event = create_test_event(source_id(source), time);
             Arc::make_mut(&mut event).sequence = sequence;
             event
         })
@@ -279,7 +360,8 @@ mod tests {
             (["z-source", "a-source", "earlier"], [4, 3, 1, 2, 0]),
             (["a-source", "z-source", "earlier"], [4, 2, 0, 3, 1]),
         ] {
-            let queue = QueryEventQueue::new(frames.len(), sources).unwrap();
+            let queue =
+                QueryEventQueue::new(frames.len(), sources.into_iter().map(source_id)).unwrap();
             for event in &frames {
                 queue.enqueue_wait(event.clone()).await.unwrap();
             }
@@ -291,18 +373,30 @@ mod tests {
 
     #[tokio::test]
     async fn ranked_query_inputs_require_unique_declared_sources() {
-        let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
-        assert!(QueryEventQueue::new(0, ["source"]).is_err());
-        assert!(QueryEventQueue::new(1, ["source", "source"]).is_err());
-        assert!(QueryEventQueue::new(1, [future]).is_ok());
-        let queue = QueryEventQueue::new(1, ["source"]).unwrap();
+        assert!(QueryEventQueue::new(0, [source_id("source")]).is_err());
+        assert!(QueryEventQueue::new(1, [source_id("source"), source_id("source")]).is_err());
+        assert!(QueryEventQueue::new(1, [source_id("__future_queue__")]).is_ok());
+        let queue = QueryEventQueue::new(
+            1,
+            [drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")],
+        )
+        .unwrap();
         assert!(queue
-            .enqueue(create_test_event("source", Utc::now()))
+            .enqueue(create_test_event(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                Utc::now()
+            ))
             .await
             .unwrap());
         assert_eq!(queue.dequeue().await.sequence, 1);
         let error = queue
-            .enqueue(create_test_event("unknown", Utc::now()))
+            .enqueue(create_test_event(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b8")
+                    .expect("fixture UUID"),
+                Utc::now(),
+            ))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("undeclared query source"));

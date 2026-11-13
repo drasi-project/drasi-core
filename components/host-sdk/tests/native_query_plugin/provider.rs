@@ -32,7 +32,7 @@ pub(crate) fn create_database(path: &Path) -> Result<()> {
 
 pub(crate) fn provider_configuration(path: &Path) -> serde_json::Value {
     json!({
-        "source": "sqlite",
+        "source": "ba51bf8f-7ec0-52a4-a2ff-37a49d49c710",
         "stream": "sqlite/out",
         "settings": {
             "path": path,
@@ -109,55 +109,29 @@ impl ProviderFixture {
                 factory.metadata().implementation.name.as_ref() == "drasi.sqlite/file-bootstrap"
             })
             .context("existing native SQLite file-bootstrap factory missing")?;
-        let core = DrasiLib::builder().with_id(INSTANCE).build().await?;
+        let core = DrasiLib::builder()
+            .with_id(INSTANCE)
+            .with_allow_external_component_ids(true)
+            .build()
+            .await?;
         core.start().await?;
         let scope = Scope {
             instance_id: INSTANCE.into(),
             graph_id: core.output_catalogue()?.graph_id().to_string(),
             generation: 1,
         };
-        let id = ComponentId::try_new("query")?;
-        let provider = bootstrap_factory.create_query_provider(
-            id.clone(),
-            provider_configuration(path),
-            scope.clone(),
-            None,
-        )?;
-        let resource = ResourceId::try_new("file-bootstrap")?;
-        let mut specification =
-            factory.specification(id, json!({"query": text, "volatile": true}))?;
-        assert!(factory.validate(&specification).is_err());
-        specification
-            .dependencies
-            .insert("bootstrap".into(), vec![resource.clone()]);
-        let query = core
-            .add_computation_component(
-                ComponentAddition::from_specification(specification, factory.clone())
-                    .auto_start(false)
-                    .bind_stream(PortId::try_new("out")?, StreamId::try_new("query/out")?)
-                    .with_resource(
-                        ResourceSpecification {
-                            id: resource,
-                            role: ResourceRole::Bootstrap,
-                            ownership: ResourceOwnership::Graph,
-                            binding: "bootstrap".into(),
-                        },
-                        ResourceHandle::new(
-                            ResourceRole::Bootstrap,
-                            Arc::new(NativeBootstrapResource(provider.clone())),
-                        )
-                        .with_cleanup(provider.clone()),
-                    ),
-            )
-            .await?;
         let live = match live {
             Some(live) => live,
-            None => ComponentAddition::new(ConstructedComponent::source(Box::new(IdleLiveInput(
-                ComponentDescriptor::try_new(
-                    ComponentId::try_new("sqlite")?,
-                    vec![port("out", PortDirection::Output)?],
-                )?,
-            )))),
+            None => ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-addition-1")
+                    .expect("fixture component name"),
+                ConstructedComponent::source(Box::new(IdleLiveInput(
+                    ComponentDescriptor::try_new(
+                        ComponentId::try_new("ba51bf8f-7ec0-52a4-a2ff-37a49d49c710")?,
+                        vec![port("out", PortDirection::Output)?],
+                    )?,
+                ))),
+            ),
         };
         let live = core
             .add_computation_component(
@@ -165,18 +139,64 @@ impl ProviderFixture {
                     .bind_stream(PortId::try_new("out")?, StreamId::try_new("sqlite/out")?),
             )
             .await?;
+        let id = ComponentId::try_new("3445bab5-04e4-5b6a-8dbd-cc7488c9a766")?;
+        let mut configuration = provider_configuration(path);
+        configuration["source"] = json!(live.id());
+        let provider = bootstrap_factory.create_query_provider(
+            id.clone(),
+            configuration,
+            scope.clone(),
+            None,
+        )?;
+        let resource = ResourceId::try_new("file-bootstrap")?;
+        let mut specification = factory.specification(
+            id,
+            json!({"query": text, "volatile": true, "stream": "query/out"}),
+        )?;
+        assert!(factory.validate(&specification).is_err());
+        specification
+            .dependencies
+            .insert("bootstrap".into(), vec![resource.clone()]);
+        let query = core
+            .add_computation_component(
+                ComponentAddition::from_specification(
+                    ComponentName::try_new("query")?,
+                    specification,
+                    factory.clone(),
+                )
+                .auto_start(false)
+                .bind_stream(PortId::try_new("out")?, StreamId::try_new("query/out")?)
+                .with_resource(
+                    ResourceSpecification {
+                        id: resource,
+                        role: ResourceRole::Bootstrap,
+                        ownership: ResourceOwnership::Graph,
+                        binding: "bootstrap".into(),
+                    },
+                    ResourceHandle::new(
+                        ResourceRole::Bootstrap,
+                        Arc::new(NativeBootstrapResource(provider.clone())),
+                    )
+                    .with_cleanup(provider.clone()),
+                ),
+            )
+            .await?;
         let received = Arc::new(Mutex::new(Vec::new()));
         let notification = Arc::new(Notify::new());
         let capture = core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new("results")?,
-                        vec![port("in", PortDirection::Input)?],
-                    )?,
-                    received: received.clone(),
-                    notification: notification.clone(),
-                })))
+                ComponentAddition::new(
+                    drasi_lib::computation::v1::ComponentName::try_new("fixture-addition-2")
+                        .expect("fixture component name"),
+                    ConstructedComponent::sink(Box::new(Sink {
+                        descriptor: ComponentDescriptor::try_new(
+                            ComponentId::try_new("b11271f4-ebc5-5fe3-8b0b-cc2e8577b16c")?,
+                            vec![port("in", PortDirection::Input)?],
+                        )?,
+                        received: received.clone(),
+                        notification: notification.clone(),
+                    })),
+                )
                 .auto_start(false),
             )
             .await?;
@@ -366,14 +386,16 @@ async fn provider_scope_and_required_binding_are_checked() -> Result<()> {
     let fixture = ProviderFixture::new(&path, "MATCH (n:items) RETURN n.amount AS value").await?;
     assert!(!path.exists());
     let configuration = json!({"query":"MATCH (n:items) RETURN n.amount AS value","volatile":true});
-    let mut unbound = fixture
-        .factory
-        .create_component(ComponentId::try_new("unbound")?, configuration.clone())?;
+    let mut unbound = fixture.factory.create_component(
+        ComponentId::try_new("05ac6525-9b54-521d-8682-fed41a5a102b")?,
+        configuration.clone(),
+    )?;
+    unbound.initialize().await?;
     assert!(unbound.start().await.is_err());
     assert!(fixture
         .factory
         .create_component_with_bootstrap(
-            ComponentId::try_new("another-query")?,
+            ComponentId::try_new("322a8385-8851-57ad-8ca5-3cccd71f443f")?,
             configuration,
             fixture.scope.clone(),
             Arc::new(NativeBootstrapResource(fixture.provider.clone())),
@@ -394,7 +416,10 @@ impl UnsupportedHandover {
     fn watermark() -> BootstrapWatermark {
         BootstrapWatermark {
             stream: StreamId::try_new("source/out").expect("constant stream"),
-            source_id: Some("source".into()),
+            source_id: Some(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             sequence: 17,
             position: None,
             producer: None,
@@ -446,7 +471,7 @@ async fn quiescent_consumer_rejects_handover_metadata_instead_of_discarding_it()
             stopped: AtomicBool::new(false),
         });
         let mut query = factory.create_component_with_bootstrap(
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("3445bab5-04e4-5b6a-8dbd-cc7488c9a766")?,
             json!({"query":"MATCH (n:items) RETURN n.amount AS value","volatile":true}),
             Scope {
                 instance_id: INSTANCE.into(),
@@ -455,6 +480,7 @@ async fn quiescent_consumer_rejects_handover_metadata_instead_of_discarding_it()
             },
             Arc::new(NativeBootstrapResource(provider.clone())),
         )?;
+        query.initialize().await?;
         assert!(query.start().await.is_err(), "handover mode {mode}");
         assert!(provider.stopped.load(Ordering::Acquire));
         assert!(snapshot_reader(&query)?.snapshot().await.is_err());

@@ -262,13 +262,13 @@ fn resource(
     Ok(id)
 }
 
-fn dependency(config: &mut HostConfig, component: &str, name: &str, resource: ResourceId) {
+fn dependency(config: &mut HostConfig, component: &ComponentId, name: &str, resource: ResourceId) {
     let ComponentConstruction::Factory(specification) = &mut config
         .desired
         .topology
         .components
         .iter_mut()
-        .find(|value| value.descriptor.id().as_str() == component)
+        .find(|value| value.descriptor.id() == component)
         .unwrap()
         .construction
     else {
@@ -287,6 +287,40 @@ fn definition(stream: &str, subscriber: &str) -> Result<QosChannelDefinition> {
         retention: RetentionPolicy::Backpressure,
         subscribers: BTreeMap::from([(subscriber.into(), SubscriptionStart::Earliest)]),
     })
+}
+
+fn admission_recovery(component: &ComponentId) -> serde_json::Value {
+    json!({
+        "kind":"admission",
+        "component":component,
+        "failureScope":"processRestart",
+        "maxProducers":1,
+        "receiptsPerProducer":1
+    })
+}
+
+#[test]
+fn durable_admission_recipe_uses_component_uuid() -> Result<()> {
+    let component = id(814);
+    let recovery: drasi_host_sdk::management::QosRecoveryConfig =
+        serde_json::from_value(admission_recovery(&component))?;
+    let drasi_host_sdk::management::QosRecoveryConfig::Admission {
+        component: owner, ..
+    } = recovery
+    else {
+        anyhow::bail!("durable ingress requires client admission recovery");
+    };
+    assert_eq!(owner, component);
+    Ok(())
+}
+
+#[test]
+fn durable_admission_recipe_rejects_component_name() {
+    let mut recovery = admission_recovery(&id(814));
+    recovery["component"] = json!("bridge-in");
+    assert!(
+        serde_json::from_value::<drasi_host_sdk::management::QosRecoveryConfig>(recovery).is_err()
+    );
 }
 
 struct AdmissionInput {
@@ -396,10 +430,12 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         link_id: "network".into(),
         sender_instance: "left".into(),
         receiver_instance: "right".into(),
-        sender_endpoint: "bridge-out".into(),
-        receiver_endpoint: "bridge-in".into(),
-        stream: "sender/out".into(),
-        peer_stream: "receiver/in".into(),
+        sender_endpoint: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000032d")
+            .expect("fixture UUID"),
+        receiver_endpoint: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000032e")
+            .expect("fixture UUID"),
+        stream: StreamId::try_new("sender/out")?,
+        peer_stream: StreamId::try_new("receiver/in")?,
         delivery: PortableDelivery::Events,
         profile: Profile::Durable,
         failure_scope: FailureMode::ProcessRestart,
@@ -436,17 +472,24 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         "persistent".into(),
         drasi_instance_host::config::IndexStorage::Rocksdb,
     );
-    bridge(&mut config, &incoming, ComponentRole::Source)?;
+    bridge(
+        &mut config,
+        ComponentName::try_new("bridge-in")?,
+        &incoming,
+        ComponentRole::Source,
+    )?;
     standard(
         &mut config,
-        "arithmetic",
+        ComponentId::try_new("00000000-0000-0000-0000-0000000003c0")?,
+        ComponentName::try_new("arithmetic")?,
         "drasi.standard/arithmetic",
         ComponentRole::Transformer,
         json!({"stream":"right/output","add":10}),
     )?;
     standard(
         &mut config,
-        "capture",
+        ComponentId::try_new("00000000-0000-0000-0000-000000000365")?,
+        ComponentName::try_new("capture")?,
         "drasi.standard/capture",
         ComponentRole::Sink,
         json!({"path":format!("{root}/results")}),
@@ -469,7 +512,12 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         ResourceRole::Identity,
         serde_json::to_value(server_tls)?,
     )?;
-    dependency(&mut config, "bridge-in", "tls", identity);
+    dependency(
+        &mut config,
+        &ComponentId::try_new("00000000-0000-0000-0000-00000000032e")?,
+        "tls",
+        identity,
+    );
     let journal_definition = definition("receiver/in", "arithmetic")?;
     let journal = resource(
         &mut config,
@@ -477,12 +525,20 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         ResourceRole::StateStore,
         json!({
             "kind":"qos", "definition":journal_definition, "provider":"persistent",
-            "recovery":{"kind":"admission", "component":"bridge-in", "failureScope":"processRestart",
-                "maxProducers":1, "receiptsPerProducer":1}
+            "recovery":admission_recovery(&incoming.receiver_endpoint)
         }),
     )?;
-    dependency(&mut config, "bridge-in", "admission", journal.clone());
-    connect(&mut config, "bridge-in", "arithmetic")?;
+    dependency(
+        &mut config,
+        &ComponentId::try_new("00000000-0000-0000-0000-00000000032e")?,
+        "admission",
+        journal.clone(),
+    );
+    connect(
+        &mut config,
+        &ComponentId::try_new("00000000-0000-0000-0000-00000000032e")?,
+        &ComponentId::try_new("00000000-0000-0000-0000-0000000003c0")?,
+    )?;
     config
         .desired
         .topology
@@ -490,19 +546,22 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         .last_mut()
         .unwrap()
         .pipe = DesiredPipe::Qos(journal_definition.pipe(journal, "arithmetic"));
-    connect(&mut config, "arithmetic", "capture")?;
+    connect(
+        &mut config,
+        &ComponentId::try_new("00000000-0000-0000-0000-0000000003c0")?,
+        &ComponentId::try_new("00000000-0000-0000-0000-000000000365")?,
+    )?;
     child(
         &mut config,
-        "local-child",
+        ComponentId::try_new("00000000-0000-0000-0000-0000000003c1")?,
+        ComponentName::try_new("local-child")?,
         &HostConfig::empty("leaf", format!("{root}/leaf")),
     )?;
     config.stop_stages = vec![
         StopStage::Quiesce {
-            components: vec![id("bridge-in"), id("arithmetic"), id("capture")],
+            components: vec![id(814), id(960), id(869)],
         },
-        StopStage::StopChild {
-            component: id("local-child"),
-        },
+        StopStage::StopChild { component: id(961) },
     ];
     output(
         Command::new("podman").args([
@@ -577,7 +636,7 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
                     RocksDbMemoryBudget::from_total_budget_bytes(32 << 20)?,
                 ),
             ));
-        let indexes = provider.create_indexes("upstream", "input").await?;
+        let indexes = provider.create_indexes("upstream", &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000071").expect("fixture UUID")).await?;
         let codec =
             FactoryRegistry::standard().envelope_codec(NonZeroUsize::new(32 * 1024).unwrap())?;
         let journal = QosChannel::persistent_with_recovery(
@@ -588,7 +647,7 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
             QosRecoveryOptions::Admission(AdmissionOptions {
                 construction_scope: "left".into(),
                 graph_id: "__drasi_lib_runtime__".into(),
-                component_id: id("input"),
+                component_id: id(113),
                 failure_scope: FailureMode::ProcessRestart,
                 max_producers: NonZeroUsize::MIN,
                 receipts_per_producer: NonZeroUsize::MIN,
@@ -604,9 +663,9 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
                 .insert(name.into(), vec![ResourceId::try_new(resource)?]);
         }
         let mut builder = ComponentBatch::builder()
-            .source(Box::new(AdmissionInput {
+            .source(drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1").expect("fixture component name"), Box::new(AdmissionInput {
                 descriptor: ComponentDescriptor::try_new(
-                    id("input"),
+                    id(113),
                     vec![PortDescriptor::new(
                         PortId::try_new("out")?,
                         PortDirection::Output,
@@ -617,6 +676,8 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
                 admission: admission.clone(),
             }))
             .component(
+                drasi_lib::computation::v1::ComponentName::try_new("bridge-output")
+                    .expect("fixture component name"),
                 specification,
                 drasi_computation_sink_bridge::factory(),
             );
@@ -650,8 +711,8 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         let batch = builder
             .connect(
                 EdgeDefinition::new(
-                    Endpoint::new(id("input"), PortId::try_new("out")?),
-                    Endpoint::new(id("bridge-out"), PortId::try_new("in")?),
+                    Endpoint::new(id(113), PortId::try_new("out")?),
+                    Endpoint::new(id(813), PortId::try_new("in")?),
                 ),
                 Box::new(
                     journal
@@ -660,17 +721,18 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
                 ),
             )
             .bind_stream(
-                Endpoint::new(id("input"), PortId::try_new("out")?),
+                Endpoint::new(id(113), PortId::try_new("out")?),
                 StreamId::try_new("sender/out")?,
             )
             .build()?;
         let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
+            .with_allow_external_component_ids(true)
             .with_id("left")
             .with_components(batch)
             .build()
             .await?;
         core.start().await?;
-        let session = admission.register_producer(id("caller")).await?;
+        let session = admission.register_producer(id(815)).await?;
         admit_when_idle(&admission, &session, 1, &input(1)?).await?;
         let deadline = Instant::now() + WATCHDOG;
         loop {
@@ -742,7 +804,7 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         control_graph
             .quiesce_components(
                 control_graph.desired_snapshot().revision,
-                GraphSelection::Exact(vec![id("input"), id("bridge-out")]),
+                GraphSelection::Exact(vec![id(113), id(813)]),
             )
             .await?;
         let cut = control.finish(Duration::from_secs(5)).await?;
@@ -773,7 +835,7 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
                 else {
                     anyhow::bail!("unexpected remote output");
                 };
-                assert_eq!(metadata.reference.source_id.as_ref(), "plant/input");
+                assert_eq!(metadata.reference.namespace.as_ref(), "plant/input");
                 let ElementValue::Integer(value) =
                     properties.get("value").context("native result")?
                 else {
@@ -793,7 +855,10 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
                 && status
                     .components
                     .iter()
-                    .any(|value| value.id == "bridge-in" && value.lifecycle == "Running")
+                    .any(|value| {
+                        value.id == incoming.receiver_endpoint.as_str()
+                            && value.lifecycle == "Running"
+                    })
         })?;
         assert_ne!(reopened.generation, initial.generation);
         ensure!(

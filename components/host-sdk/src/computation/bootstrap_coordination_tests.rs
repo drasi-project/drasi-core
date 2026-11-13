@@ -11,6 +11,10 @@ use drasi_lib::computation::v1::*;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
+
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
 use tokio_stream::StreamExt;
 
 #[path = "bootstrap_coordination_foreign_tests.rs"]
@@ -32,6 +36,18 @@ struct State {
     foreign_open_reader: AtomicBool,
     invalid_open_scope: AtomicBool,
     source_lifecycle: Arc<SourceLifecycle>,
+}
+
+fn named_component_id(value: &str) -> ComponentId {
+    component_id(match value {
+        "query" => 451,
+        "other" => 768,
+        "left" => 452,
+        "right" => 769,
+        "source" => 749,
+        "wrong-source" => 750,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 #[derive(Default)]
@@ -65,6 +81,7 @@ fn metadata() -> sdk::FactoryMetadata {
             fields: BTreeMap::from([(
                 "token".into(),
                 sdk::ConfigField {
+                    constraint: None,
                     value_type: sdk::ConfigType::String,
                     required: false,
                     secret: true,
@@ -200,7 +217,10 @@ impl sdk::NativeSourceBootstrapCoordinator for State {
         self.open_calls.fetch_add(1, Ordering::SeqCst);
         anyhow::ensure!(!self.fail_open.swap(false, Ordering::SeqCst), "open failed");
         if self.foreign_open_reader.swap(false, Ordering::SeqCst) {
-            progress = SourceProgressView::new(owner(query.as_str()));
+            progress = SourceProgressView::new(Arc::new(QuerySourceProgress::new(
+                "graph",
+                query.clone(),
+            )?));
         }
         Ok(Arc::new(Provider(
             progress,
@@ -278,7 +298,8 @@ impl sdk::BootstrapFactory for PairedFactory {
         source: sdk::NativeSourceBootstrap,
     ) -> anyhow::Result<sdk::LinkedBootstrapProvider> {
         anyhow::ensure!(
-            source.metadata().source.id.as_str() == "source",
+            source.metadata().source.id
+                == ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             "wrong source"
         );
         source.open()
@@ -313,7 +334,7 @@ fn scope(generation: u64) -> Scope {
 }
 
 fn owner(id: &str) -> Arc<QuerySourceProgress> {
-    Arc::new(QuerySourceProgress::new("graph", ComponentId::try_new(id).unwrap()).unwrap())
+    Arc::new(QuerySourceProgress::new("graph", named_component_id(id)).unwrap())
 }
 
 fn progress(
@@ -353,13 +374,13 @@ async fn coordination_matrix() -> anyhow::Result<()> {
         let other = owner("other");
         let group = Arc::new(ConsumerProgressSet::new(
             "graph",
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             [query.clone(), other.clone()],
         )?);
         assert!(
             factory
                 .create_source_bootstrap(
-                    ComponentId::try_new("source")?,
+                    ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                     json!({}),
                     scope(0),
                     progress(!shared, &query, &group),
@@ -368,7 +389,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
             "a source cannot silently change its negotiated progress mode"
         );
         let coordinator = factory.create_source_bootstrap(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             json!({}),
             scope(0),
             progress(shared, &query, &group),
@@ -391,7 +412,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
             NativePlugin::from_definition(source_definition(shared, Arc::new(State::default()))?)?;
         let foreign_error = foreign_plugin.factories()[0]
             .create_component_with_source_bootstrap(
-                ComponentId::try_new("source")?,
+                ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                 json!({}),
                 scope(0),
                 coordinator.clone(),
@@ -408,13 +429,13 @@ async fn coordination_matrix() -> anyhow::Result<()> {
         let foreign = owner("query");
         let foreign_group = Arc::new(ConsumerProgressSet::new(
             "graph",
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             [query.clone(), other.clone()],
         )?);
         assert!(
             factory
                 .create_component_with_source_bootstrap(
-                    ComponentId::try_new("source")?,
+                    ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                     json!({}),
                     scope(5),
                     coordinator.clone(),
@@ -445,7 +466,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
         ] {
             assert!(factory
                 .create_component_with_source_bootstrap(
-                    ComponentId::try_new(id)?,
+                    named_component_id(id),
                     config,
                     scope,
                     coordinator.clone(),
@@ -510,12 +531,13 @@ async fn coordination_matrix() -> anyhow::Result<()> {
 
         // Resource generation zero must accept a reconstructed live generation.
         let mut live = factory.create_component_with_source_bootstrap(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             json!({}),
             scope(99),
             coordinator.clone(),
             progress(shared, &query, &group),
         )?;
+        live.initialize().await?;
         if shared {
             let live = state.live.lock().unwrap();
             let sdk::SourceBootstrapLiveProgress::Shared(live) = live.as_ref().unwrap() else {
@@ -546,7 +568,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
         assert!(
             factory
                 .create_component_with_source_bootstrap(
-                    ComponentId::try_new("source")?,
+                    ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                     json!({}),
                     scope(100),
                     coordinator.clone(),
@@ -559,7 +581,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
         assert!(
             factory
                 .create_component_with_source_bootstrap(
-                    ComponentId::try_new("source")?,
+                    ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                     json!({}),
                     scope(100),
                     coordinator.clone(),
@@ -571,12 +593,13 @@ async fn coordination_matrix() -> anyhow::Result<()> {
         readers_active(&state, true);
         drop(live);
         let mut live = factory.create_component_with_source_bootstrap(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             json!({}),
             scope(101),
             coordinator.clone(),
             progress(shared, &query, &group),
         )?;
+        live.initialize().await?;
         live.start().await?;
         live.stop().await?;
         state.provider_stop.blocked.store(true, Ordering::SeqCst);
@@ -609,7 +632,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
         readers_active(&state, true);
         assert!(factory
             .create_component_with_source_bootstrap(
-                ComponentId::try_new("source")?,
+                ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                 json!({}),
                 scope(102),
                 coordinator.clone(),
@@ -661,11 +684,11 @@ async fn replacement_matrix() -> anyhow::Result<()> {
         let query = owner("query");
         let group = Arc::new(ConsumerProgressSet::new(
             "graph",
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             [query.clone(), owner("other")],
         )?);
         let coordinator = source.factories()[0].create_source_bootstrap(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             json!({}),
             scope(0),
             progress(shared, &query, &group),
@@ -763,11 +786,11 @@ async fn bootstrap_coordination_dropped_unstopped_or_failed_providers_remain_fen
             let query = owner("query");
             let group = Arc::new(ConsumerProgressSet::new(
                 "graph",
-                ComponentId::try_new("source")?,
+                ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                 [query.clone(), owner("other")],
             )?);
             let coordinator = source.factories()[0].create_source_bootstrap(
-                ComponentId::try_new("source")?,
+                ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                 json!({}),
                 scope(0),
                 progress(shared, &query, &group),
@@ -832,18 +855,18 @@ async fn bootstrap_coordination_dropped_failed_sources_remain_fenced() -> anyhow
             let query = owner("query");
             let group = Arc::new(ConsumerProgressSet::new(
                 "graph",
-                ComponentId::try_new("source")?,
+                ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                 [query.clone(), owner("other")],
             )?);
             let coordinator = source.factories()[0].create_source_bootstrap(
-                ComponentId::try_new("source")?,
+                ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                 json!({}),
                 scope(0),
                 progress(shared, &query, &group),
             )?;
             let make = |generation| {
                 source.factories()[0].create_component_with_source_bootstrap(
-                    ComponentId::try_new("source")?,
+                    ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
                     json!({}),
                     scope(generation),
                     coordinator.clone(),
@@ -853,6 +876,7 @@ async fn bootstrap_coordination_dropped_failed_sources_remain_fenced() -> anyhow
             let never_started = make(1)?;
             drop(never_started);
             let mut live = make(2)?;
+            live.initialize().await?;
             state
                 .source_lifecycle
                 .fail_stop
@@ -923,11 +947,11 @@ async fn rejected_replacement_matrix() -> anyhow::Result<()> {
         let query = owner("query");
         let group = Arc::new(ConsumerProgressSet::new(
             "graph",
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             [query.clone(), owner("other")],
         )?);
         let coordinator = source.factories()[0].create_source_bootstrap(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             json!({}),
             scope(0),
             progress(shared, &query, &group),
@@ -998,11 +1022,11 @@ async fn bootstrap_coordination_shared_queries_keep_independent_provider_leases(
     let right = owner("right");
     let group = Arc::new(ConsumerProgressSet::new(
         "graph",
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
         [left.clone(), right.clone()],
     )?);
     let coordinator = source.factories()[0].create_source_bootstrap(
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
         json!({}),
         scope(0),
         NativeSourceBootstrapProgress::Shared(group),
@@ -1123,11 +1147,11 @@ async fn bootstrap_coordination_stop_keeps_every_subscription_until_cleanup() ->
         let query = owner("query");
         let group = Arc::new(ConsumerProgressSet::new(
             "graph",
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             [query.clone(), owner("other")],
         )?);
         let coordinator = source.factories()[0].create_source_bootstrap(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             json!({}),
             scope(0),
             progress(shared, &query, &group),
@@ -1197,11 +1221,11 @@ async fn bootstrap_coordination_recipes_preserve_secrets_and_exact_owners() -> a
         let query = owner("query");
         let group = Arc::new(ConsumerProgressSet::new(
             "graph",
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             [query.clone(), owner("other")],
         )?);
         let config = NativeSourceBootstrapConfig {
-            component: ComponentId::try_new("source")?,
+            component: ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             implementation: source.factories()[0].metadata().implementation.clone(),
             configuration_version: 1,
             configuration: BTreeMap::from([(
@@ -1359,12 +1383,13 @@ async fn bootstrap_coordination_recipes_preserve_secrets_and_exact_owners() -> a
         provider.0.complete_snapshot().await?;
         provider.0.stop().await?;
         let mut live = source.factories()[0].create_component_with_source_bootstrap(
-            ComponentId::try_new("source")?,
+            ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
             json!({"token":"fixture-only"}),
             scope(44),
             actual.clone(),
             progress(shared, &query, &group),
         )?;
+        live.initialize().await?;
         live.start().await?;
         live.stop().await?;
         drop(live);

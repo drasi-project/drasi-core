@@ -35,7 +35,7 @@ use crate::{
     interface::{
         ElementIndex, FutureQueue, IndexError, MiddlewareError, QueryClock, ResultKey, ResultOwner,
     },
-    middleware::SourceMiddlewarePipelineCollection,
+    middleware::{SourceMiddlewarePipelineCollection, SourcePipelineKey},
     models::{validate_effective_from, ChangeOrdering, Element, ElementReference, SourceChange},
     path_solver::{
         match_path::{MatchPath, SlotElementSpec},
@@ -123,7 +123,7 @@ impl QueryEvaluator {
         &self,
         input: Vec<SourceChange>,
         ordering: ChangeOrdering,
-        input_scope: Option<Arc<str>>,
+        input_scope: Option<crate::ComponentId>,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         let mut changes = Vec::new();
         for change in input {
@@ -207,7 +207,7 @@ impl QueryEvaluator {
             ordering == ChangeOrdering::EventTime && metadata.effective_from < *latest
         }) {
             tracing::warn!(
-                source_id = %metadata.reference.source_id,
+                source_id = %metadata.reference.namespace,
                 element_id = %metadata.reference.element_id,
                 incoming_source_time = metadata.effective_from,
                 stored_source_time = latest,
@@ -839,15 +839,15 @@ impl QueryEvaluator {
     async fn execute_source_middleware(
         &self,
         change: SourceChange,
-        input_scope: Option<&Arc<str>>,
+        input_scope: Option<&crate::ComponentId>,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
-        let source_id = match input_scope {
-            Some(scope) => scope.clone(),
-            None => change.get_reference().source_id.clone(),
+        let key = match input_scope {
+            Some(scope) => SourcePipelineKey::Component(scope.clone()),
+            None => SourcePipelineKey::Namespace(change.get_reference().namespace.clone()),
         };
         let mut source_changes = vec![change];
 
-        let pipeline = match self.source_pipelines.get(source_id) {
+        let pipeline = match self.source_pipelines.get(&key) {
             Some(pipeline) => pipeline,
             None => return Ok(source_changes),
         };

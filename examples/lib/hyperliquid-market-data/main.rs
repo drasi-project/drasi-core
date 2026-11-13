@@ -57,10 +57,10 @@ async fn main() -> Result<()> {
                 )?
                 .query_factory()?,
             )
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(price_query)
             .with_query(trade_query)
-            .with_reaction(log_reaction)
+            .with_reaction(drasi_lib::Reaction::id(&log_reaction).to_owned(), log_reaction)
             .build()
             .await?,
     );

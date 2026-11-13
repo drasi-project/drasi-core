@@ -19,23 +19,26 @@ mod manager_tests {
 
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::test_helpers::managers::{QueryManager, SourceManager};
-    use crate::test_helpers::wait_for_component_status;
 
     use std::sync::Arc;
 
     /// Creates a test query configuration
-    fn create_test_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
+    fn create_test_query_config(
+        id: drasi_core_types::ComponentName,
+        sources: Vec<crate::ComponentName>,
+    ) -> QueryConfig {
         create_test_query_config_with_auto_start(id, sources, true)
     }
 
     /// Creates a test query configuration with configurable auto_start
     fn create_test_query_config_with_auto_start(
-        id: &str,
-        sources: Vec<String>,
+        id: drasi_core_types::ComponentName,
+        sources: Vec<crate::ComponentName>,
         auto_start: bool,
     ) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id,
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -44,7 +47,7 @@ mod manager_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id),
                     pipeline: vec![],
                     port: None,
                 })
@@ -64,9 +67,13 @@ mod manager_tests {
     }
 
     /// Creates a test GQL query configuration
-    fn create_test_gql_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
+    fn create_test_gql_query_config(
+        id: drasi_core_types::ComponentName,
+        sources: Vec<crate::ComponentName>,
+    ) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id,
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::GQL,
             middleware: vec![],
@@ -75,7 +82,7 @@ mod manager_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id),
                     pipeline: vec![],
                     port: None,
                 })
@@ -120,7 +127,7 @@ mod manager_tests {
     async fn add_source(
         source_manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl crate::sources::Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl crate::sources::Source + 'static>,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
     }
@@ -139,16 +146,20 @@ mod manager_tests {
     async fn delete_query(
         manager: &QueryManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        id: &str,
+        id: &drasi_core_types::ComponentName,
     ) -> anyhow::Result<()> {
-        manager.delete(id).await
+        manager.teardown_query_by_name(id).await
     }
 
     #[tokio::test]
     async fn test_add_query() {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
-        let config = create_test_query_config("test-query", vec!["source1".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         let result = add_query(&manager, &graph, config.clone()).await;
 
         assert!(result.is_ok());
@@ -156,14 +167,20 @@ mod manager_tests {
         // Verify query was added
         let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 1);
-        assert_eq!(queries[0].0, "test-query");
+        assert_eq!(
+            queries[0].name,
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name")
+        );
     }
 
     #[tokio::test]
     async fn test_add_duplicate_query() {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
-        let config = create_test_query_config("test-query", vec![]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![],
+        );
 
         // Add query first time
         assert!(add_query(&manager, &graph, config.clone()).await.is_ok());
@@ -172,34 +189,31 @@ mod manager_tests {
         let result = add_query(&manager, &graph, config).await;
         assert!(result.is_err());
         let error = result.unwrap_err();
-        {
-            use crate::computation::v1::GraphError;
-
-            let GraphError::AdditionRejected { cause, addition } = error
-                .downcast_ref::<GraphError>()
-                .expect("native graph error")
-            else {
-                panic!("expected a rejected addition: {error:?}");
-            };
-            assert!(
-                matches!(cause.as_ref(), GraphError::Topology { reason }
-                        if reason == "duplicate component test-query"),
-                "unexpected rejection cause: {cause:?}"
-            );
-            let rejected = addition.take().await.expect("retained rejected query");
-            assert_eq!(rejected.definition.descriptor.id().as_str(), "test-query");
-        }
+        assert!(
+            format!("{error:#}").contains("component name already belongs to 'test-query'"),
+            "unexpected duplicate-query error: {error:#}"
+        );
+        assert_eq!(manager.list_queries().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn test_delete_query() {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
-        let config = create_test_query_config("test-query", vec![]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![],
+        );
         add_query(&manager, &graph, config).await.unwrap();
 
         // Delete the query
-        let result = delete_query(&manager, &graph, "test-query").await;
+        let result = delete_query(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("test-query")
+                .expect("fixture component name"),
+        )
+        .await;
         assert!(result.is_ok());
 
         // Verify query was removed
@@ -219,16 +233,31 @@ mod manager_tests {
         add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add and start a query
-        let config = create_test_query_config("test-query", vec!["source1".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
 
-        let result = manager.start_query("test-query".to_string()).await;
+        let result = manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_ok());
 
         // Check for status event from graph broadcast
+        let query_id = manager
+            .0
+            .component_by_name(&crate::ComponentName::try_new("test-query").unwrap())
+            .unwrap()
+            .id()
+            .clone();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Ok(event) = event_rx.recv().await {
-                if event.component_id == "test-query" {
+                if event.component_id == query_id {
                     // Skip the Stopped event emitted by add_query (with "added" message)
                     if event
                         .message
@@ -261,28 +290,50 @@ mod manager_tests {
         add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add and start a query
-        let config = create_test_query_config("test-query", vec!["source1".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
 
-        manager.start_query("test-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Wait for query to reach Running state
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "test-query",
+            &graph,
+            &crate::ComponentName::try_new("test-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         // Stop the query
-        let result = manager.stop_query("test-query".to_string()).await;
+        let result = manager
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_ok());
 
         // Check for stop event
+        let query_id = manager
+            .0
+            .component_by_name(&crate::ComponentName::try_new("test-query").unwrap())
+            .unwrap()
+            .id()
+            .clone();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Ok(event) = event_rx.recv().await {
-                if event.component_id == "test-query"
+                if event.component_id == query_id
                     && matches!(event.status, ComponentStatus::Stopped)
                 {
                     break;
@@ -305,33 +356,57 @@ mod manager_tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Add the query and start it
-        let config = create_test_query_config("test-query", vec!["source1".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
-        manager.start_query("test-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Wait for query to reach Running state
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "test-query",
+            &graph,
+            &crate::ComponentName::try_new("test-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         // Inspect query to verify subscription tasks are present
-        let query = manager.get_query_instance("test-query").await.unwrap();
+        let query = manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         assert!(
             query.subscription_count().await > 0,
             "Expected active subscription task"
         );
 
-        manager.stop_query("test-query".to_string()).await.unwrap();
+        manager
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Wait for query to reach Stopped state
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "test-query",
+            &graph,
+            &crate::ComponentName::try_new("test-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
@@ -351,26 +426,52 @@ mod manager_tests {
         add_source(&source_manager, &graph, source1).await.unwrap();
 
         let config = create_test_query_config(
-            "test-query",
-            vec!["source1".to_string(), "source2".to_string()],
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![
+                drasi_core_types::ComponentName::try_new("source1")
+                    .expect("fixture component name"),
+                drasi_core_types::ComponentName::try_new("source2")
+                    .expect("fixture component name"),
+            ],
         );
         add_query(&manager, &graph, config).await.unwrap();
 
-        let result = manager.start_query("test-query".to_string()).await;
+        let result = manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("source2"));
         let status = manager
-            .get_query_status("test-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert_ne!(status, ComponentStatus::Error);
-        let query = manager.get_query_instance("test-query").await.unwrap();
+        let query = manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             query.subscription_count().await,
             0,
             "Waiting for another source must not leak partially started subscriptions"
         );
-        delete_query(&manager, &graph, "test-query").await.unwrap();
+        delete_query(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("test-query")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let source2 = create_test_mock_source("source2".to_string());
         add_source(&source_manager, &graph, source2).await.unwrap();
         assert!(manager.list_queries().await.unwrap().is_empty());
@@ -380,7 +481,12 @@ mod manager_tests {
     async fn test_add_gql_query() {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
-        let config = create_test_gql_query_config("test-gql-query", vec!["source1".to_string()]);
+        let config = create_test_gql_query_config(
+            drasi_core_types::ComponentName::try_new("test-gql-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         let result = add_query(&manager, &graph, config.clone()).await;
 
         assert!(result.is_ok());
@@ -388,7 +494,11 @@ mod manager_tests {
         // Verify query was added
         let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 1);
-        assert_eq!(queries[0].0, "test-gql-query");
+        assert_eq!(
+            queries[0].name,
+            drasi_core_types::ComponentName::try_new("test-gql-query")
+                .expect("fixture component name")
+        );
     }
 
     #[tokio::test]
@@ -403,16 +513,32 @@ mod manager_tests {
         add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add and start a GQL query
-        let config = create_test_gql_query_config("test-gql-query", vec!["source1".to_string()]);
+        let config = create_test_gql_query_config(
+            drasi_core_types::ComponentName::try_new("test-gql-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
 
-        let result = manager.start_query("test-gql-query".to_string()).await;
+        let result = manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-gql-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_ok());
 
         // Check for status event from graph broadcast
+        let query_id = manager
+            .0
+            .component_by_name(&crate::ComponentName::try_new("test-gql-query").unwrap())
+            .unwrap()
+            .id()
+            .clone();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Ok(event) = event_rx.recv().await {
-                if event.component_id == "test-gql-query" {
+                if event.component_id == query_id {
                     // Skip the Stopped event emitted by add_query (with "added" message)
                     if event
                         .message
@@ -438,56 +564,104 @@ mod manager_tests {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add a Cypher query
-        let cypher_config = create_test_query_config("cypher-query", vec!["source1".to_string()]);
+        let cypher_config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("cypher-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         assert!(add_query(&manager, &graph, cypher_config).await.is_ok());
 
         // Add a GQL query
-        let gql_config = create_test_gql_query_config("gql-query", vec!["source1".to_string()]);
+        let gql_config = create_test_gql_query_config(
+            drasi_core_types::ComponentName::try_new("gql-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         assert!(add_query(&manager, &graph, gql_config).await.is_ok());
 
         // Verify both queries were added
         let queries = manager.list_queries().await.unwrap();
         assert_eq!(queries.len(), 2);
 
-        let query_ids: Vec<String> = queries.iter().map(|(id, _)| id.clone()).collect();
-        assert!(query_ids.contains(&"cypher-query".to_string()));
-        assert!(query_ids.contains(&"gql-query".to_string()));
+        let query_names: Vec<_> = queries.iter().map(|entry| entry.name.clone()).collect();
+        assert!(query_names.contains(&crate::ComponentName::try_new("cypher-query").unwrap()));
+        assert!(query_names.contains(&crate::ComponentName::try_new("gql-query").unwrap()));
     }
 
     #[tokio::test]
     async fn test_get_query_config() {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
-        let config = create_test_query_config("test-query", vec!["source1".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config.clone()).await.unwrap();
 
-        let retrieved = manager.get_query_config("test-query").await;
+        let id = manager
+            .0
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .unwrap()
+            .id()
+            .clone();
+        let retrieved = manager.get_query_config_by_name(&config.name).await;
         assert!(retrieved.is_ok());
 
         let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.id, config.id);
+        assert_eq!(retrieved.id, id);
+        assert_eq!(retrieved.name, config.name);
         assert_eq!(retrieved.query, config.query);
         assert_eq!(retrieved.inputs.len(), config.inputs.len());
     }
 
     #[tokio::test]
-    async fn test_update_query() {
+    async fn test_update_query_requires_factory_assessment() {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
-        let mut config = create_test_query_config("test-query", vec![]);
+        let mut config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![],
+        );
         add_query(&manager, &graph, config.clone()).await.unwrap();
+        let handle = manager
+            .0
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .unwrap();
+        let before = manager.0.desired_configuration().unwrap();
 
         // Update config
         config.query = "MATCH (n:Updated) RETURN n".to_string();
 
-        manager
-            .update_query("test-query".into(), config.clone())
+        let error = manager
+            .update_query_by_name(&config.name, config.clone())
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("does not support"));
 
         // Verify update
-        let retrieved = manager.get_query_config("test-query").await.unwrap();
-        assert_eq!(retrieved.query, config.query);
+        let retrieved = manager.0.get_query_config_by_id(handle.id()).await.unwrap();
+        assert_ne!(retrieved.query, config.query);
+        assert_eq!(manager.0.desired_configuration().unwrap(), before);
+        assert_eq!(
+            manager
+                .0
+                .component_by_name(
+                    &drasi_core_types::ComponentName::try_new("test-query")
+                        .expect("fixture component name")
+                )
+                .unwrap()
+                .generation(),
+            handle.generation()
+        );
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -499,12 +673,19 @@ mod manager_tests {
         add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add a query that subscribes to the source
-        let query_config = create_test_query_config("test-query", vec!["source1".to_string()]);
+        let query_config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, query_config).await.unwrap();
 
         // Verify query is in Added state
         let status = manager
-            .get_query_status("test-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(matches!(status, ComponentStatus::Added));
@@ -513,35 +694,55 @@ mod manager_tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Start the query
-        manager.start_query("test-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Verify query is running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "test-query",
+            &graph,
+            &crate::ComponentName::try_new("test-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
         let status = manager
-            .get_query_status("test-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(matches!(status, ComponentStatus::Running));
 
         // Stop the query
-        manager.stop_query("test-query".to_string()).await.unwrap();
+        manager
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Verify query is stopped
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "test-query",
+            &graph,
+            &crate::ComponentName::try_new("test-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
         let status = manager
-            .get_query_status("test-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(matches!(status, ComponentStatus::Stopped));
@@ -555,7 +756,11 @@ mod manager_tests {
     #[tokio::test]
     async fn test_query_auto_start_defaults_to_true() {
         // Create query using default helper (should have auto_start=true)
-        let config = create_test_query_config("default-query", vec![]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("default-query")
+                .expect("fixture component name"),
+            vec![],
+        );
         assert!(config.auto_start, "Default auto_start should be true");
     }
 
@@ -565,12 +770,20 @@ mod manager_tests {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add query with auto_start=false (no sources needed since we won't start it)
-        let config = create_test_query_config_with_auto_start("no-auto-start-query", vec![], false);
+        let config = create_test_query_config_with_auto_start(
+            drasi_core_types::ComponentName::try_new("no-auto-start-query")
+                .expect("fixture component name"),
+            vec![],
+            false,
+        );
         add_query(&manager, &graph, config).await.unwrap();
 
         // Query should be in Added state
         let status = manager
-            .get_query_status("no-auto-start-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("no-auto-start-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -590,15 +803,20 @@ mod manager_tests {
 
         // Add query with auto_start=false
         let config = create_test_query_config_with_auto_start(
-            "manual-query",
-            vec!["source1".to_string()],
+            drasi_core_types::ComponentName::try_new("manual-query")
+                .expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("source1")
+                .expect("fixture component name")],
             false,
         );
         add_query(&manager, &graph, config).await.unwrap();
 
         // Query should be in Added state initially
         let status = manager
-            .get_query_status("manual-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -611,14 +829,18 @@ mod manager_tests {
 
         // Manually start the query
         manager
-            .start_query("manual-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
         // Wait for query to reach Running state
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "manual-query",
+            &graph,
+            &crate::ComponentName::try_new("manual-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -626,7 +848,10 @@ mod manager_tests {
 
         // Query should now be running
         let status = manager
-            .get_query_status("manual-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("manual-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -641,21 +866,42 @@ mod manager_tests {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add query with auto_start=false
-        let config = create_test_query_config_with_auto_start("test-query", vec![], false);
+        let config = create_test_query_config_with_auto_start(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+            vec![],
+            false,
+        );
         add_query(&manager, &graph, config).await.unwrap();
 
         // Retrieve config and verify auto_start is preserved
-        let retrieved = manager.get_query_config("test-query").await.unwrap();
+        let retrieved = manager
+            .get_query_config_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert!(
             !retrieved.auto_start,
             "Retrieved config should preserve auto_start=false"
         );
 
         // Add another query with auto_start=true
-        let config2 = create_test_query_config_with_auto_start("test-query-2", vec![], true);
+        let config2 = create_test_query_config_with_auto_start(
+            drasi_core_types::ComponentName::try_new("test-query-2")
+                .expect("fixture component name"),
+            vec![],
+            true,
+        );
         add_query(&manager, &graph, config2).await.unwrap();
 
-        let retrieved2 = manager.get_query_config("test-query-2").await.unwrap();
+        let retrieved2 = manager
+            .get_query_config_by_name(
+                &drasi_core_types::ComponentName::try_new("test-query-2")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert!(
             retrieved2.auto_start,
             "Retrieved config should preserve auto_start=true"
@@ -670,27 +916,33 @@ mod manager_tests {
     #[tokio::test]
     async fn test_delete_query_cleans_up_event_history() {
         let (manager, _source_manager, graph) = create_test_manager().await;
+        let query_name = drasi_core_types::ComponentName::try_new("cleanup-events-query")
+            .expect("fixture component name");
 
         // Add a query
-        let config = create_test_query_config("cleanup-events-query", vec![]);
+        let config = create_test_query_config(query_name.clone(), vec![]);
         add_query(&manager, &graph, config).await.unwrap();
+        let query_id = manager
+            .0
+            .component_by_name(&query_name)
+            .unwrap()
+            .id()
+            .clone();
 
         manager
-            .start_query_and_wait("cleanup-events-query".into())
+            .start_query_and_wait_by_name(&query_name)
             .await
             .unwrap();
 
         // Verify events exist
-        let events = manager.get_query_events("cleanup-events-query").await;
+        let events = manager.get_query_events_by_name(&query_name).await.unwrap();
         assert!(!events.is_empty(), "Expected events after recording");
 
         // Delete the query
-        delete_query(&manager, &graph, "cleanup-events-query")
-            .await
-            .unwrap();
+        delete_query(&manager, &graph, &query_name).await.unwrap();
 
         // Verify events are cleaned up
-        let events_after = manager.get_query_events("cleanup-events-query").await;
+        let events_after = manager.get_query_events_by_id(&query_id).await.unwrap();
         assert!(events_after.is_empty(), "Expected no events after deletion");
     }
 
@@ -711,20 +963,39 @@ mod manager_tests {
         let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
         // Add a source that provides the bootstrap channel
-        let source = create_test_bootstrap_mock_source("bs-source".to_string(), bootstrap_rx);
+        let source = create_test_bootstrap_mock_source(
+            drasi_core_types::ComponentName::try_new("bs-source").expect("fixture component name"),
+            bootstrap_rx,
+        );
         add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add a query subscribed to this source
-        let config = create_test_query_config("bs-query", vec!["bs-source".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("bs-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("bs-source")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
 
         // Start the query
-        manager.start_query("bs-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("bs-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Drain the Starting event from the graph broadcast
+        let query_id = manager
+            .0
+            .component_by_name(&crate::ComponentName::try_new("bs-query").unwrap())
+            .unwrap()
+            .id()
+            .clone();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Ok(event) = event_rx.recv().await {
-                if event.component_id == "bs-query"
+                if event.component_id == query_id
                     && matches!(event.status, ComponentStatus::Starting)
                 {
                     break;
@@ -736,7 +1007,10 @@ mod manager_tests {
 
         // While bootstrap channel is still open, the query should remain in Starting state
         let status = manager
-            .get_query_status("bs-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("bs-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -750,7 +1024,7 @@ mod manager_tests {
         // Wait for the Running event from graph broadcast
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while let Ok(event) = event_rx.recv().await {
-                if event.component_id == "bs-query"
+                if event.component_id == query_id
                     && matches!(event.status, ComponentStatus::Running)
                 {
                     return;
@@ -762,7 +1036,10 @@ mod manager_tests {
 
         // Verify the query is now Running
         let status = manager
-            .get_query_status("bs-query".to_string())
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("bs-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         assert!(
@@ -777,21 +1054,40 @@ mod manager_tests {
         let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add a query
-        let config = create_test_query_config("cleanup-logs-query", vec![]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("cleanup-logs-query")
+                .expect("fixture component name"),
+            vec![],
+        );
         add_query(&manager, &graph, config).await.unwrap();
 
         // Generate a log via subscribe (which creates the channel) then check
         // First subscribe to create the channel
-        let result = manager.subscribe_logs("cleanup-logs-query").await;
+        let result = manager
+            .subscribe_logs_by_name(
+                &drasi_core_types::ComponentName::try_new("cleanup-logs-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_ok(), "Expected to subscribe to query logs");
 
         // Delete the query
-        delete_query(&manager, &graph, "cleanup-logs-query")
-            .await
-            .unwrap();
+        delete_query(
+            &manager,
+            &graph,
+            &drasi_core_types::ComponentName::try_new("cleanup-logs-query")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
 
         // Verify logs are cleaned up (subscribe should fail for non-existent query)
-        let result = manager.subscribe_logs("cleanup-logs-query").await;
+        let result = manager
+            .subscribe_logs_by_name(
+                &drasi_core_types::ComponentName::try_new("cleanup-logs-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_err(), "Expected an error for deleted query logs");
     }
 }
@@ -809,8 +1105,10 @@ mod query_core_tests {
         ];
 
         for query in valid_queries {
-            let config = QueryConfig {
-                id: "test".to_string(),
+            let config: QueryConfig = QueryConfig {
+                id: None,
+                name: drasi_core_types::ComponentName::try_new("test")
+                    .expect("fixture component name"),
                 query: query.to_string(),
                 query_language: crate::config::QueryLanguage::Cypher,
                 middleware: vec![],
@@ -835,8 +1133,9 @@ mod query_core_tests {
 
     #[tokio::test]
     async fn test_empty_query_validation() {
-        let config = QueryConfig {
-            id: "test".to_string(),
+        let config: QueryConfig = QueryConfig {
+            id: None,
+            name: drasi_core_types::ComponentName::try_new("test").expect("fixture component name"),
             query: "".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
@@ -869,16 +1168,19 @@ mod output_state_integration_tests {
     use crate::queries::output_state::FetchError;
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::test_helpers::managers::{QueryManager, SourceManager};
-    use crate::test_helpers::wait_for_component_status;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
     use std::sync::Arc;
 
     /// Creates a test query configuration
-    fn create_test_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
+    fn create_test_query_config(
+        id: drasi_core_types::ComponentName,
+        sources: Vec<crate::ComponentName>,
+    ) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id,
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -887,7 +1189,7 @@ mod output_state_integration_tests {
                 .map(|s| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: s.clone(),
+                    component: crate::config::ComponentReference::by_name(s.clone()),
                     pipeline: vec![],
                     port: None,
                 })
@@ -922,7 +1224,7 @@ mod output_state_integration_tests {
     async fn add_source(
         source_manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl crate::sources::Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl crate::sources::Source + 'static>,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
     }
@@ -954,9 +1256,13 @@ mod output_state_integration_tests {
     }
 
     /// Helper: create a BootstrapEvent from a SourceChange
-    fn make_bootstrap_event(source_id: &str, change: SourceChange, seq: u64) -> BootstrapEvent {
+    fn make_bootstrap_event(
+        source_id: drasi_core_types::ComponentId,
+        change: SourceChange,
+        seq: u64,
+    ) -> BootstrapEvent {
         BootstrapEvent {
-            source_id: source_id.to_string(),
+            source_id,
             change,
             timestamp: chrono::Utc::now(),
             sequence: seq,
@@ -971,23 +1277,43 @@ mod output_state_integration_tests {
         // Create a bootstrap channel — test controls the sender
         let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
-        let source = create_test_bootstrap_mock_source("snap-src".to_string(), bootstrap_rx);
+        let source = create_test_bootstrap_mock_source(
+            drasi_core_types::ComponentName::try_new("snap-src").expect("fixture component name"),
+            bootstrap_rx,
+        );
         add_source(&source_manager, &graph, source).await.unwrap();
 
-        let config = create_test_query_config("snap-query", vec!["snap-src".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("snap-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("snap-src")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
-        manager.start_query("snap-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("snap-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Drain the Starting event
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "snap-query",
+            &graph,
+            &crate::ComponentName::try_new("snap-query").expect("fixture component name"),
             ComponentStatus::Starting,
             std::time::Duration::from_secs(2),
         )
         .await;
 
-        let query = manager.get_query_instance("snap-query").await.unwrap();
+        let query = manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("snap-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         let snapshot_request = query.fetch_snapshot();
         tokio::pin!(snapshot_request);
         assert!(
@@ -998,15 +1324,25 @@ mod output_state_integration_tests {
         // Send a bootstrap event, then close the channel to complete bootstrap
         let insert = make_person_insert("snap-src", "p1", "Alice");
         bootstrap_tx
-            .send(make_bootstrap_event("snap-src", insert, 1))
+            .send(make_bootstrap_event(
+                manager
+                    .0
+                    .component_by_name(&crate::ComponentName::try_new("snap-src").unwrap())
+                    .unwrap()
+                    .id()
+                    .clone(),
+                insert,
+                1,
+            ))
             .await
             .unwrap();
         drop(bootstrap_tx);
 
         // Wait for Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "snap-query",
+            &graph,
+            &crate::ComponentName::try_new("snap-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
@@ -1042,20 +1378,37 @@ mod output_state_integration_tests {
         let source = create_test_mock_source("live-src".to_string());
         add_source(&source_manager, &graph, source).await.unwrap();
 
-        let config = create_test_query_config("live-query", vec!["live-src".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("live-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("live-src")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
-        manager.start_query("live-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("live-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Wait for Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "live-query",
+            &graph,
+            &crate::ComponentName::try_new("live-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let query = manager.get_query_instance("live-query").await.unwrap();
+        let query = manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("live-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Before any live events: snapshot should be empty, sequence 0
         let snap = query.fetch_snapshot().await.unwrap();
@@ -1067,10 +1420,20 @@ mod output_state_integration_tests {
         assert!(outbox.results.is_empty());
         assert_eq!(outbox.latest_sequence, 0);
 
-        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
+        let mut output = query
+            .subscribe(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000365")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .receiver;
         // Inject a live event via the source manager
         let source_arc = source_manager
-            .get_source_instance("live-src")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("live-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let mock_source = source_arc
@@ -1110,14 +1473,19 @@ mod output_state_integration_tests {
 
         // Use a very small outbox capacity to trigger eviction
         let config = QueryConfig {
-            id: "gap-query".to_string(),
+            id: None,
+            name: drasi_core_types::ComponentName::try_new("gap-query")
+                .expect("fixture component name"),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "gap-src".to_string(),
+                component: crate::config::ComponentReference::by_name(
+                    drasi_core_types::ComponentName::try_new("gap-src")
+                        .expect("fixture component name"),
+                ),
                 pipeline: vec![],
                 port: None,
             }],
@@ -1134,21 +1502,47 @@ mod output_state_integration_tests {
             result: Default::default(),
         };
         add_query(&manager, &graph, config).await.unwrap();
-        manager.start_query("gap-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("gap-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "gap-query",
+            &graph,
+            &crate::ComponentName::try_new("gap-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let query = manager.get_query_instance("gap-query").await.unwrap();
+        let query = manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("gap-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
-        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
+        let mut output = query
+            .subscribe(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000365")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .receiver;
         // Inject multiple events to fill and overflow the outbox
-        let source_arc = source_manager.get_source_instance("gap-src").await.unwrap();
+        let source_arc = source_manager
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("gap-src")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         let mock_source = source_arc
             .as_any()
             .downcast_ref::<crate::sources::tests::TestMockSource>()
@@ -1193,31 +1587,55 @@ mod output_state_integration_tests {
         let source = create_test_mock_source("err-src".to_string());
         add_source(&source_manager, &graph, source).await.unwrap();
 
-        let config = create_test_query_config("err-query", vec!["err-src".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("err-query").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("err-src")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
-        manager.start_query("err-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("err-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Wait for Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "err-query",
+            &graph,
+            &crate::ComponentName::try_new("err-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
         // Stop the query to put it into Stopped state
-        manager.stop_query("err-query".to_string()).await.unwrap();
+        manager
+            .stop_query_by_name(
+                &drasi_core_types::ComponentName::try_new("err-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "err-query",
+            &graph,
+            &crate::ComponentName::try_new("err-query").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let query = manager.get_query_instance("err-query").await.unwrap();
+        let query = manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("err-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // fetch_snapshot should return NotRunning when query is stopped
         let result = query.fetch_snapshot().await;
@@ -1241,17 +1659,31 @@ mod output_state_integration_tests {
 
         let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
-        let source = create_test_bootstrap_mock_source("bs-src2".to_string(), bootstrap_rx);
+        let source = create_test_bootstrap_mock_source(
+            drasi_core_types::ComponentName::try_new("bs-src2").expect("fixture component name"),
+            bootstrap_rx,
+        );
         add_source(&source_manager, &graph, source).await.unwrap();
 
-        let config = create_test_query_config("bs-query2", vec!["bs-src2".to_string()]);
+        let config = create_test_query_config(
+            drasi_core_types::ComponentName::try_new("bs-query2").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("bs-src2")
+                .expect("fixture component name")],
+        );
         add_query(&manager, &graph, config).await.unwrap();
-        manager.start_query("bs-query2".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("bs-query2")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
         // Wait for Starting
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "bs-query2",
+            &graph,
+            &crate::ComponentName::try_new("bs-query2").expect("fixture component name"),
             ComponentStatus::Starting,
             std::time::Duration::from_secs(2),
         )
@@ -1261,7 +1693,16 @@ mod output_state_integration_tests {
         for i in 0..3 {
             let insert = make_person_insert("bs-src2", &format!("bp{i}"), &format!("BSPerson{i}"));
             bootstrap_tx
-                .send(make_bootstrap_event("bs-src2", insert, i + 1))
+                .send(make_bootstrap_event(
+                    manager
+                        .0
+                        .component_by_name(&crate::ComponentName::try_new("bs-src2").unwrap())
+                        .unwrap()
+                        .id()
+                        .clone(),
+                    insert,
+                    i + 1,
+                ))
                 .await
                 .unwrap();
         }
@@ -1270,15 +1711,22 @@ mod output_state_integration_tests {
         drop(bootstrap_tx);
 
         // Wait for Running
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "bs-query2",
+            &graph,
+            &crate::ComponentName::try_new("bs-query2").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let query = manager.get_query_instance("bs-query2").await.unwrap();
+        let query = manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("bs-query2")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         let snap = query.fetch_snapshot().await.unwrap();
 
         // Key invariant: after bootstrap, outbox is empty and sequence is 0
@@ -1322,14 +1770,19 @@ mod output_state_integration_tests {
 
         // Query that only matches Person nodes specifically
         let config = QueryConfig {
-            id: "noop-query".to_string(),
+            id: None,
+            name: drasi_core_types::ComponentName::try_new("noop-query")
+                .expect("fixture component name"),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "noop-src".to_string(),
+                component: crate::config::ComponentReference::by_name(
+                    drasi_core_types::ComponentName::try_new("noop-src")
+                        .expect("fixture component name"),
+                ),
                 pipeline: vec![],
                 port: None,
             }],
@@ -1346,22 +1799,45 @@ mod output_state_integration_tests {
             result: Default::default(),
         };
         add_query(&manager, &graph, config).await.unwrap();
-        manager.start_query("noop-query".to_string()).await.unwrap();
+        manager
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("noop-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "noop-query",
+            &graph,
+            &crate::ComponentName::try_new("noop-query").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
 
-        let query = manager.get_query_instance("noop-query").await.unwrap();
-        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
+        let query = manager
+            .get_query_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("noop-query")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
+        let mut output = query
+            .subscribe(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000365")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap()
+            .receiver;
 
         // Send a node with a different label (Vehicle) — should not match the query
         let source_arc = source_manager
-            .get_source_instance("noop-src")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("noop-src")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
         let mock_source = source_arc

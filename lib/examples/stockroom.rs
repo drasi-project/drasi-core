@@ -99,29 +99,47 @@ async fn finish(core: &DrasiLib, work: anyhow::Result<()>) -> anyhow::Result<()>
 
 async fn basic() -> anyhow::Result<()> {
     let (source, input) = ApplicationSource::new(
-        "inventory",
+        component_id(758).clone(),
         ApplicationSourceConfig {
             properties: Default::default(),
             durability: None,
         },
     )?;
-    let (reaction, output) = ApplicationReaction::new("alerts", vec!["low-stock".into()]);
+    let (reaction, output) = ApplicationReaction::new(
+        component_id(759).clone(),
+        vec![drasi_computation_contracts::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("low-stock").expect("fixture component name"),
+        )],
+    );
     let mut receiver = output
         .take_receiver()
         .await
         .context("alerts receiver was already taken")?;
     let core = DrasiLib::builder()
         .with_query_factory(Arc::new(ContinuousQueryFactory::default()))
+        .with_allow_external_component_ids(true)
         .with_id("stockroom")
-        .with_source(source)
-        .with_query(
-            Query::cypher("low-stock")
-                .query(LOW_STOCK)
-                .from_input("inventory")
-                .enable_bootstrap(false)
-                .build(),
+        .with_source(
+            drasi_core_types::ComponentName::try_new("inventory").expect("fixture component name"),
+            source,
         )
-        .with_reaction(reaction)
+        .with_query(
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("low-stock")
+                    .expect("fixture component name"),
+            )
+            .query(LOW_STOCK)
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("inventory")
+                    .expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .build()?,
+        )
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("alerts").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 
@@ -130,7 +148,11 @@ async fn basic() -> anyhow::Result<()> {
         core.start().await?;
         tokio::time::timeout(
             Duration::from_secs(5),
-            core.computation_component("alerts")?.wait_started(),
+            core.component_by_name(
+                &drasi_core_types::ComponentName::try_new("alerts")
+                    .expect("fixture component name"),
+            )?
+            .wait_started(),
         )
         .await??;
         input
@@ -140,7 +162,15 @@ async fn basic() -> anyhow::Result<()> {
         view.apply(&added);
         check_rows(&view.0.values().cloned().collect::<Vec<_>>(), Some(3))?;
         println!("basic: added {:?}", added.results);
-        check_rows(&core.get_query_results("low-stock").await?, Some(3))?;
+        check_rows(
+            &core
+                .get_query_results_by_name(
+                    &drasi_core_types::ComponentName::try_new("low-stock")
+                        .expect("fixture component name"),
+                )
+                .await?,
+            Some(3),
+        )?;
 
         input
             .send_node_update("bolts", vec!["Product"], properties(2))
@@ -149,23 +179,52 @@ async fn basic() -> anyhow::Result<()> {
         view.apply(&updated);
         check_rows(&view.0.values().cloned().collect::<Vec<_>>(), Some(2))?;
         println!("basic: updated {:?}", updated.results);
-        check_rows(&core.get_query_results("low-stock").await?, Some(2))?;
+        check_rows(
+            &core
+                .get_query_results_by_name(
+                    &drasi_core_types::ComponentName::try_new("low-stock")
+                        .expect("fixture component name"),
+                )
+                .await?,
+            Some(2),
+        )?;
 
         input.send_delete("bolts", vec!["Product"]).await?;
         let deleted = next_result(&mut receiver).await?;
         view.apply(&deleted);
         check_rows(&view.0.values().cloned().collect::<Vec<_>>(), None)?;
         println!("basic: deleted {:?}", deleted.results);
-        check_rows(&core.get_query_results("low-stock").await?, None)?;
+        check_rows(
+            &core
+                .get_query_results_by_name(
+                    &drasi_core_types::ComponentName::try_new("low-stock")
+                        .expect("fixture component name"),
+                )
+                .await?,
+            None,
+        )?;
         Ok(())
     }
     .await;
     finish(&core, work).await
 }
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
+fn named_component_id(name: &str) -> ComponentId {
+    component_id(match name {
+        "inventory" => 1,
+        "low-stock" => 2,
+        "alerts" => 3,
+        other => panic!("missing explicit example component ID for {other}"),
+    })
+}
+
 fn endpoint(component: &str, port: &str) -> anyhow::Result<Endpoint> {
     Ok(Endpoint::new(
-        ComponentId::try_new(component)?,
+        named_component_id(component),
         PortId::try_new(port)?,
     ))
 }
@@ -175,7 +234,7 @@ fn descriptor(
     ports: &[(&str, PortDirection, SchemaDescriptor)],
 ) -> anyhow::Result<ComponentDescriptor> {
     Ok(ComponentDescriptor::try_new(
-        ComponentId::try_new(id)?,
+        named_component_id(id),
         ports
             .iter()
             .map(|(name, direction, schema)| {
@@ -336,7 +395,7 @@ async fn graph() -> anyhow::Result<()> {
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "__drasi_lib_runtime__".into(),
-            id: ComponentId::try_new("low-stock")?,
+            id: component_id(757),
             query: LOW_STOCK.into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("low-stock/out")?,
@@ -346,10 +405,10 @@ async fn graph() -> anyhow::Result<()> {
     )
     .await?;
     let mut batch = ComponentBatch::builder()
-        .source(Box::new(inventory))
-        .transformer(Box::new(audit))
-        .transformer(Box::new(query))
-        .sink(Box::new(alerts));
+        .source(ComponentName::try_new("inventory")?, Box::new(inventory))
+        .transformer(ComponentName::try_new("audit")?, Box::new(audit))
+        .transformer(ComponentName::try_new("low-stock")?, Box::new(query))
+        .sink(ComponentName::try_new("alerts")?, Box::new(alerts));
     for producer in ["inventory", "audit", "low-stock"] {
         batch = batch.bind_stream(
             endpoint(producer, "out")?,
@@ -363,6 +422,7 @@ async fn graph() -> anyhow::Result<()> {
         );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_id("stockroom")
         .with_components(batch.build()?)
         .build()
@@ -371,7 +431,7 @@ async fn graph() -> anyhow::Result<()> {
         core.start().await?;
         let metadata = ElementMetadata {
             reference: ElementReference {
-                source_id: "inventory".into(),
+                namespace: "inventory".into(),
                 element_id: "bolts".into(),
             },
             labels: vec!["Product".into()].into(),
@@ -416,7 +476,15 @@ async fn graph() -> anyhow::Result<()> {
             input.send(change).await?;
             let result = next_result(&mut receiver).await?;
             println!("graph: {label} {:?}", result.results);
-            check_rows(&core.get_query_results("low-stock").await?, quantity)?;
+            check_rows(
+                &core
+                    .get_query_results_by_name(
+                        &drasi_core_types::ComponentName::try_new("low-stock")
+                            .expect("fixture component name"),
+                    )
+                    .await?,
+                quantity,
+            )?;
         }
         Ok(())
     }

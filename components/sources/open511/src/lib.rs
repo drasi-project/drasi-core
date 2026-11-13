@@ -74,8 +74,8 @@ pub struct Open511Source {
 
 impl Open511Source {
     /// Create a new source from ID and config.
-    pub fn new(id: impl Into<String>, config: Open511SourceConfig) -> Result<Self> {
-        let params = SourceBaseParams::new(id.into());
+    pub fn new(id: drasi_lib::ComponentId, config: Open511SourceConfig) -> Result<Self> {
+        let params = SourceBaseParams::new(id.clone());
         config.validate()?;
 
         Ok(Self {
@@ -90,14 +90,14 @@ impl Open511Source {
     }
 
     /// Create a builder for this source type.
-    pub fn builder(id: impl Into<String>) -> Open511SourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> Open511SourceBuilder {
         Open511SourceBuilder::new(id)
     }
 }
 
 #[async_trait]
 impl Source for Open511Source {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -147,6 +147,8 @@ impl Source for Open511Source {
 
         let source_id = self.base.id.clone();
         let config = self.config.clone();
+        let api_client = Open511ApiClient::new(config.clone())
+            .context("Preparing Open511 polling HTTP client")?;
         let base = self.base.clone_shared();
         let state_store = self.state_store.read().await.clone();
 
@@ -176,8 +178,15 @@ impl Source for Open511Source {
         spawn_owned_worker(
             &self.polling_task,
             async move {
-                let result =
-                    run_poll_loop(source_id.clone(), config, base, state_store, shutdown_rx).await;
+                let result = run_poll_loop(
+                    source_id.clone(),
+                    config,
+                    api_client,
+                    base,
+                    state_store,
+                    shutdown_rx,
+                )
+                .await;
                 if let Err(error) = &result {
                     error!("Open511 source task failed for '{source_id}': {error}");
                     status
@@ -240,12 +249,12 @@ impl Source for Open511Source {
         self
     }
 
-    async fn deprovision(&self) -> Result<()> {
-        self.base.deprovision_common().await
+    async fn delete_owned_resources(&self) -> Result<()> {
+        self.base.delete_owned_resources_common().await
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
 
         if let Some(state_store) = context.state_store {
             *self.state_store.write().await = Some(state_store);
@@ -266,13 +275,13 @@ impl Source for Open511Source {
 }
 
 async fn run_poll_loop(
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     config: Open511SourceConfig,
+    api_client: Open511ApiClient,
     base: SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let api_client = Open511ApiClient::new(config.clone())?;
     let mut state = load_poll_state(&source_id, &state_store).await?;
 
     if *shutdown_rx.borrow() || shutdown_rx.has_changed().is_err() {
@@ -353,14 +362,14 @@ fn should_run_full_sweep(state: &PollState, full_sweep_interval: u32) -> bool {
 
 async fn dispatch_change(
     base: &SourceBase,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     change: drasi_core::models::SourceChange,
 ) -> Result<()> {
     let mut profiling = ProfilingMetadata::new();
     profiling.source_send_ns = Some(timestamp_ns());
 
     let wrapper = SourceEventWrapper::with_profiling(
-        source_id.to_string(),
+        source_id.clone(),
         SourceEvent::Change(change),
         Utc::now(),
         profiling,
@@ -371,7 +380,7 @@ async fn dispatch_change(
 }
 
 async fn initialize_poll_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &Open511SourceConfig,
     api_client: &Open511ApiClient,
     state: &mut PollState,
@@ -445,7 +454,7 @@ where
 }
 
 async fn load_poll_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
 ) -> Result<PollState> {
     let Some(store) = state_store else {
@@ -454,21 +463,39 @@ async fn load_poll_state(
 
     let mut state = PollState::default();
 
-    if let Some(bytes) = store.get(source_id, KEY_EVENTS).await? {
+    if let Some(bytes) = store
+        .get(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            KEY_EVENTS,
+        )
+        .await?
+    {
         match serde_json::from_slice::<HashMap<String, Open511Event>>(&bytes) {
             Ok(events) => state.events_by_id = events,
             Err(e) => warn!("Failed to deserialize '{KEY_EVENTS}': {e}"),
         }
     }
 
-    if let Some(bytes) = store.get(source_id, KEY_KNOWN_AREAS).await? {
+    if let Some(bytes) = store
+        .get(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            KEY_KNOWN_AREAS,
+        )
+        .await?
+    {
         match serde_json::from_slice::<HashSet<String>>(&bytes) {
             Ok(known_areas) => state.known_areas = known_areas,
             Err(e) => warn!("Failed to deserialize '{KEY_KNOWN_AREAS}': {e}"),
         }
     }
 
-    if let Some(bytes) = store.get(source_id, KEY_LAST_POLL).await? {
+    if let Some(bytes) = store
+        .get(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            KEY_LAST_POLL,
+        )
+        .await?
+    {
         match String::from_utf8(bytes) {
             Ok(last_poll) if !last_poll.is_empty() => state.last_poll_time = Some(last_poll),
             Ok(_) => {}
@@ -476,7 +503,13 @@ async fn load_poll_state(
         }
     }
 
-    if let Some(bytes) = store.get(source_id, KEY_POLL_COUNT).await? {
+    if let Some(bytes) = store
+        .get(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            KEY_POLL_COUNT,
+        )
+        .await?
+    {
         if let Ok(count_str) = String::from_utf8(bytes) {
             if let Ok(count) = count_str.parse::<u32>() {
                 state.poll_count = count;
@@ -488,7 +521,7 @@ async fn load_poll_state(
 }
 
 async fn save_poll_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     state: &PollState,
 ) -> Result<()> {
@@ -497,21 +530,35 @@ async fn save_poll_state(
     };
 
     let events_bytes = serde_json::to_vec(&state.events_by_id)?;
-    store.set(source_id, KEY_EVENTS, events_bytes).await?;
+    store
+        .set(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            KEY_EVENTS,
+            events_bytes,
+        )
+        .await?;
 
     let known_areas_bytes = serde_json::to_vec(&state.known_areas)?;
     store
-        .set(source_id, KEY_KNOWN_AREAS, known_areas_bytes)
+        .set(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            KEY_KNOWN_AREAS,
+            known_areas_bytes,
+        )
         .await?;
 
     let last_poll = state.last_poll_time.clone().unwrap_or_default();
     store
-        .set(source_id, KEY_LAST_POLL, last_poll.into_bytes())
+        .set(
+            &drasi_lib::StorePartition::component(source_id.clone()),
+            KEY_LAST_POLL,
+            last_poll.into_bytes(),
+        )
         .await?;
 
     store
         .set(
-            source_id,
+            &drasi_lib::StorePartition::component(source_id.clone()),
             KEY_POLL_COUNT,
             state.poll_count.to_string().into_bytes(),
         )
@@ -522,7 +569,7 @@ async fn save_poll_state(
 
 /// Builder for [`Open511Source`].
 pub struct Open511SourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: Open511SourceConfig,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -533,9 +580,9 @@ pub struct Open511SourceBuilder {
 
 impl Open511SourceBuilder {
     /// Create builder with defaults.
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: Open511SourceConfig::default(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -669,7 +716,7 @@ impl Open511SourceBuilder {
     pub fn build(self) -> Result<Open511Source> {
         self.config.validate()?;
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -699,10 +746,11 @@ mod tests {
     use drasi_lib::context::workers::WorkerCleanupError;
     use drasi_lib::state_store::MemoryStateStoreProvider;
     use std::collections::HashMap;
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
     use tokio::sync::Notify;
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn polling_http_work_is_retained_and_restarts_clear_dispatchers() -> Result<()> {
+    async fn verify_polling_http_work_is_retained_and_restarts_clear_dispatchers() -> Result<()> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let entered = Arc::new(Notify::new());
@@ -732,17 +780,22 @@ mod tests {
                 .await
         });
         let store = Arc::new(MemoryStateStoreProvider::new());
-        let source = Open511Source::builder("lifecycle")
-            .with_base_url(format!("http://{address}"))
-            .with_poll_interval_secs(60)
-            .with_state_store(store.clone())
-            .build()?;
+        let source = Open511Source::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000034")
+                .expect("fixture UUID"),
+        )
+        .with_base_url(format!("http://{address}"))
+        .with_poll_interval_secs(60)
+        .with_state_store(store.clone())
+        .build()?;
         source.stop().await?;
         for cycle in 0..3 {
             let mut receiver = source.base.try_test_subscribe().await?;
             source.start().await?;
             source.start().await?;
-            tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+            tokio::time::timeout(Duration::from_secs(2), entered.notified())
+                .await
+                .with_context(|| format!("cycle {cycle}: HTTP poll entered"))?;
             if cycle == 0 {
                 let error = source.stop().await.unwrap_err();
                 assert!(
@@ -751,10 +804,14 @@ mod tests {
             } else {
                 let stop = source.stop();
                 tokio::pin!(stop);
-                tokio::select! {
-                    result = &mut stop => panic!("HTTP poll remains active: {result:?}"),
-                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
-                }
+                poll_fn(|cx| {
+                    assert!(
+                        stop.as_mut().poll(cx).is_pending(),
+                        "HTTP poll remains active"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
             }
             assert!(!source
                 .polling_task
@@ -774,12 +831,19 @@ mod tests {
             assert!(source.polling_task.read().await.is_none());
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(1), receiver.recv())
-                    .await?
+                    .await
+                    .with_context(|| format!("cycle {cycle}: dispatcher closed"))?
                     .unwrap_err()
                     .to_string(),
                 "Channel closed"
             );
-            assert!(store.get(source.id(), KEY_POLL_COUNT).await?.is_some());
+            assert!(store
+                .get(
+                    &drasi_core::interface::StorePartition::component((source.id()).clone()),
+                    KEY_POLL_COUNT
+                )
+                .await?
+                .is_some());
         }
         stop_server.send(()).expect("server shutdown");
         server.await??;
@@ -788,11 +852,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn polling_http_work_is_retained_and_restarts_clear_dispatchers() -> Result<()> {
+        verify_polling_http_work_is_retained_and_restarts_clear_dispatchers().await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn polling_http_work_is_retained_and_restarts_clear_dispatchers_multi_thread(
+    ) -> Result<()> {
+        verify_polling_http_work_is_retained_and_restarts_clear_dispatchers().await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn polling_errors_and_panics_retain_typed_causes_until_cleanup() -> Result<()> {
         for panic in [false, true] {
-            let source = Open511Source::builder("failed")
-                .with_base_url("http://127.0.0.1:1")
-                .build()?;
+            let source = Open511Source::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                    .expect("fixture UUID"),
+            )
+            .with_base_url("http://127.0.0.1:1")
+            .build()?;
             *source.cleanup_required.lock().await = true;
             spawn_owned_worker(&source.polling_task, async move {
                 assert!(!panic, "injected Open511 polling panic");
@@ -832,23 +910,33 @@ mod tests {
 
     #[test]
     fn builder_configures_defaults() {
-        let source = Open511Source::builder("open511-source")
-            .with_base_url("https://api.open511.gov.bc.ca")
-            .build()
-            .expect("source build should succeed");
+        let source = Open511Source::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004f")
+                .expect("fixture UUID"),
+        )
+        .with_base_url("https://api.open511.gov.bc.ca")
+        .build()
+        .expect("source build should succeed");
 
-        assert_eq!(source.id(), "open511-source");
+        assert_eq!(
+            source.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004f")
+                .expect("fixture UUID")
+        );
         assert_eq!(source.config.status_filter, Some("ACTIVE".to_string()));
         assert_eq!(source.config.full_sweep_interval, 10);
     }
 
     #[test]
     fn builder_applies_start_cursor_settings() {
-        let source = Open511Source::builder("open511-source")
-            .with_base_url("https://api.open511.gov.bc.ca")
-            .with_start_from_timestamp(1_700_000_000_000)
-            .build()
-            .expect("source build should succeed");
+        let source = Open511Source::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004f")
+                .expect("fixture UUID"),
+        )
+        .with_base_url("https://api.open511.gov.bc.ca")
+        .with_start_from_timestamp(1_700_000_000_000)
+        .build()
+        .expect("source build should succeed");
 
         assert_eq!(
             source.config.initial_cursor_behavior,
@@ -951,7 +1039,11 @@ mod tests {
         }
 
         let source_id = "open511-seq-source";
-        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003bd")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let mut rx = base.test_subscribe().await;
 
         // Simulate a poll cycle emitting several changes one at a time, as the
@@ -960,7 +1052,8 @@ mod tests {
         for i in 1..=change_count {
             dispatch_change(
                 &base,
-                source_id,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003bd")
+                    .expect("fixture UUID"),
                 insert_node(source_id, &format!("event-{i}")),
             )
             .await

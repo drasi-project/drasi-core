@@ -328,6 +328,7 @@ impl Default for QueryScheduledSourceFactory {
                     fields: BTreeMap::from([(
                         Arc::from("stream"),
                         ConfigurationField {
+                            constraint: None,
                             value_type: ConfigurationType::String,
                             required: true,
                             secret: false,
@@ -360,6 +361,23 @@ impl Default for QueryScheduledSourceFactory {
 impl ComponentFactory for QueryScheduledSourceFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
+    }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<super::ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current.descriptor == proposed.descriptor
+                && current.implementation == proposed.implementation
+                && current.configuration == proposed.configuration,
+            "scheduled query helper replacement cannot change identity or stream"
+        );
+        self.validate(proposed)?;
+        Ok(super::ComponentUpdatePlan {
+            mode: super::ComponentUpdateMode::Recreate,
+            data: super::ComponentUpdateData::Preserve,
+        })
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
         let expected = source_descriptor(spec.descriptor.id().clone())?;
@@ -443,7 +461,7 @@ mod tests {
         let scheduling = Arc::new(QuerySchedulingResource::default());
         scheduling.ready(queue.clone());
         let mut source = QueryScheduledSource::new(
-            ComponentId::try_new("clock")?,
+            crate::test_helpers::component_id(751),
             StreamId::try_new("clock/out")?,
             scheduling.clone(),
         )?;
@@ -516,7 +534,7 @@ mod tests {
         scheduling.ready(queue.clone());
         let mut source = QueryScheduledSource {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("scheduled").unwrap(),
+                crate::test_helpers::component_id(773),
                 vec![],
             )
             .unwrap(),
@@ -602,7 +620,7 @@ mod tests {
         let mut native = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: "scheduled-order".into(),
-                id: ComponentId::try_new("query").unwrap(),
+                id: crate::test_helpers::component_id(46),
                 query: text.into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new("query/out").unwrap(),
@@ -625,13 +643,16 @@ mod tests {
                     port: PortId::try_new("in").unwrap(),
                     envelope: GraphChangeCodec::encode_source_event(
                         Arc::new(SourceEventWrapper::with_sequence(
-                            "source".into(),
+                            drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d"
+                            )
+                            .expect("fixture UUID"),
                             SourceEvent::Change(change),
                             chrono::DateTime::from_timestamp_millis(1_000).unwrap(),
                             sequence as u64 + 1,
                             None,
                         )),
-                        &ComponentId::try_new("adapter").unwrap(),
+                        &crate::test_helpers::component_id(721),
                         StreamId::try_new("input").unwrap(),
                         sequence as u64 + 10,
                         None
@@ -649,7 +670,10 @@ mod tests {
             queue: queue_id.clone(),
             capacity: 8,
             source_rank: 0,
-            source_id: Some("source".into()),
+            source_id: Some(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             source_dispatch: None,
             drop_when_full: false,
         }
@@ -665,25 +689,32 @@ mod tests {
         }
         .create_with_resources(&resources)
         .unwrap();
-        let legacy_queue = QueryEventQueue::new(8, ["source"]).unwrap();
-        let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
+        let legacy_queue = QueryEventQueue::new(
+            8,
+            [drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")],
+        )
+        .unwrap();
+        let scheduled_source_id = crate::test_helpers::component_id(722);
         for (ordinal, event) in [
             SourceEventWrapper::with_sequence(
-                "source".into(),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
                 SourceEvent::Change(change("two", false, false)),
                 chrono::DateTime::from_timestamp_millis(7_000).unwrap(),
                 5,
                 None,
             ),
             SourceEventWrapper::with_sequence(
-                future.into(),
+                scheduled_source_id.clone(),
                 SourceEvent::Control(SourceControl::FuturesDue),
                 chrono::DateTime::from_timestamp_millis(6_000).unwrap(),
                 1,
                 None,
             ),
             SourceEventWrapper::with_sequence(
-                "source".into(),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
                 SourceEvent::Change(change("one", false, false)),
                 chrono::DateTime::from_timestamp_millis(5_000).unwrap(),
                 4,
@@ -697,8 +728,8 @@ mod tests {
             legacy_queue.enqueue_wait(event.clone()).await.unwrap();
             let envelope = GraphChangeCodec::encode_source_event(
                 event.clone(),
-                &ComponentId::try_new("adapter").unwrap(),
-                StreamId::try_new(if event.source_id == future {
+                &crate::test_helpers::component_id(721),
+                StreamId::try_new(if event.source_id == scheduled_source_id {
                     "future/input"
                 } else {
                     "input"
@@ -708,7 +739,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            if event.source_id == future {
+            if event.source_id == scheduled_source_id {
                 scheduled.pipe.sender().send(envelope).await.unwrap();
             } else {
                 inputs.pipe.sender().send(envelope).await.unwrap();

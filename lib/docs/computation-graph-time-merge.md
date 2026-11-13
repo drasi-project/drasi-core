@@ -55,7 +55,7 @@ use drasi_lib::computation::v1::*;
 
 let definition = SourceTimeMergeDefinition {
     graph_id: "orders-processing".into(),
-    id: ComponentId::try_new("merge")?,
+    id: ComponentId::generate(),
     sources: vec![
         StreamId::try_new("orders/out")?,
         StreamId::try_new("payments/out")?,

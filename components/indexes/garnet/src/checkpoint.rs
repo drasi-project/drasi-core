@@ -35,9 +35,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use drasi_core::{
+    interface::{
+        CheckpointKey, CheckpointStore, IndexError, OutputPartition, SourceCheckpoint, StorageScope,
+    },
+    ComponentId,
+};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 
+use crate::output_scope::OutputScope;
 use crate::session_state::{BufferReadResult, GarnetSessionState};
 
 /// Garnet/Redis-backed checkpoint store.
@@ -45,46 +51,57 @@ use crate::session_state::{BufferReadResult, GarnetSessionState};
 /// Shares a `GarnetSessionState` with the result/element/future indexes so that
 /// `stage_checkpoint` writes land in the same buffered transaction as index updates.
 pub struct GarnetCheckpointStore {
-    query_id: Arc<str>,
+    scope: OutputScope,
     connection: MultiplexedConnection,
     session_state: Arc<GarnetSessionState>,
 }
 
 impl GarnetCheckpointStore {
     pub fn new(
-        query_id: &str,
+        scope: &StorageScope,
+        component_id: &ComponentId,
         connection: MultiplexedConnection,
         session_state: Arc<GarnetSessionState>,
     ) -> Self {
         Self {
-            query_id: Arc::from(query_id),
+            scope: OutputScope::new(scope, component_id),
             connection,
             session_state,
         }
     }
 
-    fn seq_key(&self, source_id: &str) -> String {
-        format!("ss:{{{}}}:seq:{}", self.query_id, source_id)
+    fn seq_key(&self, key: &CheckpointKey) -> Result<String, IndexError> {
+        Ok(format!(
+            "ss:{{{}}}:seq:{}",
+            self.scope.storage_key(),
+            key.storage_key().map_err(IndexError::other)?
+        ))
     }
 
-    fn pos_key(&self, source_id: &str) -> String {
-        format!("ss:{{{}}}:pos:{}", self.query_id, source_id)
+    fn pos_key(&self, key: &CheckpointKey) -> Result<String, IndexError> {
+        Ok(format!(
+            "ss:{{{}}}:pos:{}",
+            self.scope.storage_key(),
+            key.storage_key().map_err(IndexError::other)?
+        ))
     }
 
     fn sources_key(&self) -> String {
-        format!("ss:{{{}}}:sources", self.query_id)
+        format!("ss:{{{}}}:sources", self.scope.storage_key())
     }
 
     fn config_hash_key(&self) -> String {
-        format!("ss:{{{}}}:config_hash", self.query_id)
+        format!("ss:{{{}}}:config_hash", self.scope.storage_key())
     }
 
-    fn result_sequence_key(&self) -> String {
-        format!("ss:{{{}}}:result_seq", self.query_id)
+    fn result_sequence_key(&self, output: &OutputPartition) -> Result<String, IndexError> {
+        output.validate()?;
+        Ok(format!("{}:result_seq", self.scope.key("ss", output)))
     }
 
-    fn output_generation_key(&self) -> String {
-        format!("ss:{{{}}}:output_gen", self.query_id)
+    fn output_generation_key(&self, output: &OutputPartition) -> Result<String, IndexError> {
+        output.validate()?;
+        Ok(format!("{}:output_gen", self.scope.key("ss", output)))
     }
 }
 
@@ -96,7 +113,7 @@ impl CheckpointStore for GarnetCheckpointStore {
 
     async fn stage_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
         sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
@@ -118,10 +135,10 @@ impl CheckpointStore for GarnetCheckpointStore {
         })?;
 
         // Write sequence
-        buffer.string_set(self.seq_key(source_id), sequence.to_string().into_bytes());
+        buffer.string_set(self.seq_key(source_id)?, sequence.to_string().into_bytes());
 
         // Write or delete position
-        let pos_key = self.pos_key(source_id);
+        let pos_key = self.pos_key(source_id)?;
         match source_position {
             Some(pos) => {
                 buffer.string_set(pos_key, pos.to_vec());
@@ -139,14 +156,14 @@ impl CheckpointStore for GarnetCheckpointStore {
             BufferReadResult::KeyDeleted => None,
             BufferReadResult::NotInBuffer => redis_list,
         };
-        let mut source_ids: Vec<String> = match current_list {
-            Some(ref s) if !s.is_empty() => serde_json::from_str(s).map_err(IndexError::other)?,
-            _ => Vec::new(),
+        let mut source_ids: Vec<CheckpointKey> = match current_list {
+            Some(ref s) => serde_json::from_str(s).map_err(IndexError::other)?,
+            None => Vec::new(),
         };
 
         // Always keep source in the sources list for checkpoint tracking
-        if !source_ids.contains(&source_id.to_string()) {
-            source_ids.push(source_id.to_string());
+        if !source_ids.contains(source_id) {
+            source_ids.push(source_id.clone());
         }
 
         let serialized = serde_json::to_string(&source_ids).map_err(IndexError::other)?;
@@ -157,10 +174,10 @@ impl CheckpointStore for GarnetCheckpointStore {
 
     async fn read_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
     ) -> Result<Option<SourceCheckpoint>, IndexError> {
-        let seq_key = self.seq_key(source_id);
-        let pos_key = self.pos_key(source_id);
+        let seq_key = self.seq_key(source_id)?;
+        let pos_key = self.pos_key(source_id)?;
 
         // Try buffer first, fall through to Redis
         let (seq_val, pos_val) = {
@@ -213,7 +230,9 @@ impl CheckpointStore for GarnetCheckpointStore {
         }))
     }
 
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
         let sources_key = self.sources_key();
 
         // Try buffer first for sources list
@@ -225,7 +244,7 @@ impl CheckpointStore for GarnetCheckpointStore {
             }
         };
 
-        let source_ids: Vec<String> = match sources_from_buffer {
+        let source_ids: Vec<CheckpointKey> = match sources_from_buffer {
             BufferReadResult::Found(bytes) => {
                 let s = String::from_utf8(bytes).map_err(IndexError::other)?;
                 serde_json::from_str(&s).map_err(IndexError::other)?
@@ -257,8 +276,8 @@ impl CheckpointStore for GarnetCheckpointStore {
         let mut con = self.connection.clone();
 
         for source_id in all.keys() {
-            let seq_key = self.seq_key(source_id);
-            let pos_key = self.pos_key(source_id);
+            let seq_key = self.seq_key(source_id)?;
+            let pos_key = self.pos_key(source_id)?;
             con.del::<&str, ()>(&seq_key)
                 .await
                 .map_err(IndexError::other)?;
@@ -282,11 +301,15 @@ impl CheckpointStore for GarnetCheckpointStore {
 
     async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
         let checkpoints = self.read_all_checkpoints().await?;
+        let keys = checkpoints
+            .keys()
+            .map(|key| Ok((self.seq_key(key)?, self.pos_key(key)?)))
+            .collect::<Result<Vec<_>, IndexError>>()?;
         self.session_state
             .with_active_buffer(|buffer| {
-                for source in checkpoints.keys() {
-                    buffer.del(self.seq_key(source));
-                    buffer.del(self.pos_key(source));
+                for (sequence, position) in keys {
+                    buffer.del(sequence);
+                    buffer.del(position);
                 }
                 buffer.del(self.sources_key());
                 buffer.del(self.config_hash_key());
@@ -319,10 +342,10 @@ impl CheckpointStore for GarnetCheckpointStore {
 
     async fn stage_result_sequence(
         &self,
-        _query_id: &str,
+        output: &OutputPartition,
         sequence: u64,
     ) -> Result<(), IndexError> {
-        let key = self.result_sequence_key();
+        let key = self.result_sequence_key(output)?;
         match self.session_state.with_active_buffer(|buffer| {
             buffer.string_set(key, sequence.to_string().into_bytes());
         })? {
@@ -335,10 +358,10 @@ impl CheckpointStore for GarnetCheckpointStore {
 
     async fn write_result_sequence(
         &self,
-        _query_id: &str,
+        output: &OutputPartition,
         sequence: u64,
     ) -> Result<(), IndexError> {
-        let key = self.result_sequence_key();
+        let key = self.result_sequence_key(output)?;
         let mut con = self.connection.clone();
         con.set::<&str, String, ()>(&key, sequence.to_string())
             .await
@@ -346,8 +369,11 @@ impl CheckpointStore for GarnetCheckpointStore {
         Ok(())
     }
 
-    async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
-        let key = self.result_sequence_key();
+    async fn read_result_sequence(
+        &self,
+        output: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        let key = self.result_sequence_key(output)?;
         let mut con = self.connection.clone();
         match con.get::<String, Option<u64>>(key).await {
             Ok(v) => Ok(v),
@@ -357,10 +383,10 @@ impl CheckpointStore for GarnetCheckpointStore {
 
     async fn write_output_generation(
         &self,
-        _query_id: &str,
+        output: &OutputPartition,
         generation: u64,
     ) -> Result<(), IndexError> {
-        let key = self.output_generation_key();
+        let key = self.output_generation_key(output)?;
         let mut con = self.connection.clone();
         con.set::<&str, String, ()>(&key, generation.to_string())
             .await
@@ -368,8 +394,11 @@ impl CheckpointStore for GarnetCheckpointStore {
         Ok(())
     }
 
-    async fn read_output_generation(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
-        let key = self.output_generation_key();
+    async fn read_output_generation(
+        &self,
+        output: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        let key = self.output_generation_key(output)?;
         let mut con = self.connection.clone();
         match con.get::<String, Option<u64>>(key).await {
             Ok(v) => Ok(v),

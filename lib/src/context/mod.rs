@@ -36,7 +36,7 @@
 //!
 //! async fn initialize_source(base: &SourceBase, context: SourceRuntimeContext) {
 //!     // Called from the source's initialize method.
-//!     base.initialize(context).await;
+//!     base.bind_runtime_context(context).await;
 //! }
 //! ```
 //!
@@ -48,7 +48,7 @@
 //!
 //! async fn initialize_reaction(base: &ReactionBase, context: ReactionRuntimeContext) {
 //!     // Called from the reaction's initialize method.
-//!     base.initialize(context).await;
+//!     base.bind_runtime_context(context).await;
 //! }
 //! ```
 
@@ -88,7 +88,7 @@ pub struct SourceRuntimeContext {
     pub instance_id: String,
 
     /// Unique identifier for this source instance
-    pub source_id: String,
+    pub source_id: crate::ComponentId,
 
     /// Optional persistent state storage.
     ///
@@ -138,14 +138,14 @@ impl SourceRuntimeContext {
     /// * `identity_provider` - Optional identity provider for credential injection
     pub fn new(
         instance_id: impl Into<String>,
-        source_id: impl Into<String>,
+        source_id: crate::ComponentId,
         state_store: Option<Arc<dyn StateStoreProvider>>,
         update_tx: impl Into<ComponentUpdateSender>,
         identity_provider: Option<Arc<dyn IdentityProvider>>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
-            source_id: source_id.into(),
+            source_id,
             state_store,
             update_tx: update_tx.into(),
             identity_provider,
@@ -160,7 +160,7 @@ impl SourceRuntimeContext {
     }
 
     /// Get the source's unique identifier.
-    pub fn source_id(&self) -> &str {
+    pub fn source_id(&self) -> &crate::ComponentId {
         &self.source_id
     }
 
@@ -229,7 +229,10 @@ pub struct ReactionRuntimeContext {
     pub instance_id: String,
 
     /// Unique identifier for this reaction instance
-    pub reaction_id: String,
+    pub reaction_id: crate::ComponentId,
+
+    /// Ordered, graph-resolved query bindings for this reaction generation.
+    pub query_ids: Vec<crate::ComponentId>,
 
     /// Optional persistent state storage.
     ///
@@ -282,14 +285,16 @@ impl ReactionRuntimeContext {
     /// * `identity_provider` - Optional identity provider for credential injection
     pub fn new(
         instance_id: impl Into<String>,
-        reaction_id: impl Into<String>,
+        reaction_id: crate::ComponentId,
+        query_ids: Vec<crate::ComponentId>,
         state_store: Option<Arc<dyn StateStoreProvider>>,
         update_tx: impl Into<ComponentUpdateSender>,
         identity_provider: Option<Arc<dyn IdentityProvider>>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
-            reaction_id: reaction_id.into(),
+            reaction_id,
+            query_ids,
             state_store,
             update_tx: update_tx.into(),
             identity_provider,
@@ -304,7 +309,7 @@ impl ReactionRuntimeContext {
     }
 
     /// Get the reaction's unique identifier.
-    pub fn reaction_id(&self) -> &str {
+    pub fn reaction_id(&self) -> &crate::ComponentId {
         &self.reaction_id
     }
 
@@ -364,7 +369,7 @@ pub struct QueryRuntimeContext {
     pub instance_id: String,
 
     /// Unique identifier for this query instance
-    pub query_id: String,
+    pub query_id: crate::ComponentId,
 
     /// Lifecycle sender for graph-owned status observation.
     ///
@@ -385,12 +390,12 @@ impl QueryRuntimeContext {
     /// * `update_tx` - lifecycle sender, or an ordinary MPSC sender for compatibility
     pub fn new(
         instance_id: impl Into<String>,
-        query_id: impl Into<String>,
+        query_id: crate::ComponentId,
         update_tx: impl Into<ComponentUpdateSender>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
-            query_id: query_id.into(),
+            query_id,
             update_tx: update_tx.into(),
         }
     }
@@ -401,7 +406,7 @@ impl QueryRuntimeContext {
     }
 
     /// Get the query's unique identifier.
-    pub fn query_id(&self) -> &str {
+    pub fn query_id(&self) -> &crate::ComponentId {
         &self.query_id
     }
 }
@@ -433,14 +438,19 @@ mod tests {
 
         let context = SourceRuntimeContext::new(
             "test-instance",
-            "test-source",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             Some(state_store),
             update_tx,
             None,
         );
 
         assert_eq!(context.instance_id(), "test-instance");
-        assert_eq!(context.source_id(), "test-source");
+        assert_eq!(
+            context.source_id(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert!(context.state_store().is_some());
     }
 
@@ -448,10 +458,20 @@ mod tests {
     async fn test_source_runtime_context_without_state_store() {
         let update_tx = test_update_tx();
 
-        let context =
-            SourceRuntimeContext::new("test-instance", "test-source", None, update_tx, None);
+        let context = SourceRuntimeContext::new(
+            "test-instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            None,
+            update_tx,
+            None,
+        );
 
-        assert_eq!(context.source_id(), "test-source");
+        assert_eq!(
+            context.source_id(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert!(context.state_store().is_none());
     }
 
@@ -462,7 +482,8 @@ mod tests {
 
         let context = SourceRuntimeContext::new(
             "test-instance",
-            "test-source",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             Some(state_store),
             update_tx,
             None,
@@ -479,14 +500,20 @@ mod tests {
 
         let context = ReactionRuntimeContext::new(
             "test-instance",
-            "test-reaction",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
             Some(state_store),
             update_tx,
             None,
         );
 
         assert_eq!(context.instance_id(), "test-instance");
-        assert_eq!(context.reaction_id(), "test-reaction");
+        assert_eq!(
+            context.reaction_id(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID")
+        );
         assert!(context.state_store().is_some());
     }
 
@@ -494,10 +521,21 @@ mod tests {
     async fn test_reaction_runtime_context_without_state_store() {
         let update_tx = test_update_tx();
 
-        let context =
-            ReactionRuntimeContext::new("test-instance", "test-reaction", None, update_tx, None);
+        let context = ReactionRuntimeContext::new(
+            "test-instance",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
+            None,
+            update_tx,
+            None,
+        );
 
-        assert_eq!(context.reaction_id(), "test-reaction");
+        assert_eq!(
+            context.reaction_id(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID")
+        );
         assert!(context.state_store().is_none());
     }
 
@@ -508,7 +546,9 @@ mod tests {
 
         let context = ReactionRuntimeContext::new(
             "test-instance",
-            "test-reaction",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+                .expect("fixture UUID"),
+            vec![],
             Some(state_store),
             update_tx,
             None,
@@ -521,7 +561,14 @@ mod tests {
     #[test]
     fn test_source_runtime_context_debug() {
         let update_tx = test_update_tx();
-        let context = SourceRuntimeContext::new("test-instance", "test", None, update_tx, None);
+        let context = SourceRuntimeContext::new(
+            "test-instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            None,
+            update_tx,
+            None,
+        );
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("SourceRuntimeContext"));
         assert!(debug_str.contains("test"));
@@ -530,7 +577,15 @@ mod tests {
     #[test]
     fn test_reaction_runtime_context_debug() {
         let update_tx = test_update_tx();
-        let context = ReactionRuntimeContext::new("test-instance", "test", None, update_tx, None);
+        let context = ReactionRuntimeContext::new(
+            "test-instance",
+            crate::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            vec![],
+            None,
+            update_tx,
+            None,
+        );
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("ReactionRuntimeContext"));
         assert!(debug_str.contains("test"));
@@ -539,16 +594,30 @@ mod tests {
     #[tokio::test]
     async fn test_query_runtime_context_creation() {
         let update_tx = test_update_tx();
-        let context = QueryRuntimeContext::new("test-instance", "test-query", update_tx);
+        let context = QueryRuntimeContext::new(
+            "test-instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
+            update_tx,
+        );
 
         assert_eq!(context.instance_id(), "test-instance");
-        assert_eq!(context.query_id(), "test-query");
+        assert_eq!(
+            context.query_id(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn test_query_runtime_context_clone() {
         let update_tx = test_update_tx();
-        let context = QueryRuntimeContext::new("test-instance", "test-query", update_tx);
+        let context = QueryRuntimeContext::new(
+            "test-instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
+            update_tx,
+        );
 
         let cloned = context.clone();
         assert_eq!(cloned.query_id(), context.query_id());
@@ -558,9 +627,14 @@ mod tests {
     #[test]
     fn test_query_runtime_context_debug() {
         let update_tx = test_update_tx();
-        let context = QueryRuntimeContext::new("test-instance", "test-query", update_tx);
+        let context = QueryRuntimeContext::new(
+            "test-instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
+            update_tx,
+        );
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("QueryRuntimeContext"));
-        assert!(debug_str.contains("test-query"));
+        assert!(debug_str.contains(context.query_id().as_str()));
     }
 }

@@ -220,7 +220,7 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -250,7 +250,7 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
                 .collect(),
         };
 
-        let mut source = crate::PostgresSourceBuilder::new(id)
+        let mut source = crate::PostgresSourceBuilder::new(id.clone())
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;

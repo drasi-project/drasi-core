@@ -154,8 +154,10 @@ fn service_negotiation_does_not_change_old_metadata_or_grant_undeclared_resource
     let dependencies = &new.factories()[0].descriptor().dependencies;
     assert_eq!(dependencies["admission"].minimum, 0);
     assert_eq!(dependencies["admission"].maximum, Some(1));
-    let mut spec =
-        old.factories()[0].specification(ComponentId::try_new("source")?, serde_json::json!({}))?;
+    let mut spec = old.factories()[0].specification(
+        ComponentId::try_new("55f1777b-fd8e-511e-ae80-87fec79a2466")?,
+        serde_json::json!({}),
+    )?;
     spec.dependencies.insert(
         Arc::from("admission"),
         vec![ResourceId::try_new("journal")?],
@@ -185,7 +187,13 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
     };
     let channel = QosChannel::persistent(
         definition.clone(),
-        provider.create_indexes("graph", "channel").await?,
+        provider
+            .create_indexes(
+                "graph",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000129")
+                    .expect("fixture UUID"),
+            )
+            .await?,
         FactoryRegistry::standard().envelope_codec(NonZeroUsize::new(1024 * 1024).unwrap())?,
         "journal",
     )
@@ -194,7 +202,7 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
         .enable_admission(AdmissionOptions {
             construction_scope: "graph".into(),
             graph_id: "graph".into(),
-            component_id: ComponentId::try_new("source")?,
+            component_id: ComponentId::try_new("55f1777b-fd8e-511e-ae80-87fec79a2466")?,
             failure_scope: FailureMode::ProcessRestart,
             max_producers: NonZeroUsize::new(2).unwrap(),
             receipts_per_producer: NonZeroUsize::new(2).unwrap(),
@@ -202,8 +210,8 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
         .await?;
     let plugin = plugin(true)?;
     let factory = plugin.factories()[0].clone();
-    let source = ComponentId::try_new("source")?;
-    let sink = ComponentId::try_new("sink")?;
+    let source = ComponentId::try_new("55f1777b-fd8e-511e-ae80-87fec79a2466")?;
+    let sink = ComponentId::try_new("9c084f4c-64cc-5879-a3c3-e1de29bea7b9")?;
     let resource = ResourceId::try_new("journal")?;
     let mut spec = factory.specification(source.clone(), serde_json::json!({}))?;
     spec.dependencies
@@ -217,19 +225,28 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
             binding: "journal".into(),
         })?
         .provide_resource(resource.clone(), channel.resource())?
-        .component(spec, factory)
-        .sink(Box::new(Sink {
-            descriptor: ComponentDescriptor::try_new(
-                sink.clone(),
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    GraphChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?,
-            seen: seen.clone(),
-        }))
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            spec,
+            factory,
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(Sink {
+                descriptor: ComponentDescriptor::try_new(
+                    sink.clone(),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?,
+                seen: seen.clone(),
+            }),
+        )
         .bind_stream(
             Endpoint::new(source.clone(), PortId::try_new("out")?),
             definition.stream.clone(),
@@ -258,7 +275,9 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
             .expect("injected native service");
         assert_eq!(
             service
-                .register_producer(&ComponentId::try_new("client")?)
+                .register_producer(&ComponentId::try_new(
+                    "5ddadfa1-268c-5a36-80fa-e43b8baac458"
+                )?)
                 .await
                 .unwrap_err()
                 .kind,
@@ -270,7 +289,9 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
         assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
         let session = loop {
             match service
-                .register_producer(&ComponentId::try_new("client")?)
+                .register_producer(&ComponentId::try_new(
+                    "5ddadfa1-268c-5a36-80fa-e43b8baac458",
+                )?)
                 .await
             {
                 Err(error) if error.kind == sdk::AdmissionErrorKind::Closed => {
@@ -315,7 +336,8 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
             sdk::AdmissionErrorKind::SessionExpired
         );
         service.report_failure("deliberate listener failure")?;
-        while control.observed().components[&ComponentId::try_new("source")?]
+        while control.observed().components
+            [&ComponentId::try_new("55f1777b-fd8e-511e-ae80-87fec79a2466")?]
             .failure
             .is_none()
         {
@@ -323,7 +345,9 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
         }
         assert!(format!(
             "{:?}",
-            control.observed().components[&ComponentId::try_new("source")?].failure
+            control.observed().components
+                [&ComponentId::try_new("55f1777b-fd8e-511e-ae80-87fec79a2466")?]
+                .failure
         )
         .contains("deliberate listener failure"));
         Ok::<_, anyhow::Error>(service)
@@ -344,7 +368,9 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
     drop(graph);
     assert_eq!(
         service
-            .register_producer(&ComponentId::try_new("late")?)
+            .register_producer(&ComponentId::try_new(
+                "d8497dcf-ded6-590b-851c-9b9b96ce6cf9"
+            )?)
             .await
             .unwrap_err()
             .kind,

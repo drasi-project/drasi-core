@@ -64,11 +64,11 @@ impl BridgeSource {
         }
         if let Some(admission) = &admission {
             anyhow::ensure!(
-                admission.component_id().as_str() == config.receiver_endpoint
+                admission.component_id() == &config.receiver_endpoint
                     && admission.identity().construction_scope() == config.receiver_instance
                     && admission.identity().graph_id() == graph_id
                     && admission.port().as_str() == "out"
-                    && admission.channel().definition().stream.as_str() == config.stream,
+                    && admission.channel().definition().stream == config.stream,
                 "admission service scope, stream or component does not match bridge source"
             );
             admission

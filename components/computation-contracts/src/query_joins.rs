@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// This creates an edge when `Order.customer_id == Customer.id`, usable in
 /// `MATCH (o:Order)-[:CUSTOMER]->(c:Customer)`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryJoinConfig {
     /// Unique identifier for the join (should match relationship type in query).
     pub id: String,
@@ -33,7 +33,7 @@ pub struct QueryJoinConfig {
 }
 
 /// One side of a synthetic join, identifying a node label and matching property.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryJoinKeyConfig {
     /// Node label to match.
     pub label: String,

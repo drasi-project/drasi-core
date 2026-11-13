@@ -210,12 +210,13 @@ impl Drop for HostProcess {
     }
 }
 
-fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).unwrap()
+fn id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
 }
 
-fn add(config: &mut HostConfig, specification: ComponentSpecification) {
+fn add(config: &mut HostConfig, name: ComponentName, specification: ComponentSpecification) {
     config.desired.topology.components.push(DesiredComponent {
+        name,
         descriptor: specification.descriptor.clone(),
         role: specification.role,
         completion: specification.completion,
@@ -226,8 +227,17 @@ fn add(config: &mut HostConfig, specification: ComponentSpecification) {
     });
 }
 
-fn child(parent: &mut HostConfig, name: &str, config: &HostConfig) -> Result<()> {
-    add(parent, SupervisorFactory::specification(id(name), config)?);
+fn child(
+    parent: &mut HostConfig,
+    component: ComponentId,
+    name: ComponentName,
+    config: &HostConfig,
+) -> Result<()> {
+    add(
+        parent,
+        name,
+        SupervisorFactory::specification(component, config)?,
+    );
     Ok(())
 }
 
@@ -241,8 +251,16 @@ fn fixture() -> Result<PathBuf> {
     } else {
         "libinstance_host_fixture.so"
     };
-    let path = executable.parent().unwrap().join("examples").join(name);
-    ensure!(path.is_file(), "build the real native fixture first: cargo build -p drasi-instance-host --features dynamic-plugin --example instance_host_fixture ({})", path.display());
+    let path = executable
+        .parent()
+        .unwrap()
+        .join("plugins/examples")
+        .join(name);
+    ensure!(
+        path.is_file(),
+        "first run make build-test-plugins (missing {})",
+        path.display()
+    );
     Ok(path)
 }
 
@@ -264,8 +282,9 @@ fn native(
     });
     add(
         config,
+        ComponentName::try_new("native")?,
         ComponentSpecification {
-            descriptor: ComponentDescriptor::try_new(id("native"), Vec::new())?
+            descriptor: ComponentDescriptor::try_new(id(466), Vec::new())?
                 .with_plugin_identity(implementation.plugin.clone().expect("fixture provenance"))?,
             role: ComponentRole::Service,
             completion: None,
@@ -308,9 +327,19 @@ fn same_normal_host_hierarchy_uses_child_only_native_library_and_stable_namespac
     let mut grandchild = HostConfig::empty("grandchild", directory.join("c"));
     native(&mut grandchild, "healthy", &directory.join("native"), 0, 0)?;
     let mut child_config = HostConfig::empty("child", directory.join("b"));
-    child(&mut child_config, "grandchild-owner", &grandchild)?;
+    child(
+        &mut child_config,
+        ComponentId::try_new("00000000-0000-0000-0000-000000000463")?,
+        ComponentName::try_new("grandchild-owner")?,
+        &grandchild,
+    )?;
     let mut config = HostConfig::empty("parent", directory.join("a"));
-    child(&mut config, "child-owner", &child_config)?;
+    child(
+        &mut config,
+        ComponentId::try_new("00000000-0000-0000-0000-00000000031c")?,
+        ComponentName::try_new("child-owner")?,
+        &child_config,
+    )?;
     let mut parent = HostProcess::spawn(&config, &directory)?;
     let status = parent.wait(|status| status.ready)?;
     assert!(status.loaded_plugins.is_empty());
@@ -366,7 +395,12 @@ fn initialization_failure_is_not_readiness_and_keeps_native_desired_definition()
         0,
     )?;
     let mut config = HostConfig::empty("parent", directory.join("a"));
-    child(&mut config, "child-owner", &child_config)?;
+    child(
+        &mut config,
+        ComponentId::try_new("00000000-0000-0000-0000-00000000031c")?,
+        ComponentName::try_new("child-owner")?,
+        &child_config,
+    )?;
     let mut parent = HostProcess::spawn(&config, &directory)?;
     let status = parent.wait(|status| {
         status
@@ -417,7 +451,12 @@ fn accepted_stop_survives_disconnected_caller_and_force_reaps_pending_native_cle
     )?;
     let mut config = HostConfig::empty("parent", directory.join("a"));
     config.runtime.operation_timeout_ms = 500;
-    child(&mut config, "child-owner", &child_config)?;
+    child(
+        &mut config,
+        ComponentId::try_new("00000000-0000-0000-0000-00000000031c")?,
+        ComponentName::try_new("child-owner")?,
+        &child_config,
+    )?;
     let mut parent = HostProcess::spawn(&config, &directory)?;
     let status = parent.wait(|status| status.ready)?;
     let generation = status.children[0].generation.unwrap();
@@ -427,7 +466,7 @@ fn accepted_stop_survives_disconnected_caller_and_force_reaps_pending_native_cle
     let request = serde_json::to_vec(&json!({
         "version":1, "instance_id":credentials.instance_id, "generation":credentials.generation,
         "token":credentials.token, "request_id":operation_id,
-        "command":{"kind":"stop_child", "component":"child-owner", "generation":generation}
+        "command":{"kind":"stop_child", "component":id(796).to_string(), "generation":generation}
     }))?;
     let mut socket = UnixStream::connect(&credentials.endpoint)?;
     socket.write_all(&(request.len() as u32).to_be_bytes())?;
@@ -439,7 +478,7 @@ fn accepted_stop_survives_disconnected_caller_and_force_reaps_pending_native_cle
         "timed-out stop must retain, not silently kill"
     );
     let forced = parent.operation(ControlCommand::ForceChild {
-        component: "child-owner".into(),
+        component: id(796).clone(),
         generation,
     })?;
     let outcome = parent.wait_operation(forced)?;
@@ -456,7 +495,12 @@ fn terminal_crash_requires_explicit_repair_and_stale_generation_cannot_kill_repl
     let directory = Directory::new()?;
     let child_config = HostConfig::empty("child", directory.join("b"));
     let mut config = HostConfig::empty("parent", directory.join("a"));
-    child(&mut config, "child-owner", &child_config)?;
+    child(
+        &mut config,
+        ComponentId::try_new("00000000-0000-0000-0000-00000000031c")?,
+        ComponentName::try_new("child-owner")?,
+        &child_config,
+    )?;
     let mut parent = HostProcess::spawn(&config, &directory)?;
     let status = parent.wait(|status| status.ready)?;
     let old = status.children[0].clone();
@@ -468,7 +512,7 @@ fn terminal_crash_requires_explicit_repair_and_stale_generation_cannot_kill_repl
         status.children[0].phase == ChildPhase::Failed && status.children[0].reaped
     })?;
     let repair = parent.operation(ControlCommand::RepairChild {
-        component: "child-owner".into(),
+        component: id(796).clone(),
         generation: old.generation.unwrap(),
     })?;
     let operation = parent.wait_operation(repair)?;
@@ -483,7 +527,7 @@ fn terminal_crash_requires_explicit_repair_and_stale_generation_cannot_kill_repl
         .request(Uuid::new_v4(), ControlCommand::StopTree)
         .is_err());
     let stale = parent.operation(ControlCommand::ForceChild {
-        component: "child-owner".into(),
+        component: id(796).clone(),
         generation: old.generation.unwrap(),
     })?;
     assert_ne!(
@@ -505,9 +549,19 @@ fn abrupt_parent_death_terminates_noncooperative_grandchild_without_graph_heartb
     grandchild.runtime.worker_threads = 1;
     native(&mut grandchild, "block", &directory.join("busy"), 0, 0)?;
     let mut child_config = HostConfig::empty("child", directory.join("b"));
-    child(&mut child_config, "grandchild-owner", &grandchild)?;
+    child(
+        &mut child_config,
+        ComponentId::try_new("00000000-0000-0000-0000-000000000463")?,
+        ComponentName::try_new("grandchild-owner")?,
+        &grandchild,
+    )?;
     let mut config = HostConfig::empty("parent", directory.join("a"));
-    child(&mut config, "child-owner", &child_config)?;
+    child(
+        &mut config,
+        ComponentId::try_new("00000000-0000-0000-0000-00000000031c")?,
+        ComponentName::try_new("child-owner")?,
+        &child_config,
+    )?;
     let mut parent = HostProcess::spawn(&config, &directory)?;
     let deadline = Instant::now() + WATCHDOG;
     while !directory.join("busy.blocked").exists() && Instant::now() < deadline {
@@ -569,8 +623,9 @@ fn persisted_normal_management_keeps_waiting_and_failed_state_and_excludes_dupli
         let component = if mode == "missing-factory" {
             add(
                 &mut changed,
+                ComponentName::try_new("unavailable")?,
                 ComponentSpecification {
-                    descriptor: ComponentDescriptor::try_new(id("unavailable"), Vec::new())?,
+                    descriptor: ComponentDescriptor::try_new(id(797), Vec::new())?,
                     role: ComponentRole::Service,
                     completion: None,
                     implementation: ImplementationIdentity::try_new("not-installed/service", "1")?,
@@ -579,11 +634,11 @@ fn persisted_normal_management_keeps_waiting_and_failed_state_and_excludes_dupli
                     dependencies: BTreeMap::new(),
                 },
             );
-            "unavailable"
+            id(797).to_string()
         } else {
             native(&mut changed, mode, &directory.join("native"), 0, 0)?;
             config.plugins = changed.plugins.clone();
-            "native"
+            id(466).to_string()
         };
         let expected = changed.desired.clone();
         let mut host = HostProcess::spawn(&config, &directory)?;
@@ -617,10 +672,9 @@ fn persisted_normal_management_keeps_waiting_and_failed_state_and_excludes_dupli
             status.configuration_revision == Some(revision)
                 && if mode == "missing-factory" {
                     status.phase == HostPhase::Running
-                        && status
-                            .components
-                            .iter()
-                            .any(|node| node.id == component && node.realization == "Blocked")
+                        && status.components.iter().any(|node| {
+                            node.id == component.as_str() && node.realization == "Blocked"
+                        })
                 } else {
                     status.phase == HostPhase::Failed
                 }
@@ -629,7 +683,7 @@ fn persisted_normal_management_keeps_waiting_and_failed_state_and_excludes_dupli
         let state = observed
             .components
             .iter()
-            .find(|node| node.id == component)
+            .find(|node| node.id == component.as_str())
             .context("persisted component observation")?;
         if mode == "missing-factory" {
             assert!(observed.healthy);
@@ -671,7 +725,12 @@ async fn cancelling_embedded_host_retains_independent_child_reaping() -> Result<
     let directory = Directory::new()?;
     let mut config = HostConfig::empty("embedded", directory.join("a"));
     let child_config = HostConfig::empty("child", directory.join("b"));
-    child(&mut config, "child-owner", &child_config)?;
+    child(
+        &mut config,
+        ComponentId::try_new("00000000-0000-0000-0000-00000000031c")?,
+        ComponentName::try_new("child-owner")?,
+        &child_config,
+    )?;
     let credentials = Credentials::new(&config)?;
     let client = ControlClient::new(credentials.clone());
     let task = tokio::spawn(drasi_instance_host::run(
@@ -738,7 +797,7 @@ fn standard_plugin(implementation: &str) -> Result<(&'static str, PathBuf)> {
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_drasi-instance-host"));
     let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| executable.parent().unwrap().to_owned());
+        .unwrap_or_else(|| executable.parent().unwrap().join("plugins"));
     let path = directory.join(format!(
         "{}{}{}",
         std::env::consts::DLL_PREFIX,
@@ -754,7 +813,8 @@ fn standard_plugin(implementation: &str) -> Result<(&'static str, PathBuf)> {
 
 fn standard(
     config: &mut HostConfig,
-    name: &str,
+    component: ComponentId,
+    name: ComponentName,
     implementation: &str,
     role: ComponentRole,
     values: serde_json::Value,
@@ -790,8 +850,9 @@ fn standard(
     }
     add(
         config,
+        name,
         ComponentSpecification {
-            descriptor: ComponentDescriptor::try_new(id(name), ports)?.with_plugin_identity(
+            descriptor: ComponentDescriptor::try_new(component, ports)?.with_plugin_identity(
                 identity
                     .plugin
                     .clone()
@@ -828,15 +889,15 @@ fn standard(
     Ok(())
 }
 
-fn connect(config: &mut HostConfig, producer: &str, consumer: &str) -> Result<()> {
+fn connect(config: &mut HostConfig, producer: &ComponentId, consumer: &ComponentId) -> Result<()> {
     config
         .desired
         .topology
         .relationships
         .push(DesiredRelationship {
             definition: EdgeDefinition::new(
-                Endpoint::new(id(producer), PortId::try_new("out")?),
-                Endpoint::new(id(consumer), PortId::try_new("in")?),
+                Endpoint::new(producer.clone(), PortId::try_new("out")?),
+                Endpoint::new(consumer.clone(), PortId::try_new("in")?),
             ),
             policy: RelationshipPolicy::default(),
             pipe: DesiredPipe::Bounded { capacity: 8 },
@@ -846,6 +907,7 @@ fn connect(config: &mut HostConfig, producer: &str, consumer: &str) -> Result<()
 
 fn bridge(
     config: &mut HostConfig,
+    name: ComponentName,
     value: &drasi_computation_bridge_common::BridgeConfig,
     role: ComponentRole,
 ) -> Result<()> {
@@ -866,7 +928,7 @@ fn bridge(
         });
     config.desired.topology.resource_configurations.insert(control,
         json!({"kind": if role == ComponentRole::Source { "bridgeIngressControl" } else { "bridgeEgressControl" }}));
-    add(config, specification);
+    add(config, name, specification);
     if role == ComponentRole::Source {
         config
             .desired
@@ -875,10 +937,7 @@ fn bridge(
             .last_mut()
             .unwrap()
             .streams
-            .insert(
-                PortId::try_new("out")?,
-                StreamId::try_new(value.stream.as_str())?,
-            );
+            .insert(PortId::try_new("out")?, value.stream.clone());
     }
     Ok(())
 }
@@ -895,16 +954,16 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
         link_id: "input".into(),
         sender_instance: "parent".into(),
         receiver_instance: "child".into(),
-        sender_endpoint: "to-child".into(),
-        receiver_endpoint: "from-parent".into(),
-        stream: "p/input".into(),
-        peer_stream: "c/input".into(),
+        sender_endpoint: id(798).clone(),
+        receiver_endpoint: id(799).clone(),
+        stream: StreamId::try_new("p/input")?,
+        peer_stream: StreamId::try_new("c/input")?,
         delivery: PortableDelivery::Events,
         profile: Profile::Volatile,
         failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
         namespace: Namespace {
             version: 1,
-            source_prefixes: vec!["parent/".into()],
+            source_prefixes: vec![id(962).to_string()],
         },
         transport: Transport::Unix {
             data_path: directory.join("in.d").to_string_lossy().into_owned(),
@@ -918,10 +977,10 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
         link_id: "output".into(),
         sender_instance: "child".into(),
         receiver_instance: "parent".into(),
-        sender_endpoint: "to-parent".into(),
-        receiver_endpoint: "from-child".into(),
-        stream: "c/output".into(),
-        peer_stream: "p/output".into(),
+        sender_endpoint: id(800).clone(),
+        receiver_endpoint: id(801).clone(),
+        stream: StreamId::try_new("c/output")?,
+        peer_stream: StreamId::try_new("p/output")?,
         transport: Transport::Unix {
             data_path: directory.join("out.d").to_string_lossy().into_owned(),
             control_path: directory.join("out.c").to_string_lossy().into_owned(),
@@ -932,7 +991,8 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
     std::mem::swap(&mut returned.stream, &mut returned.peer_stream);
     standard(
         &mut parent_config,
-        "parent/input",
+        ComponentId::try_new("00000000-0000-0000-0000-0000000003c2")?,
+        ComponentName::try_new("parent/input")?,
         "drasi.standard/volatile-counter",
         ComponentRole::Source,
         json!({"stream":"p/input","count":64,"interval_ms":20}),
@@ -948,45 +1008,70 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
     let output = directory.join("results");
     standard(
         &mut parent_config,
-        "parent/capture",
+        ComponentId::try_new("00000000-0000-0000-0000-0000000003c4")?,
+        ComponentName::try_new("parent/capture")?,
         "drasi.standard/capture",
         ComponentRole::Sink,
         json!({"path":output}),
     )?;
-    bridge(&mut parent_config, &outgoing, ComponentRole::Sink)?;
-    bridge(&mut parent_config, &returned, ComponentRole::Source)?;
-    bridge(&mut child_config, &incoming, ComponentRole::Source)?;
-    bridge(&mut child_config, &returning, ComponentRole::Sink)?;
+    bridge(
+        &mut parent_config,
+        ComponentName::try_new("to-child")?,
+        &outgoing,
+        ComponentRole::Sink,
+    )?;
+    bridge(
+        &mut parent_config,
+        ComponentName::try_new("from-child")?,
+        &returned,
+        ComponentRole::Source,
+    )?;
+    bridge(
+        &mut child_config,
+        ComponentName::try_new("from-parent")?,
+        &incoming,
+        ComponentRole::Source,
+    )?;
+    bridge(
+        &mut child_config,
+        ComponentName::try_new("to-parent")?,
+        &returning,
+        ComponentRole::Sink,
+    )?;
     standard(
         &mut child_config,
-        "child/arithmetic",
+        ComponentId::try_new("00000000-0000-0000-0000-0000000003c3")?,
+        ComponentName::try_new("child/arithmetic")?,
         "drasi.standard/arithmetic",
         ComponentRole::Transformer,
         json!({"stream":"c/output","add":10}),
     )?;
-    connect(&mut parent_config, "parent/input", "to-child")?;
-    connect(&mut parent_config, "from-child", "parent/capture")?;
-    connect(&mut child_config, "from-parent", "child/arithmetic")?;
-    connect(&mut child_config, "child/arithmetic", "to-parent")?;
+    connect(&mut parent_config, &id(962), &id(798))?;
+    connect(&mut parent_config, &id(801), &id(964))?;
+    connect(&mut child_config, &id(799), &id(963))?;
+    connect(&mut child_config, &id(963), &id(800))?;
     child_config.stop_stages = vec![StopStage::Quiesce {
-        components: vec![id("from-parent"), id("child/arithmetic"), id("to-parent")],
+        components: vec![id(799), id(963), id(800)],
     }];
-    child(&mut parent_config, "child-owner", &child_config)?;
+    child(
+        &mut parent_config,
+        ComponentId::try_new("00000000-0000-0000-0000-00000000031c")?,
+        ComponentName::try_new("child-owner")?,
+        &child_config,
+    )?;
     parent_config.stop_stages = vec![
         StopStage::Quiesce {
-            components: vec![id("parent/input"), id("to-child")],
+            components: vec![id(962), id(798)],
         },
-        StopStage::StopChild {
-            component: id("child-owner"),
-        },
+        StopStage::StopChild { component: id(796) },
         StopStage::Quiesce {
-            components: vec![id("from-child"), id("parent/capture")],
+            components: vec![id(801), id(964)],
         },
     ];
     let mut parent = HostProcess::spawn(&parent_config, &directory)?;
     let initial = parent.wait(|status| status.ready)?;
     let start = parent.operation(ControlCommand::StartComponents {
-        components: vec![id("parent/input")],
+        components: vec![id(962)],
     })?;
     assert_eq!(
         parent.wait_operation(start)?.phase,
@@ -1018,10 +1103,12 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
     let final_observation: HostObservation = serde_json::from_slice(&std::fs::read(
         parent_config.state_dir.join("last-observation.json"),
     )?)?;
-    let expected = final_observation.stop_cuts["egress:to-child"].client_sequence;
+    let to_child_cut = format!("egress:{}", id(798));
+    let from_child_cut = format!("ingress:{}", id(801));
+    let expected = final_observation.stop_cuts[&to_child_cut].client_sequence;
     assert!((8..=64).contains(&expected));
     assert_eq!(
-        final_observation.stop_cuts["ingress:from-child"].client_sequence,
+        final_observation.stop_cuts[&from_child_cut].client_sequence,
         expected
     );
     let codec = FactoryRegistry::standard()
@@ -1040,7 +1127,7 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
             else {
                 panic!("expected graph insertion")
             };
-            assert_eq!(metadata.reference.source_id.as_ref(), "parent/input");
+            assert_eq!(metadata.reference.namespace.as_ref(), id(962).as_str());
             let drasi_core::models::ElementValue::Integer(value) = properties.get("value").unwrap()
             else {
                 panic!("expected arithmetic value")
@@ -1066,10 +1153,10 @@ fn an_empty_bridge_queue_without_a_peer_cut_cannot_claim_graceful_stop() -> Resu
         link_id: "inlet".into(),
         sender_instance: "external".into(),
         receiver_instance: "receiver".into(),
-        sender_endpoint: "outlet".into(),
-        receiver_endpoint: "inlet".into(),
-        stream: "receiver/in".into(),
-        peer_stream: "external/out".into(),
+        sender_endpoint: id(802).clone(),
+        receiver_endpoint: id(803).clone(),
+        stream: StreamId::try_new("receiver/in")?,
+        peer_stream: StreamId::try_new("external/out")?,
         delivery: PortableDelivery::Events,
         profile: Profile::Volatile,
         failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
@@ -1083,17 +1170,23 @@ fn an_empty_bridge_queue_without_a_peer_cut_cannot_claim_graceful_stop() -> Resu
         },
         limits: Limits::default(),
     };
-    bridge(&mut config, &incoming, ComponentRole::Source)?;
+    bridge(
+        &mut config,
+        ComponentName::try_new("inlet")?,
+        &incoming,
+        ComponentRole::Source,
+    )?;
     standard(
         &mut config,
-        "capture",
+        ComponentId::try_new("00000000-0000-0000-0000-000000000365")?,
+        ComponentName::try_new("capture")?,
         "drasi.standard/capture",
         ComponentRole::Sink,
         json!({"path":directory.join("output")}),
     )?;
-    connect(&mut config, "inlet", "capture")?;
+    connect(&mut config, &id(803), &id(869))?;
     config.stop_stages = vec![StopStage::Quiesce {
-        components: vec![id("inlet"), id("capture")],
+        components: vec![id(803), id(869)],
     }];
     let mut host = HostProcess::spawn(&config, &directory)?;
     host.wait(|status| status.ready)?;
@@ -1109,7 +1202,7 @@ fn an_empty_bridge_queue_without_a_peer_cut_cannot_claim_graceful_stop() -> Resu
         .status()?
         .components
         .iter()
-        .any(|component| component.id == "inlet" && component.lifecycle == "Running"));
+        .any(|component| component.id == id(803).to_string() && component.lifecycle == "Running"));
 
     let mut sender = incoming;
     std::mem::swap(&mut sender.stream, &mut sender.peer_stream);

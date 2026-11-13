@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Optional activation-credentials protocol. Base tables and wire version 1 are
+//! Optional activation-credentials protocol. Base tables and the current wire version are
 //! unchanged. A supporting factory accepts the versioned creation envelope on
 //! its existing create callbacks, and bound instances accept credential payloads
 //! only on their normal, owned START operation. No credential-fetch RPC exists.
@@ -53,9 +53,9 @@ mod tests {
         );
         assert_eq!(
             size_of::<crate::FactoryVTable>(),
-            16 + 2 * size_of::<usize>()
+            16 + 3 * size_of::<usize>()
         );
-        assert_eq!(crate::ABI_VERSION, "1.0.0");
-        assert_eq!(crate::WIRE_VERSION, 1);
+        assert_eq!(crate::ABI_VERSION, "3.0.0");
+        assert_eq!(crate::WIRE_VERSION, 3);
     }
 }

@@ -41,7 +41,7 @@ pub struct StreamState {
 }
 
 pub struct WsStreamParams {
-    pub source_id: String,
+    pub source_id: drasi_lib::ComponentId,
     pub ws_url: String,
     pub config: HyperliquidSourceConfig,
     pub coins: Vec<String>,
@@ -53,7 +53,7 @@ pub struct WsStreamParams {
 }
 
 pub struct FundingPollParams {
-    pub source_id: String,
+    pub source_id: drasi_lib::ComponentId,
     pub rest_client: HyperliquidRestClient,
     pub config: HyperliquidSourceConfig,
     pub base: SourceBase,
@@ -64,7 +64,7 @@ pub struct FundingPollParams {
 }
 
 pub async fn load_trade_dedupe_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     coins: &[String],
 ) -> HashMap<String, u64> {
@@ -72,7 +72,13 @@ pub async fn load_trade_dedupe_state(
     if let Some(store) = state_store {
         for coin in coins {
             let key = format!("last_trade_tid:{coin}");
-            if let Ok(Some(bytes)) = store.get(source_id, &key).await {
+            if let Ok(Some(bytes)) = store
+                .get(
+                    &drasi_lib::StorePartition::component(source_id.clone()),
+                    &key,
+                )
+                .await
+            {
                 if bytes.len() == 8 {
                     let tid = u64::from_le_bytes(
                         <[u8; 8]>::try_from(bytes.as_slice()).expect("len checked above"),
@@ -86,7 +92,7 @@ pub async fn load_trade_dedupe_state(
 }
 
 pub async fn load_funding_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     coins: &[String],
 ) -> HashMap<String, FundingSnapshot> {
@@ -94,7 +100,13 @@ pub async fn load_funding_state(
     if let Some(store) = state_store {
         for coin in coins {
             let key = format!("funding_state:{coin}");
-            if let Ok(Some(bytes)) = store.get(source_id, &key).await {
+            if let Ok(Some(bytes)) = store
+                .get(
+                    &drasi_lib::StorePartition::component(source_id.clone()),
+                    &key,
+                )
+                .await
+            {
                 if let Ok(snapshot) = serde_json::from_slice::<FundingSnapshot>(&bytes) {
                     map.insert(coin.clone(), snapshot);
                 }
@@ -265,7 +277,7 @@ where
 }
 
 async fn handle_ws_message(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     base: &SourceBase,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     stream_state: &StreamState,
@@ -382,7 +394,7 @@ async fn should_emit_trade(
     trade: &Trade,
     stream_state: &StreamState,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
 ) -> bool {
     let should_emit = {
         let mut trade_state = stream_state.trade_dedupe.write().await;
@@ -405,7 +417,11 @@ async fn should_emit_trade(
         if let Some(store) = state_store {
             let key = format!("last_trade_tid:{}", trade.coin);
             if let Err(e) = store
-                .set(source_id, &key, trade.tid.to_le_bytes().to_vec())
+                .set(
+                    &drasi_lib::StorePartition::component(source_id.clone()),
+                    &key,
+                    trade.tid.to_le_bytes().to_vec(),
+                )
                 .await
             {
                 warn!("Failed to persist trade tid: {e}");
@@ -417,7 +433,7 @@ async fn should_emit_trade(
 }
 
 pub(crate) async fn dispatch_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     base: &SourceBase,
     changes: Vec<drasi_core::models::SourceChange>,
 ) {
@@ -512,7 +528,7 @@ pub async fn run_funding_poll(params: FundingPollParams) -> Result<()> {
 
 async fn persist_funding_snapshot(
     state_store: &Option<Arc<dyn StateStoreProvider>>,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     coin: &str,
     snapshot: &FundingSnapshot,
 ) {
@@ -520,7 +536,14 @@ async fn persist_funding_snapshot(
         let key = format!("funding_state:{coin}");
         match serde_json::to_vec(snapshot) {
             Ok(bytes) => {
-                if let Err(e) = store.set(source_id, &key, bytes).await {
+                if let Err(e) = store
+                    .set(
+                        &drasi_lib::StorePartition::component(source_id.clone()),
+                        &key,
+                        bytes,
+                    )
+                    .await
+                {
                     warn!("Failed to persist funding snapshot: {e}");
                 }
             }

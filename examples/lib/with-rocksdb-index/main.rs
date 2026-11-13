@@ -155,9 +155,9 @@ async fn main() -> Result<()> {
             .with_id("rocksdb-example")
             // Inject the RocksDB index provider under the name "rocksdb"
             .with_index_provider("rocksdb", Arc::new(rocksdb_provider))
-            .with_source(http_source)
+            .with_source(drasi_lib::Source::id(&http_source).to_owned(), http_source)
             .with_query(all_prices_query)
-            .with_reaction(log_reaction)
+            .with_reaction(drasi_lib::Reaction::id(&log_reaction).to_owned(), log_reaction)
             .build()
             .await?,
     );

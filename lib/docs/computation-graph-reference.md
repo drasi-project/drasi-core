@@ -59,7 +59,8 @@ qualification; see the work inventory for remaining runtime/callback boundaries.
 
 | Identity | What it distinguishes |
 |---|---|
-| `ComponentId` | A component name within one graph |
+| `ComponentId` | An immutable UUID, also the exact component-node ID |
+| `ComponentName` | Editable, case-sensitive graph metadata unique across all component kinds |
 | `GraphRevision` | A version of the graph's declarations and reported inventory |
 | `ComponentGeneration` | One constructed instance of a component |
 | `OperationEpoch` | One operation on that instance |
@@ -75,6 +76,28 @@ Component IDs, resource IDs and plugin IDs have separate meanings. When combinin
 several graphs, retain their scope information rather than using local names as
 globally unique keys. Inventory across different DrasiLib instances also needs the
 instance ID.
+
+Names belong to `DesiredComponent` and `NodeSnapshot`, not the immutable
+`ComponentDescriptor` or plugin construction specification. Graph and batch
+builders require a `ComponentName` before the component argument;
+`ComponentAddition::{new,from_specification,declaration}` also require the name
+first. Names must be supplied explicitly, never inferred from UUIDs.
+
+Use `GraphSnapshot::component_by_name` or
+`GraphControl::component_handle_by_name` for name lookup. A returned handle binds
+to the UUID and construction generation, not to subsequent owners of that name.
+`GraphControl::rename_component(&id, name)`, `ComponentHandle::rename(name)` and
+`DesiredMutation::RenameComponent` change graph metadata only. They do not invoke
+plugin callbacks, replace the instance, change its generation, or rebind its
+connections. Managed configuration protections still apply.
+
+`GraphError::DuplicateComponentId` and `DuplicateComponentName` carry safe
+existing-component metadata (UUID, name, semantic kind, available implementation/
+plugin identity and observed lifecycle/realization), never configuration or
+failure causes. Pending, failed and stopped declarations reserve their names
+until completed removal. Component graph-as-data keys are the canonical UUID,
+with the current name emitted as a separate property; resource, plugin and pipe
+keys retain their own namespaces.
 
 ## Component and connection declarations
 
@@ -277,6 +300,19 @@ Their operational failures are usually reported by the consuming component.
 return a retained connection declaration to Declared. Its data availability is
 separate: Unknown, Idle, Available, Unavailable or Exhausted.
 
+Deferred connections wait for active lifecycle operations throughout their
+reconciliation pause cut, including recovery siblings. A dormant endpoint awaiting
+its first connection can be wired without cancelling its pending construction;
+this does not permit binding over an active initializer or changing a sibling
+whose construction is unfinished.
+
+`GraphControl::start_requested` is revision-scoped and rejects overlapping
+lifecycle or reconciliation work. Created components can still be covered by an
+initial-binding reservation. To start a fixed group after construction without
+racing that boundary, use `start_members` with each component handle's generation.
+It queues behind conflicting work and reports actual per-member startup outcomes;
+replacement cannot retarget the accepted request to a new generation.
+
 Hosted source/query/reaction subscriptions expose their endpoint observations,
 not invented capabilities or binding states from a different transport.
 Plugin/version reference nodes likewise have no Running/Error lifecycle.
@@ -371,11 +407,13 @@ Call `GraphControl::preview(revision, mutations)`, then
 revision and affected instances before changing them.
 
 Supported changes include add/replace/update/remove, connect/disconnect, resource
-replacement, subscription changes, restart and retry. In-place reconfiguration
-requires factory support and cannot silently change an interface or implementation.
-Otherwise replacement constructs a new component instance.
+replacement, subscription changes, restart and retry. A registered factory's
+`plan_update` assesses live configuration changes. Retained-object updates cannot
+silently change an interface, resource binding or implementation. Construction
+support alone does not authorize reconstruction; unsupported changes are rejected.
+See [object lifecycle and assessed updates](computation-graph-configuration.md#object-lifecycle-and-assessed-updates).
 
-Preflight, pipe creation, reconfiguration and retired resource/object destruction
+Preflight, pipe creation, accepted updates and retired resource/object disposal
 run in graph-owned tasks with retained joins and typed panic boundaries.
 Reconciliation continues servicing disjoint lifecycle commands while those
 tasks are pending. Conflicting mutations reject rather than entering an
@@ -622,21 +660,23 @@ Disk replay can therefore lack completion times.
 
 | Integration type | Role and limits |
 |---|---|
-| `SourcePluginHost` | Owns, recreates or borrows an existing Source; full subscriptions preserve filtering, bootstrap and source metadata |
+| `SourcePluginHost` | Owns or borrows one Source object; full subscriptions preserve filtering, bootstrap and source metadata |
 | `ReactionPluginHost` | Supplies snapshot/history recovery to an existing Reaction; enqueue completion remains Accepted |
 | `LegacySourceFactory` / `LegacyReactionFactory` | Lower-level adapters for supplied existing interfaces, not automatic injection of every service |
 | `LegacyIndexProviderAdapter` | Uses existing index providers in graph-specific storage namespaces |
 | `drasi-plugin-sdk/computation` factories | Descriptor-backed construction with retained unresolved configuration recipes |
 
 A plugin has one lifecycle owner. Borrowing it does not permit another graph to
-initialize, start, stop, deprovision or reconfigure it. Use a constructor when the
-plugin needs reconstruction for restart. In `SourceSubscriptionOptions`,
+initialize, start, stop, dispose, delete its resources or apply an update.
+`from_constructor` constructs once; normal restart retains that initialized object.
+Managed reconstruction requires a registered factory's explicit update plan.
+In `SourceSubscriptionOptions`,
 `borrowed_recovery` and `allow_broadcast_loss` both default to false; enabling
 either gives permission to use that behaviour, not a capability the source lacks.
 
 Descriptor factories validate kind/configuration version and available schema.
 The host must first safely load and version-check dynamic plugins. The existing
-Source/Reaction ABI is 0.17 with supported 0.16 fast-mode compatibility; recovery distinguishes
+Source/Reaction ABI is 0.18; older layouts are rejected. Recovery distinguishes
 an absent resume sequence from an explicit sequence zero. Native graph plugins
 use a different ABI family. Task-scoped secret resolution
 for in-process creation does not replace a dynamic plugin's injected resolver.
@@ -651,7 +691,7 @@ dynamic loading by itself neither supplies nor rules out replay support.
 
 The [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
 [native SDK](../../components/computation-plugin-sdk/README.md) are separate from
-the existing Source/Reaction plugin interface. ABI 1.0 loads sources,
+the existing Source/Reaction plugin interface. ABI 2.0 loads sources,
 transformers, sinks and services directly into graph-native proxies; it does not
 translate them back into the older component model.
 
@@ -672,7 +712,7 @@ operations cross the boundary as poll/wake/cancel handles and owned serialized
 buffers. Control notifications do not wait behind mutable data processing.
 Libraries remain loaded for the process lifetime.
 
-Native wire version 1 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
+Native wire version 2 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
 The binary transport preserves the complete envelope and runs the same registered
 record validators; it does not strip context, lineage or recovery metadata.
 Producer-owned reply buffers remain alive during decoding and are released
@@ -688,11 +728,12 @@ rejects failed, cancelled or unfinished state requests before a step succeeds.
 Participants cannot commit, retain a usable transaction after the call, or
 schedule independent transaction work.
 
-ABI 1.0 deliberately does not claim native query snapshot/outbox interfaces,
-source recovery-progress handles, arbitrary provider injection, in-place
-reconfiguration, or safe library unloading. Unsupported capabilities are
-rejected. Existing query implementations and durable source adapters remain
-available in mixed graphs; this does not confer durability on a volatile native
+Optional native interfaces expose query snapshot/outbox readers, source recovery
+progress and explicit factory-managed updates. Factories must advertise and
+implement each capability; ABI compatibility does not grant it. Core currently
+rejects every `Rebootstrap` update plan. Arbitrary Rust provider objects do not
+cross the ABI, and safe library unloading remains unsupported. Ordinary adapters
+can coexist with native components; this does not confer durability on a volatile
 source.
 
 The [native network components](../../components/computation-plugins/NETWORK.md)
@@ -813,43 +854,29 @@ are outside those modules. This is an enforced code boundary, not a separate cra
 From the drasi-core repository root:
 
 ```bash
-env -u RUST_LOG bash lib/tests/run-runtime-parity.sh
+make test
 cargo test --locked -p drasi-lib --features computation-rocksdb-tests \
   --test computation_query_codec --test computation_query_faults \
   --test computation_query_recovery
 cargo test --locked -p lib-integration-tests
 ```
 
-The integration suite includes container-backed cases and needs a
-Docker-compatible daemon; this workspace uses Podman.
-The runtime runner executes default, no-default-feature, extra-capability,
-integration and SDK descriptor-factory profiles. These are build configurations
-of one engine, not alternate execution modes. Leave `RUST_LOG` unset for suites
-that assert logging behaviour.
+Container-backed cases are ignored by default and run separately with their
+declared prerequisites. The integration CI workflow discovers them automatically;
+local container runs need a Docker-compatible daemon (Podman is supported).
+Additional feature configurations are explicit Cargo commands in `test.yml`.
+Leave `RUST_LOG` unset for suites that assert logging behaviour.
 
 ### Main-branch contracts and graph-specific coverage
 
-The comparison baseline is main commit
-[`c2d80aa7`](https://github.com/drasi-project/drasi-core/commit/c2d80aa7e4de874302b301584a6c7134c3609ed7).
-The library [inventory](../tests/runtime_parity/original-cases.tsv) includes all
-970 test cases at that revision, plus nine older names retained by the previous
-baseline. The [integration inventory](../tests/runtime_parity/integration-cases.tsv)
-records all 88 main integration cases. Tests whose implementation moved have
-explicit [case mappings](../tests/runtime_parity/case-mappings.tsv); a removed
-mutable graph API is not a blanket exemption from its observable contract.
-
-The runner checks both discovery and actual passing results. Adding `#[ignore]`,
-dropping a test file, losing a mapped replacement, or filtering required tests
-out of execution fails the run. The only
-[permitted ignores](../tests/runtime_parity/allowed-ignored.tsv) are the named
-manual serialization/publication diagnostics and subprocess workers whose crash drivers must
-pass, plus explicitly owned, expiring environment exceptions. The
-macOS/Linux network case runs when its Linux peer is prepared; its unprepared
-exception does not establish network acceptance. The Host SDK subscribe/drop
-stress case runs as an ordinary test; its bounded cycles do not qualify
-sustained DLL ownership. The
-[runner self-check](../tests/runtime_parity/check-runner.sh) exercises these
-failure paths without compiling Rust.
+Preserved tests run against ComputationGraph using Cargo's normal discovery.
+A removed mutable graph API is not an exemption from its observable contract.
+Run `cargo test --locked -p <package> -- --list` to inspect a package's selection.
+The [testing guide](../../docs/contributing/contributing-code/contributing-code-tests/)
+describes shared plugin preparation, feature jobs and service-dependent tests.
+Ignored subprocess workers need their parent drivers; an unprepared cross-OS
+peer is not network acceptance. Bounded subscribe/drop tests do not establish
+sustained DLL ownership.
 
 The native input crash matrix independently qualifies admission QoS, retained
 inputs and shared journals with eager/paged RocksDB storage on both runtimes.
@@ -860,8 +887,7 @@ projection and output. See
 This is process-restart evidence, not universal provider, power-loss or
 exactly-once external-effect qualification.
 
-The [graph contract inventory](../tests/runtime_parity/computation-contracts.tsv)
-also requires named coverage for functionality with no ComponentGraph equivalent:
+Graph-specific Rust tests also cover functionality with no ComponentGraph equivalent:
 
 | Capability | Required behavior |
 |---|---|

@@ -71,9 +71,12 @@ const RESET_HIGH_WATER_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_RESET_HIGH_WATER"
 const IDENTITY_CASE_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_IDENTITY_CASE";
 
 const SOURCE_ID: &str = "people-source";
+const SOURCE_UUID: &str = "00000000-0000-0000-0000-000000000342";
 const INSTANCE_ID: &str = "reaction-recovery-conformance";
 const QUERY_ID: &str = "people-query";
+const QUERY_UUID: &str = "00000000-0000-0000-0000-000000000344";
 const REACTION_ID: &str = "durable-recording-reaction";
+const REACTION_UUID: &str = "00000000-0000-0000-0000-000000000343";
 const QUERY_TEXT: &str =
     "MATCH (p:Person) RETURN p.personId AS id, p.name AS name, p.active AS active";
 const RECONFIGURED_QUERY_TEXT: &str =
@@ -156,8 +159,8 @@ struct RuntimeAttestation {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct IndexLocation {
-    storage_scope: String,
-    query_id: String,
+    storage_scope: drasi_core::interface::StorageScope,
+    query_id: drasi_core::ComponentId,
     runtime: String,
 }
 
@@ -168,23 +171,27 @@ struct ObservedRocksDb {
 
 #[async_trait]
 impl IndexBackendPlugin for ObservedRocksDb {
-    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
-        self.create_scoped_indexes(query_id, query_id).await
+    async fn create_indexes(
+        &self,
+        query_id: &drasi_core::ComponentId,
+    ) -> Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(&drasi_core::interface::StorageScope::default(), query_id)
+            .await
     }
 
     async fn create_scoped_indexes(
         &self,
-        storage_scope: &str,
-        query_id: &str,
+        storage_scope: &drasi_core::interface::StorageScope,
+        query_id: &drasi_core::ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         let indexes = self
             .inner
             .create_scoped_indexes(storage_scope, query_id)
             .await?;
-        if query_id == QUERY_ID {
+        if query_id == &drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID") {
             let location = IndexLocation {
-                storage_scope: storage_scope.to_string(),
-                query_id: query_id.to_string(),
+                storage_scope: storage_scope.clone(),
+                query_id: query_id.clone(),
                 runtime: RUNTIME_NAME.to_string(),
             };
             let bytes = serde_json::to_vec(&location).map_err(IndexError::other)?;
@@ -213,7 +220,8 @@ fn read_index_location(paths: &FixturePaths) -> Result<IndexLocation> {
     )
     .context("decode observed query index location")?;
     anyhow::ensure!(
-        location.query_id == QUERY_ID && location.runtime == RUNTIME_NAME,
+        location.query_id == drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID")
+            && location.runtime == RUNTIME_NAME,
         "query index location belongs to another query or runtime: {location:?}"
     );
     Ok(location)
@@ -262,7 +270,7 @@ struct ObservedApplication {
 
 #[async_trait]
 impl Source for ObservedApplication {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.inner.id()
     }
 
@@ -286,8 +294,8 @@ impl Source for ObservedApplication {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.inner.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.inner.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -318,7 +326,7 @@ impl Source for ObservedApplication {
         Ok(response)
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_core::ComponentId) {
         self.inner.remove_position_handle(query_id).await;
     }
 
@@ -341,7 +349,7 @@ fn parse_seq_env(name: &str) -> Option<u64> {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JournalRecord {
     Snapshot {
-        query_id: String,
+        query_id: drasi_core::ComponentId,
         sequence: u64,
         is_reset: bool,
         rows: Vec<serde_json::Value>,
@@ -418,8 +426,13 @@ impl DurableRecordingReaction {
         recovery_policy: ReactionRecoveryPolicy,
         snapshot_on_fresh: bool,
     ) -> Self {
-        let params = ReactionBaseParams::new(REACTION_ID, vec![QUERY_ID.to_string()])
-            .with_recovery_policy(recovery_policy);
+        let params = ReactionBaseParams::new(
+            drasi_core::ComponentId::try_new(REACTION_UUID).expect("fixture UUID"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+            )],
+        )
+        .with_recovery_policy(recovery_policy);
         Self {
             base: ReactionBase::new(params),
             journal: SideEffectJournal::new(journal_path),
@@ -431,7 +444,7 @@ impl DurableRecordingReaction {
 
 #[async_trait]
 impl Reaction for DurableRecordingReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -446,16 +459,16 @@ impl Reaction for DurableRecordingReaction {
         )])
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -623,7 +636,10 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
             capacity_policy: CapacityPolicy::RejectIncoming,
         }),
     };
-    let (source, source_handle) = ApplicationSource::new(SOURCE_ID, source_config)?;
+    let (source, source_handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new(SOURCE_UUID).expect("fixture UUID"),
+        source_config,
+    )?;
     let source_observations = Arc::new(SourceObservations::default());
     let source = ObservedApplication {
         inner: source,
@@ -638,17 +654,26 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
 
     let mut builder = lib_integration_tests::query_builder()
         .with_id(INSTANCE_ID)
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new(SOURCE_ID).expect("fixture component name"),
+            source,
+        )
         .with_query(
-            drasi_lib::Query::cypher(QUERY_ID)
-                .query(opts.query_text)
-                .from_input(SOURCE_ID)
-                .auto_start(true)
-                .enable_bootstrap(false)
-                .with_outbox_capacity(opts.outbox_capacity)
-                .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-                .with_recovery_policy(opts.query_policy)
-                .build(),
+            drasi_lib::Query::cypher(
+                drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+            )
+            .with_id(drasi_core::ComponentId::try_new(QUERY_UUID)?)
+            .query(opts.query_text)
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("people-source")
+                    .expect("fixture component name"),
+            )
+            .auto_start(true)
+            .enable_bootstrap(false)
+            .with_outbox_capacity(opts.outbox_capacity)
+            .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+            .with_recovery_policy(opts.query_policy)
+            .build()?,
         )
         .with_index_provider("rocks", rocks)
         .with_state_store_provider(state_store.clone())
@@ -660,14 +685,19 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
             opts.reaction_policy,
             opts.snapshot_on_fresh,
         );
-        builder = builder.with_reaction(reaction);
+        builder = builder.with_reaction(
+            drasi_core::ComponentName::try_new(REACTION_ID).expect("fixture component name"),
+            reaction,
+        );
     }
 
     let core = builder.build().await?;
     core.computation_control()
         .context("fixture must construct a computation controller")?;
-    core.computation_component(QUERY_ID)
-        .context("fixture query must belong to the computation graph")?;
+    core.component_by_name(
+        &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .context("fixture query must belong to the computation graph")?;
     let phase = std::env::var(PHASE_ENV).context("fixture requires a child conformance phase")?;
     write_synced_file(
         &paths.runtime_attestation(&phase),
@@ -721,21 +751,24 @@ async fn update_person(
 
 async fn wait_for_status(
     core: &DrasiLib,
-    component_id: &str,
+    component_name: &str,
     expected: ComponentStatus,
 ) -> Result<()> {
+    let component_id = core
+        .component_by_name(&drasi_core::ComponentName::try_new(component_name)?)?
+        .id()
+        .clone();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let graph = core.get_graph().await.expect("graph snapshot");
-        if graph
-            .nodes
-            .iter()
-            .any(|node| node.id == component_id && node.status == expected)
-        {
+        if graph.nodes.iter().any(|node| {
+            node.id == drasi_lib::computation::v1::GraphEntityId::Component(component_id.clone())
+                && node.status == expected
+        }) {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("component '{component_id}' did not reach {expected:?}: {graph:?}");
+            anyhow::bail!("component '{component_name}' did not reach {expected:?}: {graph:?}");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -743,7 +776,9 @@ async fn wait_for_status(
 
 async fn query_instance(core: &DrasiLib) -> Result<Arc<dyn drasi_lib::queries::Query>> {
     core.query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)
 }
@@ -752,7 +787,12 @@ async fn read_reaction_checkpoint(
     state_store: &dyn StateStoreProvider,
 ) -> Result<ReactionCheckpoint> {
     let bytes = state_store
-        .get(REACTION_ID, &format!("checkpoint:{QUERY_ID}"))
+        .get(
+            &drasi_core::interface::StorePartition::component(
+                drasi_core::ComponentId::try_new(REACTION_UUID).expect("fixture UUID"),
+            ),
+            &format!("checkpoint:{QUERY_UUID}"),
+        )
         .await?
         .context("durable reaction checkpoint is missing")?;
     bincode::deserialize(&bytes).context("deserialize durable reaction checkpoint")
@@ -1080,7 +1120,13 @@ async fn seed_phase(paths: &FixturePaths) -> Result<()> {
         "the reaction checkpoint must preserve the query configuration hash"
     );
 
-    fixture.core.stop_reaction(REACTION_ID).await?;
+    fixture
+        .core
+        .stop_reaction_by_name(
+            &drasi_core::ComponentName::try_new("durable-recording-reaction")
+                .expect("fixture component name"),
+        )
+        .await?;
     wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Stopped).await?;
 
     insert_person(&fixture.source, "p3", "Carol", true).await?;
@@ -1140,12 +1186,15 @@ async fn seed_phase(paths: &FixturePaths) -> Result<()> {
     );
 
     fixture.state_store.sync().await?;
-    assert!(paths
-        .rocks
-        .join(read_index_location(paths)?.storage_scope)
-        .join("CURRENT")
-        .exists());
-    assert!(paths.wal.join(format!("{SOURCE_ID}.redb")).exists());
+    let index_location = read_index_location(paths)?;
+    let database_path = RocksDbIndexProvider::new(&paths.rocks, false, false)
+        .database_path(&index_location.storage_scope, &index_location.query_id);
+    assert!(
+        database_path.join("CURRENT").exists(),
+        "RocksDB manifest is missing from {}",
+        database_path.display()
+    );
+    assert!(paths.wal.join(format!("{SOURCE_UUID}.redb")).exists());
     assert!(paths.state.exists());
     assert!(paths.journal.exists());
 
@@ -1380,7 +1429,12 @@ async fn recover_strict_fail_phase(paths: &FixturePaths) -> Result<()> {
     let _ = fixture.core.start().await;
     wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Error).await?;
 
-    let query_info = fixture.core.get_query_info(QUERY_ID).await?;
+    let query_info = fixture
+        .core
+        .get_query_info_by_name(
+            &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+        )
+        .await?;
     let message = query_info.error_message.clone().unwrap_or_default();
     let _ = fixture.core.shutdown().await;
     anyhow::ensure!(
@@ -1469,7 +1523,13 @@ async fn append_outbox_ahead(paths: &FixturePaths) -> Result<()> {
         .as_ref()
         .context("RocksDB outbox writer missing")?;
     writer
-        .append(QUERY_ID, 99, b"corrupt-outbox-payload")
+        .append(
+            &drasi_core::interface::OutputPartition::Component(
+                drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+            ),
+            99,
+            b"corrupt-outbox-payload",
+        )
         .await
         .context("append outbox entry ahead of stored result sequence")?;
     drop(created);
@@ -1483,7 +1543,13 @@ async fn overwrite_outbox_with_garbage(paths: &FixturePaths, sequence: u64) -> R
         .as_ref()
         .context("RocksDB outbox writer missing")?;
     writer
-        .append(QUERY_ID, sequence, b"corrupt-outbox-payload")
+        .append(
+            &drasi_core::interface::OutputPartition::Component(
+                drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+            ),
+            sequence,
+            b"corrupt-outbox-payload",
+        )
         .await
         .with_context(|| format!("overwrite outbox sequence {sequence} with garbage"))?;
     drop(created);
@@ -1532,7 +1598,12 @@ async fn durable_outbox_sequences(paths: &FixturePaths) -> Result<Vec<u64>> {
         .as_ref()
         .context("RocksDB outbox writer missing")?;
     let entries = writer
-        .read_from(QUERY_ID, 0)
+        .read_from(
+            &drasi_core::interface::OutputPartition::Component(
+                drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+            ),
+            0,
+        )
         .await
         .context("read durable outbox after restart")?;
     Ok(entries.into_iter().map(|(sequence, _)| sequence).collect())
@@ -1606,7 +1677,13 @@ async fn seed_overflow_phase(paths: &FixturePaths) -> Result<()> {
     let checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 1).await?;
     assert_eq!(checkpoint.sequence, OVERFLOW_CHECKPOINT);
 
-    fixture.core.stop_reaction(REACTION_ID).await?;
+    fixture
+        .core
+        .stop_reaction_by_name(
+            &drasi_core::ComponentName::try_new("durable-recording-reaction")
+                .expect("fixture component name"),
+        )
+        .await?;
     wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Stopped).await?;
 
     insert_person(&fixture.source, "p2", "Bob", false).await?;
@@ -2101,11 +2178,14 @@ async fn seed_trigger_fresh_phase(paths: &FixturePaths) -> Result<()> {
     assert_eq!(outbox.latest_sequence, 2);
 
     fixture.state_store.sync().await?;
-    assert!(paths
-        .rocks
-        .join(read_index_location(paths)?.storage_scope)
-        .join("CURRENT")
-        .exists());
+    let index_location = read_index_location(paths)?;
+    let database_path = RocksDbIndexProvider::new(&paths.rocks, false, false)
+        .database_path(&index_location.storage_scope, &index_location.query_id);
+    assert!(
+        database_path.join("CURRENT").exists(),
+        "RocksDB manifest is missing from {}",
+        database_path.display()
+    );
 
     let readiness = SeedReadiness {
         query_sequence: outbox.latest_sequence,
@@ -2140,7 +2220,12 @@ async fn recover_trigger_fresh_phase(paths: &FixturePaths) -> Result<()> {
 
     let checkpoint_before_start = fixture
         .state_store
-        .get(REACTION_ID, &format!("checkpoint:{QUERY_ID}"))
+        .get(
+            &drasi_core::interface::StorePartition::component(
+                drasi_core::ComponentId::try_new(REACTION_UUID).expect("fixture UUID"),
+            ),
+            &format!("checkpoint:{QUERY_UUID}"),
+        )
         .await?;
     anyhow::ensure!(
         checkpoint_before_start.is_none(),
@@ -2489,16 +2574,32 @@ async fn seed_uncheckpointed_wal_phase(paths: &FixturePaths) -> Result<()> {
         "the fresh query must not have confirmed a source checkpoint"
     );
     drop(query);
-    fixture.core.stop_query(QUERY_ID).await?;
+    fixture
+        .core
+        .stop_query_by_name(
+            &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+        )
+        .await?;
     wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Stopped).await?;
     insert_person(&fixture.source, "p1", "Alice", true).await?;
     insert_person(&fixture.source, "p2", "Bob", false).await?;
-    assert_eq!(fixture.wal.head_sequence(SOURCE_ID).await?, 2);
-    assert_eq!(fixture.wal.event_count(SOURCE_ID).await?, 2);
+    let source_id = drasi_core::ComponentId::try_new(SOURCE_UUID).expect("fixture UUID");
+    let storage_scope = drasi_core::interface::StorageScope::default();
     assert_eq!(
         fixture
             .wal
-            .read_from(SOURCE_ID, 1)
+            .head_sequence(&storage_scope, &source_id)
+            .await?,
+        2
+    );
+    assert_eq!(
+        fixture.wal.event_count(&storage_scope, &source_id).await?,
+        2
+    );
+    assert_eq!(
+        fixture
+            .wal
+            .read_from(&storage_scope, &source_id, 1)
             .await?
             .iter()
             .map(|(sequence, _)| *sequence)
@@ -2557,10 +2658,14 @@ async fn recover_uncheckpointed_wal_phase(paths: &FixturePaths) -> Result<()> {
     );
     fixture
         .core
-        .add_reaction(DurableRecordingReaction::trigger(
-            paths.journal.clone(),
-            ReactionRecoveryPolicy::Strict,
-        ))
+        .add_reaction(
+            drasi_core::ComponentName::try_new("durable-recording-reaction")
+                .expect("fixture component name"),
+            DurableRecordingReaction::trigger(
+                paths.journal.clone(),
+                ReactionRecoveryPolicy::Strict,
+            ),
+        )
         .await?;
     wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
     assert_eq!(
@@ -2673,7 +2778,15 @@ async fn run_uncheckpointed_reconstruction(policy: &str) -> Result<()> {
                 checkpoints.is_empty(),
                 "seed process unexpectedly persisted source progress: {checkpoints:?}"
             );
-            assert_eq!(store.read_result_sequence(QUERY_ID).await?.unwrap_or(0), 0);
+            assert_eq!(
+                store
+                    .read_result_sequence(&drasi_core::interface::OutputPartition::Component(
+                        drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID")
+                    ))
+                    .await?
+                    .unwrap_or(0),
+                0
+            );
         }
         require_phase("recover_uncheckpointed_wal", &paths, &extra_env)?;
         {
@@ -2689,7 +2802,14 @@ async fn run_uncheckpointed_reconstruction(policy: &str) -> Result<()> {
                 source_progress[0].1.source_position.as_deref(),
                 Some(3u64.to_be_bytes().as_slice())
             );
-            assert_eq!(store.read_result_sequence(QUERY_ID).await?, Some(3));
+            assert_eq!(
+                store
+                    .read_result_sequence(&drasi_core::interface::OutputPartition::Component(
+                        drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID")
+                    ))
+                    .await?,
+                Some(3)
+            );
         }
         require_phase("reopen_checkpointed_wal", &paths, &extra_env)
     }
@@ -2771,23 +2891,48 @@ async fn seed_query_identity_change_phase(paths: &FixturePaths) -> Result<()> {
         sorted_people(&old.to_vec())?,
         vec![person("p1", "Alice", true)]
     );
-    fixture.core.remove_reaction(REACTION_ID, false).await?;
+    fixture
+        .core
+        .remove_reaction_by_name(
+            &drasi_core::ComponentName::try_new("durable-recording-reaction")
+                .expect("fixture component name"),
+            false,
+        )
+        .await?;
 
-    let replacement = drasi_lib::Query::cypher(QUERY_ID)
-        .query(change.query_text())
-        .from_input(SOURCE_ID)
-        .auto_start(true)
-        .enable_bootstrap(false)
-        .with_outbox_capacity(32)
-        .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-        .with_recovery_policy(RecoveryPolicy::Strict)
-        .build();
+    let replacement = drasi_lib::Query::cypher(
+        drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+    )
+    .with_id(drasi_core::ComponentId::try_new(QUERY_UUID)?)
+    .query(change.query_text())
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("people-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(false)
+    .with_outbox_capacity(32)
+    .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+    .with_recovery_policy(RecoveryPolicy::Strict)
+    .build()?;
     match change {
         IdentityChange::Reconfigure => {
-            fixture.core.update_query(QUERY_ID, replacement).await?;
+            fixture
+                .core
+                .update_query_by_name(
+                    &drasi_core::ComponentName::try_new("people-query")
+                        .expect("fixture component name"),
+                    replacement,
+                )
+                .await?;
         }
         IdentityChange::Delete => {
-            fixture.core.remove_query(QUERY_ID).await?;
+            fixture
+                .core
+                .remove_query_by_name(
+                    &drasi_core::ComponentName::try_new("people-query")
+                        .expect("fixture component name"),
+                )
+                .await?;
             fixture.core.add_query(replacement).await?;
         }
     }

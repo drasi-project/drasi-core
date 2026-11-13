@@ -129,6 +129,7 @@ fn request(delivery: &DeliveryRunner, batch: &InputEnvelope) -> Result<serde_jso
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn http_remote_progress_loss_and_partial_batches_resume_only_unfinished_effects() -> Result<()>
 {
     let mut database = Database::new().await?;
@@ -199,20 +200,17 @@ struct NonAtomicEffect {
 #[tokio::test(flavor = "current_thread")]
 async fn http_rejects_state_runners_before_accepting_external_handlers() -> Result<()> {
     let path = tempfile::tempdir()?;
+    let consumer = ComponentId::try_new("0eb1090a-1248-5dfe-a934-6fbc2708fc5b")?;
     let indexes = LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
         path.path(),
         false,
         false,
     )))
-    .create_indexes("delivery", "consumer")
+    .create_indexes("delivery", &consumer)
     .await?;
     let cleanup = indexes.cleanup().expect("cleanup").clone();
     let delivery = DeliveryRunner::new_transactional(
-        DeliveryScope::new(
-            "scope".into(),
-            "graph".into(),
-            ComponentId::try_new("sink")?,
-        )?,
+        DeliveryScope::new("scope".into(), "graph".into(), consumer)?,
         indexes,
         codec()?,
         DeliveryOptions {
@@ -390,6 +388,7 @@ async fn http_nontransactional_effects_explicitly_remain_at_least_once() -> Resu
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn http_lost_response_and_two_sided_reconstruction_preserve_once_only_effects() -> Result<()>
 {
     let mut database = Database::new().await?;
@@ -449,6 +448,7 @@ async fn http_lost_response_and_two_sided_reconstruction_preserve_once_only_effe
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn http_validates_actual_content_and_rejects_queued_or_forged_confirmations() -> Result<()> {
     let mut database = Database::new().await?;
     let observer = database.connect().await?;
@@ -526,6 +526,7 @@ async fn http_validates_actual_content_and_rejects_queued_or_forged_confirmation
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a PostgreSQL container"]
 async fn http_bounded_admission_and_shutdown_cancel_sql_without_advancing_progress() -> Result<()> {
     let mut database = Database::new().await?;
     let observer = database.connect().await?;

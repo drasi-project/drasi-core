@@ -71,7 +71,8 @@ fn session(value: Option<proto::ProducerSession>) -> Result<ProducerSession, Adm
     })
 }
 fn check(ingress: &Ingress, source: &str) -> Result<(), AdmissionError> {
-    if source != ingress.config.source_id {
+    let source = ComponentId::try_new(source).map_err(invalid)?;
+    if source != ingress.source_id {
         return Err(invalid("source ID mismatch"));
     }
     ingress.admission_service()?;
@@ -85,7 +86,7 @@ async fn admit(
     let session = session(request.session)?;
     let change = wire::grpc_change(
         request.event.ok_or_else(|| invalid("event is required"))?,
-        &ingress.config.source_id,
+        &ingress.source_id,
     )
     .map_err(invalid)?;
     let outcome = ingress

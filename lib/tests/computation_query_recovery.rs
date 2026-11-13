@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use async_trait::async_trait;
 use drasi_core::{
     computation::{ComputationIndexProvider, InMemoryComputationProvider},
@@ -111,7 +115,7 @@ async fn query_retains_bootstrap_cleanup_across_cancelled_and_timed_out_stop() {
     query.stop().await.expect("joined snapshot worker");
     assert!(bootstrap.worker.read().await.is_none());
     query
-        .deprovision()
+        .delete_owned_resources()
         .await
         .expect("deprovision after cleanup");
     assert_eq!(bootstrap.stops.load(Ordering::SeqCst), 4);
@@ -220,7 +224,7 @@ impl ComputationBootstrapProvider for Bootstrap {
 fn definition(query: &str) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: "recovery".into(),
-        id: ComponentId::try_new("query").expect("id"),
+        id: fixture_support::component_id(46),
         query: query.into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("query/out").expect("stream"),
@@ -316,7 +320,7 @@ impl RecoverySink {
     fn new(state: Arc<ConsumerState>) -> Self {
         Self {
             descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("sink").expect("id"),
+                fixture_support::component_id(101),
                 vec![PortDescriptor::new(
                     PortId::try_new("in").expect("port"),
                     PortDirection::Input,
@@ -422,7 +426,18 @@ async fn checkpointed_batches_record_each_handled_prefix_and_deduplicate_replay(
         })
         .collect();
     sink.handle_batch(inputs).await.unwrap();
-    assert_eq!(progress.load("query").await.unwrap().unwrap().sequence, 2);
+    assert_eq!(
+        progress
+            .load(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        2
+    );
     sink.handle_batch(retry).await.unwrap();
     assert_eq!(state.handled.load(Ordering::SeqCst), 2);
     producer.stop().await.unwrap();
@@ -446,8 +461,9 @@ fn replay(
     policy: ConsumerRecoveryPolicy,
 ) -> QueryReplayTransformer {
     QueryReplayTransformer::new(
-        ComponentId::try_new("replay").expect("id"),
-        "query".into(),
+        fixture_support::component_id(719),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID"),
         StreamId::try_new("replay/out").expect("stream"),
         results,
         progress,
@@ -491,7 +507,16 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         })
         .await
         .is_err());
-    assert_eq!(progress.load("query").await.expect("checkpoint"), None);
+    assert_eq!(
+        progress
+            .load(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await
+            .expect("checkpoint"),
+        None
+    );
     replay.stop().await.expect("stop failed startup");
     replay.start().await.expect("retry snapshot");
     let initial = replay
@@ -507,7 +532,13 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
     .await
     .expect("actual snapshot handled");
     assert_eq!(
-        progress.load("query").await.expect("checkpoint"),
+        progress
+            .load(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await
+            .expect("checkpoint"),
         Some(ConsumerCheckpoint {
             sequence: 0,
             generation: 0,
@@ -550,7 +581,13 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         .expect("overlap dedup")
         .is_empty());
     assert_eq!(
-        progress.load("query").await.expect("checkpoint"),
+        progress
+            .load(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await
+            .expect("checkpoint"),
         Some(ConsumerCheckpoint {
             sequence: 1,
             generation: 0,
@@ -593,7 +630,8 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
         let progress = Arc::new(MemoryConsumerProgress::default());
         progress
             .commit_handled(
-                "query",
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
                 ConsumerCheckpoint {
                     sequence: 1,
                     generation: 0,
@@ -621,7 +659,13 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
             }
         }
         assert_eq!(
-            progress.load("query").await.expect("unmodified checkpoint"),
+            progress
+                .load(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID")
+                )
+                .await
+                .expect("unmodified checkpoint"),
             Some(ConsumerCheckpoint {
                 sequence: 1,
                 generation: 0,
@@ -639,20 +683,22 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
 #[tokio::test]
 async fn state_store_consumer_checkpoints_and_producer_sequences_survive_wrapper_reconstruction() {
     let provider = Arc::new(drasi_lib::state_store::MemoryStateStoreProvider::new());
-    let first =
-        StateStoreConsumerProgress::new("graph", "consumer", provider.clone()).expect("scope");
-    let stream = StreamId::try_new("replay/out").expect("stream");
-    let identity = QueryRecoveryIdentity::try_new(
+    let first = StateStoreConsumerProgress::new(
         "graph",
-        ComponentId::try_new("query").expect("query"),
-        42,
-        None,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a7")
+            .expect("fixture UUID"),
+        provider.clone(),
     )
-    .expect("identity");
+    .expect("scope");
+    let stream = StreamId::try_new("replay/out").expect("stream");
+    let identity =
+        QueryRecoveryIdentity::try_new("graph", fixture_support::component_id(46), 42, None)
+            .expect("identity");
     assert_eq!(first.allocate_sequence(&stream).await.expect("sequence"), 1);
     first
         .commit_handled(
-            "query",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
             ConsumerCheckpoint {
                 sequence: 7,
                 generation: 2,
@@ -661,8 +707,13 @@ async fn state_store_consumer_checkpoints_and_producer_sequences_survive_wrapper
         )
         .await
         .expect("handled progress");
-    let restored =
-        StateStoreConsumerProgress::new("graph", "consumer", provider).expect("same scope");
+    let restored = StateStoreConsumerProgress::new(
+        "graph",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a7")
+            .expect("fixture UUID"),
+        provider,
+    )
+    .expect("same scope");
     assert_eq!(
         restored
             .allocate_sequence(&stream)
@@ -671,7 +722,13 @@ async fn state_store_consumer_checkpoints_and_producer_sequences_survive_wrapper
         2
     );
     assert_eq!(
-        restored.load("query").await.expect("restored progress"),
+        restored
+            .load(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await
+            .expect("restored progress"),
         Some(ConsumerCheckpoint {
             sequence: 7,
             generation: 2,
@@ -767,37 +824,40 @@ async fn bootstrapped_query_delivers_live_updates_to_second_batch_consumers() ->
 {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         for (start_before_binding, factory_query) in [(false, false), (true, false), (false, true), (true, true)] {
-            let core = drasi_lib::DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone()).build().await?;
+            let core = drasi_lib::DrasiLib::builder().with_allow_external_component_ids(true).with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone()).build().await?;
             let query = query(
                 Arc::new(InMemoryComputationProvider),
                 "MATCH (n:Person) RETURN collect({name:n.name}) AS records",
                 QueryRecoveryPolicy::Strict, false, Arc::new(AtomicUsize::new(0)),
             ).await;
             let mut quiet_definition = definition("MATCH (n:Person) RETURN count(n) AS count");
-            quiet_definition.id = ComponentId::try_new("quiet")?;
+            quiet_definition.id = fixture_support::component_id(754);
             quiet_definition.output_stream = StreamId::try_new("quiet/out")?;
             let quiet = ContinuousQueryTransformer::new_with_options(
                 quiet_definition, Arc::new(InMemoryComputationProvider), QueryOptions::default(),
             ).await?.with_bootstrap(Arc::new(Bootstrap { calls: Arc::new(AtomicUsize::new(0)), fail: false }));
-            let endpoint = |component: &str, port: &str| Endpoint::new(ComponentId::try_new(component).expect("component"), PortId::try_new(port).expect("port"));
+            let endpoint = |component: u128, port: &str| Endpoint::new(fixture_support::component_id(component), PortId::try_new(port).expect("port"));
             let (send_input, receive_input) = tokio::sync::mpsc::unbounded_channel();
             let (early_sender, mut early_receiver) = tokio::sync::mpsc::unbounded_channel();
             let source = LateBindingSource {
-                descriptor: ComponentDescriptor::try_new(ComponentId::try_new("source")?, vec![
+                descriptor: ComponentDescriptor::try_new(fixture_support::component_id(77), vec![
                     PortDescriptor::new(PortId::try_new("out")?, PortDirection::Output, GraphChangeCodec::schema().descriptor().clone(), PipeRequirements::default()),
                 ])?, receiver: receive_input,
             };
-            let sink = |id: &str, sender| -> anyhow::Result<LateBindingSink> {
-                Ok(LateBindingSink { descriptor: ComponentDescriptor::try_new(ComponentId::try_new(id)?, vec![
+            let sink = |id: u128, sender| -> anyhow::Result<LateBindingSink> {
+                Ok(LateBindingSink { descriptor: ComponentDescriptor::try_new(fixture_support::component_id(id), vec![
                     PortDescriptor::new(PortId::try_new("in")?, PortDirection::Input, QueryChangeCodec::schema().descriptor().clone(), PipeRequirements::default()),
                 ])?, sender })
             };
-            let first = ComponentBatch::builder().source(Box::new(source))
-                .transformer(Box::new(quiet)).sink(Box::new(sink("early", early_sender)?));
+            let first = ComponentBatch::builder().source(ComponentName::try_new("source")?, Box::new(source))
+                .transformer(ComponentName::try_new("quiet")?, Box::new(quiet))
+                .sink(ComponentName::try_new("early")?, Box::new(sink(1, early_sender)?));
             let first = if factory_query {
                 let indexes = ResourceId::try_new("late-binding-indexes")?;
                 let bootstrap = ResourceId::try_new("late-binding-bootstrap")?;
-                let factory = Arc::new(ContinuousQueryFactory::default());
+                let factory = FactoryRegistry::standard()
+                    .get(&ContinuousQueryFactory::default().descriptor().implementation)
+                    .expect("registered reference query factory").clone();
                 let specification = ComponentSpecification {
                     descriptor: query.descriptor().clone(), role: ComponentRole::Transformer, completion: None,
                     implementation: factory.descriptor().implementation.clone(), configuration_version: 1,
@@ -819,40 +879,51 @@ async fn bootstrapped_query_delivers_live_updates_to_second_batch_consumers() ->
                         id: bootstrap.clone(), role: ResourceRole::Bootstrap, ownership: ResourceOwnership::Borrowed, binding: Arc::from("bootstrap"),
                     })?.provide_resource(bootstrap, ResourceHandle::new(ResourceRole::Bootstrap,
                         Arc::new(QueryBootstrapResource(Arc::new(Bootstrap { calls: Arc::new(AtomicUsize::new(0)), fail: false })))))?
-                    .component(specification, factory)
+                    .component(
+                        ComponentName::try_new("query")?,
+                        specification,
+                        factory,
+                    )
             } else {
-                first.transformer(Box::new(query))
+                first.transformer(ComponentName::try_new("query")?, Box::new(query))
             };
             let first = first
-                .bind_stream(endpoint("source", "out"), StreamId::try_new("source/out")?)
-                .bind_stream(endpoint("query", "out"), StreamId::try_new("query/out")?)
-                .bind_stream(endpoint("quiet", "out"), StreamId::try_new("quiet/out")?)
-                .connect(EdgeDefinition::new(endpoint("source","out"),endpoint("query","in")), Box::new(BoundedPipeConfig { capacity: 32 }))
-                .connect(EdgeDefinition::new(endpoint("source","out"),endpoint("quiet","in")), Box::new(BoundedPipeConfig { capacity: 32 }))
-                .connect(EdgeDefinition::new(endpoint("query","out"),endpoint("early","in")), Box::new(BoundedPipeConfig { capacity: 32 }))
-                .connect(EdgeDefinition::new(endpoint("quiet","out"),endpoint("early","in")), Box::new(BoundedPipeConfig { capacity: 32 }))
+                .bind_stream(endpoint(77, "out"), StreamId::try_new("source/out")?)
+                .bind_stream(endpoint(46, "out"), StreamId::try_new("query/out")?)
+                .bind_stream(endpoint(754, "out"), StreamId::try_new("quiet/out")?)
+                .connect(EdgeDefinition::new(endpoint(77,"out"),endpoint(46,"in")), Box::new(BoundedPipeConfig { capacity: 32 }))
+                .connect(EdgeDefinition::new(endpoint(77,"out"),endpoint(754,"in")), Box::new(BoundedPipeConfig { capacity: 32 }))
+                .connect(EdgeDefinition::new(endpoint(46,"out"),endpoint(1,"in")), Box::new(BoundedPipeConfig { capacity: 32 }))
+                .connect(EdgeDefinition::new(endpoint(754,"out"),endpoint(1,"in")), Box::new(BoundedPipeConfig { capacity: 32 }))
                 .build()?;
-            assert!(core.add_components(first).await?.committed);
+            core.add_components(first).await?;
             if start_before_binding {
-                core.start().await?;
-                core.computation_component("query")?.wait_started().await?;
-                let reader = core.query_manager().get_query_instance("query").await.map_err(anyhow::Error::msg)?;
+                core.start().await.map_err(|error| anyhow::Error::from(error).context(format!(
+                    "first batch startup (factory={factory_query}): {:?}",
+                    core.computation_control().map(|control| control.observed())
+                )))?;
+                core.component_by_name(&drasi_core_types::ComponentName::try_new("query").expect("fixture component name"))?.wait_started().await?;
+                let reader = core.query_manager().get_query_instance_by_name(&drasi_core_types::ComponentName::try_new("query").expect("fixture component name")).await.map_err(anyhow::Error::msg)?;
                 let snapshot = reader.fetch_snapshot().await?;
-                assert_eq!(core.get_query_results("query").await?.len(), 1);
+                assert_eq!(core.get_query_results_by_name(&drasi_core_types::ComponentName::try_new("query").expect("fixture component name")).await?.len(), 1);
                 assert_eq!(snapshot.as_of_sequence, 0);
             }
             let (late_sender, mut late_receiver) = tokio::sync::mpsc::unbounded_channel();
-            let mut second = ComponentBatch::builder().sink(Box::new(sink("late", late_sender)?)).build()?;
-            for producer in ["query", "quiet"] {
+            let mut second = ComponentBatch::builder().sink(ComponentName::try_new("late")?, Box::new(sink(2, late_sender)?)).build()?;
+            for producer in [46, 754] {
                 second.definition.relationships.push(DesiredRelationship {
-                    definition: EdgeDefinition::new(endpoint(producer,"out"),endpoint("late","in")),
+                    definition: EdgeDefinition::new(endpoint(producer,"out"),endpoint(2,"in")),
                     pipe: DesiredPipe::Bounded { capacity: 32 }, policy: RelationshipPolicy::default(),
                 });
             }
-            let report = core.add_components(second).await?;
-            assert!(report.committed && report.summary == OperationSummary::Completed, "{report:?}");
-            if !start_before_binding { core.start().await?; }
-            core.computation_component("late")?.wait_started().await?;
+            core.add_components(second).await?;
+            if !start_before_binding {
+                core.start().await.map_err(|error| anyhow::Error::from(error).context(format!(
+                    "combined batch startup (factory={factory_query}): {:?}",
+                    core.computation_control().map(|control| control.observed())
+                )))?;
+            }
+            core.component_by_name(&drasi_core_types::ComponentName::try_new("late").expect("fixture component name"))?.wait_started().await?;
             for (sequence, name) in [(2, "Alicia"), (3, "Alice")] {
                 send_input.send(envelope(sequence, name, true))?;
                 for receiver in [&mut early_receiver, &mut late_receiver] {
@@ -895,7 +966,7 @@ async fn graph_bootstrap_snapshot_and_live_handoff_run_through_real_components()
         .expect("sink");
     let source = LiveSource {
         descriptor: ComponentDescriptor::try_new(
-            ComponentId::try_new("source").expect("id"),
+            fixture_support::component_id(77),
             vec![PortDescriptor::new(
                 PortId::try_new("out").expect("port"),
                 PortDirection::Output,
@@ -906,39 +977,39 @@ async fn graph_bootstrap_snapshot_and_live_handoff_run_through_real_components()
         .expect("source"),
         events: vec![envelope(1, "Alice", false), envelope(2, "Alicia", true)].into(),
     };
-    let endpoint = |node: &str, port: &str| {
+    let endpoint = |node: u128, port: &str| {
         Endpoint::new(
-            ComponentId::try_new(node).expect("id"),
+            fixture_support::component_id(node),
             PortId::try_new(port).expect("port"),
         )
     };
     let mut graph = ComputationGraph::builder("snapshot-handoff")
-        .source(Box::new(source))
-        .transformer(Box::new(query))
-        .transformer(Box::new(replay))
-        .sink(Box::new(sink))
+        .fixture_source(Box::new(source))
+        .fixture_transformer(Box::new(query))
+        .fixture_transformer(Box::new(replay))
+        .fixture_sink(Box::new(sink))
         .bind_stream(
-            endpoint("source", "out"),
+            endpoint(77, "out"),
             StreamId::try_new("source/out").expect("stream"),
         )
         .bind_stream(
-            endpoint("query", "out"),
+            endpoint(46, "out"),
             StreamId::try_new("query/out").expect("stream"),
         )
         .bind_stream(
-            endpoint("replay", "out"),
+            endpoint(719, "out"),
             StreamId::try_new("replay/out").expect("stream"),
         )
         .connect(
-            EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+            EdgeDefinition::new(endpoint(77, "out"), endpoint(46, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            EdgeDefinition::new(endpoint("query", "out"), endpoint("replay", "in")),
+            EdgeDefinition::new(endpoint(46, "out"), endpoint(719, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            EdgeDefinition::new(endpoint("replay", "out"), endpoint("sink", "in")),
+            EdgeDefinition::new(endpoint(719, "out"), endpoint(101, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -961,7 +1032,13 @@ async fn graph_bootstrap_snapshot_and_live_handoff_run_through_real_components()
         Some(&drasi_core::evaluation::variable_value::VariableValue::from("Alicia"))
     );
     assert_eq!(
-        progress.load("query").await.expect("handled checkpoint"),
+        progress
+            .load(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID")
+            )
+            .await
+            .expect("handled checkpoint"),
         Some(ConsumerCheckpoint {
             sequence: 1,
             generation: 0,
@@ -973,6 +1050,7 @@ async fn graph_bootstrap_snapshot_and_live_handoff_run_through_real_components()
 #[cfg(feature = "computation-rocksdb-tests")]
 mod persistent {
     use super::*;
+    use drasi_core::interface::{CheckpointKey, OutputPartition};
     use drasi_index_rocksdb::{
         computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
     };
@@ -1139,25 +1217,32 @@ mod persistent {
         first.stop().await.unwrap();
         drop(first);
         let foreign_bytes = {
-            let resources = indexes.create_indexes("recovery", "query").await.unwrap();
+            let resources = indexes
+                .create_indexes("recovery", &fixture_support::component_id(46))
+                .await
+                .unwrap();
             let outbox = resources.outbox_writer().unwrap();
-            let retained = outbox.read_from("query", 0).await.unwrap();
+            let partition = OutputPartition::Component(fixture_support::component_id(46));
+            let retained = outbox.read_from(&partition, 0).await.unwrap();
             let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).unwrap());
-            codec.register_schema(GraphChangeCodec::schema()).unwrap();
+            codec.register_schema(QueryChangeCodec::schema()).unwrap();
             let mut output = codec.decode(&retained[0].1).unwrap();
             let identity = QueryRecoveryIdentity::from_envelope(&output).unwrap();
             QueryRecoveryIdentity::try_new(
                 "foreign-graph",
-                ComponentId::try_new("query").unwrap(),
+                fixture_support::component_id(46),
                 identity.configuration_hash(),
                 identity.incarnation(),
             )
             .unwrap()
-            .annotate(&mut output, &ComponentId::try_new("query").unwrap())
+            .annotate(&mut output, &fixture_support::component_id(46))
             .unwrap();
             let bytes = codec.encode(&output).unwrap();
             resources.indexes().session_control.begin().await.unwrap();
-            outbox.append("query", retained[0].0, &bytes).await.unwrap();
+            outbox
+                .append(&partition, retained[0].0, &bytes)
+                .await
+                .unwrap();
             resources.indexes().session_control.commit().await.unwrap();
             resources.cleanup().unwrap().shutdown().await.unwrap();
             bytes
@@ -1180,12 +1265,18 @@ mod persistent {
             restored.stop().await.unwrap();
             drop(restored);
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            let resources = indexes.create_indexes("recovery", "query").await.unwrap();
+            let resources = indexes
+                .create_indexes("recovery", &fixture_support::component_id(46))
+                .await
+                .unwrap();
             assert_eq!(
                 resources
                     .outbox_writer()
                     .unwrap()
-                    .read_from("query", 0)
+                    .read_from(
+                        &OutputPartition::Component(fixture_support::component_id(46)),
+                        0,
+                    )
                     .await
                     .unwrap()[0]
                     .1,
@@ -1223,7 +1314,7 @@ mod persistent {
         );
         query.stop().await.expect("release reconstructed owner");
         query
-            .deprovision()
+            .delete_owned_resources()
             .await
             .expect("reopen and clear incomplete state");
         query
@@ -1274,7 +1365,7 @@ mod persistent {
                 watermarks: vec![BootstrapWatermark {
                     producer: None,
                     stream: StreamId::try_new("source/out")?,
-                    source_id: Some("people".into()),
+                    source_id: Some(fixture_support::component_id(77)),
                     sequence: 17,
                     position: Some(bytes::Bytes::from_static(b"consistent-boundary")),
                 }],
@@ -1303,7 +1394,7 @@ mod persistent {
                 calls: AtomicUsize::new(0),
             });
             let progress = Arc::new(
-                QuerySourceProgress::new("recovery", ComponentId::try_new("query").expect("id"))
+                QuerySourceProgress::new("recovery", fixture_support::component_id(46))
                     .expect("progress"),
             );
             let mut query = ContinuousQueryTransformer::new_with_options(
@@ -1327,7 +1418,8 @@ mod persistent {
                 query.start().await.expect("complete or recover");
                 let snapshot = progress.snapshot();
                 assert!(snapshot.ready && snapshot.bootstrap_complete);
-                let checkpoint = &snapshot.checkpoints[&SourceProgressKey::Source("people".into())];
+                let checkpoint = &snapshot.checkpoints
+                    [&SourceProgressKey::Source(fixture_support::component_id(77))];
                 assert_eq!(checkpoint.sequence, 17);
                 assert_eq!(
                     checkpoint.source_position.as_deref(),
@@ -1382,13 +1474,17 @@ mod persistent {
             }
             {
                 let resources = provider
-                    .create_indexes("recovery", "query")
+                    .create_indexes("recovery", &fixture_support::component_id(46))
                     .await
                     .expect("resources");
                 let outbox = resources.outbox_writer().expect("outbox");
                 let live = resources.live_results_writer().expect("live rows");
-                let retained = outbox.read_from("query", 0).await.expect("history");
-                let stored_rows = live.read_snapshot("query").await.expect("snapshot");
+                let output = OutputPartition::Component(fixture_support::component_id(46));
+                let retained = outbox.read_from(&output, 0).await.expect("history");
+                let stored_rows = live
+                    .read_snapshot(&fixture_support::component_id(46))
+                    .await
+                    .expect("snapshot");
                 assert_eq!(retained.len(), 1);
                 assert_eq!(stored_rows.len(), 1);
                 resources
@@ -1399,7 +1495,7 @@ mod persistent {
                     .expect("begin");
                 if corrupt == "snapshot" {
                     live.apply_mutations(
-                        "query",
+                        &fixture_support::component_id(46),
                         &[RowMutation {
                             row_signature: stored_rows[0].0,
                             data: Some(b"corrupt-snapshot"),
@@ -1426,7 +1522,7 @@ mod persistent {
                         output
                             .append_annotation(
                                 ContextEntry::try_new(
-                                    ComponentId::try_new("query").expect("id"),
+                                    fixture_support::component_id(46),
                                     key,
                                     ContextValue::Bool(true),
                                 )
@@ -1438,7 +1534,7 @@ mod persistent {
                             .expect("envelope with invalid query annotation")
                     };
                     outbox
-                        .append("query", retained[0].0, &bytes)
+                        .append(&output, retained[0].0, &bytes)
                         .await
                         .expect("corrupt output");
                 }
@@ -1625,7 +1721,10 @@ mod persistent {
             );
             published.push(generation);
             query.stop().await.expect("stop");
-            query.deprovision().await.expect("deprovision");
+            query
+                .delete_owned_resources()
+                .await
+                .expect("delete owned resources");
         }
         assert!(
             published.windows(2).all(|pair| pair[0] < pair[1]),
@@ -1690,7 +1789,7 @@ mod persistent {
             let progress = Arc::new(MemoryConsumerProgress::default());
             progress
                 .commit_handled(
-                    "query",
+                    &fixture_support::component_id(46),
                     ConsumerCheckpoint {
                         sequence: 1,
                         generation: 0,
@@ -1724,7 +1823,7 @@ mod persistent {
             assert_eq!(state.snapshots.load(Ordering::SeqCst), 1);
             assert_eq!(
                 progress
-                    .load("query")
+                    .load(&fixture_support::component_id(46))
                     .await
                     .expect("new checkpoint")
                     .expect("checkpoint")
@@ -1766,7 +1865,7 @@ mod persistent {
         let provider = provider(temp.path());
         {
             let resources = provider
-                .create_indexes("recovery", "query")
+                .create_indexes("recovery", &fixture_support::component_id(46))
                 .await
                 .expect("resources");
             let session = &resources.indexes().session_control;
@@ -1774,7 +1873,11 @@ mod persistent {
             resources
                 .checkpoint_store()
                 .expect("checkpoint")
-                .stage_checkpoint("\0computation:pending-output:v1", 17, None)
+                .stage_checkpoint(
+                    &CheckpointKey::Metadata("\0computation:pending-output:v1".into()),
+                    17,
+                    None,
+                )
                 .await
                 .expect("pending output");
             session.commit().await.expect("commit");
@@ -1816,7 +1919,7 @@ mod persistent {
             let provider = provider(temp.path());
             {
                 let resources = provider
-                    .create_indexes("recovery", "query")
+                    .create_indexes("recovery", &fixture_support::component_id(46))
                     .await
                     .expect("resources");
                 resources
@@ -1829,7 +1932,7 @@ mod persistent {
                     .checkpoint_store()
                     .expect("checkpoint")
                     .stage_checkpoint(
-                        "\0computation:query-bootstrap:v1",
+                        &CheckpointKey::Metadata("\0computation:query-bootstrap:v1".into()),
                         sequence,
                         position.as_ref(),
                     )
@@ -1873,7 +1976,7 @@ mod persistent {
         let provider = provider(temp.path());
         {
             let resources = provider
-                .create_indexes("recovery", "query")
+                .create_indexes("recovery", &fixture_support::component_id(46))
                 .await
                 .expect("resources");
             resources
@@ -1885,14 +1988,18 @@ mod persistent {
             resources
                 .checkpoint_store()
                 .expect("checkpoint")
-                .stage_result_sequence("query", u64::MAX)
+                .stage_result_sequence(
+                    &OutputPartition::Component(fixture_support::component_id(46)),
+                    u64::MAX,
+                )
                 .await
                 .expect("high water");
             resources
                 .outbox_writer()
                 .expect("outbox")
                 .append(
-                    "computation-reset-v1:query",
+                    &OutputPartition::Component(fixture_support::component_id(46))
+                        .metadata("computation-reset-v1"),
                     1,
                     &serde_json::to_vec(&serde_json::json!({
                         "sequence": u64::MAX, "in_progress": false, "generation": 1
@@ -1952,7 +2059,7 @@ mod persistent {
             query.stop().await.expect("stop");
         }
         let resources = provider
-            .create_indexes("recovery", "query")
+            .create_indexes("recovery", &fixture_support::component_id(46))
             .await
             .expect("resources");
         let checkpoints = resources
@@ -1962,10 +2069,10 @@ mod persistent {
             .await
             .expect("checkpoints");
         let input = checkpoints
-            .iter()
-            .find(|(key, _)| key.starts_with("computation:input:"))
-            .expect("input checkpoint")
-            .1;
+            .get(&CheckpointKey::Stream(
+                StreamId::try_new("source/out").expect("stream"),
+            ))
+            .expect("input checkpoint");
         assert_eq!(input.sequence, 2);
         assert_eq!(input.source_position.as_deref(), Some(&b"valid-cursor"[..]));
         resources

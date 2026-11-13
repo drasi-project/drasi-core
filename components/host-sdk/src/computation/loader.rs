@@ -1394,7 +1394,9 @@ mod activation_credentials_tests {
             )));
             assert!(factory
                 .create_component_with_identity(
-                    drasi_lib::computation::v1::ComponentId::try_new("test")?,
+                    drasi_lib::computation::v1::ComponentId::try_new(
+                        "1321ecc5-bbea-5d09-9a30-d09172a1027f"
+                    )?,
                     fixture::configuration(),
                     identity,
                 )
@@ -1422,14 +1424,17 @@ mod bootstrap_coordination_tests {
         } else {
             workspace.join(target)
         };
-        let path = target.join("debug/examples").join(format!(
+        let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| target.join("debug/plugins"));
+        let path = directory.join("examples").join(format!(
             "{}{name}{}",
             std::env::consts::DLL_PREFIX,
             std::env::consts::DLL_SUFFIX,
         ));
         anyhow::ensure!(
             path.is_file(),
-            "build drasi-host-sdk --example {name} first"
+            "first run make build-test-plugins (missing fixture {name})"
         );
         Ok(Arc::new(unsafe { Library::new(path)? }))
     }
@@ -1630,14 +1635,17 @@ mod consumer_progress_tests {
         } else {
             workspace.join(target)
         };
-        let path = target.join("debug/examples").join(format!(
+        let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| target.join("debug/plugins"));
+        let path = directory.join("examples").join(format!(
             "{}native_consumer_progress_metadata{}",
             std::env::consts::DLL_PREFIX,
             std::env::consts::DLL_SUFFIX,
         ));
         anyhow::ensure!(
             path.is_file(),
-            "build drasi-host-sdk --example native_consumer_progress_metadata first"
+            "first run make build-test-plugins (missing native_consumer_progress_metadata fixture)"
         );
         let library = Arc::new(unsafe { Library::new(path)? });
         let entered =

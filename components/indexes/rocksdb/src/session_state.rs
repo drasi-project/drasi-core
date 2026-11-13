@@ -374,8 +374,14 @@ mod tests {
     fn setup_test_db() -> (tempfile::TempDir, Arc<IndexDb>) {
         let dir = tempfile::TempDir::new().expect("failed to create temp dir");
         let options = RocksIndexOptions::new(false, false, crate::RocksDbMemoryBudget::default());
-        let db = open_unified_db(dir.path().to_str().expect("path"), "test", &options)
-            .expect("failed to open db");
+        let db = open_unified_db(
+            dir.path().to_str().expect("path"),
+            &drasi_core_types::StorageScope::default(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+            &options,
+        )
+        .expect("failed to open db");
         (dir, db)
     }
 

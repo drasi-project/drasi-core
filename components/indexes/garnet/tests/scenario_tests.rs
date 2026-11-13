@@ -65,7 +65,7 @@ impl GarnetQueryConfig {
 
     pub async fn build_future_queue(
         &self,
-        query_id: &str,
+        query_id: &drasi_core::ComponentId,
     ) -> (
         GarnetFutureQueue,
         Arc<dyn drasi_core::interface::SessionControl>,
@@ -75,7 +75,12 @@ impl GarnetQueryConfig {
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
         (
-            GarnetFutureQueue::new(query_id, connection, session_state),
+            GarnetFutureQueue::new(
+                &drasi_core::interface::StorageScope::default(),
+                query_id,
+                connection,
+                session_state,
+            ),
             session_control,
         )
     }
@@ -90,7 +95,7 @@ impl GarnetQueryConfig {
 impl QueryTestConfig for GarnetQueryConfig {
     async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
         log::info!("using in Garnet indexes");
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let client = redis::Client::open(self.url.as_str()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
@@ -98,10 +103,25 @@ impl QueryTestConfig for GarnetQueryConfig {
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
 
-        let element_index =
-            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
-        let ari = GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
-        let fq = GarnetFutureQueue::new(&query_id, connection, session_state);
+        let element_index = GarnetElementIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            true,
+            session_state.clone(),
+        );
+        let ari = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            session_state.clone(),
+        );
+        let fq = GarnetFutureQueue::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         let element_index = Arc::new(element_index);
         let archive_index = element_index.clone();
@@ -457,7 +477,7 @@ mod index {
     async fn future_queue_push_always() {
         let test_config = GarnetQueryConfig::new(false).await;
         let (fqi, sc) = test_config
-            .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
+            .build_future_queue(&drasi_core::ComponentId::generate())
             .await;
         fqi.clear().await.unwrap();
         shared_tests::index::future_queue::push_always(&fqi, &sc).await;
@@ -467,7 +487,7 @@ mod index {
     async fn future_queue_push_not_exists() {
         let test_config = GarnetQueryConfig::new(false).await;
         let (fqi, sc) = test_config
-            .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
+            .build_future_queue(&drasi_core::ComponentId::generate())
             .await;
         fqi.clear().await.unwrap();
         shared_tests::index::future_queue::push_not_exists(&fqi, &sc).await;
@@ -477,7 +497,7 @@ mod index {
     async fn future_queue_clear_removes_all() {
         let test_config = GarnetQueryConfig::new(false).await;
         let (fqi, sc) = test_config
-            .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
+            .build_future_queue(&drasi_core::ComponentId::generate())
             .await;
         shared_tests::index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
@@ -486,7 +506,7 @@ mod index {
     async fn future_queue_push_overwrite() {
         let test_config = GarnetQueryConfig::new(false).await;
         let (fqi, sc) = test_config
-            .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
+            .build_future_queue(&drasi_core::ComponentId::generate())
             .await;
         fqi.clear().await.unwrap();
         shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
@@ -587,15 +607,29 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let element_index =
-            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
-        let result_index =
-            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
-        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+        let element_index = GarnetElementIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            true,
+            session_state.clone(),
+        );
+        let result_index = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            session_state.clone(),
+        );
+        let future_queue = GarnetFutureQueue::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         element_index.clear().await.unwrap();
         result_index.clear().await.unwrap();
@@ -657,15 +691,29 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let element_index =
-            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
-        let result_index =
-            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
-        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+        let element_index = GarnetElementIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            true,
+            session_state.clone(),
+        );
+        let result_index = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            session_state.clone(),
+        );
+        let future_queue = GarnetFutureQueue::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         element_index.clear().await.unwrap();
         result_index.clear().await.unwrap();
@@ -728,14 +776,23 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let element_index =
-            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
-        let result_index =
-            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+        let element_index = GarnetElementIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            true,
+            session_state.clone(),
+        );
+        let result_index = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            session_state.clone(),
+        );
 
         element_index.clear().await.unwrap();
         result_index.clear().await.unwrap();
@@ -798,14 +855,23 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let element_index =
-            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
-        let result_index =
-            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+        let element_index = GarnetElementIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            true,
+            session_state.clone(),
+        );
+        let result_index = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            session_state.clone(),
+        );
 
         element_index.clear().await.unwrap();
         result_index.clear().await.unwrap();
@@ -888,12 +954,16 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let result_index =
-            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+        let result_index = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            session_state.clone(),
+        );
 
         result_index.clear().await.unwrap();
 
@@ -939,12 +1009,17 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let element_index =
-            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
+        let element_index = GarnetElementIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection.clone(),
+            true,
+            session_state.clone(),
+        );
 
         element_index.clear().await.unwrap();
 
@@ -1002,11 +1077,16 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
+        let result_index = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state.clone(),
+        );
 
         result_index.clear().await.unwrap();
 
@@ -1028,11 +1108,16 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
+        let result_index = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state.clone(),
+        );
 
         result_index.clear().await.unwrap();
 
@@ -1083,11 +1168,16 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+        let future_queue = GarnetFutureQueue::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         future_queue.clear().await.unwrap();
 
@@ -1133,11 +1223,16 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+        let future_queue = GarnetFutureQueue::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         future_queue.clear().await.unwrap();
 
@@ -1168,11 +1263,16 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+        let future_queue = GarnetFutureQueue::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         future_queue.clear().await.unwrap();
 
@@ -1212,11 +1312,12 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
         let checkpoint_store = drasi_index_garnet::GarnetCheckpointStore::new(
+            &drasi_core::interface::StorageScope::default(),
             &query_id,
             connection,
             session_state.clone(),
@@ -1227,32 +1328,64 @@ mod session {
         // Commit sequence 5
         session_control.begin().await.unwrap();
         checkpoint_store
-            .stage_checkpoint("change-1", 5, None)
+            .stage_checkpoint(
+                &drasi_core::interface::CheckpointKey::Source(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000033b")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                None,
+            )
             .await
             .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it persisted
         session_control.begin().await.unwrap();
-        let cp = checkpoint_store.read_checkpoint("change-1").await.unwrap();
+        let cp = checkpoint_store
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Source(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000033b")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
         assert_eq!(cp.as_ref().unwrap().sequence, 5);
 
         // Stage sequence 10 then rollback
         checkpoint_store
-            .stage_checkpoint("change-2", 10, None)
+            .stage_checkpoint(
+                &drasi_core::interface::CheckpointKey::Source(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000033c")
+                        .expect("fixture UUID"),
+                ),
+                10,
+                None,
+            )
             .await
             .unwrap();
         session_control.rollback().unwrap();
 
         // Verify rollback preserved the old value (change-2 should not exist)
         session_control.begin().await.unwrap();
-        let cp = checkpoint_store.read_checkpoint("change-2").await.unwrap();
+        let cp = checkpoint_store
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Source(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000033c")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
         assert!(
             cp.is_none(),
             "change-2 checkpoint should not exist after rollback"
         );
         // change-1 still has sequence 5
-        let cp = checkpoint_store.read_checkpoint("change-1").await.unwrap();
+        let cp = checkpoint_store
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Source(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000033b")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
         assert_eq!(
             cp.as_ref().unwrap().sequence,
             5,
@@ -1261,14 +1394,27 @@ mod session {
 
         // Now commit sequence 10
         checkpoint_store
-            .stage_checkpoint("change-2", 10, None)
+            .stage_checkpoint(
+                &drasi_core::interface::CheckpointKey::Source(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000033c")
+                        .expect("fixture UUID"),
+                ),
+                10,
+                None,
+            )
             .await
             .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it persisted
         session_control.begin().await.unwrap();
-        let cp = checkpoint_store.read_checkpoint("change-2").await.unwrap();
+        let cp = checkpoint_store
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Source(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000033c")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
         assert_eq!(cp.as_ref().unwrap().sequence, 10);
         session_control.rollback().unwrap();
     }
@@ -1279,12 +1425,17 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let element_index =
-            GarnetElementIndex::new(&query_id, connection, true, session_state.clone());
+        let element_index = GarnetElementIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            true,
+            session_state.clone(),
+        );
 
         element_index.clear().await.unwrap();
 
@@ -1380,12 +1531,17 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let element_index =
-            GarnetElementIndex::new(&query_id, connection, true, session_state.clone());
+        let element_index = GarnetElementIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            true,
+            session_state.clone(),
+        );
 
         ElementIndex::clear(&element_index).await.unwrap();
 
@@ -1499,11 +1655,16 @@ mod session {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
+        let result_index = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state.clone(),
+        );
 
         result_index.clear().await.unwrap();
 
@@ -1614,11 +1775,16 @@ mod checkpoint_tests {
         let redis = shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let subject = GarnetCheckpointStore::new(&query_id, connection, session_state);
+        let subject = GarnetCheckpointStore::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         session_control.begin().await.unwrap();
         shared_tests::sequence_counter::sequence_counter(&subject).await;
@@ -1631,11 +1797,16 @@ mod checkpoint_tests {
         let redis = shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let subject = GarnetCheckpointStore::new(&query_id, connection, session_state);
+        let subject = GarnetCheckpointStore::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         session_control.begin().await.unwrap();
         shared_tests::sequence_counter::checkpoint_round_trip(&subject).await;
@@ -1648,11 +1819,16 @@ mod checkpoint_tests {
         let redis = shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let query_id = format!("test-{}", Uuid::new_v4());
+        let query_id = drasi_core::ComponentId::generate();
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let subject = GarnetResultIndex::new(&query_id, connection, session_state);
+        let subject = GarnetResultIndex::new(
+            &drasi_core::interface::StorageScope::default(),
+            &query_id,
+            connection,
+            session_state,
+        );
 
         subject.clear().await.unwrap();
         session_control.begin().await.unwrap();

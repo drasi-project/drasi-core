@@ -7,8 +7,8 @@ use chrono::Utc;
 use drasi_computation_contracts::{
     profiling::{timestamp_ns, ProfilingMetadata},
     ChangeEnvelope, ComponentId, GraphChangeCodec, GraphProducerProgress, QueryChangeCodec,
-    QueryCodecError, QueryOutputMetadata, ResultNodeProjector, SourceTransactionCodec,
-    SourceTransactionLimits, StreamId, SystemMetadata,
+    QueryCodecError, QueryInputOrigin, QueryOutputMetadata, ResultNodeProjector,
+    SourceTransactionCodec, SourceTransactionLimits, StreamId, SystemMetadata,
 };
 use drasi_core::{
     computation::ComputationFutureResult, evaluation::context::QueryPartEvaluationContext,
@@ -19,7 +19,7 @@ use crate::ContinuousQueryDefinition;
 
 pub struct PreparedQueryInput {
     changes: Option<Vec<SourceChange>>,
-    pub source_id: Option<String>,
+    pub source_id: Option<ComponentId>,
 }
 
 impl PreparedQueryInput {
@@ -63,7 +63,7 @@ pub fn prepare_query_input<const SOURCE_TRANSACTION: bool>(
 /// the hosting adapter; completion timing is added only after its commit.
 pub struct QueryOperation<'a> {
     input: &'a ChangeEnvelope,
-    source_id: String,
+    input_origin: QueryInputOrigin,
     profiling: ProfilingMetadata,
 }
 
@@ -86,20 +86,20 @@ impl<'a> QueryOperation<'a> {
 
     pub fn new(input: &'a ChangeEnvelope) -> anyhow::Result<Self> {
         let metadata = GraphChangeCodec::source_metadata(input)?;
-        let source_id = metadata
+        let input_origin = metadata
             .as_ref()
-            .map(|metadata| metadata.source_id.clone())
-            .unwrap_or_else(|| input.system().stream().as_str().to_owned());
+            .map(|metadata| QueryInputOrigin::Source(metadata.source_id.clone()))
+            .unwrap_or_else(|| QueryInputOrigin::Stream(input.system().stream().clone()));
         Ok(Self::from_metadata(
             input,
-            source_id,
+            input_origin,
             metadata.and_then(|metadata| metadata.profiling),
         ))
     }
 
     pub fn from_metadata(
         input: &'a ChangeEnvelope,
-        source_id: String,
+        input_origin: QueryInputOrigin,
         profiling: Option<ProfilingMetadata>,
     ) -> Self {
         let mut profiling = profiling.unwrap_or_default();
@@ -109,13 +109,13 @@ impl<'a> QueryOperation<'a> {
         profiling.query_core_call_ns = Some(timestamp_ns());
         Self {
             input,
-            source_id,
+            input_origin,
             profiling,
         }
     }
 
-    pub fn with_source_id(mut self, source_id: String) -> Self {
-        self.source_id = source_id;
+    pub fn with_source_id(mut self, source_id: ComponentId) -> Self {
+        self.input_origin = QueryInputOrigin::Source(source_id);
         self
     }
 
@@ -134,8 +134,8 @@ impl<'a> QueryOperation<'a> {
             projector,
             results,
             QueryOutputMetadata {
-                query_id: definition.id.to_string(),
-                source_id: Some(self.source_id.clone()),
+                query_id: definition.id.clone(),
+                input_origin: Some(self.input_origin.clone()),
                 timestamp: Utc::now(),
                 metadata: HashMap::new(),
                 profiling: Some(self.profiling.clone()),
@@ -184,8 +184,8 @@ pub fn project_due_query_output(
         projector,
         &due.results,
         QueryOutputMetadata {
-            query_id: definition.id.to_string(),
-            source_id: Some(due.source_id.to_string()),
+            query_id: definition.id.clone(),
+            input_origin: Some(QueryInputOrigin::Scheduled(due.future.element_ref.clone())),
             timestamp: Utc::now(),
             metadata: HashMap::new(),
             profiling: Some(ProfilingMetadata::new()),

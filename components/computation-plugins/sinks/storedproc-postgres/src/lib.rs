@@ -6,7 +6,7 @@ mod config;
 
 use anyhow::Result;
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, SinkCompletion,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, SinkCompletion,
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ConsumerMode, ControlSender, CreateRequest,
@@ -45,6 +45,15 @@ drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 impl Factory for PostgresStoredProcFactory {
     fn metadata(&self) -> FactoryMetadata {
         let mut configuration = ConfigSchema::from_fields([("settings", ConfigType::Object, true)]);
+        configuration.constrain(
+            "settings",
+            drasi_computation_contracts::ConfigurationConstraint::try_new(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "outputs": drasi_computation_contracts::ConfigurationConstraint::output_aliases().schema(),
+                },
+            })).expect("constant stored procedure identity schema"),
+        ).expect("settings field");
         configuration
             .fields
             .get_mut("settings")
@@ -56,12 +65,7 @@ impl Factory for PostgresStoredProcFactory {
             role: ComponentRole::Sink,
             configuration_version: 1,
             configuration,
-            ports: PostgresStoredProcSink::describe(
-                ComponentId::try_new("postgres").expect("constant id"),
-            )
-            .expect("sink descriptor")
-            .ports()
-            .to_vec(),
+            ports: PostgresStoredProcSink::ports().expect("constant port descriptor"),
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,
@@ -89,14 +93,17 @@ impl Factory for PostgresStoredProcFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drasi_computation_contracts::{ComponentId, PortDirection};
     use drasi_computation_plugin_sdk::{ExportedPlugin, NativeComponent};
     use serde_json::json;
+
+    const OUTPUT_COMPONENT_ID: &str = "6439b52f-06c0-5e90-8905-d736f18e34ee";
 
     fn config() -> serde_json::Value {
         json!({
             "hostname": "no-database-is-opened-at-construction",
             "database": "test", "user": "user", "password": "secret",
-            "outputs": {"people": {"component": "source.people", "port": "out"}},
+            "outputs": {"people": {"component": OUTPUT_COMPONENT_ID, "port": "out"}},
             "default_template": { "added": {"template": "CALL add_user({{param after.id}})"} }
         })
     }
@@ -106,11 +113,35 @@ mod tests {
         Ok(vec![InputBinding {
             input_port: PortId::try_new("in")?,
             output: OutputEndpoint::new(
-                ComponentId::try_new("source.people")?,
+                ComponentId::try_new(OUTPUT_COMPONENT_ID)?,
                 PortId::try_new("out")?,
             ),
             stream: StreamId::try_new("people/out")?,
         }])
+    }
+
+    #[test]
+    fn factory_metadata_constructs_without_database_io() -> Result<()> {
+        ExportedPlugin::new(plugin()?)?;
+        #[cfg(feature = "dynamic-plugin")]
+        assert!(!drasi_computation_plugin_metadata().is_null());
+        let metadata = PostgresStoredProcFactory.metadata();
+        assert_eq!(metadata.role, ComponentRole::Sink);
+        assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
+        assert_eq!(metadata.ports, PostgresStoredProcSink::ports()?);
+        assert_eq!(metadata.ports.len(), 1);
+        assert_eq!(metadata.ports[0].id().as_str(), "in");
+        assert_eq!(metadata.ports[0].direction(), PortDirection::Input);
+        assert_eq!(
+            metadata.ports[0].schema(),
+            GraphChangeCodec::schema().descriptor()
+        );
+        let id = ComponentId::generate();
+        let descriptor = PostgresStoredProcSink::describe(id.clone())?;
+        assert_eq!(descriptor.id(), &id);
+        assert_eq!(descriptor.ports(), metadata.ports.as_slice());
+        assert!(metadata.configuration.fields["settings"].secret);
+        Ok(())
     }
 
     #[test]
@@ -122,7 +153,7 @@ mod tests {
         );
         assert!(PostgresStoredProcFactory.metadata().configuration.fields["settings"].secret);
         let sink = PostgresStoredProcSink::new(
-            ComponentId::try_new("sink")?,
+            ComponentId::try_new("a21a4fde-f642-54e1-93cf-bb9e177949d7")?,
             serde_json::from_value(config())?,
             &inputs()?,
         )?;
@@ -138,7 +169,10 @@ mod tests {
     #[test]
     fn configuration_rejects_unsafe_sql_unknown_routes_and_invalid_bounds() {
         for (field, value) in [
-            ("outputs", json!({"bad id": {"component": "source.people"}})),
+            (
+                "outputs",
+                json!({"bad id": {"component": OUTPUT_COMPONENT_ID}}),
+            ),
             ("port", json!(0)),
             ("command_timeout_ms", json!(0)),
             ("shutdown_timeout_ms", json!(0)),
@@ -173,7 +207,7 @@ mod tests {
     #[test]
     fn a_sink_without_declared_inputs_fails_clearly() -> Result<()> {
         assert!(PostgresStoredProcSink::new(
-            ComponentId::try_new("sink")?,
+            ComponentId::try_new("a21a4fde-f642-54e1-93cf-bb9e177949d7")?,
             serde_json::from_value(config())?,
             &[],
         )

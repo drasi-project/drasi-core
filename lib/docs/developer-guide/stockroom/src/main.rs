@@ -49,6 +49,12 @@ const WAREHOUSE_ALERTS: &str =
 const SUSTAINED: &str =
     "MATCH (p:Product) WHERE drasi.trueFor(p.quantity < p.minimum, duration({seconds:5})) RETURN p.sku AS sku, p.quantity AS quantity";
 
+// ANCHOR: component-identity
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+// ANCHOR_END: component-identity
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
     LowStock,
@@ -80,19 +86,16 @@ impl Scenario {
     }
 }
 
-fn endpoint(component: &str, port: &str) -> anyhow::Result<Endpoint> {
-    Ok(Endpoint::new(
-        ComponentId::try_new(component)?,
-        PortId::try_new(port)?,
-    ))
+fn endpoint(component: ComponentId, port: &str) -> GraphResult<Endpoint> {
+    Ok(Endpoint::new(component, PortId::try_new(port)?))
 }
 
 fn descriptor(
-    id: &str,
+    id: ComponentId,
     ports: &[(&str, PortDirection, SchemaDescriptor)],
-) -> anyhow::Result<ComponentDescriptor> {
+) -> GraphResult<ComponentDescriptor> {
     Ok(ComponentDescriptor::try_new(
-        ComponentId::try_new(id)?,
+        id,
         ports
             .iter()
             .map(|(name, direction, schema)| {
@@ -103,7 +106,7 @@ fn descriptor(
                     PipeRequirements::default(),
                 ))
             })
-            .collect::<anyhow::Result<_>>()?,
+            .collect::<GraphResult<_>>()?,
     )?)
 }
 
@@ -155,6 +158,7 @@ fn parse_inventory(text: &str) -> anyhow::Result<BTreeMap<String, Product>> {
 }
 
 trait FileRow: Clone + PartialEq + serde::de::DeserializeOwned + Send + Sync + 'static {
+    const ID: u128;
     const SOURCE: &'static str;
     const LABEL: &'static str;
     fn key(&self) -> &str;
@@ -162,6 +166,7 @@ trait FileRow: Clone + PartialEq + serde::de::DeserializeOwned + Send + Sync + '
 }
 
 impl FileRow for Product {
+    const ID: u128 = 758;
     const SOURCE: &'static str = "inventory";
     const LABEL: &'static str = "Product";
     fn key(&self) -> &str {
@@ -180,6 +185,7 @@ struct Warehouse {
 }
 
 impl FileRow for Warehouse {
+    const ID: u128 = 763;
     const SOURCE: &'static str = "catalog";
     const LABEL: &'static str = "Warehouse";
     fn key(&self) -> &str {
@@ -252,7 +258,6 @@ struct FileSource<T: FileRow> {
     pending: VecDeque<SourceChange>,
     poll: tokio::time::Interval,
     sequence: u64,
-    initialized: bool,
     last_error: Option<String>,
 }
 
@@ -260,11 +265,15 @@ type Inventory = FileSource<Product>;
 
 impl<T: FileRow> FileSource<T> {
     fn new(path: &Path) -> anyhow::Result<Self> {
+        Self::with_id(component_id(T::ID), path)
+    }
+
+    fn with_id(id: ComponentId, path: &Path) -> anyhow::Result<Self> {
         let mut poll = tokio::time::interval(POLL_INTERVAL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Ok(Self {
             descriptor: descriptor(
-                T::SOURCE,
+                id,
                 &[(
                     "out",
                     PortDirection::Output,
@@ -276,7 +285,6 @@ impl<T: FileRow> FileSource<T> {
             pending: VecDeque::new(),
             poll,
             sequence: 0,
-            initialized: false,
             last_error: None,
         })
     }
@@ -303,17 +311,11 @@ impl<T: FileRow> ComputationComponent for FileSource<T> {
         Ok(serde_json::json!({"path": self.path}))
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
-        if !self.initialized {
-            self.reload().await?;
-            self.initialized = true;
-        }
-        Ok(())
+    // ANCHOR: file-initialization
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.reload().await
     }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    // ANCHOR_END: file-initialization
 }
 
 #[async_trait]
@@ -449,7 +451,7 @@ impl ResultView {
 
 struct Alerts {
     descriptor: ComponentDescriptor,
-    query_id: &'static str,
+    label: &'static str,
     view: watch::Sender<ResultView>,
     output: tokio::io::Stdout,
     audit: bool,
@@ -534,12 +536,13 @@ impl EnvelopeSink for Alerts {
         }
         view.apply(&input.envelope)?;
         if self.audit {
+            let audit_id = component_id(764);
             ensure!(
                 input
                     .envelope
                     .annotations()
                     .entries()
-                    .any(|entry| entry.contributor() == "audit"
+                    .any(|entry| entry.contributor() == &audit_id
                         && entry.key() == "checked-by"
                         && entry.value() == ContextValue::String("stockroom".into())),
                 "audit context was not preserved"
@@ -549,7 +552,7 @@ impl EnvelopeSink for Alerts {
         if self.display {
             message.push_str(&format!(
                 "{}: {}\n",
-                self.query_id,
+                self.label,
                 serde_json::to_string(&view.rows())?
             ));
             self.output.write_all(message.as_bytes()).await?;
@@ -580,7 +583,7 @@ async fn finish<T>(core: &DrasiLib, work: anyhow::Result<T>) -> anyhow::Result<T
 fn application_callback(view: watch::Sender<ResultView>) -> anyhow::Result<Box<dyn EnvelopeSink>> {
     use drasi_reaction_application::NativeApplicationReaction;
     let sink = NativeApplicationReaction::callback(
-        "alerts",
+        component_id(759),
         QueryChangeCodec::schema().descriptor().clone(),
         move |input: InputEnvelope| {
             let view = view.clone();
@@ -605,7 +608,7 @@ fn application_callback(view: watch::Sender<ResultView>) -> anyhow::Result<Box<d
 fn normalization() -> anyhow::Result<MiddlewareTransformer> {
     MiddlewareTransformer::new(
         MiddlewareTransformerDefinition {
-            id: ComponentId::try_new("normalize")?,
+            id: component_id(760),
             output_stream: StreamId::try_new("normalize/out")?,
             middleware: serde_json::from_value(serde_json::json!([
                 {"kind":"parse_json","name":"read-payload","config":{
@@ -629,7 +632,7 @@ async fn low_stock_query() -> anyhow::Result<(ContinuousQueryTransformer, QueryR
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: GRAPH.into(),
-            id: ComponentId::try_new("low-stock")?,
+            id: component_id(757),
             query: LOW_STOCK.into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("low-stock/out")?,
@@ -654,7 +657,7 @@ async fn build_application(
     cli::Health,
 )> {
     let audit = matches!(scenario, Scenario::Audit);
-    let (query_id, query_text) = scenario.query();
+    let (query_name, query_text) = scenario.query();
     let (view, reader) = watch::channel(ResultView::default());
     let alerts: Box<dyn EnvelopeSink> = if scenario == Scenario::Callback {
         #[cfg(feature = "callbacks")]
@@ -666,14 +669,14 @@ async fn build_application(
     } else {
         Box::new(Alerts {
             descriptor: descriptor(
-                "alerts",
+                component_id(759),
                 &[(
                     "in",
                     PortDirection::Input,
                     QueryChangeCodec::schema().descriptor().clone(),
                 )],
             )?,
-            query_id,
+            label: query_name,
             view,
             output: tokio::io::stdout(),
             audit,
@@ -708,10 +711,10 @@ async fn build_application(
         let query = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: GRAPH.into(),
-                id: ComponentId::try_new(query_id)?,
+                id: component_id(757),
                 query: query_text.into(),
                 language: ComputationQueryLanguage::Cypher,
-                output_stream: StreamId::try_new(format!("{query_id}/out"))?,
+                output_stream: StreamId::try_new(format!("{query_name}/out"))?,
                 outbox_capacity: NonZeroUsize::new(128).expect("positive capacity"),
             },
             Arc::new(InMemoryComputationProvider),
@@ -730,13 +733,22 @@ async fn build_application(
     if let Some(catalog) = &catalog {
         query = query.with_result_catalog(catalog)?;
     }
+    let query_component_id = query.descriptor().id().clone();
+    let alerts_component_id = alerts.descriptor().id().clone();
     let mut batch = ComponentBatch::builder()
-        .transformer(Box::new(query))
-        .sink(alerts);
+        .transformer(ComponentName::try_new(query_name)?, Box::new(query))
+        .sink(ComponentName::try_new("alerts")?, alerts);
     if let Some((directory, http_port, sse_port)) = plugins {
         #[cfg(feature = "plugins")]
         {
-            batch = network::connect(batch, directory, query_id, http_port, sse_port)?;
+            batch = network::connect(
+                batch,
+                directory,
+                query_name,
+                query_component_id.clone(),
+                http_port,
+                sse_port,
+            )?;
         }
         #[cfg(not(feature = "plugins"))]
         anyhow::bail!(
@@ -744,54 +756,79 @@ async fn build_application(
             directory.display()
         );
     } else {
-        batch = batch.source(Box::new(Inventory::new(path)?));
+        batch = batch.source(
+            ComponentName::try_new("inventory")?,
+            Box::new(Inventory::new(path)?),
+        );
     }
-    let mut producers = vec!["inventory", query_id];
+    let inventory_id = component_id(Product::ID);
+    let mut producers =
+        vec![("inventory", inventory_id.clone()), (query_name, query_component_id.clone())];
     let mut edges = if audit {
         let schema = GraphChangeCodec::schema().descriptor().clone();
-        batch = batch.transformer(Box::new(Audit {
-            descriptor: descriptor(
-                "audit",
-                &[
-                    ("in", PortDirection::Input, schema.clone()),
-                    ("out", PortDirection::Output, schema),
-                ],
-            )?,
-            sequence: 0,
-        }));
-        producers.push("audit");
-        vec![("inventory", "audit"), ("audit", query_id), (query_id, "alerts")]
+        batch = batch.transformer(
+            ComponentName::try_new("audit")?,
+            Box::new(Audit {
+                descriptor: descriptor(
+                    component_id(764),
+                    &[
+                        ("in", PortDirection::Input, schema.clone()),
+                        ("out", PortDirection::Output, schema),
+                    ],
+                )?,
+                sequence: 0,
+            }),
+        );
+        let audit_id = component_id(764);
+        producers.push(("audit", audit_id.clone()));
+        vec![
+            (inventory_id.clone(), audit_id.clone()),
+            (audit_id, query_component_id.clone()),
+            (query_component_id.clone(), alerts_component_id.clone()),
+        ]
     } else if scenario == Scenario::Normalize {
         #[cfg(feature = "normalize")]
         {
             let normalize = normalization()?;
-            batch = batch.transformer(Box::new(normalize));
-            producers.push("normalize");
-            vec![("inventory", "normalize"), ("normalize", query_id), (query_id, "alerts")]
+            batch = batch.transformer(ComponentName::try_new("normalize")?, Box::new(normalize));
+            let normalize_id = component_id(760);
+            producers.push(("normalize", normalize_id.clone()));
+            vec![
+                (inventory_id.clone(), normalize_id.clone()),
+                (normalize_id, query_component_id.clone()),
+                (query_component_id.clone(), alerts_component_id.clone()),
+            ]
         }
         #[cfg(not(feature = "normalize"))]
         anyhow::bail!("normalize mode requires --features normalize");
     } else {
-        vec![("inventory", query_id), (query_id, "alerts")]
+        vec![
+            (inventory_id, query_component_id.clone()),
+            (query_component_id.clone(), alerts_component_id),
+        ]
     };
     if scenario == Scenario::Join {
-        batch = batch.source(Box::new(FileSource::<Warehouse>::new(
-            &path.with_file_name("catalog.json"),
-        )?));
-        producers.push("catalog");
-        edges.push(("catalog", query_id));
+        batch = batch.source(
+            ComponentName::try_new("catalog")?,
+            Box::new(FileSource::<Warehouse>::new(
+                &path.with_file_name("catalog.json"),
+            )?),
+        );
+        let catalog_id = component_id(Warehouse::ID);
+        producers.push(("catalog", catalog_id.clone()));
+        edges.push((catalog_id, query_component_id.clone()));
     }
     if let Some(catalog) = catalog {
-        batch = batch.sink(Box::new(QueryResultsOutlet::new(
-            ComponentId::try_new("live-results")?,
-            catalog,
-        )));
-        edges.push((query_id, "live-results"));
+        batch = batch.sink(
+            ComponentName::try_new("live-results")?,
+            Box::new(QueryResultsOutlet::new(component_id(761), catalog)),
+        );
+        edges.push((query_component_id, component_id(761)));
     }
-    for producer in producers {
+    for (name, producer) in producers {
         batch = batch.bind_stream(
             endpoint(producer, "out")?,
-            StreamId::try_new(format!("{producer}/out"))?,
+            StreamId::try_new(format!("{name}/out"))?,
         );
     }
     for (from, to) in edges {
@@ -802,6 +839,7 @@ async fn build_application(
     }
     // ANCHOR: instance-build
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_id("stockroom")
         .with_components(batch.build()?)
         .build()
@@ -810,7 +848,7 @@ async fn build_application(
     let setup = async {
         let mut health = cli::Health::new(&core)?;
         core.start().await.context("start Stockroom")?;
-        let mut required = vec!["inventory", query_id, "alerts"];
+        let mut required = vec!["inventory", query_name, "alerts"];
         if plugins.is_some() {
             required.push("notifications");
         }
@@ -825,7 +863,7 @@ async fn build_application(
         }
         tokio::time::timeout(Duration::from_secs(5), results.wait_ready())
             .await
-            .with_context(|| format!("wait for query '{query_id}' readiness"))??;
+            .with_context(|| format!("wait for query '{query_name}' readiness"))??;
         health.check()?;
         Ok(health)
     }
@@ -1051,6 +1089,188 @@ async fn run_cli() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    struct LifecycleProbe {
+        descriptor: ComponentDescriptor,
+        events: Arc<std::sync::Mutex<Vec<(ComponentId, &'static str)>>>,
+    }
+
+    #[async_trait]
+    impl ComputationComponent for LifecycleProbe {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+        async fn initialize(&mut self) -> anyhow::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((self.descriptor.id().clone(), "initialize"));
+            Ok(())
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((self.descriptor.id().clone(), "start"));
+            Ok(())
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((self.descriptor.id().clone(), "stop"));
+            Ok(())
+        }
+        async fn dispose(&mut self) -> anyhow::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((self.descriptor.id().clone(), "dispose"));
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ComputationService for LifecycleProbe {
+        async fn run(&mut self) -> anyhow::Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    struct ProbeFactory {
+        descriptor: FactoryDescriptor,
+        events: Arc<std::sync::Mutex<Vec<(ComponentId, &'static str)>>>,
+    }
+
+    #[async_trait]
+    impl ComponentFactory for ProbeFactory {
+        fn descriptor(&self) -> &FactoryDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()> {
+            ensure!(
+                specification.descriptor.ports().is_empty(),
+                "probe has no ports"
+            );
+            Ok(())
+        }
+        async fn create(
+            &self,
+            context: ConstructionContext,
+        ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+            Ok(ConstructedComponent::service(Box::new(LifecycleProbe {
+                descriptor: context.specification.descriptor.clone(),
+                events: self.events.clone(),
+            })))
+        }
+    }
+
+    async fn create_probe(
+        core: &DrasiLib,
+        name: ComponentName,
+        factory: Arc<ProbeFactory>,
+    ) -> anyhow::Result<ComponentHandle> {
+        let requested_name = name.clone();
+        let receipt = core
+            .create_components(move |ids| {
+                let specification = ComponentSpecification {
+                    descriptor: descriptor(ids.allocate()?, &[])?,
+                    role: ComponentRole::Service,
+                    completion: None,
+                    implementation: factory.descriptor.implementation.clone(),
+                    configuration_version: 1,
+                    configuration: Default::default(),
+                    dependencies: Default::default(),
+                };
+                ComponentBatch::builder()
+                    .component(requested_name, specification, factory)
+                    .build()
+            })
+            .await?;
+        cli::accepted_component(core, &receipt, &name).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn component_identity_and_lifecycle_are_separate() -> anyhow::Result<()> {
+        let core = DrasiLib::builder()
+            .with_id("stockroom-lifecycle")
+            .build()
+            .await?;
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let factory = Arc::new(ProbeFactory {
+            descriptor: FactoryDescriptor {
+                implementation: ImplementationIdentity::try_new("stockroom/lifecycle-probe", "1")?,
+                role: ComponentRole::Service,
+                configuration_version: 1,
+                configuration: ConfigurationSchema::default(),
+                dependencies: Default::default(),
+            },
+            events: events.clone(),
+        });
+        let original_name = ComponentName::try_new("alerts")?;
+        let mut original_id = None;
+        let work = async {
+            let handle = create_probe(&core, original_name.clone(), factory.clone()).await?;
+            let id = handle.id().clone();
+            original_id = Some(id.clone());
+            tokio::time::timeout(Duration::from_secs(5), handle.wait_created()).await??;
+            core.start().await?;
+            tokio::time::timeout(Duration::from_secs(5), handle.wait_started()).await??;
+            let generation = handle.generation();
+            core.rename_component_by_id(&id, ComponentName::try_new("notifications")?)
+                .await?;
+            ensure!(core.component_by_name(&original_name).is_err());
+            ensure!(core.component_by_id(&id)?.generation() == generation);
+            let replacement = create_probe(&core, original_name.clone(), factory.clone()).await?;
+            ensure!(
+                replacement.id() != &id,
+                "reusing a name must allocate a new identity"
+            );
+            let uuid_shaped_name = ComponentName::try_new(id.as_str())?;
+            core.rename_component_by_id(replacement.id(), uuid_shaped_name.clone())
+                .await?;
+            ensure!(core.component_by_name(&uuid_shaped_name)?.id() == replacement.id());
+            ensure!(core.component_by_id(&id)?.id() == &id);
+            handle.stop().await?;
+            handle.start().await?;
+            ensure!(
+                handle.generation() == generation,
+                "stop/start retains the same object"
+            );
+            let trace: Vec<_> = events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(component, _)| component == &id)
+                .map(|(_, event)| *event)
+                .collect();
+            ensure!(
+                trace == ["initialize", "start", "stop", "start"],
+                "{trace:?}"
+            );
+            println!(
+                "Renamed component {id}; reused 'alerts' for {}.",
+                replacement.id()
+            );
+            Ok(())
+        }
+        .await;
+        finish(&core, work).await?;
+        let id = original_id.context("missing original probe identity")?;
+        let trace: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(component, _)| component == &id)
+            .map(|(_, event)| *event)
+            .collect();
+        ensure!(
+            trace == ["initialize", "start", "stop", "start", "stop", "dispose"],
+            "{trace:?}"
+        );
+        println!("Lifecycle: {trace:?}");
+        Ok(())
+    }
+
     struct FailsLater {
         descriptor: ComponentDescriptor,
         fail: Arc<tokio::sync::Notify>,
@@ -1083,6 +1303,7 @@ mod tests {
     async fn health_reports_a_failure_even_after_stop_acknowledges_it() -> anyhow::Result<()> {
         let fail = Arc::new(tokio::sync::Notify::new());
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1098,10 +1319,13 @@ mod tests {
             .with_id("health-test")
             .with_components(
                 ComponentBatch::builder()
-                    .service(Box::new(FailsLater {
-                        descriptor: descriptor("destination", &[])?,
-                        fail: fail.clone(),
-                    }))
+                    .service(
+                        ComponentName::try_new("destination")?,
+                        Box::new(FailsLater {
+                            descriptor: descriptor(component_id(766), &[])?,
+                            fail: fail.clone(),
+                        }),
+                    )
                     .build()?,
             )
             .build()
@@ -1124,9 +1348,11 @@ mod tests {
                 }),
             )
             .await??;
-            core.computation_component("destination")?.stop().await?;
+            core.component_by_name(&ComponentName::try_new("destination")?)?
+                .stop()
+                .await?;
             ensure!(core
-                .computation_component("destination")?
+                .component_by_name(&ComponentName::try_new("destination")?)?
                 .observed()?
                 .failure
                 .is_none());
@@ -1156,6 +1382,7 @@ mod tests {
         let (query, results) = low_stock_query().await?;
         let (view, _) = watch::channel(ResultView::default());
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1171,36 +1398,42 @@ mod tests {
             .with_id("missing-connection-test")
             .with_components(
                 ComponentBatch::builder()
-                    .source(Box::new(Inventory::new(&path)?))
-                    .transformer(Box::new(query))
-                    .sink(Box::new(Alerts {
-                        descriptor: descriptor(
-                            "alerts",
-                            &[(
-                                "in",
-                                PortDirection::Input,
-                                QueryChangeCodec::schema().descriptor().clone(),
-                            )],
-                        )?,
-                        query_id: "low-stock",
-                        view,
-                        output: tokio::io::stdout(),
-                        audit: false,
-                        reorders: false,
-                        display: true,
-                    }))
+                    .source(
+                        ComponentName::try_new("inventory")?,
+                        Box::new(Inventory::new(&path)?),
+                    )
+                    .transformer(ComponentName::try_new("low-stock")?, Box::new(query))
+                    .sink(
+                        ComponentName::try_new("alerts")?,
+                        Box::new(Alerts {
+                            descriptor: descriptor(
+                                component_id(759),
+                                &[(
+                                    "in",
+                                    PortDirection::Input,
+                                    QueryChangeCodec::schema().descriptor().clone(),
+                                )],
+                            )?,
+                            label: "low-stock",
+                            view,
+                            output: tokio::io::stdout(),
+                            audit: false,
+                            reorders: false,
+                            display: true,
+                        }),
+                    )
                     .bind_stream(
-                        endpoint("inventory", "out")?,
+                        endpoint(component_id(758), "out")?,
                         StreamId::try_new("inventory/out")?,
                     )
                     .bind_stream(
-                        endpoint("low-stock", "out")?,
+                        endpoint(component_id(757), "out")?,
                         StreamId::try_new("low-stock/out")?,
                     )
                     .connect(
                         EdgeDefinition::new(
-                            endpoint("low-stock", "out")?,
-                            endpoint("alerts", "in")?,
+                            endpoint(component_id(757), "out")?,
+                            endpoint(component_id(759), "in")?,
                         ),
                         Box::new(BoundedPipeConfig { capacity: 8 }),
                     )
@@ -1221,24 +1454,26 @@ mod tests {
                 "{messages}"
             );
             ensure!(
-                messages.contains("connection for 'inventory:out'"),
+                messages.contains("connection for '00000000-0000-0000-0000-0000000002f6:out'"),
                 "{messages}"
             );
             ensure!(messages.contains("deadline has elapsed"), "{messages}");
             ensure!(!messages.contains("Blocked"), "{messages}");
             health.check()?;
-            let report = core
-                .computation_control()?
-                .connect(
-                    EdgeDefinition::new(
-                        endpoint("inventory", "out")?,
-                        endpoint("low-stock", "in")?,
-                    ),
-                    Box::new(BoundedPipeConfig { capacity: 8 }),
-                    RelationshipPolicy::default(),
-                )
+            let current = core.desired_configuration()?;
+            let mut desired = current.desired;
+            desired.topology.relationships.push(DesiredRelationship {
+                definition: EdgeDefinition::new(
+                    endpoint(component_id(758), "out")?,
+                    endpoint(component_id(757), "in")?,
+                ),
+                pipe: DesiredPipe::Bounded { capacity: 8 },
+                policy: RelationshipPolicy::default(),
+            });
+            let receipt = core
+                .apply_desired_state(current.revision, "connect-inventory", desired)
                 .await?;
-            ensure!(report.summary == OperationSummary::Completed);
+            ensure!(receipt.revision == current.revision + 1);
             for component in ["inventory", "low-stock", "alerts"] {
                 cli::wait_started(&core, component, Duration::from_secs(5)).await?;
             }
@@ -1302,7 +1537,11 @@ mod tests {
                     vec![]
                 };
                 expect_view(&mut view, expected.clone()).await?;
-                ensure!(core.get_query_results(scenario.query().0).await? == expected);
+                ensure!(
+                    core.get_query_results_by_name(&ComponentName::try_new(scenario.query().0)?)
+                        .await?
+                        == expected
+                );
             }
             save(&path, &serde_json::json!([])).await?;
             let expected = if matches!(scenario, Scenario::Totals) {
@@ -1311,7 +1550,11 @@ mod tests {
                 vec![]
             };
             expect_view(&mut view, expected.clone()).await?;
-            ensure!(core.get_query_results(scenario.query().0).await? == expected);
+            ensure!(
+                core.get_query_results_by_name(&ComponentName::try_new(scenario.query().0)?)
+                    .await?
+                    == expected
+            );
             Ok(())
         }
         .await;
@@ -1572,6 +1815,7 @@ mod tests {
         let path = directory.path().join("inventory.json");
         save(&path, &inventory(3)).await?;
         let mut source = Inventory::new(&path)?;
+        source.initialize().await?;
         source.start().await?;
         source.pending.clear();
         tokio::fs::write(&path, "[").await?;
@@ -1593,6 +1837,7 @@ mod tests {
         let path = directory.path().join("inventory.json");
         save(&path, &inventory(3)).await?;
         let mut source = Inventory::new(&path)?;
+        source.initialize().await?;
         source.start().await?;
         source.stop().await?;
         source.start().await?;

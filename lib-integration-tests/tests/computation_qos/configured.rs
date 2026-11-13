@@ -7,7 +7,13 @@ async fn open(
 ) -> Result<Arc<QosChannel>> {
     let provider =
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false)));
-    let indexes = provider.create_indexes("qos", "channel").await?;
+    let indexes = provider
+        .create_indexes(
+            "qos",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000129")
+                .expect("fixture UUID"),
+        )
+        .await?;
     let codec =
         FactoryRegistry::standard().envelope_codec(NonZeroUsize::new(1 << 20).expect("limit"))?;
     Ok(
@@ -19,11 +25,20 @@ async fn open(
 async fn metadata(path: &Path) -> Result<Option<Bytes>> {
     let provider =
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false)));
-    let indexes = provider.create_indexes("qos", "channel").await?;
+    let indexes = provider
+        .create_indexes(
+            "qos",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000129")
+                .expect("fixture UUID"),
+        )
+        .await?;
     let result = indexes
         .checkpoint_store()
         .expect("checkpoint")
-        .read_checkpoint("journal")
+        .read_checkpoint(&drasi_core::interface::CheckpointKey::Source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000127")
+                .expect("fixture UUID"),
+        ))
         .await?
         .and_then(|checkpoint| checkpoint.source_position);
     drasi_core::computation::ComputationTransaction::try_new(indexes)?
@@ -47,7 +62,9 @@ async fn configured_recovery_preserves_receipts_and_rejects_changed_or_disabled_
         let journal = channel.output_journal_identity();
         let session = if matches!(options, QosRecoveryOptions::Admission(_)) {
             let session = channel
-                .register_producer(ComponentId::try_new("client")?)
+                .register_producer(ComponentId::try_new(
+                    "52e1c8f5-53bd-5fa7-86fa-cf5812b96486",
+                )?)
                 .await?;
             channel.admit(&session, 1, &event(1)?).await?;
             Some(session)

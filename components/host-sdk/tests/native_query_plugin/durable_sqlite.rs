@@ -96,19 +96,24 @@ impl Graph {
         indexes: &Path,
         generation: u64,
         gate: Option<Arc<super::lifecycle::Gate>>,
-        configuration: serde_json::Value,
+        mut configuration: serde_json::Value,
         tables: Vec<String>,
         delivery: Option<(drasi_lib::DispatchMode, usize)>,
     ) -> Result<Self> {
-        let core = DrasiLib::builder().with_id(GRAPH).build().await?;
+        let core = DrasiLib::builder()
+            .with_id(GRAPH)
+            .with_allow_external_component_ids(true)
+            .build()
+            .await?;
         core.start().await?;
         let scope = Scope {
             instance_id: GRAPH.into(),
             graph_id: core.output_catalogue()?.graph_id().to_string(),
             generation,
         };
+        configuration["stream"] = json!(format!("{COMPONENT}/out"));
         let mut query = factory()?.create_component_with_processing(
-            ComponentId::try_new(COMPONENT)?,
+            component_id()?,
             configuration,
             scope.clone(),
             provider(indexes)?,
@@ -162,13 +167,13 @@ impl Graph {
             "rest_api": {"host":"127.0.0.1", "port":port}
         });
         let coordinator = source_factory.create_source_bootstrap(
-            ComponentId::try_new("sqlite")?,
+            ComponentId::try_new("0dcb43b3-f286-5c30-87dc-41c98e4c52e9")?,
             configuration.clone(),
             scope.clone(),
             NativeSourceBootstrapProgress::Single(progress.clone()),
         )?;
         let source = source_factory.create_component_with_source_bootstrap(
-            ComponentId::try_new("sqlite")?,
+            ComponentId::try_new("0dcb43b3-f286-5c30-87dc-41c98e4c52e9")?,
             configuration,
             scope.clone(),
             coordinator.clone(),
@@ -184,8 +189,11 @@ impl Graph {
             })
             .context("missing coordinated SQLite bootstrap")?;
         let provider = bootstrap_factory.create_paired_query_provider(
-            ComponentId::try_new(COMPONENT)?,
-            json!({"source":"sqlite", "stream":"sqlite/out"}),
+            component_id()?,
+            json!({
+                "source": "0dcb43b3-f286-5c30-87dc-41c98e4c52e9",
+                "stream": "sqlite/out"
+            }),
             scope.clone(),
             progress.clone(),
             coordinator.clone(),
@@ -201,33 +209,44 @@ impl Graph {
         query.prepare_processing().await?;
         let query = core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::transformer(Box::new(query)))
-                    .auto_start(false)
-                    .bind_stream(
-                        PortId::try_new("out")?,
-                        StreamId::try_new(format!("{COMPONENT}/out"))?,
-                    ),
+                ComponentAddition::new(
+                    component_name()?,
+                    ConstructedComponent::transformer(Box::new(query)),
+                )
+                .auto_start(false)
+                .bind_stream(
+                    PortId::try_new("out")?,
+                    StreamId::try_new(format!("{COMPONENT}/out"))?,
+                ),
             )
             .await?;
         let source = core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
-                    .auto_start(false)
-                    .bind_stream(PortId::try_new("out")?, StreamId::try_new("sqlite/out")?),
+                ComponentAddition::new(
+                    drasi_lib::computation::v1::ComponentName::try_new("results")
+                        .expect("fixture component name"),
+                    ConstructedComponent::source(Box::new(source)),
+                )
+                .auto_start(false)
+                .bind_stream(PortId::try_new("out")?, StreamId::try_new("sqlite/out")?),
             )
             .await?;
         let received = Arc::new(Mutex::new(Vec::new()));
         let changed = Arc::new(Notify::new());
         let sink = core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new("results")?,
-                        vec![port_descriptor("in", PortDirection::Input)?],
-                    )?,
-                    received: received.clone(),
-                    notification: changed.clone(),
-                })))
+                ComponentAddition::new(
+                    drasi_lib::computation::v1::ComponentName::try_new("sqlite")
+                        .expect("fixture component name"),
+                    ConstructedComponent::sink(Box::new(Sink {
+                        descriptor: ComponentDescriptor::try_new(
+                            ComponentId::try_new("53381860-79f7-547a-bec1-33cf704cf05a")?,
+                            vec![port_descriptor("in", PortDirection::Input)?],
+                        )?,
+                        received: received.clone(),
+                        notification: changed.clone(),
+                    })),
+                )
                 .auto_start(false),
             )
             .await?;
@@ -242,10 +261,17 @@ impl Graph {
             ),
         ];
         let outlet = if let Some(catalog) = &catalog {
-            let factory = Arc::new(QueryResultsOutletFactory::default());
+            let implementation = QueryResultsOutletFactory::default()
+                .descriptor()
+                .implementation
+                .clone();
+            let factory = FactoryRegistry::standard()
+                .get(&implementation)
+                .context("standard query results outlet factory missing")?
+                .clone();
             let resource = ResourceId::try_new("native-query-results")?;
             let mut specification = factory.specification_from_config(
-                ComponentId::try_new("query-result-outlet")?,
+                ComponentId::try_new("c5195203-257d-50d6-941a-1b16e2e08fc0")?,
                 json!({}),
             )?;
             specification
@@ -253,20 +279,21 @@ impl Graph {
                 .insert("catalog".into(), vec![resource.clone()]);
             let outlet = core
                 .add_computation_component(
-                    ComponentAddition::from_specification(specification, factory)
-                        .auto_start(false)
-                        .with_resource(
-                            ResourceSpecification {
-                                id: resource,
-                                role: ResourceRole::QueryCatalog,
-                                ownership: ResourceOwnership::Graph,
-                                binding: "native-query-results".into(),
-                            },
-                            ResourceHandle::new(
-                                ResourceRole::QueryCatalog,
-                                Arc::new(catalog.clone()),
-                            ),
-                        ),
+                    ComponentAddition::from_specification(
+                        ComponentName::try_new("query-results")?,
+                        specification,
+                        factory,
+                    )
+                    .auto_start(false)
+                    .with_resource(
+                        ResourceSpecification {
+                            id: resource,
+                            role: ResourceRole::QueryCatalog,
+                            ownership: ResourceOwnership::Graph,
+                            binding: "native-query-results".into(),
+                        },
+                        ResourceHandle::new(ResourceRole::QueryCatalog, Arc::new(catalog.clone())),
+                    ),
                 )
                 .await?;
             edges.push(EdgeDefinition::new(
@@ -454,7 +481,7 @@ async fn snapshot_live_reopen() -> Result<()> {
         );
         let checkpoint = progress
             .checkpoints
-            .get(&SourceProgressKey::Source("sqlite".into()))
+            .get(&SourceProgressKey::Source(graph.source.id().clone()))
             .context("missing initialization source watermark")?;
         assert_eq!(checkpoint.sequence, 0);
         assert!(checkpoint
@@ -484,7 +511,7 @@ async fn snapshot_live_reopen() -> Result<()> {
         )?;
         let progress = graph.progress.snapshot();
         assert_eq!(
-            progress.checkpoints[&SourceProgressKey::Source("sqlite".into())].sequence,
+            progress.checkpoints[&SourceProgressKey::Source(graph.source.id().clone())].sequence,
             1
         );
         assert_eq!(total(&graph.snapshot().await?)?, 39.0);
@@ -510,7 +537,8 @@ async fn snapshot_live_reopen() -> Result<()> {
         assert_eq!(snapshot.cursor().sequence(), 1);
         assert_eq!(snapshot.cursor().producer(), &producer);
         assert_eq!(
-            graph.progress.snapshot().checkpoints[&SourceProgressKey::Source("sqlite".into())]
+            graph.progress.snapshot().checkpoints
+                [&SourceProgressKey::Source(graph.source.id().clone())]
                 .sequence,
             1
         );
@@ -529,7 +557,8 @@ async fn snapshot_live_reopen() -> Result<()> {
         )?;
         assert_eq!(total(&graph.snapshot().await?)?, 40.0);
         assert_eq!(
-            graph.progress.snapshot().checkpoints[&SourceProgressKey::Source("sqlite".into())]
+            graph.progress.snapshot().checkpoints
+                [&SourceProgressKey::Source(graph.source.id().clone())]
                 .sequence,
             2
         );
@@ -562,7 +591,7 @@ async fn ordinary_read_api() -> Result<()> {
         let query = graph
             .core
             .query_manager()
-            .get_query_instance(COMPONENT)
+            .get_query_instance_by_name(&component_name()?)
             .await?;
         assert_eq!(query.get_config().query, TEXT);
         assert!(!query.is_volatile());
@@ -570,10 +599,20 @@ async fn ordinary_read_api() -> Result<()> {
         assert_eq!(initial.as_of_sequence, 0);
         assert_eq!(initial.to_vec(), vec![json!({"total":30.0})]);
         assert_eq!(
-            graph.core.get_query_results(COMPONENT).await?,
+            graph
+                .core
+                .get_query_results_by_name(&component_name()?)
+                .await?,
             initial.to_vec()
         );
-        assert_eq!(graph.core.get_query_config(COMPONENT).await?.query, TEXT);
+        assert_eq!(
+            graph
+                .core
+                .get_query_config_by_name(&component_name()?)
+                .await?
+                .query,
+            TEXT
+        );
         graph
             .apply(json!([{"op":"update","table":"items","id":"1","data":{"amount":12}}]))
             .await?;
@@ -590,7 +629,19 @@ async fn ordinary_read_api() -> Result<()> {
         let head = query.fetch_outbox(u64::MAX).await?;
         assert!(head.results.is_empty());
         assert_eq!(head.latest_sequence, 1);
+        let progress = graph.progress.snapshot();
         graph.query.stop().await?;
+        let stopped = graph.progress.snapshot();
+        anyhow::ensure!(
+            !stopped.ready && !stopped.admitting && !stopped.recovered && stopped.failure.is_none(),
+            "stopped query must retain only inactive progress: {stopped:?}"
+        );
+        anyhow::ensure!(
+            stopped.persistent
+                && stopped.checkpoints == progress.checkpoints
+                && stopped.reset_generation == progress.reset_generation,
+            "query stop discarded confirmed durable input progress"
+        );
         assert!(query.fetch_snapshot().await.is_err());
         Ok::<_, anyhow::Error>(())
     }

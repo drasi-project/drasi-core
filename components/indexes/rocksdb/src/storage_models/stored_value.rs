@@ -423,7 +423,7 @@ mod tests {
 
     fn reference() -> ElementReference {
         ElementReference {
-            source_id: Arc::from("source"),
+            namespace: Arc::from("source"),
             element_id: Arc::from("element"),
         }
     }

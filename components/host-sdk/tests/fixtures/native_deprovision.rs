@@ -23,6 +23,7 @@ impl sdk::Factory for Factory {
                 fields: [(
                     "state_file".into(),
                     sdk::ConfigField {
+                        constraint: None,
                         value_type: sdk::ConfigType::String,
                         required: true,
                         secret: false,
@@ -45,7 +46,7 @@ impl sdk::Factory for Factory {
                 .collect(),
             completion: None,
             capabilities: sdk::Capabilities {
-                deprovision: true,
+                delete_owned_resources: true,
                 ..Default::default()
             },
         }
@@ -86,7 +87,7 @@ impl sdk::NativeComponent for Transformer {
         Ok(self.configuration.clone())
     }
 
-    fn supports_deprovision(&self) -> bool {
+    fn supports_delete_owned_resources(&self) -> bool {
         true
     }
 
@@ -98,7 +99,7 @@ impl sdk::NativeComponent for Transformer {
         Ok(())
     }
 
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         match std::fs::remove_file(&self.state_file) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

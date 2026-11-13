@@ -53,8 +53,8 @@
 //! fn example(some_operation: impl FnOnce() -> Result<()>) -> Result<()> {
 //!     match some_operation() {
 //!         Err(error) => match error.classification() {
-//!             DrasiError::ComponentNotFound { component_type, component_id } => {
-//!                 println!("{} '{}' not found", component_type, component_id);
+//!             DrasiError::ComponentNotFound { component_type, subject } => {
+//!                 println!("{} '{}' not found", component_type, subject);
 //!             }
 //!             DrasiError::InvalidState { message } => {
 //!                 println!("Invalid state: {}", message);
@@ -65,11 +65,37 @@
 //!     }
 //!     Ok(())
 //! }
-//! # example(|| Err(DrasiError::component_not_found("source", "example")))?;
-//! # Ok::<(), DrasiError>(())
+//! # let name = drasi_lib::ComponentName::try_new("example")?;
+//! # example(|| Err(DrasiError::component_not_found_by_name("source", &name)))?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+use crate::{ComponentId, ComponentName};
 use thiserror::Error;
+
+/// The subject of a failed operation without overloading component identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationSubject {
+    Id(ComponentId),
+    Name(ComponentName),
+    Instance(String),
+    Graph(String),
+    Resource(crate::computation::v1::ResourceId),
+    Control(&'static str),
+}
+
+impl std::fmt::Display for OperationSubject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Id(id) => id.fmt(formatter),
+            Self::Name(name) => write!(formatter, "named {name}"),
+            Self::Instance(id) => id.fmt(formatter),
+            Self::Graph(id) => id.fmt(formatter),
+            Self::Resource(id) => id.fmt(formatter),
+            Self::Control(kind) => write!(formatter, "{kind} control"),
+        }
+    }
+}
 
 /// Startup accepted work, but not every requested component became available.
 /// The instance remains running so callers can inspect failures and call `stop`
@@ -91,14 +117,14 @@ pub struct PartialStartError {
 #[error("{component_type} not found: {component_id}")]
 pub struct ComponentNotFoundError {
     pub component_type: &'static str,
-    pub component_id: String,
+    pub component_id: ComponentId,
 }
 
 impl ComponentNotFoundError {
-    pub fn new(component_type: &'static str, component_id: impl Into<String>) -> Self {
+    pub fn new(component_type: &'static str, component_id: ComponentId) -> Self {
         Self {
             component_type,
-            component_id: component_id.into(),
+            component_id,
         }
     }
 }
@@ -110,21 +136,21 @@ impl ComponentNotFoundError {
 #[derive(Error, Debug)]
 pub enum DrasiError {
     /// Component (source, query, or reaction) was not found.
-    #[error("{component_type} '{component_id}' not found")]
+    #[error("{component_type} '{subject}' not found")]
     ComponentNotFound {
         /// The type of component (e.g., "source", "query", "reaction")
         component_type: String,
-        /// The ID of the component that was not found
-        component_id: String,
+        /// The exact requested name or ID.
+        subject: OperationSubject,
     },
 
     /// Component already exists with the given ID.
-    #[error("{component_type} '{component_id}' already exists")]
+    #[error("{component_type} '{subject}' already exists")]
     AlreadyExists {
         /// The type of component
         component_type: String,
-        /// The ID that already exists
-        component_id: String,
+        /// The conflicting name or ID.
+        subject: OperationSubject,
     },
 
     /// Invalid configuration provided.
@@ -149,12 +175,12 @@ pub enum DrasiError {
     },
 
     /// A component operation (start, stop, delete, etc.) failed.
-    #[error("Failed to {operation} {component_type} '{component_id}': {reason}")]
+    #[error("Failed to {operation} {component_type} '{subject}': {reason}")]
     OperationFailed {
         /// The type of component
         component_type: String,
-        /// The ID of the component
-        component_id: String,
+        /// The selected component or non-component owner.
+        subject: OperationSubject,
         /// The operation that failed (e.g., "start", "stop", "delete")
         operation: String,
         /// The reason for the failure
@@ -224,16 +250,27 @@ impl DrasiError {
     /// # Example
     /// ```rust
     /// use drasi_lib::error::DrasiError;
-    /// let error = DrasiError::component_not_found("source", "my-source-id");
+    /// let source_id = drasi_lib::ComponentId::generate();
+    /// let error = DrasiError::component_not_found_by_id("source", &source_id);
     /// assert!(matches!(error, DrasiError::ComponentNotFound { .. }));
     /// ```
-    pub fn component_not_found(
+    pub fn component_not_found_by_id(
         component_type: impl Into<String>,
-        component_id: impl Into<String>,
+        component_id: &ComponentId,
     ) -> Self {
         DrasiError::ComponentNotFound {
             component_type: component_type.into(),
-            component_id: component_id.into(),
+            subject: OperationSubject::Id(component_id.clone()),
+        }
+    }
+
+    pub fn component_not_found_by_name(
+        component_type: impl Into<String>,
+        name: &ComponentName,
+    ) -> Self {
+        Self::ComponentNotFound {
+            component_type: component_type.into(),
+            subject: OperationSubject::Name(name.clone()),
         }
     }
 
@@ -242,16 +279,24 @@ impl DrasiError {
     /// # Example
     /// ```rust
     /// use drasi_lib::error::DrasiError;
-    /// let error = DrasiError::already_exists("query", "my-query-id");
+    /// let query_id = drasi_lib::ComponentId::generate();
+    /// let error = DrasiError::already_exists_by_id("query", &query_id);
     /// assert!(matches!(error, DrasiError::AlreadyExists { .. }));
     /// ```
-    pub fn already_exists(
+    pub fn already_exists_by_id(
         component_type: impl Into<String>,
-        component_id: impl Into<String>,
+        component_id: &ComponentId,
     ) -> Self {
         DrasiError::AlreadyExists {
             component_type: component_type.into(),
-            component_id: component_id.into(),
+            subject: OperationSubject::Id(component_id.clone()),
+        }
+    }
+
+    pub fn already_exists_by_name(component_type: impl Into<String>, name: &ComponentName) -> Self {
+        Self::AlreadyExists {
+            component_type: component_type.into(),
+            subject: OperationSubject::Name(name.clone()),
         }
     }
 
@@ -302,18 +347,25 @@ impl DrasiError {
     /// # Example
     /// ```rust
     /// use drasi_lib::error::DrasiError;
-    /// let error = DrasiError::operation_failed("source", "my-source", "start", "Connection refused");
+    /// let name = drasi_lib::ComponentName::try_new("my-source")?;
+    /// let error = DrasiError::operation_failed(
+    ///     "source",
+    ///     drasi_lib::error::OperationSubject::Name(name),
+    ///     "start",
+    ///     "Connection refused",
+    /// );
     /// assert!(matches!(error, DrasiError::OperationFailed { .. }));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn operation_failed(
         component_type: impl Into<String>,
-        component_id: impl Into<String>,
+        subject: OperationSubject,
         operation: impl Into<String>,
         reason: impl Into<String>,
     ) -> Self {
         DrasiError::OperationFailed {
             component_type: component_type.into(),
-            component_id: component_id.into(),
+            subject,
             operation: operation.into(),
             reason: reason.into(),
         }
@@ -359,14 +411,16 @@ mod tests {
 
     #[test]
     fn test_component_not_found_display() {
-        let err = DrasiError::component_not_found("source", "my-source");
-        assert_eq!(err.to_string(), "source 'my-source' not found");
+        let name = ComponentName::try_new("my-source").unwrap();
+        let err = DrasiError::component_not_found_by_name("source", &name);
+        assert_eq!(err.to_string(), "source 'named my-source' not found");
     }
 
     #[test]
     fn test_already_exists_display() {
-        let err = DrasiError::already_exists("query", "my-query");
-        assert_eq!(err.to_string(), "query 'my-query' already exists");
+        let name = ComponentName::try_new("my-query").unwrap();
+        let err = DrasiError::already_exists_by_name("query", &name);
+        assert_eq!(err.to_string(), "query 'named my-query' already exists");
     }
 
     #[test]
@@ -389,11 +443,15 @@ mod tests {
 
     #[test]
     fn test_operation_failed_display() {
-        let err =
-            DrasiError::operation_failed("source", "my-source", "start", "Connection refused");
+        let err = DrasiError::operation_failed(
+            "source",
+            OperationSubject::Name(ComponentName::try_new("my-source").unwrap()),
+            "start",
+            "Connection refused",
+        );
         assert_eq!(
             err.to_string(),
-            "Failed to start source 'my-source': Connection refused"
+            "Failed to start source 'named my-source': Connection refused"
         );
     }
 
@@ -412,13 +470,19 @@ mod tests {
             "checkpoint denied",
         ))
         .context("saving checkpoint");
-        let error = DrasiError::operation_failed("source", "input", "stop", cause.to_string())
-            .with_cause(cause);
+        let name = ComponentName::try_new("input").unwrap();
+        let error = DrasiError::operation_failed(
+            "source",
+            OperationSubject::Name(name.clone()),
+            "stop",
+            cause.to_string(),
+        )
+        .with_cause(cause);
         let error = DrasiError::from(anyhow::Error::new(error).context("outer operation"));
         assert!(matches!(
             error.classification(),
-            DrasiError::OperationFailed { component_type, component_id, operation, reason }
-                if component_type == "source" && component_id == "input"
+            DrasiError::OperationFailed { component_type, subject: OperationSubject::Name(actual), operation, reason }
+                if component_type == "source" && actual == &name
                     && operation == "stop" && reason == "saving checkpoint"
         ));
         assert_eq!(
@@ -430,8 +494,13 @@ mod tests {
     #[test]
     fn outer_public_classification_wins_over_inner_classification() {
         let inner = DrasiError::invalid_state("not ready");
-        let error = DrasiError::operation_failed("query", "q", "start", inner.to_string())
-            .with_cause(inner);
+        let error = DrasiError::operation_failed(
+            "query",
+            OperationSubject::Name(ComponentName::try_new("q").unwrap()),
+            "start",
+            inner.to_string(),
+        )
+        .with_cause(inner);
         assert!(matches!(
             error.classification(),
             DrasiError::OperationFailed { .. }
@@ -447,10 +516,10 @@ mod tests {
 
     #[test]
     fn nested_internal_carriers_retain_the_root_error_not_only_its_source() {
-        use crate::computation::v1::{ComponentId, GraphError};
+        use crate::computation::v1::GraphError;
 
         let graph_error = GraphError::Component {
-            component: ComponentId::try_new("input").unwrap(),
+            component: crate::test_helpers::component_id(113),
             operation: "stop",
             source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),
         };
@@ -477,8 +546,13 @@ mod tests {
                 std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),
             ],
         );
-        let error = DrasiError::operation_failed("source", "input", "stop", failures.to_string())
-            .with_cause(failures);
+        let error = DrasiError::operation_failed(
+            "source",
+            OperationSubject::Name(ComponentName::try_new("input").unwrap()),
+            "stop",
+            failures.to_string(),
+        )
+        .with_cause(failures);
         assert!(error.downcast_ref::<WorkerCleanupError>().is_some());
         let failures = error
             .downcast_ref::<OperationFailures>()
@@ -493,15 +567,16 @@ mod tests {
 
     #[test]
     fn test_error_pattern_matching() {
-        let err = DrasiError::component_not_found("source", "test-source");
+        let name = ComponentName::try_new("test-source").unwrap();
+        let err = DrasiError::component_not_found_by_name("source", &name);
 
         match err {
             DrasiError::ComponentNotFound {
                 component_type,
-                component_id,
+                subject: OperationSubject::Name(actual),
             } => {
                 assert_eq!(component_type, "source");
-                assert_eq!(component_id, "test-source");
+                assert_eq!(actual, name);
             }
             _ => panic!("Expected ComponentNotFound variant"),
         }

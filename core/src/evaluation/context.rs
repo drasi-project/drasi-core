@@ -196,7 +196,7 @@ pub struct ChangeContext {
 
 fn extract_element_reference_hash(element_reference: &ElementReference) -> u64 {
     let mut hasher = SpookyHasher::default();
-    element_reference.source_id.hash(&mut hasher);
+    element_reference.namespace.hash(&mut hasher);
     element_reference.element_id.hash(&mut hasher);
     hasher.finish()
 }

@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -14,7 +18,13 @@ use async_trait::async_trait;
 use drasi_lib::computation::v1::*;
 
 fn component(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("component ID")
+    fixture_support::component_id(match value {
+        "waiting" => 1,
+        "independent" => 2,
+        "consumer" => 3,
+        "producer" => 4,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 fn resource(value: &str) -> ResourceId {
@@ -80,6 +90,7 @@ impl Factory {
 
     fn addition(self: &Arc<Self>, auto_start: bool) -> ComponentAddition {
         let mut addition = ComponentAddition::from_specification(
+            ComponentName::try_new("waiting").expect("fixture name"),
             ComponentSpecification {
                 descriptor: ComponentDescriptor::try_new(component("waiting"), Vec::new())
                     .expect("service descriptor"),
@@ -190,16 +201,18 @@ async fn verify_late_resource() {
 
             let independent_starts = Arc::new(AtomicUsize::new(0));
             let independent = control
-                .add_component(ComponentAddition::new(ConstructedComponent::service(
-                    Box::new(Service {
+                .add_component(ComponentAddition::new(
+                    ComponentName::try_new("independent")
+                        .expect("deferred dependency fixture name"),
+                    ConstructedComponent::service(Box::new(Service {
                         descriptor: ComponentDescriptor::try_new(
                             component("independent"),
                             Vec::new(),
                         )
                         .expect("descriptor"),
                         starts: independent_starts.clone(),
-                    }),
-                )))
+                    })),
+                ))
                 .await
                 .expect("independent addition");
             tokio::time::timeout(Duration::from_secs(3), independent.wait_started())
@@ -234,7 +247,7 @@ async fn verify_late_resource() {
                 .expect("supply resource");
             assert!(report.committed, "{report:?}");
             let current = control
-                .component_handle(waiting.id())
+                .component_handle_by_id(waiting.id())
                 .expect("current generation");
             tokio::time::timeout(Duration::from_secs(3), current.wait_created())
                 .await
@@ -286,7 +299,11 @@ async fn verify_unresolved_reconstruction() {
         panic!("factory declaration");
     };
     let original = ComputationGraph::builder("deferred-reconstruction")
-        .component(specification, factory.clone())
+        .component(
+            fixture_support::component_name(),
+            specification,
+            factory.clone(),
+        )
         .build()
         .expect("missing provider does not invalidate a declaration");
     let saved = original
@@ -314,7 +331,7 @@ async fn verify_unresolved_reconstruction() {
     let (outcome, ()) = tokio::join!(run, async {
         control.deployment_report().await.expect("deployment");
         let waiting = control
-            .component_handle(&component("waiting"))
+            .component_handle_by_id(&component("waiting"))
             .expect("node");
         let observed = waiting.observed().expect("observation");
         assert_eq!(observed.realization, RealizationState::Blocked);
@@ -353,7 +370,7 @@ async fn verify_unresolved_reconstruction() {
             .ensure_committed()
             .expect("desired topology committed");
         let observed = control
-            .component_handle(waiting.id())
+            .component_handle_by_id(waiting.id())
             .expect("node")
             .observed()
             .expect("state");
@@ -379,7 +396,7 @@ async fn verify_unresolved_reconstruction() {
             .expect("register implementation")
             .ensure_committed()
             .expect("desired topology committed");
-        let current = control.component_handle(waiting.id()).expect("node");
+        let current = control.component_handle_by_id(waiting.id()).expect("node");
         tokio::time::timeout(Duration::from_secs(3), current.wait_created())
             .await
             .expect("creation deadline")
@@ -425,17 +442,20 @@ async fn verify_no_failure_retry() {
         timeout_created_failure(&failed).await;
         factory.fail.store(false, Ordering::SeqCst);
         for index in 0..3 {
+            let name = format!("healthy-{index}");
             let healthy = control
-                .add_component(ComponentAddition::new(ConstructedComponent::service(
-                    Box::new(Service {
+                .add_component(ComponentAddition::new(
+                    ComponentName::try_new(name.as_str())
+                        .expect("deferred dependency fixture name"),
+                    ConstructedComponent::service(Box::new(Service {
                         descriptor: ComponentDescriptor::try_new(
-                            component(&format!("healthy-{index}")),
+                            fixture_support::component_id(100 + index),
                             Vec::new(),
                         )
                         .expect("descriptor"),
                         starts: Arc::new(AtomicUsize::new(0)),
-                    }),
-                )))
+                    })),
+                ))
                 .await
                 .expect("unrelated declaration");
             tokio::time::timeout(Duration::from_secs(3), healthy.wait_started())
@@ -556,7 +576,7 @@ async fn verify_late_connection(late_stream: bool) {
         .expect("sink descriptor"),
         output: send.clone(),
     };
-    let builder = ComputationGraph::builder("late-connection").source(Box::new(Producer {
+    let builder = ComputationGraph::builder("late-connection").fixture_source(Box::new(Producer {
         descriptor: ComponentDescriptor::try_new(
             component("producer"),
             vec![PortDescriptor::new(
@@ -603,7 +623,7 @@ async fn verify_late_connection(late_stream: bool) {
     let (outcome, ()) = tokio::join!(run, async {
         control.startup_report().await.expect("startup status");
         let producer = control
-            .component_handle(&component("producer"))
+            .component_handle_by_id(&component("producer"))
             .expect("producer");
         assert!(producer.observed().expect("state").waiting_for.contains(
             &DependencyWait::Connection {
@@ -611,9 +631,10 @@ async fn verify_late_connection(late_stream: bool) {
             }
         ));
         let consumer = control
-            .add_component(ComponentAddition::new(ConstructedComponent::sink(
-                Box::new(consumer()),
-            )))
+            .add_component(ComponentAddition::new(
+                ComponentName::try_new("consumer").expect("deferred dependency fixture name"),
+                ConstructedComponent::sink(Box::new(consumer())),
+            ))
             .await
             .expect("sink declaration");
         let waiting = wait_for_creation_state(&control, consumer.id()).await;
@@ -743,7 +764,7 @@ async fn verify_declared_connection_before_producer() {
         .expect("consumer descriptor");
         let (send, mut receive) = tokio::sync::mpsc::channel(1);
         let mut graph = ComputationGraph::builder("declared-connection")
-            .sink(Box::new(Consumer {
+            .fixture_sink(Box::new(Consumer {
                 descriptor: descriptor.clone(),
                 output: send.clone(),
             }))
@@ -800,8 +821,9 @@ async fn verify_declared_connection_before_producer() {
         let (outcome, ()) = tokio::join!(run, async {
             control.startup_report().await.expect("startup report");
             let consumer = control
-                .component_handle(&component("consumer"))
+                .component_handle_by_id(&component("consumer"))
                 .expect("consumer handle");
+            let generation = consumer.observed().expect("consumer state").generation;
             assert!(consumer
                 .observed()
                 .expect("consumer state")
@@ -843,9 +865,11 @@ async fn verify_declared_connection_before_producer() {
             assert!(
                 control
                     .add_component(
-                        ComponentAddition::new(ConstructedComponent::source(Box::new(
-                            incompatible
-                        )))
+                        ComponentAddition::new(
+                            ComponentName::try_new("producer")
+                                .expect("deferred dependency fixture name"),
+                            ConstructedComponent::source(Box::new(incompatible)),
+                        )
                         .bind_stream(output.clone(), stream.clone()),
                     )
                     .await
@@ -857,13 +881,15 @@ async fn verify_declared_connection_before_producer() {
                 .components
                 .contains_key(&component("producer")));
             let healthy = control
-                .add_component(ComponentAddition::new(ConstructedComponent::service(
-                    Box::new(Service {
+                .add_component(ComponentAddition::new(
+                    ComponentName::try_new("independent")
+                        .expect("deferred dependency fixture name"),
+                    ConstructedComponent::service(Box::new(Service {
                         descriptor: ComponentDescriptor::try_new(component("independent"), vec![])
                             .expect("independent service descriptor"),
                         starts: Arc::new(AtomicUsize::new(0)),
-                    }),
-                )))
+                    })),
+                ))
                 .await
                 .expect("independent service addition");
             tokio::time::timeout(Duration::from_secs(3), healthy.wait_started())
@@ -894,8 +920,12 @@ async fn verify_declared_connection_before_producer() {
             };
             control
                 .add_component(
-                    ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
-                        .bind_stream(output, stream),
+                    ComponentAddition::new(
+                        ComponentName::try_new("producer")
+                            .expect("deferred dependency fixture name"),
+                        ConstructedComponent::source(Box::new(source)),
+                    )
+                    .bind_stream(output, stream),
                 )
                 .await
                 .expect("producer addition");
@@ -913,6 +943,14 @@ async fn verify_declared_connection_before_producer() {
                 [change]
             );
             consumer.wait_started().await.expect("consumer startup");
+            assert_eq!(
+                consumer.observed().expect("consumer state").generation,
+                generation
+            );
+            assert_eq!(
+                control.observed().relationships[&edge].binding,
+                BindingState::Bound
+            );
             assert!(control.desired_snapshot().unbound_relationships.is_empty());
             assert!(consumer
                 .observed()

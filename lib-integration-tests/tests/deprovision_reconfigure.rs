@@ -16,19 +16,29 @@
 //!
 //! These tests exercise the full DrasiLib public API for:
 //! - `remove_source(id, cleanup: bool)` / `remove_reaction(id, cleanup: bool)`
-//! - `update_source(id, new_source_instance)` / `update_reaction(id, new_reaction_instance)`
+//! - registered source/reaction definition updates through the configuration owner
 //! - Lifecycle event streaming during deprovision and reconfigure operations
 //! - Log history preservation across reconfigure cycles
 
 use async_trait::async_trait;
 use drasi_lib::{
-    channels::QueryResult, ComponentEvent, ComponentStatus, DrasiLib, MemoryStateStoreProvider,
-    Query, Reaction, ReactionRuntimeContext, Source, SourceBase, SourceBaseParams,
-    SourceRuntimeContext, SourceSubscriptionSettings, StateStoreProvider, SubscriptionResponse,
+    channels::QueryResult,
+    computation::v1::{
+        ComponentId, ComponentName, ComponentUpdateData, ComponentUpdateDirective,
+        ComponentUpdateMode, ComponentUpdatePlan,
+    },
+    config::ComponentReference,
+    management::{
+        OrdinaryComponent, OrdinaryComponentDefinition, OrdinaryComponentRecord,
+        OrdinaryComponentResolver,
+    },
+    ComponentEvent, ComponentStatus, DrasiLib, MemoryStateStoreProvider, Query, Reaction,
+    ReactionRuntimeContext, Source, SourceBase, SourceBaseParams, SourceRuntimeContext,
+    SourceSubscriptionSettings, StateStoreProvider, SubscriptionResponse,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::Instrument;
@@ -38,10 +48,24 @@ use tracing::Instrument;
 // ============================================================================
 
 /// Wait for a source to reach the expected status via event notification.
-async fn wait_for_source_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
+async fn wait_for_source_status(
+    drasi: &DrasiLib,
+    name: &drasi_lib::ComponentName,
+    expected: ComponentStatus,
+) {
     // Subscribe BEFORE checking to avoid missing events
     let mut rx = drasi.subscribe_all_component_events();
-    if drasi.get_source_status(id).await.ok() == Some(expected) {
+    let id = drasi
+        .component_by_name(name)
+        .expect("declared source")
+        .id()
+        .clone();
+    if drasi
+        .get_source_status_by_id(&id)
+        .await
+        .expect("source status")
+        == expected
+    {
         return;
     }
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -62,10 +86,24 @@ async fn wait_for_source_status(drasi: &DrasiLib, id: &str, expected: ComponentS
 }
 
 /// Wait for a reaction to reach the expected status via event notification.
-async fn wait_for_reaction_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
+async fn wait_for_reaction_status(
+    drasi: &DrasiLib,
+    name: &drasi_lib::ComponentName,
+    expected: ComponentStatus,
+) {
     // Subscribe BEFORE checking to avoid missing events
     let mut rx = drasi.subscribe_all_component_events();
-    if drasi.get_reaction_status(id).await.ok() == Some(expected) {
+    let id = drasi
+        .component_by_name(name)
+        .expect("declared reaction")
+        .id()
+        .clone();
+    if drasi
+        .get_reaction_status_by_id(&id)
+        .await
+        .expect("reaction status")
+        == expected
+    {
         return;
     }
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -85,44 +123,39 @@ async fn wait_for_reaction_status(drasi: &DrasiLib, id: &str, expected: Componen
     });
 }
 
+#[derive(Clone, Default)]
+struct LifecycleProbe {
+    delete_owned_resources_called: Arc<AtomicBool>,
+    start_count: Arc<AtomicU32>,
+    stop_count: Arc<AtomicU32>,
+}
+
 // ============================================================================
 // Test Source with deprovision/reconfigure support
 // ============================================================================
 
 struct TestSource {
     base: SourceBase,
-    deprovision_called: Arc<AtomicBool>,
-    start_count: Arc<AtomicU32>,
-    stop_count: Arc<AtomicU32>,
+    probe: LifecycleProbe,
 }
 
 impl TestSource {
-    fn new(id: &str) -> anyhow::Result<Self> {
+    fn new(id: drasi_core::ComponentId) -> anyhow::Result<Self> {
+        Self::with_probe(id, LifecycleProbe::default())
+    }
+
+    fn with_probe(id: drasi_core::ComponentId, probe: LifecycleProbe) -> anyhow::Result<Self> {
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
-            deprovision_called: Arc::new(AtomicBool::new(false)),
-            start_count: Arc::new(AtomicU32::new(0)),
-            stop_count: Arc::new(AtomicU32::new(0)),
+            probe,
         })
-    }
-
-    fn deprovision_called(&self) -> Arc<AtomicBool> {
-        self.deprovision_called.clone()
-    }
-
-    fn start_count(&self) -> Arc<AtomicU32> {
-        self.start_count.clone()
-    }
-
-    fn stop_count(&self) -> Arc<AtomicU32> {
-        self.stop_count.clone()
     }
 }
 
 #[async_trait]
 impl Source for TestSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -138,12 +171,12 @@ impl Source for TestSource {
         self.base.auto_start
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
-        self.start_count.fetch_add(1, Ordering::SeqCst);
+        self.probe.start_count.fetch_add(1, Ordering::SeqCst);
         let source_id = self.base.get_id().to_string();
         let instance_id = self
             .base
@@ -171,7 +204,7 @@ impl Source for TestSource {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        self.stop_count.fetch_add(1, Ordering::SeqCst);
+        self.probe.stop_count.fetch_add(1, Ordering::SeqCst);
         let source_id = self.base.get_id().to_string();
         let instance_id = self
             .base
@@ -208,9 +241,11 @@ impl Source for TestSource {
             .await
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        self.deprovision_called.store(true, Ordering::SeqCst);
-        self.base.deprovision_common().await?;
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.probe
+            .delete_owned_resources_called
+            .store(true, Ordering::SeqCst);
+        self.base.delete_owned_resources_common().await?;
         Ok(())
     }
 
@@ -225,38 +260,26 @@ impl Source for TestSource {
 
 struct TestReaction {
     base: drasi_lib::ReactionBase,
-    deprovision_called: Arc<AtomicBool>,
-    start_count: Arc<AtomicU32>,
-    stop_count: Arc<AtomicU32>,
+    probe: LifecycleProbe,
 }
 
 impl TestReaction {
-    fn new(id: &str, query_ids: Vec<String>) -> Self {
+    fn with_probe(
+        id: drasi_core::ComponentId,
+        query_ids: Vec<drasi_lib::config::ComponentReference>,
+        probe: LifecycleProbe,
+    ) -> Self {
         let params = drasi_lib::ReactionBaseParams::new(id, query_ids);
         Self {
             base: drasi_lib::ReactionBase::new(params),
-            deprovision_called: Arc::new(AtomicBool::new(false)),
-            start_count: Arc::new(AtomicU32::new(0)),
-            stop_count: Arc::new(AtomicU32::new(0)),
+            probe,
         }
-    }
-
-    fn deprovision_called(&self) -> Arc<AtomicBool> {
-        self.deprovision_called.clone()
-    }
-
-    fn start_count(&self) -> Arc<AtomicU32> {
-        self.start_count.clone()
-    }
-
-    fn stop_count(&self) -> Arc<AtomicU32> {
-        self.stop_count.clone()
     }
 }
 
 #[async_trait]
 impl Reaction for TestReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -268,20 +291,20 @@ impl Reaction for TestReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
-        self.start_count.fetch_add(1, Ordering::SeqCst);
+        self.probe.start_count.fetch_add(1, Ordering::SeqCst);
         let reaction_id = self.base.get_id().to_string();
         let instance_id = self
             .base
@@ -309,7 +332,7 @@ impl Reaction for TestReaction {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        self.stop_count.fetch_add(1, Ordering::SeqCst);
+        self.probe.stop_count.fetch_add(1, Ordering::SeqCst);
         let reaction_id = self.base.get_id().to_string();
         let instance_id = self
             .base
@@ -337,9 +360,11 @@ impl Reaction for TestReaction {
         self.base.get_status().await
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        self.deprovision_called.store(true, Ordering::SeqCst);
-        self.base.deprovision_common().await?;
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.probe
+            .delete_owned_resources_called
+            .store(true, Ordering::SeqCst);
+        self.base.delete_owned_resources_common().await?;
         Ok(())
     }
 
@@ -348,9 +373,279 @@ impl Reaction for TestReaction {
     }
 }
 
+#[derive(Default)]
+struct TestOrdinaryResolver {
+    probes: Mutex<HashMap<String, LifecycleProbe>>,
+}
+
+impl TestOrdinaryResolver {
+    fn register(&self, key: &str) -> LifecycleProbe {
+        let probe = LifecycleProbe::default();
+        assert!(
+            self.probes
+                .lock()
+                .expect("lifecycle probe registry lock")
+                .insert(key.to_string(), probe.clone())
+                .is_none(),
+            "duplicate lifecycle probe {key}"
+        );
+        probe
+    }
+
+    fn probe(&self, definition: &OrdinaryComponentRecord) -> anyhow::Result<LifecycleProbe> {
+        let configuration = match &definition.component {
+            OrdinaryComponent::Source { configuration, .. }
+            | OrdinaryComponent::Reaction { configuration, .. } => configuration,
+            _ => anyhow::bail!("lifecycle fixture requires a source or reaction definition"),
+        };
+        let key = configuration
+            .get("probe")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("lifecycle fixture requires a probe key"))?;
+        self.probes
+            .lock()
+            .expect("lifecycle probe registry lock")
+            .get(key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown lifecycle probe {key}"))
+    }
+}
+
+#[async_trait]
+impl OrdinaryComponentResolver for TestOrdinaryResolver {
+    fn plan_update(
+        &self,
+        _instance_id: &str,
+        current: &OrdinaryComponentRecord,
+        proposed: &OrdinaryComponentRecord,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        anyhow::ensure!(current.id == proposed.id, "component UUID changed");
+        anyhow::ensure!(current.name == proposed.name, "component name changed");
+        anyhow::ensure!(
+            matches!(
+                (&current.component, &proposed.component),
+                (
+                    OrdinaryComponent::Source { .. },
+                    OrdinaryComponent::Source { .. }
+                ) | (
+                    OrdinaryComponent::Reaction { .. },
+                    OrdinaryComponent::Reaction { .. }
+                )
+            ),
+            "component role changed"
+        );
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
+
+    async fn create_source(
+        &self,
+        _instance_id: &str,
+        definition: &OrdinaryComponentRecord,
+        _update: Option<&ComponentUpdateDirective>,
+    ) -> anyhow::Result<(Box<dyn Source>, HashMap<String, String>)> {
+        Ok((
+            Box::new(TestSource::with_probe(
+                definition.id.clone(),
+                self.probe(definition)?,
+            )?),
+            HashMap::new(),
+        ))
+    }
+
+    async fn create_reaction(
+        &self,
+        _instance_id: &str,
+        definition: &OrdinaryComponentRecord,
+        inputs: &[ComponentId],
+        _update: Option<&ComponentUpdateDirective>,
+    ) -> anyhow::Result<(Box<dyn Reaction>, HashMap<String, String>)> {
+        Ok((
+            Box::new(TestReaction::with_probe(
+                definition.id.clone(),
+                inputs
+                    .iter()
+                    .cloned()
+                    .map(ComponentReference::by_id)
+                    .collect(),
+                self.probe(definition)?,
+            )),
+            HashMap::new(),
+        ))
+    }
+}
+
 // ============================================================================
 // Helper
 // ============================================================================
+
+fn component_name(name: &str) -> ComponentName {
+    ComponentName::try_new(name).expect("component name")
+}
+
+fn source_definition(
+    id: ComponentId,
+    name: &str,
+    auto_start: bool,
+    probe: &str,
+) -> OrdinaryComponentRecord {
+    OrdinaryComponentRecord {
+        id,
+        name: component_name(name),
+        auto_start,
+        component: OrdinaryComponent::Source {
+            kind: "lifecycle-fixture".into(),
+            configuration: serde_json::json!({"probe": probe}),
+        },
+    }
+}
+
+fn reaction_definition(
+    id: ComponentId,
+    name: &str,
+    query_name: Option<&str>,
+    auto_start: bool,
+    probe: &str,
+) -> OrdinaryComponentRecord {
+    OrdinaryComponentRecord {
+        id,
+        name: component_name(name),
+        auto_start,
+        component: OrdinaryComponent::Reaction {
+            kind: "lifecycle-fixture".into(),
+            configuration: serde_json::json!({"probe": probe}),
+            inputs: query_name
+                .map(|name| {
+                    vec![ComponentReference::by_name(
+                        drasi_core::ComponentName::try_new(name).expect("fixture component name"),
+                    )]
+                })
+                .unwrap_or_default(),
+        },
+    }
+}
+
+async fn settle_managed_configuration(drasi: &DrasiLib) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let status = drasi
+                .reconcile_desired_state()
+                .await
+                .expect("managed lifecycle reconciliation");
+            assert!(status.error.is_none(), "{status:?}");
+            if drasi
+                .desired_configuration()
+                .expect("managed lifecycle configuration")
+                .pending_updates
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("managed configuration should settle");
+}
+
+async fn create_managed_source(
+    drasi: &DrasiLib,
+    resolver: &TestOrdinaryResolver,
+    name: &str,
+    auto_start: bool,
+    probe_key: &str,
+) -> (ComponentId, LifecycleProbe) {
+    let probe = resolver.register(probe_key);
+    let template = source_definition(ComponentId::generate(), name, auto_start, probe_key);
+    let receipt = drasi
+        .create_managed_ordinary_component(
+            drasi
+                .desired_configuration()
+                .expect("managed source configuration")
+                .revision,
+            format!("create-source-{name}"),
+            OrdinaryComponentDefinition {
+                id: None,
+                name: template.name,
+                auto_start: template.auto_start,
+                component: template.component,
+            },
+        )
+        .await
+        .expect("managed source acceptance");
+    let id = receipt
+        .creation
+        .expect("source creation receipt")
+        .components[0]
+        .id
+        .clone();
+    settle_managed_configuration(drasi).await;
+    timeout(
+        Duration::from_secs(5),
+        drasi
+            .component_by_id(&id)
+            .expect("managed source handle")
+            .wait_created(),
+    )
+    .await
+    .expect("source construction should finish")
+    .expect("source construction should succeed");
+    (id, probe)
+}
+
+async fn create_managed_reaction(
+    drasi: &DrasiLib,
+    resolver: &TestOrdinaryResolver,
+    name: &str,
+    query_name: &str,
+    auto_start: bool,
+    probe_key: &str,
+) -> (ComponentId, LifecycleProbe) {
+    let probe = resolver.register(probe_key);
+    let template = reaction_definition(
+        ComponentId::generate(),
+        name,
+        Some(query_name),
+        auto_start,
+        probe_key,
+    );
+    let receipt = drasi
+        .create_managed_ordinary_component(
+            drasi
+                .desired_configuration()
+                .expect("managed reaction configuration")
+                .revision,
+            format!("create-reaction-{name}"),
+            OrdinaryComponentDefinition {
+                id: None,
+                name: template.name,
+                auto_start: template.auto_start,
+                component: template.component,
+            },
+        )
+        .await
+        .expect("managed reaction acceptance");
+    let id = receipt
+        .creation
+        .expect("reaction creation receipt")
+        .components[0]
+        .id
+        .clone();
+    settle_managed_configuration(drasi).await;
+    timeout(
+        Duration::from_secs(5),
+        drasi
+            .component_by_id(&id)
+            .expect("managed reaction handle")
+            .wait_created(),
+    )
+    .await
+    .expect("reaction construction should finish")
+    .expect("reaction construction should succeed");
+    (id, probe)
+}
 
 async fn collect_events(
     rx: &mut tokio::sync::broadcast::Receiver<ComponentEvent>,
@@ -386,19 +681,34 @@ async fn collect_events(
 /// Removing a source with cleanup=true calls deprovision.
 #[tokio::test]
 async fn test_source_remove_with_cleanup_calls_deprovision() {
-    let source = TestSource::new("deprov-src-1").unwrap();
-    let deprov_flag = source.deprovision_called();
+    let probe = LifecycleProbe::default();
+    let deprov_flag = probe.delete_owned_resources_called.clone();
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("deprov-src-1").expect("fixture component name"),
+            true,
+            move |id| TestSource::with_probe(id.clone(), probe),
+        )
         .build()
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "deprov-src-1", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("deprov-src-1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
-    drasi.remove_source("deprov-src-1", true).await.unwrap();
+    drasi
+        .remove_source_by_name(
+            &drasi_core::ComponentName::try_new("deprov-src-1").expect("fixture component name"),
+            true,
+        )
+        .await
+        .unwrap();
 
     assert!(
         deprov_flag.load(Ordering::SeqCst),
@@ -408,7 +718,11 @@ async fn test_source_remove_with_cleanup_calls_deprovision() {
     // Source should no longer be listed
     let sources = drasi.list_sources().await.unwrap();
     assert!(
-        !sources.iter().any(|s| s.0 == "deprov-src-1"),
+        !sources.iter().any(|source| {
+            source.name
+                == drasi_core::ComponentName::try_new("deprov-src-1")
+                    .expect("fixture component name")
+        }),
         "Source should be removed"
     );
 
@@ -418,19 +732,34 @@ async fn test_source_remove_with_cleanup_calls_deprovision() {
 /// Removing a source with cleanup=false does NOT call deprovision.
 #[tokio::test]
 async fn test_source_remove_without_cleanup_skips_deprovision() {
-    let source = TestSource::new("deprov-src-2").unwrap();
-    let deprov_flag = source.deprovision_called();
+    let probe = LifecycleProbe::default();
+    let deprov_flag = probe.delete_owned_resources_called.clone();
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("deprov-src-2").expect("fixture component name"),
+            true,
+            move |id| TestSource::with_probe(id.clone(), probe),
+        )
         .build()
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "deprov-src-2", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("deprov-src-2").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
-    drasi.remove_source("deprov-src-2", false).await.unwrap();
+    drasi
+        .remove_source_by_name(
+            &drasi_core::ComponentName::try_new("deprov-src-2").expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
 
     assert!(
         !deprov_flag.load(Ordering::SeqCst),
@@ -443,23 +772,48 @@ async fn test_source_remove_without_cleanup_skips_deprovision() {
 /// Removing a stopped source with cleanup=true still calls deprovision.
 #[tokio::test]
 async fn test_source_remove_stopped_with_cleanup() {
-    let source = TestSource::new("deprov-src-3").unwrap();
-    let deprov_flag = source.deprovision_called();
+    let probe = LifecycleProbe::default();
+    let deprov_flag = probe.delete_owned_resources_called.clone();
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("deprov-src-3").expect("fixture component name"),
+            true,
+            move |id| TestSource::with_probe(id.clone(), probe),
+        )
         .build()
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "deprov-src-3", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("deprov-src-3").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Stop first, then remove
-    drasi.stop_source("deprov-src-3").await.unwrap();
-    wait_for_source_status(&drasi, "deprov-src-3", ComponentStatus::Stopped).await;
+    drasi
+        .stop_source_by_name(
+            &drasi_core::ComponentName::try_new("deprov-src-3").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("deprov-src-3").expect("fixture component name"),
+        ComponentStatus::Stopped,
+    )
+    .await;
 
-    drasi.remove_source("deprov-src-3", true).await.unwrap();
+    drasi
+        .remove_source_by_name(
+            &drasi_core::ComponentName::try_new("deprov-src-3").expect("fixture component name"),
+            true,
+        )
+        .await
+        .unwrap();
 
     assert!(
         deprov_flag.load(Ordering::SeqCst),
@@ -476,26 +830,62 @@ async fn test_source_remove_stopped_with_cleanup() {
 /// Removing a reaction with cleanup=true calls deprovision.
 #[tokio::test]
 async fn test_reaction_remove_with_cleanup_calls_deprovision() {
-    let source = TestSource::new("deprov-rxn-src-1").unwrap();
-    let query = Query::cypher("deprov-rxn-q-1")
-        .from_input("deprov-rxn-src-1")
-        .query("MATCH (n) RETURN n")
-        .build();
-    let reaction = TestReaction::new("deprov-rxn-1", vec!["deprov-rxn-q-1".to_string()]);
-    let deprov_flag = reaction.deprovision_called();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("deprov-rxn-q-1").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("deprov-rxn-src-1").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
+    let probe = LifecycleProbe::default();
+    let deprov_flag = probe.delete_owned_resources_called.clone();
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("deprov-rxn-src-1").expect("fixture component name"),
+            true,
+            |id| TestSource::new(id.clone()),
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction_factory(
+            drasi_core::ComponentName::try_new("deprov-rxn-1").expect("fixture component name"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("deprov-rxn-q-1")
+                    .expect("fixture component name"),
+            )],
+            true,
+            move |id, inputs| {
+                Ok(TestReaction::with_probe(
+                    id,
+                    inputs
+                        .into_iter()
+                        .map(drasi_lib::config::ComponentReference::by_id)
+                        .collect(),
+                    probe,
+                ))
+            },
+        )
         .build()
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
-    wait_for_reaction_status(&drasi, "deprov-rxn-1", ComponentStatus::Running).await;
+    wait_for_reaction_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("deprov-rxn-1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
-    drasi.remove_reaction("deprov-rxn-1", true).await.unwrap();
+    drasi
+        .remove_reaction_by_name(
+            &drasi_core::ComponentName::try_new("deprov-rxn-1").expect("fixture component name"),
+            true,
+        )
+        .await
+        .unwrap();
 
     assert!(
         deprov_flag.load(Ordering::SeqCst),
@@ -508,26 +898,62 @@ async fn test_reaction_remove_with_cleanup_calls_deprovision() {
 /// Removing a reaction with cleanup=false does NOT call deprovision.
 #[tokio::test]
 async fn test_reaction_remove_without_cleanup_skips_deprovision() {
-    let source = TestSource::new("deprov-rxn-src-2").unwrap();
-    let query = Query::cypher("deprov-rxn-q-2")
-        .from_input("deprov-rxn-src-2")
-        .query("MATCH (n) RETURN n")
-        .build();
-    let reaction = TestReaction::new("deprov-rxn-2", vec!["deprov-rxn-q-2".to_string()]);
-    let deprov_flag = reaction.deprovision_called();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("deprov-rxn-q-2").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("deprov-rxn-src-2").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
+    let probe = LifecycleProbe::default();
+    let deprov_flag = probe.delete_owned_resources_called.clone();
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("deprov-rxn-src-2").expect("fixture component name"),
+            true,
+            |id| TestSource::new(id.clone()),
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction_factory(
+            drasi_core::ComponentName::try_new("deprov-rxn-2").expect("fixture component name"),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("deprov-rxn-q-2")
+                    .expect("fixture component name"),
+            )],
+            true,
+            move |id, inputs| {
+                Ok(TestReaction::with_probe(
+                    id,
+                    inputs
+                        .into_iter()
+                        .map(drasi_lib::config::ComponentReference::by_id)
+                        .collect(),
+                    probe,
+                ))
+            },
+        )
         .build()
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
-    wait_for_reaction_status(&drasi, "deprov-rxn-2", ComponentStatus::Running).await;
+    wait_for_reaction_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("deprov-rxn-2").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
-    drasi.remove_reaction("deprov-rxn-2", false).await.unwrap();
+    drasi
+        .remove_reaction_by_name(
+            &drasi_core::ComponentName::try_new("deprov-rxn-2").expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
 
     assert!(
         !deprov_flag.load(Ordering::SeqCst),
@@ -544,50 +970,70 @@ async fn test_reaction_remove_without_cleanup_skips_deprovision() {
 /// Updating a running source stops it, replaces the instance, and restarts it.
 #[tokio::test]
 async fn test_source_update_running_stops_and_restarts() {
-    let source = TestSource::new("reconfig-src-1").unwrap();
-    let start_count = source.start_count();
-    let stop_count = source.stop_count();
-
+    let resolver = Arc::new(TestOrdinaryResolver::default());
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_ordinary_component_resolver(resolver.clone())
         .build()
         .await
         .unwrap();
+    let (source_id, initial_probe) =
+        create_managed_source(&drasi, resolver.as_ref(), "reconfig-src-1", true, "initial").await;
 
     drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "reconfig-src-1", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-src-1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Should be running
-    let status = drasi.get_source_status("reconfig-src-1").await.unwrap();
+    let status = drasi
+        .get_source_status_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-src-1").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
     assert_eq!(status, ComponentStatus::Running);
-    assert_eq!(start_count.load(Ordering::SeqCst), 1);
+    assert_eq!(initial_probe.start_count.load(Ordering::SeqCst), 1);
 
-    // Update with a new source instance
-    let new_source = TestSource::new("reconfig-src-1").unwrap();
-    let new_start_count = new_source.start_count();
+    let replacement_probe = resolver.register("replacement");
 
     drasi
-        .update_source("reconfig-src-1", new_source)
+        .update_source_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-src-1").expect("fixture component name"),
+            source_definition(source_id, "reconfig-src-1", true, "replacement"),
+        )
         .await
         .unwrap();
 
-    wait_for_source_status(&drasi, "reconfig-src-1", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-src-1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Old instance was stopped
     assert_eq!(
-        stop_count.load(Ordering::SeqCst),
+        initial_probe.stop_count.load(Ordering::SeqCst),
         1,
         "should have stopped old instance"
     );
     // New instance was started
     assert_eq!(
-        new_start_count.load(Ordering::SeqCst),
+        replacement_probe.start_count.load(Ordering::SeqCst),
         1,
         "should have started new instance"
     );
 
     // Should be running again
-    let status = drasi.get_source_status("reconfig-src-1").await.unwrap();
+    let status = drasi
+        .get_source_status_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-src-1").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
     assert_eq!(status, ComponentStatus::Running);
 
     let _ = drasi.stop().await;
@@ -596,32 +1042,50 @@ async fn test_source_update_running_stops_and_restarts() {
 /// Updating a stopped source replaces the instance without restart.
 #[tokio::test]
 async fn test_source_update_stopped_replaces_without_restart() {
-    let source = TestSource::new("reconfig-src-2").unwrap();
-
+    let resolver = Arc::new(TestOrdinaryResolver::default());
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_ordinary_component_resolver(resolver.clone())
         .build()
         .await
         .unwrap();
+    let (source_id, _) =
+        create_managed_source(&drasi, resolver.as_ref(), "reconfig-src-2", true, "initial").await;
 
     drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "reconfig-src-2", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-src-2").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Stop the source
-    drasi.stop_source("reconfig-src-2").await.unwrap();
-    wait_for_source_status(&drasi, "reconfig-src-2", ComponentStatus::Stopped).await;
+    drasi
+        .stop_source_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-src-2").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-src-2").expect("fixture component name"),
+        ComponentStatus::Stopped,
+    )
+    .await;
 
-    let new_source = TestSource::new("reconfig-src-2").unwrap();
-    let new_start_count = new_source.start_count();
+    let replacement_probe = resolver.register("replacement");
 
     drasi
-        .update_source("reconfig-src-2", new_source)
+        .update_source_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-src-2").expect("fixture component name"),
+            source_definition(source_id, "reconfig-src-2", true, "replacement"),
+        )
         .await
         .unwrap();
 
     // New instance should NOT have been started (was stopped)
     assert_eq!(
-        new_start_count.load(Ordering::SeqCst),
+        replacement_probe.start_count.load(Ordering::SeqCst),
         0,
         "should NOT restart a stopped source"
     );
@@ -636,42 +1100,76 @@ async fn test_source_update_stopped_replaces_without_restart() {
 /// Updating a running reaction stops it, replaces the instance, and restarts it.
 #[tokio::test]
 async fn test_reaction_update_running_stops_and_restarts() {
-    let source = TestSource::new("reconfig-rxn-src-1").unwrap();
-    let query = Query::cypher("reconfig-rxn-q-1")
-        .from_input("reconfig-rxn-src-1")
-        .query("MATCH (n) RETURN n")
-        .build();
-    let reaction = TestReaction::new("reconfig-rxn-1", vec!["reconfig-rxn-q-1".to_string()]);
-    let stop_count = reaction.stop_count();
-
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("reconfig-rxn-q-1").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("reconfig-rxn-src-1").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
+    let resolver = Arc::new(TestOrdinaryResolver::default());
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("reconfig-rxn-src-1")
+                .expect("fixture component name"),
+            true,
+            |id| TestSource::new(id.clone()),
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_ordinary_component_resolver(resolver.clone())
         .build()
         .await
         .unwrap();
+    let (reaction_id, initial_probe) = create_managed_reaction(
+        &drasi,
+        resolver.as_ref(),
+        "reconfig-rxn-1",
+        "reconfig-rxn-q-1",
+        true,
+        "initial",
+    )
+    .await;
 
     drasi.start().await.unwrap();
-    wait_for_reaction_status(&drasi, "reconfig-rxn-1", ComponentStatus::Running).await;
+    wait_for_reaction_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-rxn-1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
-    let new_reaction = TestReaction::new("reconfig-rxn-1", vec!["reconfig-rxn-q-1".to_string()]);
-    let new_start_count = new_reaction.start_count();
+    let replacement_probe = resolver.register("replacement");
 
     drasi
-        .update_reaction("reconfig-rxn-1", new_reaction)
+        .update_reaction_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-rxn-1").expect("fixture component name"),
+            reaction_definition(
+                reaction_id,
+                "reconfig-rxn-1",
+                Some("reconfig-rxn-q-1"),
+                true,
+                "replacement",
+            ),
+        )
         .await
         .unwrap();
 
-    wait_for_reaction_status(&drasi, "reconfig-rxn-1", ComponentStatus::Running).await;
+    wait_for_reaction_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-rxn-1").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     assert_eq!(
-        stop_count.load(Ordering::SeqCst),
+        initial_probe.stop_count.load(Ordering::SeqCst),
         1,
         "should have stopped old instance"
     );
     assert_eq!(
-        new_start_count.load(Ordering::SeqCst),
+        replacement_probe.start_count.load(Ordering::SeqCst),
         1,
         "should have started new instance"
     );
@@ -686,20 +1184,35 @@ async fn test_reaction_update_running_stops_and_restarts() {
 /// Verify that Reconfiguring event is emitted during source update.
 #[tokio::test]
 async fn test_source_update_emits_reconfiguring_event() {
-    let source = TestSource::new("reconfig-evt-src").unwrap();
-
+    let resolver = Arc::new(TestOrdinaryResolver::default());
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_ordinary_component_resolver(resolver.clone())
         .build()
         .await
         .unwrap();
+    let (source_id, _) = create_managed_source(
+        &drasi,
+        resolver.as_ref(),
+        "reconfig-evt-src",
+        true,
+        "initial",
+    )
+    .await;
 
     drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "reconfig-evt-src", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-evt-src").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Subscribe to events before update
     let (_history, mut event_rx) = drasi
-        .subscribe_source_events("reconfig-evt-src")
+        .subscribe_source_events_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-evt-src")
+                .expect("fixture component name"),
+        )
         .await
         .unwrap();
 
@@ -708,10 +1221,14 @@ async fn test_source_update_emits_reconfiguring_event() {
     tokio::task::yield_now().await;
     while event_rx.try_recv().is_ok() {}
 
-    let new_source = TestSource::new("reconfig-evt-src").unwrap();
+    resolver.register("replacement");
 
     drasi
-        .update_source("reconfig-evt-src", new_source)
+        .update_source_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-evt-src")
+                .expect("fixture component name"),
+            source_definition(source_id, "reconfig-evt-src", true, "replacement"),
+        )
         .await
         .unwrap();
 
@@ -737,26 +1254,51 @@ async fn test_source_update_emits_reconfiguring_event() {
 /// Verify that Reconfiguring event is emitted during reaction update.
 #[tokio::test]
 async fn test_reaction_update_emits_reconfiguring_event() {
-    let source = TestSource::new("reconfig-evt-rxn-src").unwrap();
-    let query = Query::cypher("reconfig-evt-rxn-q")
-        .from_input("reconfig-evt-rxn-src")
-        .query("MATCH (n) RETURN n")
-        .build();
-    let reaction = TestReaction::new("reconfig-evt-rxn", vec!["reconfig-evt-rxn-q".to_string()]);
-
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("reconfig-evt-rxn-q").expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("reconfig-evt-rxn-src").expect("fixture component name"),
+    )
+    .query("MATCH (n) RETURN n")
+    .build()
+    .expect("valid query configuration");
+    let resolver = Arc::new(TestOrdinaryResolver::default());
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("reconfig-evt-rxn-src")
+                .expect("fixture component name"),
+            true,
+            |id| TestSource::new(id.clone()),
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_ordinary_component_resolver(resolver.clone())
         .build()
         .await
         .unwrap();
+    let (reaction_id, _) = create_managed_reaction(
+        &drasi,
+        resolver.as_ref(),
+        "reconfig-evt-rxn",
+        "reconfig-evt-rxn-q",
+        true,
+        "initial",
+    )
+    .await;
 
     drasi.start().await.unwrap();
-    wait_for_reaction_status(&drasi, "reconfig-evt-rxn", ComponentStatus::Running).await;
+    wait_for_reaction_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-evt-rxn").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     let (_history, mut event_rx) = drasi
-        .subscribe_reaction_events("reconfig-evt-rxn")
+        .subscribe_reaction_events_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-evt-rxn")
+                .expect("fixture component name"),
+        )
         .await
         .unwrap();
 
@@ -765,11 +1307,20 @@ async fn test_reaction_update_emits_reconfiguring_event() {
     tokio::task::yield_now().await;
     while event_rx.try_recv().is_ok() {}
 
-    let new_reaction =
-        TestReaction::new("reconfig-evt-rxn", vec!["reconfig-evt-rxn-q".to_string()]);
+    resolver.register("replacement");
 
     drasi
-        .update_reaction("reconfig-evt-rxn", new_reaction)
+        .update_reaction_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-evt-rxn")
+                .expect("fixture component name"),
+            reaction_definition(
+                reaction_id,
+                "reconfig-evt-rxn",
+                Some("reconfig-evt-rxn-q"),
+                true,
+                "replacement",
+            ),
+        )
         .await
         .unwrap();
 
@@ -794,22 +1345,37 @@ async fn test_reaction_update_emits_reconfiguring_event() {
 /// Source log history is preserved across a reconfigure cycle.
 #[tokio::test]
 async fn test_source_update_preserves_log_history() {
-    let source = TestSource::new("reconfig-log-src").unwrap();
-
+    let resolver = Arc::new(TestOrdinaryResolver::default());
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_ordinary_component_resolver(resolver.clone())
         .build()
         .await
         .unwrap();
+    let (source_id, _) = create_managed_source(
+        &drasi,
+        resolver.as_ref(),
+        "reconfig-log-src",
+        true,
+        "initial",
+    )
+    .await;
 
     // Subscribe to logs before starting to detect log arrival
     let (_, mut log_rx) = drasi
-        .subscribe_source_logs("reconfig-log-src")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-log-src")
+                .expect("fixture component name"),
+        )
         .await
         .unwrap();
 
     drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "reconfig-log-src", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-log-src").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Wait for at least one log to arrive (event-based instead of sleep)
     let _ = timeout(Duration::from_secs(5), log_rx.recv())
@@ -818,24 +1384,39 @@ async fn test_source_update_preserves_log_history() {
 
     // Capture pre-update log count
     let (pre_logs, _) = drasi
-        .subscribe_source_logs("reconfig-log-src")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-log-src")
+                .expect("fixture component name"),
+        )
         .await
         .unwrap();
     let pre_count = pre_logs.len();
     assert!(pre_count > 0, "Expected logs before update");
 
     // Now update
-    let new_source = TestSource::new("reconfig-log-src").unwrap();
+    resolver.register("replacement");
     drasi
-        .update_source("reconfig-log-src", new_source)
+        .update_source_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-log-src")
+                .expect("fixture component name"),
+            source_definition(source_id, "reconfig-log-src", true, "replacement"),
+        )
         .await
         .unwrap();
 
-    wait_for_source_status(&drasi, "reconfig-log-src", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("reconfig-log-src").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Post-update logs should include pre-update logs plus new ones
     let (post_logs, _) = drasi
-        .subscribe_source_logs("reconfig-log-src")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-log-src")
+                .expect("fixture component name"),
+        )
         .await
         .unwrap();
     assert!(
@@ -850,17 +1431,27 @@ async fn test_source_update_preserves_log_history() {
 /// Active log subscribers continue receiving logs through a reconfigure.
 #[tokio::test]
 async fn test_source_update_active_log_stream_continues() {
-    let source = TestSource::new("reconfig-stream-src").unwrap();
-
+    let resolver = Arc::new(TestOrdinaryResolver::default());
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_ordinary_component_resolver(resolver.clone())
         .build()
         .await
         .unwrap();
+    let (source_id, _) = create_managed_source(
+        &drasi,
+        resolver.as_ref(),
+        "reconfig-stream-src",
+        true,
+        "initial",
+    )
+    .await;
 
     // Subscribe to logs before start
     let (_initial, mut log_rx) = drasi
-        .subscribe_source_logs("reconfig-stream-src")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-stream-src")
+                .expect("fixture component name"),
+        )
         .await
         .unwrap();
 
@@ -880,9 +1471,13 @@ async fn test_source_update_active_log_stream_continues() {
     assert!(!pre_logs.is_empty(), "Should receive startup logs");
 
     // Now reconfigure
-    let new_source = TestSource::new("reconfig-stream-src").unwrap();
+    resolver.register("replacement");
     drasi
-        .update_source("reconfig-stream-src", new_source)
+        .update_source_by_name(
+            &drasi_core::ComponentName::try_new("reconfig-stream-src")
+                .expect("fixture component name"),
+            source_definition(source_id, "reconfig-stream-src", true, "replacement"),
+        )
         .await
         .unwrap();
 
@@ -919,7 +1514,12 @@ async fn test_remove_nonexistent_source_fails() {
         .unwrap();
     drasi.start().await.unwrap();
 
-    let result = drasi.remove_source("does-not-exist", true).await;
+    let result = drasi
+        .remove_source_by_name(
+            &drasi_core::ComponentName::try_new("does-not-exist").expect("fixture component name"),
+            true,
+        )
+        .await;
     assert!(result.is_err());
 
     let _ = drasi.stop().await;
@@ -935,7 +1535,10 @@ async fn test_update_nonexistent_source_fails() {
     drasi.start().await.unwrap();
 
     let result = drasi
-        .update_source("does-not-exist", TestSource::new("does-not-exist").unwrap())
+        .update_source_by_name(
+            &drasi_core::ComponentName::try_new("does-not-exist").expect("fixture component name"),
+            source_definition(ComponentId::generate(), "does-not-exist", true, "missing"),
+        )
         .await;
     assert!(result.is_err());
 
@@ -951,7 +1554,12 @@ async fn test_remove_nonexistent_reaction_fails() {
         .unwrap();
     drasi.start().await.unwrap();
 
-    let result = drasi.remove_reaction("does-not-exist", true).await;
+    let result = drasi
+        .remove_reaction_by_name(
+            &drasi_core::ComponentName::try_new("does-not-exist").expect("fixture component name"),
+            true,
+        )
+        .await;
     assert!(result.is_err());
 
     let _ = drasi.stop().await;
@@ -967,9 +1575,15 @@ async fn test_update_nonexistent_reaction_fails() {
     drasi.start().await.unwrap();
 
     let result = drasi
-        .update_reaction(
-            "does-not-exist",
-            TestReaction::new("does-not-exist", vec![]),
+        .update_reaction_by_name(
+            &drasi_core::ComponentName::try_new("does-not-exist").expect("fixture component name"),
+            reaction_definition(
+                ComponentId::generate(),
+                "does-not-exist",
+                None,
+                true,
+                "missing",
+            ),
         )
         .await;
     assert!(result.is_err());
@@ -986,38 +1600,59 @@ async fn test_update_nonexistent_reaction_fails() {
 async fn test_source_remove_with_cleanup_clears_state_store() {
     let state_store = Arc::new(MemoryStateStoreProvider::new());
 
-    // Pre-populate state store with data for this source
+    let drasi = lib_integration_tests::query_builder()
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("cleanup-src").expect("fixture component name"),
+            true,
+            |id| TestSource::new(id.clone()),
+        )
+        .with_state_store_provider(state_store.clone() as Arc<dyn StateStoreProvider>)
+        .build()
+        .await
+        .unwrap();
+    let source_id = drasi
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("cleanup-src").expect("fixture component name"),
+        )
+        .unwrap()
+        .id()
+        .clone();
+    let source_partition = drasi_core::interface::StorePartition::component(source_id);
+
+    // Pre-populate state store with data for this source UUID.
     state_store
-        .set("cleanup-src", "key1", b"value1".to_vec())
+        .set(&source_partition, "key1", b"value1".to_vec())
         .await
         .unwrap();
     state_store
-        .set("cleanup-src", "key2", b"value2".to_vec())
+        .set(&source_partition, "key2", b"value2".to_vec())
         .await
         .unwrap();
 
-    let keys = state_store.list_keys("cleanup-src").await.unwrap();
+    let keys = state_store.list_keys(&source_partition).await.unwrap();
     assert_eq!(
         keys.len(),
         2,
         "State store should have 2 keys before delete"
     );
 
-    let source = TestSource::new("cleanup-src").unwrap();
+    drasi.start().await.unwrap();
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("cleanup-src").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
-    let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
-        .with_state_store_provider(state_store.clone() as Arc<dyn StateStoreProvider>)
-        .build()
+    drasi
+        .remove_source_by_name(
+            &drasi_core::ComponentName::try_new("cleanup-src").expect("fixture component name"),
+            true,
+        )
         .await
         .unwrap();
 
-    drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "cleanup-src", ComponentStatus::Running).await;
-
-    drasi.remove_source("cleanup-src", true).await.unwrap();
-
-    let keys = state_store.list_keys("cleanup-src").await.unwrap();
+    let keys = state_store.list_keys(&source_partition).await.unwrap();
     assert!(
         keys.is_empty(),
         "State store should be empty after delete with cleanup=true, got {} keys",
@@ -1032,31 +1667,52 @@ async fn test_source_remove_with_cleanup_clears_state_store() {
 async fn test_source_remove_without_cleanup_preserves_state_store() {
     let state_store = Arc::new(MemoryStateStoreProvider::new());
 
-    // Pre-populate state store with data for this source
-    state_store
-        .set("no-cleanup-src", "key1", b"value1".to_vec())
-        .await
-        .unwrap();
-    state_store
-        .set("no-cleanup-src", "key2", b"value2".to_vec())
-        .await
-        .unwrap();
-
-    let source = TestSource::new("no-cleanup-src").unwrap();
-
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source_factory(
+            drasi_core::ComponentName::try_new("no-cleanup-src").expect("fixture component name"),
+            true,
+            |id| TestSource::new(id.clone()),
+        )
         .with_state_store_provider(state_store.clone() as Arc<dyn StateStoreProvider>)
         .build()
         .await
         .unwrap();
+    let source_id = drasi
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("no-cleanup-src").expect("fixture component name"),
+        )
+        .unwrap()
+        .id()
+        .clone();
+    let source_partition = drasi_core::interface::StorePartition::component(source_id);
+
+    // Pre-populate state store with data for this source UUID.
+    state_store
+        .set(&source_partition, "key1", b"value1".to_vec())
+        .await
+        .unwrap();
+    state_store
+        .set(&source_partition, "key2", b"value2".to_vec())
+        .await
+        .unwrap();
 
     drasi.start().await.unwrap();
-    wait_for_source_status(&drasi, "no-cleanup-src", ComponentStatus::Running).await;
+    wait_for_source_status(
+        &drasi,
+        &drasi_core::ComponentName::try_new("no-cleanup-src").expect("fixture component name"),
+        ComponentStatus::Running,
+    )
+    .await;
 
-    drasi.remove_source("no-cleanup-src", false).await.unwrap();
+    drasi
+        .remove_source_by_name(
+            &drasi_core::ComponentName::try_new("no-cleanup-src").expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
 
-    let keys = state_store.list_keys("no-cleanup-src").await.unwrap();
+    let keys = state_store.list_keys(&source_partition).await.unwrap();
     assert_eq!(
         keys.len(),
         2,

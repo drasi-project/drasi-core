@@ -294,11 +294,11 @@ impl SourceMiddleware for JQ {
                             Element::Relation {
                                 metadata: new_metadata,
                                 in_node: ElementReference::new(
-                                    &metadata.reference.source_id,
+                                    &metadata.reference.namespace,
                                     &in_node_id,
                                 ),
                                 out_node: ElementReference::new(
-                                    &metadata.reference.source_id,
+                                    &metadata.reference.namespace,
                                     &out_node_id,
                                 ),
                                 properties: item.into(),

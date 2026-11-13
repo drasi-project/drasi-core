@@ -73,7 +73,7 @@ impl GtfsRtPoller {
         self.state.initial_mode = mode;
     }
 
-    pub async fn poll_once(&mut self, source_id: &str) -> Result<PollResult> {
+    pub async fn poll_once(&mut self, source_id: &drasi_lib::ComponentId) -> Result<PollResult> {
         let fetch = self.fetch_feeds().await?;
 
         // Cache successful feeds for future fallback
@@ -319,7 +319,12 @@ mod tests {
             )],
             "en",
         );
-        let changes = snapshot_insert_changes(&snapshot, "source").unwrap();
+        let changes = snapshot_insert_changes(
+            &snapshot,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        )
+        .unwrap();
         let filtered = changes
             .into_iter()
             .filter(|change| change.get_transaction_time() > 9_999_999_999_999)

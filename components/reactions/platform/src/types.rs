@@ -34,7 +34,7 @@ use drasi_core::evaluation::context::{QueryPartEvaluationContext, QueryVariables
 // #[serde(rename_all = "camelCase")]
 // pub struct ChangeEvent {
 //     /// Query identifier
-//     pub query_id: String,
+//     pub query_id: drasi_lib::ComponentId,
 
 //     /// Sequence number for ordering
 //     pub sequence: i64,
@@ -133,7 +133,7 @@ pub enum ResultEvent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultChangeEvent {
-    pub query_id: String,
+    pub query_id: drasi_lib::ComponentId,
     pub sequence: u64,
     pub source_time_ms: u64,
     pub added_results: Vec<Map<String, Value>>,
@@ -146,7 +146,7 @@ pub struct ResultChangeEvent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultControlEvent {
-    pub query_id: String,
+    pub query_id: drasi_lib::ComponentId,
     pub sequence: u64,
     pub source_time_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,7 +167,7 @@ pub struct UpdatePayload {
 
 impl ResultEvent {
     pub fn from_query_results(
-        query_id: &str,
+        query_id: &drasi_lib::ComponentId,
         data: Vec<QueryPartEvaluationContext>,
         sequence: u64,
         source_time_ms: u64,
@@ -209,7 +209,7 @@ impl ResultEvent {
         }
 
         ResultEvent::Change(ResultChangeEvent {
-            query_id: query_id.to_string(),
+            query_id: query_id.clone(),
             sequence,
             source_time_ms,
             added_results,
@@ -220,13 +220,13 @@ impl ResultEvent {
     }
 
     pub fn from_control_signal(
-        query_id: &str,
+        query_id: &drasi_lib::ComponentId,
         sequence: u64,
         source_time_ms: u64,
         control_signal: ControlSignal,
     ) -> Self {
         ResultEvent::Control(ResultControlEvent {
-            query_id: query_id.to_string(),
+            query_id: query_id.clone(),
             sequence,
             source_time_ms,
             metadata: None,
@@ -319,7 +319,7 @@ where
     T: Serialize,
 {
     /// Create a new CloudEvent
-    pub fn new(data: T, query_id: &str, config: &CloudEventConfig) -> Self {
+    pub fn new(data: T, query_id: &drasi_lib::ComponentId, config: &CloudEventConfig) -> Self {
         let now = chrono::Utc::now();
         let id = uuid::Uuid::new_v4().to_string();
         let topic = format!("{query_id}-results");
@@ -360,7 +360,8 @@ mod tests {
         map.insert("value".to_string(), json!("test"));
 
         let event = ResultChangeEvent {
-            query_id: "test-query".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 1,
             source_time_ms: 1609459200000,
             added_results: vec![map],
@@ -370,7 +371,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["queryId"], "test-query");
+        assert_eq!(json["queryId"], event.query_id.to_string());
         assert_eq!(json["sequence"], 1);
         assert_eq!(json["sourceTimeMs"], 1609459200000_i64);
         assert!(json["addedResults"].is_array());
@@ -415,7 +416,8 @@ mod tests {
     #[test]
     fn test_result_event_change_variant() {
         let change = ResultChangeEvent {
-            query_id: "test".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
             sequence: 1,
             source_time_ms: 0,
             added_results: vec![],
@@ -427,7 +429,7 @@ mod tests {
         let result_event = ResultEvent::Change(change);
         let json = serde_json::to_value(&result_event).unwrap();
         assert_eq!(json["kind"], "change");
-        assert_eq!(json["queryId"], "test");
+        assert_eq!(json["queryId"], "00000000-0000-0000-0000-000000000051");
     }
 
     // #[test]
@@ -474,7 +476,8 @@ mod tests {
         map.insert("id".to_string(), json!("1"));
 
         let change = ResultChangeEvent {
-            query_id: "test-query".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
             sequence: 1,
             source_time_ms: 0,
             added_results: vec![map],
@@ -486,14 +489,22 @@ mod tests {
         let result_event = ResultEvent::Change(change);
         let config =
             CloudEventConfig::with_values("custom-pubsub".to_string(), "custom-source".to_string());
-        let cloud_event = CloudEvent::new(result_event, "test-query", &config);
+        let cloud_event = CloudEvent::new(
+            result_event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
+            &config,
+        );
 
         let json = serde_json::to_value(&cloud_event).unwrap();
         assert_eq!(json["datacontenttype"], "application/json");
         assert_eq!(json["pubsubname"], "custom-pubsub");
         assert_eq!(json["source"], "custom-source");
         assert_eq!(json["specversion"], "1.0");
-        assert_eq!(json["topic"], "test-query-results");
+        assert_eq!(
+            json["topic"],
+            "00000000-0000-0000-0000-000000000050-results"
+        );
         assert_eq!(json["type"], "com.dapr.event.sent");
         assert!(json["data"].is_object());
         assert_eq!(json["data"]["kind"], "change");
@@ -502,7 +513,8 @@ mod tests {
     #[test]
     fn test_empty_arrays_included_in_serialization() {
         let event = ResultChangeEvent {
-            query_id: "test".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
             sequence: 1,
             source_time_ms: 0,
             added_results: vec![],

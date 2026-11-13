@@ -79,6 +79,7 @@ mod point_lookup;
 pub mod result_index;
 mod session_state;
 mod sizing;
+mod storage_format;
 mod storage_models;
 
 #[cfg(feature = "computation")]

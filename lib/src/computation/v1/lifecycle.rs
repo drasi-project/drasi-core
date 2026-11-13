@@ -109,7 +109,7 @@ pub struct ComponentGeneration(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OperationEpoch(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RealizationState {
     Pending,
     Creating,
@@ -118,7 +118,7 @@ pub enum RealizationState {
     CreationFailed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ComponentLifecycle {
     Stopped,
     Starting,
@@ -376,6 +376,7 @@ impl GraphError {
         match self {
             Self::Creation { disposition, .. } => *disposition,
             Self::Component { source, .. }
+            | Self::ReferenceResolution { source }
             | Self::Driver { source, .. }
             | Self::ResourceCreation { source, .. }
             | Self::ResourceCleanup { source, .. } => operation_failure_disposition(source),
@@ -434,6 +435,9 @@ impl GraphError {
             Self::Contract(_)
             | Self::Recovery(_)
             | Self::Validation { .. }
+            | Self::DuplicateComponentId { .. }
+            | Self::DuplicateComponentName { .. }
+            | Self::ExternalComponentId { .. }
             | Self::Topology { .. }
             | Self::InvalidState { .. }
             | Self::StaleGeneration
@@ -501,6 +505,9 @@ impl ComponentFailure {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DependencyWait {
+    ComponentName {
+        name: super::ComponentName,
+    },
     Component {
         id: ComponentId,
     },
@@ -521,6 +528,7 @@ pub enum DependencyWait {
 impl std::fmt::Display for DependencyWait {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ComponentName { name } => write!(f, "component named '{name}'"),
             Self::Component { id } => write!(f, "component '{id}'"),
             Self::Resource { id } => write!(f, "resource '{id}'"),
             Self::Factory { implementation } => {
@@ -920,6 +928,22 @@ pub enum GraphSelection {
 mod tests {
     use super::*;
 
+    fn fixture_id(name: &str) -> ComponentId {
+        let value = match name {
+            "first" => 10_001,
+            "last" => 10_002,
+            "source-00512-extra" => 20_000,
+            name if name.starts_with("source-") => {
+                name["source-".len()..]
+                    .parse::<u128>()
+                    .expect("fixture source index")
+                    + 1
+            }
+            other => panic!("missing explicit fixture component ID for {other}"),
+        };
+        crate::test_helpers::component_id(value)
+    }
+
     #[test]
     fn outgoing_relationship_ranges_select_exact_producers_without_scanning_the_graph() {
         use super::super::{Endpoint, PortId};
@@ -939,13 +963,10 @@ mod tests {
                     observed.relationships.insert(
                         EdgeDefinition::new(
                             Endpoint::new(
-                                ComponentId::try_new(format!("source-{index:05}")).unwrap(),
+                                fixture_id(&format!("source-{index:05}")),
                                 PortId::try_new(port).unwrap(),
                             ),
-                            Endpoint::new(
-                                ComponentId::try_new(destination).unwrap(),
-                                PortId::try_new("in").unwrap(),
-                            ),
+                            Endpoint::new(fixture_id(destination), PortId::try_new("in").unwrap()),
                         ),
                         ObservedRelationship {
                             binding: BindingState::Bound,
@@ -960,7 +981,7 @@ mod tests {
             }
         }
         for name in ["source-00000", "source-00512", "source-01023", "source-00512-extra"] {
-            let id = ComponentId::try_new(name).unwrap();
+            let id = fixture_id(name);
             let actual: Vec<_> = observed
                 .outgoing_relationships(&id)
                 .map(|(edge, _)| edge)
@@ -986,7 +1007,7 @@ mod tests {
             }
         }
         let comparisons = std::cell::Cell::new(0);
-        let id = ComponentId::try_new("source-00512").unwrap();
+        let id = crate::test_helpers::component_id(774);
         let matches = observed
             .relationships
             .range((
@@ -1049,7 +1070,7 @@ mod tests {
             ))
             .context("native operation");
             let error = GraphError::Component {
-                component: ComponentId::try_new("query").unwrap(),
+                component: crate::test_helpers::component_id(46),
                 operation: "process",
                 source,
             };
@@ -1113,7 +1134,7 @@ mod tests {
             }),
             anyhow::Error::new(GraphError::Cleanup {
                 primary: Some(Box::new(GraphError::Component {
-                    component: ComponentId::try_new("query").unwrap(),
+                    component: crate::test_helpers::component_id(46),
                     operation: "process",
                     source: IndexError::IOError.into(),
                 })),
@@ -1153,7 +1174,7 @@ mod tests {
             );
         }
         let transient = || GraphError::StopTimeout {
-            component: ComponentId::try_new("query").unwrap(),
+            component: crate::test_helpers::component_id(46),
         };
         assert_eq!(
             GraphError::Cleanup {

@@ -11,6 +11,7 @@
 use anyhow::{ensure, Context};
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::{
+    config::ComponentId,
     wal::{CapacityPolicy, DurabilityConfig},
     DrasiLib, Query, RecoveryPolicy, StorageBackendRef,
 };
@@ -19,10 +20,14 @@ use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, Prope
 use drasi_wal_redb::RedbWalProvider;
 use std::{path::Path, sync::Arc, time::Duration};
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 async fn stockroom(directory: &Path, write: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(directory)?;
     let (source, input) = ApplicationSource::new(
-        "inventory",
+        component_id(758).clone(),
         ApplicationSourceConfig {
             properties: Default::default(),
             durability: Some(DurabilityConfig {
@@ -32,7 +37,12 @@ async fn stockroom(directory: &Path, write: bool) -> anyhow::Result<()> {
             }),
         },
     )?;
-    let (reaction, output) = ApplicationReaction::new("alerts", vec!["low-stock".into()]);
+    let (reaction, output) = ApplicationReaction::new(
+        component_id(759).clone(),
+        vec![drasi_computation_contracts::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("low-stock").expect("fixture component name"),
+        )],
+    );
     let mut receiver = output
         .take_receiver()
         .await
@@ -43,35 +53,57 @@ async fn stockroom(directory: &Path, write: bool) -> anyhow::Result<()> {
         .with_query_factory(Arc::new(
             drasi_lib::computation::v1::ContinuousQueryFactory::default(),
         ))
+        .with_allow_external_component_ids(true)
         .with_id("stockroom-persistent")
         .with_index_provider("local", Arc::new(indexes))
         .with_wal_provider(Arc::new(RedbWalProvider::new(directory.join("wal"))))
-        .with_source(source)
-        .with_query(
-            Query::cypher("low-stock")
-                .query(
-                    "MATCH (p:Product) WHERE p.quantity < p.minimum
-                     RETURN p.sku AS sku, p.quantity AS quantity",
-                )
-                .from_input("inventory")
-                .enable_bootstrap(false)
-                .with_storage_backend(StorageBackendRef::Named("local".into()))
-                .with_recovery_policy(RecoveryPolicy::Strict)
-                .build(),
+        .with_source(
+            drasi_core_types::ComponentName::try_new("inventory").expect("fixture component name"),
+            source,
         )
-        .with_reaction(reaction)
+        .with_query(
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("low-stock")
+                    .expect("fixture component name"),
+            )
+            .query(
+                "MATCH (p:Product) WHERE p.quantity < p.minimum
+                     RETURN p.sku AS sku, p.quantity AS quantity",
+            )
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("inventory")
+                    .expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .with_storage_backend(StorageBackendRef::Named("local".into()))
+            .with_recovery_policy(RecoveryPolicy::Strict)
+            .build()?,
+        )
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("alerts").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
     let work = async {
         core.start().await?;
         tokio::time::timeout(
             Duration::from_secs(10),
-            core.computation_component("alerts")?.wait_started(),
+            core.component_by_name(
+                &drasi_core_types::ComponentName::try_new("alerts")
+                    .expect("fixture component name"),
+            )?
+            .wait_started(),
         )
         .await??;
         if write {
             ensure!(
-                core.get_query_results("low-stock").await?.is_empty(),
+                core.get_query_results_by_name(
+                    &drasi_core_types::ComponentName::try_new("low-stock")
+                        .expect("fixture component name")
+                )
+                .await?
+                .is_empty(),
                 "write requires a new stockroom; use read to inspect saved data"
             );
             input
@@ -89,7 +121,12 @@ async fn stockroom(directory: &Path, write: bool) -> anyhow::Result<()> {
                 .await?
                 .context("alerts closed before the write was processed")?;
         }
-        let rows = core.get_query_results("low-stock").await?;
+        let rows = core
+            .get_query_results_by_name(
+                &drasi_core_types::ComponentName::try_new("low-stock")
+                    .expect("fixture component name"),
+            )
+            .await?;
         ensure!(
             rows == vec![serde_json::json!({"sku": "bolts", "quantity": 3})],
             "expected saved low-stock product, got {rows:?}"

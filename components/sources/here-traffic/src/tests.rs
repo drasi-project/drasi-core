@@ -33,43 +33,80 @@ mod lifecycle {
 
     #[async_trait]
     impl StateStoreProvider for HeldStore {
-        async fn get(&self, store: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+        async fn get(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<Option<Vec<u8>>> {
             self.inner.get(store, key).await
         }
-        async fn set(&self, store: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+        async fn set(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+            key: &str,
+            value: Vec<u8>,
+        ) -> StateStoreResult<()> {
             self.entered.notify_one();
             self.release.notified().await;
             self.inner.set(store, key, value).await
         }
-        async fn delete(&self, store: &str, key: &str) -> StateStoreResult<bool> {
+        async fn delete(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<bool> {
             self.inner.delete(store, key).await
         }
-        async fn contains_key(&self, store: &str, key: &str) -> StateStoreResult<bool> {
+        async fn contains_key(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+            key: &str,
+        ) -> StateStoreResult<bool> {
             self.inner.contains_key(store, key).await
         }
         async fn get_many(
             &self,
-            store: &str,
+            store: &drasi_core::interface::StorePartition,
             keys: &[&str],
         ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
             self.inner.get_many(store, keys).await
         }
-        async fn set_many(&self, store: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+        async fn set_many(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+            entries: &[(&str, &[u8])],
+        ) -> StateStoreResult<()> {
             self.inner.set_many(store, entries).await
         }
-        async fn delete_many(&self, store: &str, keys: &[&str]) -> StateStoreResult<usize> {
+        async fn delete_many(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+            keys: &[&str],
+        ) -> StateStoreResult<usize> {
             self.inner.delete_many(store, keys).await
         }
-        async fn clear_store(&self, store: &str) -> StateStoreResult<usize> {
+        async fn clear_store(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+        ) -> StateStoreResult<usize> {
             self.inner.clear_store(store).await
         }
-        async fn list_keys(&self, store: &str) -> StateStoreResult<Vec<String>> {
+        async fn list_keys(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+        ) -> StateStoreResult<Vec<String>> {
             self.inner.list_keys(store).await
         }
-        async fn store_exists(&self, store: &str) -> StateStoreResult<bool> {
+        async fn store_exists(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+        ) -> StateStoreResult<bool> {
             self.inner.store_exists(store).await
         }
-        async fn key_count(&self, store: &str) -> StateStoreResult<usize> {
+        async fn key_count(
+            &self,
+            store: &drasi_core::interface::StorePartition,
+        ) -> StateStoreResult<usize> {
             self.inner.key_count(store).await
         }
     }
@@ -88,10 +125,15 @@ mod lifecycle {
     }
 
     fn source(url: &str) -> HereTrafficSourceBuilder {
-        HereTrafficSource::builder("lifecycle", "test-key", "52.5,13.3,52.6,13.5")
-            .with_base_url(url)
-            .with_endpoints(vec![Endpoint::Flow])
-            .with_polling_interval(Duration::from_secs(60))
+        HereTrafficSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000034")
+                .expect("fixture UUID"),
+            "test-key",
+            "52.5,13.3,52.6,13.5",
+        )
+        .with_base_url(url)
+        .with_endpoints(vec![Endpoint::Flow])
+        .with_polling_interval(Duration::from_secs(60))
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -128,7 +170,13 @@ mod lifecycle {
             );
             assert!(source.task_handle.read().await.is_none());
             assert_eq!(source.shutdown_tx.receiver_count(), 0);
-            assert!(store.get(source.id(), LAST_POLL_KEY).await?.is_some());
+            assert!(store
+                .get(
+                    &drasi_core::interface::StorePartition::component((source.id()).clone()),
+                    LAST_POLL_KEY
+                )
+                .await?
+                .is_some());
         }
         source.stop().await?;
         Ok(())
@@ -173,10 +221,24 @@ mod lifecycle {
             .as_ref()
             .expect("retained worker")
             .is_finished());
-        assert!(store.inner.get(source.id(), LAST_POLL_KEY).await?.is_none());
+        assert!(store
+            .inner
+            .get(
+                &drasi_core::interface::StorePartition::component((source.id()).clone()),
+                LAST_POLL_KEY
+            )
+            .await?
+            .is_none());
         store.release.notify_one();
         source.stop().await?;
-        assert!(store.inner.get(source.id(), LAST_POLL_KEY).await?.is_some());
+        assert!(store
+            .inner
+            .get(
+                &drasi_core::interface::StorePartition::component((source.id()).clone()),
+                LAST_POLL_KEY
+            )
+            .await?
+            .is_some());
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), receiver.recv())
                 .await?
@@ -270,7 +332,12 @@ fn test_config_validation_invalid_bbox() {
 fn test_detect_flow_change_new_segment() {
     let config = HereTrafficConfig::new("key", "52.5,13.3,52.6,13.5");
     let mut state = state::SourceState::default();
-    let changes = state.update_flow("source", &config, vec![sample_segment(3.0, 45.0)]);
+    let changes = state.update_flow(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &config,
+        vec![sample_segment(3.0, 45.0)],
+    );
     assert_eq!(changes.len(), 1);
     assert!(matches!(changes[0], SourceChange::Insert { .. }));
 }
@@ -279,15 +346,30 @@ fn test_detect_flow_change_new_segment() {
 fn test_detect_flow_change_thresholds() {
     let config = HereTrafficConfig::new("key", "52.5,13.3,52.6,13.5");
     let mut state = state::SourceState::default();
-    state.update_flow("source", &config, vec![sample_segment(3.0, 45.0)]);
+    state.update_flow(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &config,
+        vec![sample_segment(3.0, 45.0)],
+    );
 
-    let changes = state.update_flow("source", &config, vec![sample_segment(3.3, 47.0)]);
+    let changes = state.update_flow(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &config,
+        vec![sample_segment(3.3, 47.0)],
+    );
     assert!(
         changes.is_empty(),
         "Changes below threshold should be ignored"
     );
 
-    let changes = state.update_flow("source", &config, vec![sample_segment(3.9, 47.0)]);
+    let changes = state.update_flow(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &config,
+        vec![sample_segment(3.9, 47.0)],
+    );
     assert_eq!(changes.len(), 1);
     assert!(matches!(changes[0], SourceChange::Update { .. }));
 }
@@ -299,7 +381,11 @@ fn test_detect_incident_resolved() {
         .incidents
         .insert("INC_1".to_string(), sample_incident("INC_1", "HIGH"));
 
-    let changes = state.update_incidents("source", vec![]);
+    let changes = state.update_incidents(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        vec![],
+    );
     assert_eq!(changes.len(), 1);
     assert!(matches!(changes[0], SourceChange::Delete { .. }));
 }
@@ -316,19 +402,28 @@ fn test_relation_generation() {
         .incidents
         .insert("INC_1".to_string(), sample_incident("INC_1", "HIGH"));
 
-    let changes = state.update_relations("source", &config);
+    let changes = state.update_relations(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &config,
+    );
     assert_eq!(changes.len(), 1);
     assert!(matches!(changes[0], SourceChange::Insert { .. }));
 
     // Calling again with the same state should produce no changes (idempotent)
-    let changes = state.update_relations("source", &config);
+    let changes = state.update_relations(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &config,
+    );
     assert!(
         changes.is_empty(),
         "No relation changes expected when state matches"
     );
 
     let relation_change = mapping::build_relation_change(
-        "source",
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
         &RelationSnapshot {
             id: "affects_INC_1_segment_52.50000_13.40000".to_string(),
             incident_id: "INC_1".to_string(),

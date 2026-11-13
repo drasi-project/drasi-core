@@ -14,7 +14,7 @@ fn split_query(
     recovery: &str,
 ) -> Result<NativeComponentProxy> {
     let mut query = factory()?.create_component_with_processing_publication(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({
             "query": super::bootstrap::TEXT,
             "publication": "non_atomic",
@@ -50,7 +50,7 @@ fn live_input() -> Result<InputEnvelope> {
 
 fn query(path: &Path, generation: u64) -> Result<NativeComponentProxy> {
     factory()?.create_component_with_processing_publication(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": QUERY, "publication": "non_atomic"}),
         scope(generation),
         provider(path)?,
@@ -68,6 +68,7 @@ async fn restart_and_delete() -> Result<()> {
         1,
     )?;
     let mut first = query(directory.path(), 1)?;
+    first.initialize().await?;
     first.start().await?;
     assert!(first.continue_transform().await?.is_empty());
     let pending = first.transform(original.clone()).await?;
@@ -85,6 +86,7 @@ async fn restart_and_delete() -> Result<()> {
     drop(first);
 
     let mut reopened = query(directory.path(), 2)?;
+    reopened.initialize().await?;
     reopened.start().await?;
     let replayed = reopened.continue_transform().await?;
     aggregate(&replayed, Some(0.0), 5.0, 1)?;
@@ -111,12 +113,13 @@ async fn restart_and_delete() -> Result<()> {
     assert_eq!(generation, 0);
     assert_eq!(snapshot.records().len(), 1);
     reopened.stop().await?;
-    reopened.deprovision().await?;
+    reopened.delete_owned_resources().await?;
     drop(output);
     drop(readers);
     drop(reopened);
 
     let mut fresh = query(directory.path(), 3)?;
+    fresh.initialize().await?;
     fresh.start().await?;
     assert!(fresh.continue_transform().await?.is_empty());
     let readers = fresh.output_readers();
@@ -149,6 +152,7 @@ async fn non_atomic_query_restarts_replays_and_deletes_multi_thread() -> Result<
 async fn non_atomic_query_validates_input_before_marking_evaluation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut first = query(directory.path(), 1)?;
+    first.initialize().await?;
     first.start().await?;
     let mut invalid = input(
         SourceChange::Insert {
@@ -159,7 +163,7 @@ async fn non_atomic_query_validates_input_before_marking_evaluation() -> Result<
     let producer = GraphProducerIdentity::new(
         "input".into(),
         "upstream".into(),
-        ComponentId::try_new("source")?,
+        ComponentId::try_new("0539efe2-20f1-5267-bc33-53d354d01e65")?,
         StreamId::try_new("source/out")?,
         false,
     )?;
@@ -168,6 +172,7 @@ async fn non_atomic_query_validates_input_before_marking_evaluation() -> Result<
     first.stop().await?;
     drop(first);
     let mut reopened = query(directory.path(), 2)?;
+    reopened.initialize().await?;
     reopened.start().await?;
     assert!(reopened.continue_transform().await?.is_empty());
     let outputs = reopened
@@ -192,6 +197,7 @@ async fn independent_output_recovery() -> Result<()> {
     let create =
         |generation, recovery| split_query(&database, provider.clone(), generation, recovery);
     let mut first = create(1, "strict")?;
+    first.initialize().await?;
     first.start().await?;
     assert!(first.continue_transform().await?.is_empty());
     let progress = first
@@ -225,6 +231,7 @@ async fn independent_output_recovery() -> Result<()> {
     drop(first);
 
     let mut strict = create(2, "strict")?;
+    strict.initialize().await?;
     let failed = strict
         .start()
         .await
@@ -234,6 +241,7 @@ async fn independent_output_recovery() -> Result<()> {
     drop(strict);
 
     let mut recovered = create(3, "auto_reset")?;
+    recovered.initialize().await?;
     recovered.start().await?;
     assert!(recovered.continue_transform().await?.is_empty());
     let readers = recovered.output_readers();
@@ -255,6 +263,7 @@ async fn independent_output_recovery() -> Result<()> {
     drop(recovered);
 
     let mut reopened = create(4, "auto_reset")?;
+    reopened.initialize().await?;
     reopened.start().await?;
     let readers = reopened.output_readers();
     let (snapshot, generation) = readers.ports()[&PortId::try_new("out")?]
@@ -269,7 +278,7 @@ async fn independent_output_recovery() -> Result<()> {
     );
     drop(readers);
     reopened.stop().await?;
-    reopened.deprovision().await?;
+    reopened.delete_owned_resources().await?;
     drop(reopened);
     assert_eq!(
         rusqlite::Connection::open(database)?.query_row(
@@ -299,6 +308,7 @@ pub(super) async fn exit_child(root: &Path, phase: &str) -> Result<()> {
     match phase {
         "output" => {
             let mut query = split_query(&database, provider.clone(), 1, "strict")?;
+            query.initialize().await?;
             query.start().await?;
             provider.exit_after_output_commit();
             query.transform(live_input()?).await?;
@@ -306,6 +316,7 @@ pub(super) async fn exit_child(root: &Path, phase: &str) -> Result<()> {
         "reset" => {
             provider.exit_after_output_clear();
             let mut query = split_query(&database, provider, 2, "auto_reset")?;
+            query.initialize().await?;
             query.start().await?;
         }
         _ => anyhow::bail!("unknown non-atomic crash phase"),
@@ -340,6 +351,7 @@ async fn process_exit_recovery() -> Result<()> {
         );
         let provider = Arc::new(SplitOutputProvider::new(&directory.path().join("query"))?);
         let mut strict = split_query(&database, provider, 3, "strict")?;
+        strict.initialize().await?;
         assert!(
             strict.start().await.is_err(),
             "unfinished {phase} cannot be adopted"
@@ -349,6 +361,7 @@ async fn process_exit_recovery() -> Result<()> {
     for generation in 4..=5 {
         let provider = Arc::new(SplitOutputProvider::new(&directory.path().join("query"))?);
         let mut recovered = split_query(&database, provider, generation, "auto_reset")?;
+        recovered.initialize().await?;
         recovered.start().await?;
         let readers = recovered.output_readers();
         let (snapshot, reset_generation) = readers.ports()[&PortId::try_new("out")?]

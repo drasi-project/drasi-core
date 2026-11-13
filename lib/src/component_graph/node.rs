@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::channels::{ComponentStatus, ComponentType};
+use crate::{computation::v1::GraphEntityId, ComponentName};
 
 // Preserve existing plugin import paths without owning their status protocol.
 pub use crate::channels::{
@@ -128,8 +129,10 @@ impl RelationshipKind {
 /// exclusively to the ComputationGraph registry publication it was derived from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentNode {
-    /// Unique identifier for this component
-    pub id: String,
+    /// Tagged entity identity; roots and providers are not components.
+    pub id: GraphEntityId,
+    /// Present for graph-owned components, absent for inspection-only entities.
+    pub name: Option<ComponentName>,
     /// Type of component
     pub kind: ComponentKind,
     /// Current lifecycle status
@@ -160,10 +163,8 @@ pub struct GraphSnapshot {
 /// A serializable edge in the graph snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdge {
-    /// Source component ID
-    pub from: String,
-    /// Target component ID
-    pub to: String,
+    pub from: GraphEntityId,
+    pub to: GraphEntityId,
     /// Type of relationship
     pub relationship: RelationshipKind,
 }

@@ -140,11 +140,12 @@ impl AzuriteRuntime {
 
 async fn start_drasi_with_reaction(
     reaction: AzureStorageReaction,
-    query_id: &str,
+    query_id: drasi_core::ComponentName,
 ) -> anyhow::Result<(DrasiLib, drasi_source_application::ApplicationSourceHandle)> {
-    let reaction_id = reaction.id().to_string();
+    let reaction_id = reaction.id().clone();
     let (source, handle) = ApplicationSource::new(
-        "app-source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000024")
+            .expect("fixture UUID"),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: None,
@@ -152,9 +153,9 @@ async fn start_drasi_with_reaction(
     )?;
     let query = Query::cypher(query_id)
         .query("MATCH (n:Sensor) RETURN n.id AS id, n.name AS name, n.region AS region, n.value AS value")
-        .from_input("app-source")
+        .from_input_by_name(drasi_core::ComponentName::try_new("app-source").expect("fixture component name"))
         .auto_start(true)
-        .build();
+        .build().expect("valid query configuration");
 
     let drasi = DrasiLib::builder()
         .with_query_factory(
@@ -169,9 +170,15 @@ async fn start_drasi_with_reaction(
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("app-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("storage-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 
@@ -181,7 +188,7 @@ async fn start_drasi_with_reaction(
     let rid = reaction_id.clone();
     let ready = poll_until(|| async {
         matches!(
-            drasi_ref.get_reaction_status(&rid).await,
+            drasi_ref.get_reaction_status_by_id(&rid).await,
             Ok(ComponentStatus::Running)
         )
     })
@@ -257,31 +264,39 @@ async fn test_queue_reaction_insert_update_delete() {
         .await
         .expect("queue should be created");
 
-    let reaction = AzureStorageReaction::builder("queue-reaction")
-        .with_query("queue-query")
-        .with_account_name(AZURITE_ACCOUNT)
-        .with_access_key(AZURITE_KEY)
-        .with_queue_endpoint(format!("http://127.0.0.1:{}", azurite.queue_port))
-        .with_target(StorageTarget::Queue {
-            queue_name: queue_name.to_string(),
-        })
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                r#"{"op":"{{operation}}","name":"{{after.name}}"}"#,
-            )),
-            updated: Some(TemplateSpec::new(
-                r#"{"op":"{{operation}}","name":"{{after.name}}","before":"{{before.name}}"}"#,
-            )),
-            deleted: Some(TemplateSpec::new(
-                r#"{"op":"{{operation}}","name":"{{before.name}}"}"#,
-            )),
-        })
-        .build()
-        .expect("reaction should build");
+    let reaction = AzureStorageReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000025")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("queue-query").expect("fixture component name"),
+    )
+    .with_account_name(AZURITE_ACCOUNT)
+    .with_access_key(AZURITE_KEY)
+    .with_queue_endpoint(format!("http://127.0.0.1:{}", azurite.queue_port))
+    .with_target(StorageTarget::Queue {
+        queue_name: queue_name.to_string(),
+    })
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new(
+            r#"{"op":"{{operation}}","name":"{{after.name}}"}"#,
+        )),
+        updated: Some(TemplateSpec::new(
+            r#"{"op":"{{operation}}","name":"{{after.name}}","before":"{{before.name}}"}"#,
+        )),
+        deleted: Some(TemplateSpec::new(
+            r#"{"op":"{{operation}}","name":"{{before.name}}"}"#,
+        )),
+    })
+    .build()
+    .expect("reaction should build");
 
-    let (drasi, handle) = start_drasi_with_reaction(reaction, "queue-query")
-        .await
-        .expect("drasi should start");
+    let (drasi, handle) = start_drasi_with_reaction(
+        reaction,
+        drasi_core::ComponentName::try_new("queue-query").expect("fixture component name"),
+    )
+    .await
+    .expect("drasi should start");
     emit_insert_update_delete(&handle)
         .await
         .expect("events should be emitted");
@@ -351,28 +366,34 @@ async fn test_queue_reaction_aggregation() {
         .await
         .expect("queue should be created");
 
-    let reaction = AzureStorageReaction::builder("agg-queue-reaction")
-        .with_query("agg-query")
-        .with_account_name(AZURITE_ACCOUNT)
-        .with_access_key(AZURITE_KEY)
-        .with_queue_endpoint(format!("http://127.0.0.1:{}", azurite.queue_port)) // DevSkim: ignore DS137138
-        .with_target(StorageTarget::Queue {
-            queue_name: queue_name.to_string(),
-        })
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                r#"{"op":"{{operation}}","total_value":{{after.total_value}}}"#,
-            )),
-            updated: Some(TemplateSpec::new(
-                r#"{"op":"{{operation}}","total_value":{{after.total_value}}}"#,
-            )),
-            deleted: Some(TemplateSpec::new(r#"{"op":"{{operation}}"}"#)),
-        })
-        .build()
-        .expect("reaction should build");
+    let reaction = AzureStorageReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000026")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+    )
+    .with_account_name(AZURITE_ACCOUNT)
+    .with_access_key(AZURITE_KEY)
+    .with_queue_endpoint(format!("http://127.0.0.1:{}", azurite.queue_port)) // DevSkim: ignore DS137138
+    .with_target(StorageTarget::Queue {
+        queue_name: queue_name.to_string(),
+    })
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new(
+            r#"{"op":"{{operation}}","total_value":{{after.total_value}}}"#,
+        )),
+        updated: Some(TemplateSpec::new(
+            r#"{"op":"{{operation}}","total_value":{{after.total_value}}}"#,
+        )),
+        deleted: Some(TemplateSpec::new(r#"{"op":"{{operation}}"}"#)),
+    })
+    .build()
+    .expect("reaction should build");
 
     let (source, handle) = ApplicationSource::new(
-        "app-source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000024")
+            .expect("fixture UUID"),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: None,
@@ -380,11 +401,16 @@ async fn test_queue_reaction_aggregation() {
     )
     .expect("source should build");
 
-    let query = Query::cypher("agg-query")
-        .query("MATCH (n:Sensor) RETURN sum(n.value) AS total_value")
-        .from_input("app-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+    )
+    .query("MATCH (n:Sensor) RETURN sum(n.value) AS total_value")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("app-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
     let drasi = DrasiLib::builder()
         .with_query_factory(
@@ -399,9 +425,16 @@ async fn test_queue_reaction_aggregation() {
                 .expect("reference query factory")
                 .clone(),
         )
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("app-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("agg-queue-reaction")
+                .expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .expect("drasi should build");
@@ -410,7 +443,12 @@ async fn test_queue_reaction_aggregation() {
     let drasi_ref = &drasi;
     let ready = poll_until(|| async {
         matches!(
-            drasi_ref.get_reaction_status("agg-queue-reaction").await,
+            drasi_ref
+                .get_reaction_status_by_name(
+                    &drasi_core::ComponentName::try_new("agg-queue-reaction")
+                        .expect("fixture component name")
+                )
+                .await,
             Ok(ComponentStatus::Running)
         )
     })
@@ -530,27 +568,35 @@ async fn test_blob_reaction_insert_update_delete() {
         .expect("container should be created");
 
     let blob_path_template = "{{#if after}}{{after.id}}{{else}}{{before.id}}{{/if}}.txt";
-    let reaction = AzureStorageReaction::builder("blob-reaction")
-        .with_query("blob-query")
-        .with_account_name(AZURITE_ACCOUNT)
-        .with_access_key(AZURITE_KEY)
-        .with_blob_endpoint(format!("http://127.0.0.1:{}", azurite.blob_port))
-        .with_target(StorageTarget::Blob {
-            container_name: container_name.to_string(),
-            blob_path_template: blob_path_template.to_string(),
-            content_type: "text/plain".to_string(),
-        })
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("ADD:{{after.name}}")),
-            updated: Some(TemplateSpec::new("UPDATE:{{after.name}}")),
-            deleted: Some(TemplateSpec::new("DELETE:{{before.name}}")),
-        })
-        .build()
-        .expect("reaction should build");
+    let reaction = AzureStorageReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000027")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("blob-query").expect("fixture component name"),
+    )
+    .with_account_name(AZURITE_ACCOUNT)
+    .with_access_key(AZURITE_KEY)
+    .with_blob_endpoint(format!("http://127.0.0.1:{}", azurite.blob_port))
+    .with_target(StorageTarget::Blob {
+        container_name: container_name.to_string(),
+        blob_path_template: blob_path_template.to_string(),
+        content_type: "text/plain".to_string(),
+    })
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new("ADD:{{after.name}}")),
+        updated: Some(TemplateSpec::new("UPDATE:{{after.name}}")),
+        deleted: Some(TemplateSpec::new("DELETE:{{before.name}}")),
+    })
+    .build()
+    .expect("reaction should build");
 
-    let (drasi, handle) = start_drasi_with_reaction(reaction, "blob-query")
-        .await
-        .expect("drasi should start");
+    let (drasi, handle) = start_drasi_with_reaction(
+        reaction,
+        drasi_core::ComponentName::try_new("blob-query").expect("fixture component name"),
+    )
+    .await
+    .expect("drasi should start");
 
     let blob_client = azurite.blob_client();
 
@@ -644,32 +690,40 @@ async fn test_table_reaction_insert_update_delete() {
         .await
         .expect("table should be created");
 
-    let reaction = AzureStorageReaction::builder("table-reaction")
-        .with_query("table-query")
-        .with_account_name(AZURITE_ACCOUNT)
-        .with_access_key(AZURITE_KEY)
-        .with_table_endpoint(format!("http://127.0.0.1:{}", azurite.table_port))
-        .with_target(StorageTarget::Table {
-            table_name: table_name.to_string(),
-            partition_key_template: "{{#if after}}{{after.region}}{{else}}{{before.region}}{{/if}}"
-                .to_string(),
-            row_key_template: "{{#if after}}{{after.id}}{{else}}{{before.id}}{{/if}}".to_string(),
-        })
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                r#"{"name":"{{after.name}}","value":{{after.value}},"op":"{{operation}}"}"#,
-            )),
-            updated: Some(TemplateSpec::new(
-                r#"{"name":"{{after.name}}","value":{{after.value}},"op":"{{operation}}"}"#,
-            )),
-            deleted: None,
-        })
-        .build()
-        .expect("reaction should build");
+    let reaction = AzureStorageReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000028")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("table-query").expect("fixture component name"),
+    )
+    .with_account_name(AZURITE_ACCOUNT)
+    .with_access_key(AZURITE_KEY)
+    .with_table_endpoint(format!("http://127.0.0.1:{}", azurite.table_port))
+    .with_target(StorageTarget::Table {
+        table_name: table_name.to_string(),
+        partition_key_template: "{{#if after}}{{after.region}}{{else}}{{before.region}}{{/if}}"
+            .to_string(),
+        row_key_template: "{{#if after}}{{after.id}}{{else}}{{before.id}}{{/if}}".to_string(),
+    })
+    .with_default_template(QueryConfig {
+        added: Some(TemplateSpec::new(
+            r#"{"name":"{{after.name}}","value":{{after.value}},"op":"{{operation}}"}"#,
+        )),
+        updated: Some(TemplateSpec::new(
+            r#"{"name":"{{after.name}}","value":{{after.value}},"op":"{{operation}}"}"#,
+        )),
+        deleted: None,
+    })
+    .build()
+    .expect("reaction should build");
 
-    let (drasi, handle) = start_drasi_with_reaction(reaction, "table-query")
-        .await
-        .expect("drasi should start");
+    let (drasi, handle) = start_drasi_with_reaction(
+        reaction,
+        drasi_core::ComponentName::try_new("table-query").expect("fixture component name"),
+    )
+    .await
+    .expect("drasi should start");
 
     let entity_client = azurite
         .table_client()

@@ -34,12 +34,12 @@ fn labels(labels: &[&str]) -> Arc<[Arc<str>]> {
     labels.iter().map(|label| Arc::from(*label)).collect()
 }
 
-fn element_reference(source_id: &str, element_id: &str) -> ElementReference {
-    ElementReference::new(source_id, element_id)
+fn element_reference(source_id: &drasi_lib::ComponentId, element_id: &str) -> ElementReference {
+    ElementReference::new(source_id.as_str(), element_id)
 }
 
 fn node_metadata(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label_names: &[&str],
     effective_from: u64,
@@ -52,7 +52,7 @@ fn node_metadata(
 }
 
 fn relation_metadata(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label_names: &[&str],
     effective_from: u64,
@@ -97,7 +97,7 @@ pub fn normalize_id(input: &str) -> String {
 }
 
 fn build_node(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label: &str,
     properties: ElementPropertyMap,
@@ -122,7 +122,7 @@ fn build_node(
 
 #[allow(clippy::too_many_arguments)]
 fn build_relation(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label: &str,
     from_id: &str,
@@ -152,7 +152,7 @@ fn build_relation(
 }
 
 pub fn map_outage(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     outage_id: &str,
     outage: &OutageAnnotation,
     action: ChangeAction,
@@ -246,7 +246,7 @@ pub fn map_outage(
 }
 
 pub fn map_hijack(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     hijack: &BgpHijackEvent,
     action: ChangeAction,
     include_shared: bool,
@@ -389,7 +389,7 @@ pub fn map_hijack(
 }
 
 pub fn map_leak(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     leak: &BgpLeakEvent,
     action: ChangeAction,
     include_shared: bool,
@@ -547,7 +547,10 @@ pub fn relation_element_ids_for_leak(leak: &BgpLeakEvent) -> Vec<(String, String
 }
 
 /// Generates `SourceChange::Delete` entries for a list of relation `(element_id, label)` pairs.
-pub fn delete_relations(source_id: &str, relation_ids: &[(String, String)]) -> Vec<SourceChange> {
+pub fn delete_relations(
+    source_id: &drasi_lib::ComponentId,
+    relation_ids: &[(String, String)],
+) -> Vec<SourceChange> {
     relation_ids
         .iter()
         .map(|(elem_id, label)| SourceChange::Delete {
@@ -557,7 +560,7 @@ pub fn delete_relations(source_id: &str, relation_ids: &[(String, String)]) -> V
 }
 
 pub fn map_http_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     node_id: &str,
     series_name: &str,
     summary: &HttpSummaryData,
@@ -584,7 +587,7 @@ pub fn map_http_summary(
 }
 
 pub fn map_attack_l7_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     node_id: &str,
     series_name: &str,
     summary: &AttackSummaryData,
@@ -619,7 +622,7 @@ pub fn map_attack_l7_summary(
 }
 
 pub fn map_attack_l3_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     node_id: &str,
     series_name: &str,
     summary: &AttackLayer3SummaryData,
@@ -647,7 +650,7 @@ pub fn map_attack_l3_summary(
 }
 
 pub fn map_domain_ranking(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     domain: &DomainRank,
     action: ChangeAction,
     effective_from: u64,
@@ -715,7 +718,7 @@ pub fn map_domain_ranking(
 }
 
 pub fn map_dns_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     domain: &str,
     locations: &[DnsLocationEntry],
     action: ChangeAction,

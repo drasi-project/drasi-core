@@ -22,6 +22,8 @@ use super::{
 pub enum ContractError {
     #[error("invalid {kind} identifier {value:?}: expected nonempty text without whitespace or controls")]
     InvalidIdentifier { kind: &'static str, value: String },
+    #[error(transparent)]
+    ComponentIdentity(#[from] drasi_core_types::ComponentIdentityError),
     #[error("{kind} identity must contain nonempty bytes")]
     EmptyIdentity { kind: &'static str },
     #[error("schema version must be nonzero, got {value}")]

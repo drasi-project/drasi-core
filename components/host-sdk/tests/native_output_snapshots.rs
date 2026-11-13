@@ -34,7 +34,23 @@ fn stream(name: &str) -> StreamId {
 }
 
 fn component_id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("component")
+    let uuid = match name {
+        "multi" => "00000000-0000-0000-0000-000000000001",
+        "xform" => "00000000-0000-0000-0000-000000000002",
+        "bare" => "00000000-0000-0000-0000-000000000003",
+        "denied" => "00000000-0000-0000-0000-000000000004",
+        "ui" => "00000000-0000-0000-0000-000000000005",
+        "unbound" => "00000000-0000-0000-0000-000000000006",
+        "multi-out-sink" => "00000000-0000-0000-0000-000000000101",
+        "multi-alt-sink" => "00000000-0000-0000-0000-000000000102",
+        "xform-feed" => "00000000-0000-0000-0000-000000000103",
+        "xform-feed-out-sink" => "00000000-0000-0000-0000-000000000104",
+        "xform-sink" => "00000000-0000-0000-0000-000000000105",
+        "bare-out-sink" => "00000000-0000-0000-0000-000000000106",
+        "denied-out-sink" => "00000000-0000-0000-0000-000000000107",
+        other => panic!("unknown snapshot fixture component: {other}"),
+    };
+    ComponentId::try_new(uuid).expect("fixture UUID")
 }
 
 fn port_id(name: &str) -> PortId {
@@ -258,34 +274,41 @@ async fn connect(
     from: (&ComponentHandle, &str),
     to: (&ComponentHandle, &str),
 ) -> Result<()> {
-    let control = core.computation_control()?;
-    let plan = control
-        .preview(
-            control.desired_snapshot().revision,
-            vec![DesiredMutation::Bind(DesiredRelationship {
-                definition: EdgeDefinition {
-                    from: Endpoint::new(from.0.id().clone(), port_id(from.1)),
-                    to: Endpoint::new(to.0.id().clone(), port_id(to.1)),
-                },
-                policy: Default::default(),
-                pipe: DesiredPipe::Bounded { capacity: 2 },
-            })],
-        )
-        .await?;
-    let report = control.reconcile(plan, TopologyBindings::default()).await?;
-    anyhow::ensure!(report.failures.is_empty() && report.committed, "{report:?}");
+    let current = core.desired_configuration()?;
+    let mut desired = current.desired;
+    desired.topology.relationships.push(DesiredRelationship {
+        definition: EdgeDefinition {
+            from: Endpoint::new(from.0.id().clone(), port_id(from.1)),
+            to: Endpoint::new(to.0.id().clone(), port_id(to.1)),
+        },
+        policy: Default::default(),
+        pipe: DesiredPipe::Bounded { capacity: 2 },
+    });
+    core.apply_desired_state(
+        current.revision,
+        format!("connect-{}-{}-{}-{}", from.0.id(), from.1, to.0.id(), to.1),
+        desired,
+    )
+    .await?;
+    let status = core.reconcile_desired_state().await?;
+    anyhow::ensure!(
+        status.error.is_none() && status.resource_errors.is_empty(),
+        "{status:?}"
+    );
     Ok(())
 }
 
 async fn add_sink(core: &DrasiLib, name: &str) -> Result<ComponentHandle> {
     Ok(core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::sink(Box::new(FixtureSink(
-                ComponentDescriptor::try_new(
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new(name)
+                    .expect("fixture component name"),
+                ConstructedComponent::sink(Box::new(FixtureSink(ComponentDescriptor::try_new(
                     component_id(name),
                     vec![port("in", PortDirection::Input)],
-                )?,
-            ))))
+                )?))),
+            )
             .auto_start(false),
         )
         .await?)
@@ -302,8 +325,9 @@ async fn add_source(
         .iter()
         .filter_map(|(name, output)| output.map(|output| (*name, output)))
         .collect();
-    let mut addition =
-        ComponentAddition::new(ConstructedComponent::source(Box::new(FixtureSource {
+    let mut addition = ComponentAddition::new(
+        drasi_lib::computation::v1::ComponentName::try_new(id).expect("fixture component name"),
+        ConstructedComponent::source(Box::new(FixtureSource {
             descriptor: ComponentDescriptor::try_new(
                 component_id(id),
                 outputs
@@ -312,8 +336,9 @@ async fn add_source(
                     .collect(),
             )?,
             readers: readers(&registered),
-        })))
-        .auto_start(false);
+        })),
+    )
+    .auto_start(false);
     for (name, _) in outputs {
         addition = addition.bind_stream(port_id(name), stream(&format!("{id}/{name}")));
     }
@@ -329,8 +354,10 @@ async fn add_source(
 async fn add_transformer(core: &DrasiLib, id: &str, output: &Arc<Output>) -> Result<()> {
     let handle = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::transformer(Box::new(
-                FixtureTransformer {
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new(id)
+                    .expect("fixture component name"),
+                ConstructedComponent::transformer(Box::new(FixtureTransformer {
                     descriptor: ComponentDescriptor::try_new(
                         component_id(id),
                         vec![
@@ -339,15 +366,17 @@ async fn add_transformer(core: &DrasiLib, id: &str, output: &Arc<Output>) -> Res
                         ],
                     )?,
                     readers: readers(&[("out", output)]),
-                },
-            )))
+                })),
+            )
             .auto_start(false)
             .bind_stream(port_id("out"), stream(&format!("{id}/out"))),
         )
         .await?;
     let feed_id = format!("{id}-feed");
     add_source(core, &feed_id, &[("out", None)]).await?;
-    let feed = core.computation_component(&feed_id)?;
+    let feed = core.component_by_name(
+        &drasi_core_types::ComponentName::try_new(feed_id).expect("fixture component name"),
+    )?;
     connect(core, (&feed, "out"), (&handle, "in")).await?;
     let sink = add_sink(core, &format!("{id}-sink")).await?;
     connect(core, (&handle, "out"), (&sink, "in")).await?;
@@ -356,7 +385,7 @@ async fn add_transformer(core: &DrasiLib, id: &str, output: &Arc<Output>) -> Res
 }
 
 fn binding(component: &str, port: &str) -> Value {
-    json!({"component": component, "port": port})
+    json!({"component": component_id(component), "port": port})
 }
 
 async fn start_sink(
@@ -402,6 +431,7 @@ async fn start_sink(
         catalogue,
         sink_inputs::inputs_for(&sink_configuration),
     )?;
+    sink.initialize().await?;
     sink.start().await?;
     Ok(sink)
 }
@@ -415,6 +445,7 @@ struct World {
 
 async fn world(name: &str) -> Result<World> {
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -628,6 +659,7 @@ async fn snapshot_readers_are_bounded_and_a_sink_without_the_capability_answers_
             component_id("unbound"),
             json!({"outputs": {"main": binding("multi", "out")}, "host": "127.0.0.1", "port": bare_port}),
         )?;
+        unbound.initialize().await?;
         unbound.start().await?;
         assert_eq!(get(&client, bare_port, "main").await?.status(), 501);
         unbound.stop().await?;

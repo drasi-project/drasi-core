@@ -50,40 +50,33 @@ impl std::fmt::Debug for MsSqlStoredProcReaction {
 
 impl MsSqlStoredProcReaction {
     /// Create a builder for MsSqlStoredProcReaction
-    pub fn builder(id: impl Into<String>) -> MsSqlStoredProcReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> MsSqlStoredProcReactionBuilder {
         MsSqlStoredProcReactionBuilder::new(id)
     }
 
     /// Create a new MS SQL Server stored procedure reaction
     pub async fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: MsSqlStoredProcReactionConfig,
     ) -> Result<Self> {
-        Self::create_internal(id.into(), queries, config, None, true).await
+        Self::create_internal(id.clone(), queries, config, None, true).await
     }
 
     /// Create a new MS SQL Server stored procedure reaction with custom priority queue capacity
     pub async fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: MsSqlStoredProcReactionConfig,
         priority_queue_capacity: usize,
     ) -> Result<Self> {
-        Self::create_internal(
-            id.into(),
-            queries,
-            config,
-            Some(priority_queue_capacity),
-            true,
-        )
-        .await
+        Self::create_internal(id, queries, config, Some(priority_queue_capacity), true).await
     }
 
     /// Create from builder (internal method)
     pub(crate) async fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: MsSqlStoredProcReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
@@ -93,14 +86,14 @@ impl MsSqlStoredProcReaction {
 
     /// Internal constructor
     async fn create_internal(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: MsSqlStoredProcReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
         // Validate configuration (including template compilation and route keys)
-        config.validate(&queries)?;
+        config.validate(&drasi_lib::reactions::common::input_aliases(&queries))?;
 
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -126,7 +119,7 @@ impl MsSqlStoredProcReaction {
 /// Process a single dequeued [`QueryResult`]: render and execute a command for
 /// each diff item that has a configured template.
 async fn process_query_result(
-    reaction_id: &str,
+    reaction_id: &drasi_lib::ComponentId,
     config: &MsSqlStoredProcReactionConfig,
     executor: &MsSqlExecutor,
     query_result: &QueryResult,
@@ -148,7 +141,7 @@ async fn process_query_result(
         };
 
         // Resolve the command template for this query and operation type.
-        let Some(template) = config.get_command_template(&query_result.query_id, operation) else {
+        let Some(template) = config.get_command_template(query_result, operation) else {
             debug!(
                 "[{reaction_id}] No command configured for {} operation on query '{}', skipping",
                 context
@@ -194,7 +187,7 @@ async fn process_query_result(
 
 /// Run the processing loop until the shutdown signal fires or the queue closes.
 async fn run_processing_loop(
-    reaction_id: String,
+    reaction_id: drasi_lib::ComponentId,
     base: ReactionBase,
     config: MsSqlStoredProcReactionConfig,
     executor: Arc<MsSqlExecutor>,
@@ -222,7 +215,7 @@ async fn run_processing_loop(
 
 #[async_trait]
 impl Reaction for MsSqlStoredProcReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -271,7 +264,7 @@ impl Reaction for MsSqlStoredProcReaction {
         self.base.properties_or_serialize(&dto)
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -279,8 +272,8 @@ impl Reaction for MsSqlStoredProcReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -380,8 +373,8 @@ impl Reaction for MsSqlStoredProcReaction {
 
 /// Builder for MsSqlStoredProcReaction
 pub struct MsSqlStoredProcReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     config: MsSqlStoredProcReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
@@ -389,9 +382,9 @@ pub struct MsSqlStoredProcReactionBuilder {
 
 impl MsSqlStoredProcReactionBuilder {
     /// Create a new builder with the given reaction ID
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             config: MsSqlStoredProcReactionConfig::default(),
             priority_queue_capacity: None,
@@ -515,16 +508,43 @@ impl MsSqlStoredProcReactionBuilder {
         self
     }
 
-    /// Add a query to subscribe to
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
         self
     }
 
-    /// Set all queries to subscribe to
-    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
-        self.queries = queries;
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
+    }
+
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
+        self
+    }
+
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
     }
 
     /// Set the command timeout in milliseconds
@@ -607,12 +627,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_recovery_trait_defaults() {
-        let reaction = MsSqlStoredProcReaction::builder("test-mssql")
-            .with_connection("localhost", 1433, "testdb", "testuser", "testpass")
-            .with_stored_procedure("test_proc")
-            .build()
-            .await
-            .unwrap();
+        let reaction = MsSqlStoredProcReaction::builder(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000016b")
+                .expect("fixture UUID"),
+        )
+        .with_connection("localhost", 1433, "testdb", "testuser", "testpass")
+        .with_stored_procedure("test_proc")
+        .build()
+        .await
+        .unwrap();
 
         assert!(!reaction.is_durable());
         assert!(!reaction.needs_snapshot_on_fresh_start());

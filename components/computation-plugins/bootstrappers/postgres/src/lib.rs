@@ -146,8 +146,8 @@ impl BootstrapFactory for StandalonePostgresBootstrapFactory {
             .scope
             .clone()
             .context("PostgreSQL snapshot requires query scope")?;
-        ComponentId::try_new(scope.instance_id.as_str())?;
-        ComponentId::try_new(scope.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+        drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
         let mut provider = PostgresBootstrapProvider::new(
             ComponentId::try_new(config.source)?,
             StreamId::try_new(config.stream)?,
@@ -180,7 +180,7 @@ impl BootstrapFactory for PostgresRowBootstrapFactory {
 impl BootstrapFactory for PostgresBootstrapFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
         let mut configuration = ConfigSchema::from_fields([
-            ("source", ConfigType::String, true),
+            ("source", ConfigType::ComponentId, true),
             ("stream", ConfigType::String, true),
             ("settings", ConfigType::Object, true),
         ]);
@@ -245,8 +245,8 @@ fn scoped_configuration(
         .scope
         .clone()
         .context("PostgreSQL bootstrap requires query scope")?;
-    ComponentId::try_new(scope.instance_id.as_str())?;
-    ComponentId::try_new(scope.graph_id.as_str())?;
+    drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+    drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
     let reader = progress
         .context("PostgreSQL bootstrap requires its actual query progress owner")?
         .reader();
@@ -261,6 +261,8 @@ fn scoped_configuration(
 mod tests {
     use super::*;
     use drasi_computation_plugin_sdk::ExportedPlugin;
+
+    const SOURCE_ID: &str = "ca61606a-85bf-514b-83b4-bdf81b539289";
 
     #[test]
     fn bootstrap_library_has_only_a_query_scoped_recoverable_factory() -> Result<()> {
@@ -278,7 +280,8 @@ mod tests {
         let request = CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
-            id: ComponentId::try_new("query")?,
+            update_directive: None,
+            id: ComponentId::try_new("5244cc6b-39d7-5693-be0e-6cbc7e8504ad")?,
             implementation: StandalonePostgresBootstrapFactory.metadata().implementation,
             configuration_version: 1,
             scope: Some(Scope {
@@ -287,7 +290,7 @@ mod tests {
                 generation: 1,
             }),
             configuration: serde_json::json!({
-                "source": "seed", "stream": "seed/out", "settings": {
+                "source": SOURCE_ID, "stream": "seed/out", "settings": {
                     "host": "must-not-connect-at-construction", "database": "db", "user": "reader",
                     "tables": ["items"], "max_tables": 8, "max_protocol_bytes": 65536,
                     "io_timeout_ms": 1000, "max_duration_ms": 10000

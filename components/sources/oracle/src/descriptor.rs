@@ -223,14 +223,14 @@ impl SourcePluginDescriptor for OracleSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
         let dto: OracleSourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let mut builder = OracleSourceBuilder::new(id)
+        let mut builder = OracleSourceBuilder::new(id.clone())
             .with_host(mapper.resolve_string(&dto.host).await?)
             .with_port(mapper.resolve_typed(&dto.port).await?)
             .with_service(mapper.resolve_string(&dto.service).await?)

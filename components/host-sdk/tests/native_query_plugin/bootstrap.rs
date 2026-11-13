@@ -134,7 +134,7 @@ impl Fixture {
             })
             .context("volatile query factory missing")?
             .clone();
-        let source = ComponentId::try_new("source")?;
+        let source = ComponentId::try_new("68a68371-40ec-5d2b-9963-1cafccbbdc2a")?;
         let source_port = PortId::try_new("data")?;
         let stream = StreamId::try_new("source/data")?;
         let producer = GraphProducerIdentity::new(
@@ -160,7 +160,7 @@ impl Fixture {
             )?,
             unavailable: AtomicBool::new(false),
         });
-        let sink = ComponentId::try_new("unused-sink")?;
+        let sink = ComponentId::try_new("a0040407-1d59-5705-9e5b-acb2d9a52031")?;
         let output = OutputEndpoint::new(source.clone(), source_port.clone());
         let binding = InputBinding {
             input_port: PortId::try_new("in")?,
@@ -170,33 +170,42 @@ impl Fixture {
         let (live, events) = tokio::sync::mpsc::channel(4);
         let core = DrasiLib::builder()
             .with_id("bootstrap-test")
+            .with_allow_external_component_ids(true)
             .build()
             .await?;
         core.start().await?;
         let source_handle = core
             .add_computation_component(
-                ComponentAddition::new(ConstructedComponent::source(Box::new(SnapshotSource {
-                    descriptor: ComponentDescriptor::try_new(
-                        source.clone(),
-                        vec![port("data", PortDirection::Output)?],
-                    )?,
-                    snapshot: snapshot.clone(),
-                    events,
-                    emitted: None,
-                })))
+                ComponentAddition::new(
+                    drasi_lib::computation::v1::ComponentName::try_new("source")
+                        .expect("fixture component name"),
+                    ConstructedComponent::source(Box::new(SnapshotSource {
+                        descriptor: ComponentDescriptor::try_new(
+                            source.clone(),
+                            vec![port("data", PortDirection::Output)?],
+                        )?,
+                        snapshot: snapshot.clone(),
+                        events,
+                        emitted: None,
+                    })),
+                )
                 .auto_start(false)
                 .bind_stream(source_port.clone(), stream),
             )
             .await?;
         core.add_computation_component(
-            ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink {
-                descriptor: ComponentDescriptor::try_new(
-                    sink.clone(),
-                    vec![port("in", PortDirection::Input)?],
-                )?,
-                received: Arc::new(Mutex::new(Vec::new())),
-                notification: Arc::new(Notify::new()),
-            })))
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new("unused-sink")
+                    .expect("fixture component name"),
+                ConstructedComponent::sink(Box::new(Sink {
+                    descriptor: ComponentDescriptor::try_new(
+                        sink.clone(),
+                        vec![port("in", PortDirection::Input)?],
+                    )?,
+                    received: Arc::new(Mutex::new(Vec::new())),
+                    notification: Arc::new(Notify::new()),
+                })),
+            )
             .auto_start(false),
         )
         .await?;
@@ -224,17 +233,22 @@ impl Fixture {
         json!({
             "query": "MATCH (n:Item) RETURN sum(n.value) AS total",
             "volatile": true,
-            "bootstrap": [{"component": "source", "port": "data"}]
+            "stream": "query/out",
+            "bootstrap": [{"component": "68a68371-40ec-5d2b-9963-1cafccbbdc2a", "port": "data"}]
         })
     }
 
     fn query(&self) -> Result<NativeComponentProxy> {
-        self.query_with("query", Self::configuration(), self.binding.clone())
+        self.query_with(
+            ComponentId::try_new("c9a1f5f7-c142-552e-82dc-c2dc8aa9f75d")?,
+            Self::configuration(),
+            self.binding.clone(),
+        )
     }
 
     fn query_with(
         &self,
-        id: &str,
+        id: ComponentId,
         configuration: serde_json::Value,
         binding: InputBinding,
     ) -> Result<NativeComponentProxy> {
@@ -243,7 +257,7 @@ impl Fixture {
 
     fn query_with_inputs(
         &self,
-        id: &str,
+        id: ComponentId,
         configuration: serde_json::Value,
         bindings: Vec<InputBinding>,
     ) -> Result<NativeComponentProxy> {
@@ -258,7 +272,7 @@ impl Fixture {
             1,
         )?);
         self.factory.create_component_with_output_snapshots(
-            ComponentId::try_new(id)?,
+            id,
             configuration,
             drasi_computation_plugin_sdk::Scope {
                 instance_id: "bootstrap-test".into(),
@@ -305,24 +319,31 @@ pub(crate) async fn connect_with_capacity(
     edges: Vec<EdgeDefinition>,
     capacity: usize,
 ) -> Result<()> {
-    let control = core.computation_control()?;
-    let plan = control
-        .preview(
-            control.desired_snapshot().revision,
-            edges
-                .into_iter()
-                .map(|definition| {
-                    DesiredMutation::Bind(DesiredRelationship {
-                        definition,
-                        policy: Default::default(),
-                        pipe: DesiredPipe::Bounded { capacity },
-                    })
-                })
-                .collect(),
+    let committed = core.desired_configuration()?;
+    let mut desired = committed.desired;
+    desired
+        .topology
+        .relationships
+        .extend(edges.into_iter().map(|definition| DesiredRelationship {
+            definition,
+            policy: Default::default(),
+            pipe: DesiredPipe::Bounded { capacity },
+        }));
+    let receipt = core
+        .apply_desired_state(
+            committed.revision,
+            format!("native-query-connect-{}", committed.revision),
+            desired,
         )
         .await?;
-    let report = control.reconcile(plan, TopologyBindings::default()).await?;
-    anyhow::ensure!(report.committed && report.failures.is_empty(), "{report:?}");
+    let report = core.reconcile_desired_state().await?;
+    anyhow::ensure!(
+        report.revision == receipt.revision
+            && report.applied
+            && report.error.is_none()
+            && report.resource_errors.is_empty(),
+        "{report:?}"
+    );
     Ok(())
 }
 
@@ -378,6 +399,7 @@ fn assert_total(output: &[OutputEnvelope], before: f64, after: f64) -> Result<()
 async fn snapshot_then_live() -> Result<()> {
     let fixture = Fixture::new().await?;
     let mut query = fixture.query()?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.transform(fixture.input(99, 2)?).await?.is_empty());
     let output = query.transform(fixture.input(3, 3)?).await?;
@@ -405,12 +427,15 @@ async fn requested_bootstrap_requires_matching_input_and_host_service() -> Resul
     let fixture = Fixture::new().await?;
     assert!(fixture
         .factory
-        .create_component(ComponentId::try_new("query")?, Fixture::configuration())
+        .create_component(
+            ComponentId::try_new("c9a1f5f7-c142-552e-82dc-c2dc8aa9f75d")?,
+            Fixture::configuration()
+        )
         .is_err());
     let error = fixture
         .factory
         .create_component_with_inputs(
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("c9a1f5f7-c142-552e-82dc-c2dc8aa9f75d")?,
             Fixture::configuration(),
             vec![fixture.binding.clone()],
         )
@@ -425,7 +450,7 @@ async fn requested_bootstrap_requires_matching_input_and_host_service() -> Resul
     assert!(fixture
         .factory
         .create_component_with_inputs(
-            ComponentId::try_new("query")?,
+            ComponentId::try_new("c9a1f5f7-c142-552e-82dc-c2dc8aa9f75d")?,
             Fixture::configuration(),
             vec![wrong_input],
         )
@@ -440,6 +465,7 @@ async fn failed_snapshot_does_not_start_query_and_can_retry_after_stop() -> Resu
     fixture.snapshot.unavailable.store(true, Ordering::Release);
     let mut query = fixture.query()?;
     let reader = snapshot_reader(&query)?;
+    query.initialize().await?;
     assert!(reader.snapshot().await.is_err());
     let error = query.start().await.expect_err("snapshot must fail startup");
     assert!(
@@ -462,6 +488,7 @@ async fn failed_snapshot_does_not_start_query_and_can_retry_after_stop() -> Resu
 async fn loaded_query_exposes_completed_initial_and_live_snapshots() -> Result<()> {
     let fixture = Fixture::new().await?;
     let mut query = fixture.query()?;
+    query.initialize().await?;
     query.start().await?;
     let initial = snapshot_reader(&query)?.snapshot().await?;
     assert_snapshot_total(&initial, 3.0)?;
@@ -486,7 +513,12 @@ async fn loaded_query_snapshot_removes_rows_and_fences_restart_epoch() -> Result
     let fixture = Fixture::new().await?;
     let mut configuration = Fixture::configuration();
     configuration["query"] = json!("MATCH (n:Item) RETURN n.value AS value");
-    let mut query = fixture.query_with("query", configuration, fixture.binding.clone())?;
+    let mut query = fixture.query_with(
+        ComponentId::try_new("c9a1f5f7-c142-552e-82dc-c2dc8aa9f75d")?,
+        configuration,
+        fixture.binding.clone(),
+    )?;
+    query.initialize().await?;
     query.start().await?;
     let initial = snapshot_reader(&query)?.snapshot().await?;
     assert_eq!(initial.records().len(), 2);
@@ -525,7 +557,12 @@ async fn loaded_query_exposes_an_empty_initial_snapshot() -> Result<()> {
     let fixture = Fixture::new().await?;
     let mut configuration = Fixture::configuration();
     configuration["query"] = json!("MATCH (n:Missing) RETURN n.value AS value");
-    let mut query = fixture.query_with("query", configuration, fixture.binding.clone())?;
+    let mut query = fixture.query_with(
+        ComponentId::try_new("c9a1f5f7-c142-552e-82dc-c2dc8aa9f75d")?,
+        configuration,
+        fixture.binding.clone(),
+    )?;
+    query.initialize().await?;
     query.start().await?;
     let snapshot = snapshot_reader(&query)?.snapshot().await?;
     assert!(snapshot.records().is_empty());
@@ -549,35 +586,47 @@ async fn downstream_query_chain() -> Result<()> {
     let fixture = Fixture::new().await?;
     let upstream = fixture.query()?;
     let downstream = fixture.query_with(
-        "downstream",
+        ComponentId::generate(),
         json!({
             "query": "MATCH (n:Result) RETURN n.total AS total",
             "volatile": true,
-            "bootstrap": [{"component": "query", "port": "out"}]
+            "stream": "downstream/out",
+            "bootstrap": [{"component": "c9a1f5f7-c142-552e-82dc-c2dc8aa9f75d", "port": "out"}]
         }),
         InputBinding {
             input_port: PortId::try_new("in")?,
-            output: OutputEndpoint::new(ComponentId::try_new("query")?, PortId::try_new("out")?),
+            output: OutputEndpoint::new(
+                ComponentId::try_new("c9a1f5f7-c142-552e-82dc-c2dc8aa9f75d")?,
+                PortId::try_new("out")?,
+            ),
             stream: StreamId::try_new("query/out")?,
         },
     )?;
     let upstream = fixture
         .core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::transformer(Box::new(upstream)))
-                .auto_start(false)
-                .bind_stream(PortId::try_new("out")?, StreamId::try_new("query/out")?),
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new("query")
+                    .expect("fixture component name"),
+                ConstructedComponent::transformer(Box::new(upstream)),
+            )
+            .auto_start(false)
+            .bind_stream(PortId::try_new("out")?, StreamId::try_new("query/out")?),
         )
         .await?;
     let downstream = fixture
         .core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::transformer(Box::new(downstream)))
-                .auto_start(false)
-                .bind_stream(
-                    PortId::try_new("out")?,
-                    StreamId::try_new("downstream/out")?,
-                ),
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new("downstream")
+                    .expect("fixture component name"),
+                ConstructedComponent::transformer(Box::new(downstream)),
+            )
+            .auto_start(false)
+            .bind_stream(
+                PortId::try_new("out")?,
+                StreamId::try_new("downstream/out")?,
+            ),
         )
         .await?;
     let received = Arc::new(Mutex::new(Vec::new()));
@@ -585,14 +634,18 @@ async fn downstream_query_chain() -> Result<()> {
     let capture = fixture
         .core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink {
-                descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new("result-sink")?,
-                    vec![port("in", PortDirection::Input)?],
-                )?,
-                received: received.clone(),
-                notification: notification.clone(),
-            })))
+            ComponentAddition::new(
+                drasi_lib::computation::v1::ComponentName::try_new("capture")
+                    .expect("fixture component name"),
+                ConstructedComponent::sink(Box::new(Sink {
+                    descriptor: ComponentDescriptor::try_new(
+                        ComponentId::try_new("6ba52fde-3567-5fd7-b293-fcd6ff9a73a5")?,
+                        vec![port("in", PortDirection::Input)?],
+                    )?,
+                    received: received.clone(),
+                    notification: notification.clone(),
+                })),
+            )
             .auto_start(false),
         )
         .await?;
@@ -621,7 +674,10 @@ async fn downstream_query_chain() -> Result<()> {
         capture.start().await?;
         fixture
             .core
-            .computation_component("unused-sink")?
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("unused-sink")
+                    .expect("fixture component name"),
+            )?
             .start()
             .await?;
         upstream.start().await?;
@@ -636,7 +692,10 @@ async fn downstream_query_chain() -> Result<()> {
             .is_empty());
         fixture
             .core
-            .computation_component("source")?
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )?
             .start()
             .await?;
         fixture.live.send(fixture.input(99, 2)?.envelope).await?;
@@ -696,6 +755,7 @@ async fn downstream_loaded_query_bootstraps_and_runs_in_graph_multi_thread() -> 
 async fn bootstrapped_query_rejects_missing_or_changed_producer() -> Result<()> {
     let fixture = Fixture::new().await?;
     let mut query = fixture.query()?;
+    query.initialize().await?;
     query.start().await?;
     let unmarked = InputEnvelope {
         port: fixture.binding.input_port.clone(),

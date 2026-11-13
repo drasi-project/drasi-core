@@ -55,6 +55,18 @@ pub fn discover_jobs(
             }) {
                 continue;
             }
+            if files.iter().any(|path| {
+                fs::read_to_string(path)
+                    .map(|src| {
+                        src.contains("DRASI_MSSQL_TEST_MODE")
+                            || src.contains("DRASI_NETWORK_CONTAINER")
+                    })
+                    .unwrap_or(false)
+            }) {
+                // Credentials/ownership and prebuilt cross-OS peers are not
+                // supplied by the automatically provisioned container workflow.
+                continue;
+            }
             if !files.iter().any(|path| {
                 fs::read_to_string(path)
                     .map(|src| uses_containers(&src))
@@ -76,12 +88,31 @@ pub fn discover_jobs(
             if needs_plugins {
                 extras.push("plugins");
             }
+            if files.iter().any(|path| {
+                fs::read_to_string(path)
+                    .map(|src| src.contains("\"podman\""))
+                    .unwrap_or(false)
+            }) {
+                extras.push("podman");
+            }
+            let root_source = fs::read_to_string(&root).expect("read discovered test target");
+            for feature in ["computation", "garnet-tests"] {
+                if root_source.contains(&format!("#![cfg(feature = \"{feature}\")]")) {
+                    extras.push(feature);
+                }
+            }
             let extra = if extras.is_empty() {
                 "none".to_string()
             } else {
                 extras.join(",")
             };
-            let timeout = if needs_oracle { 90 } else { 60 };
+            let timeout = if needs_oracle {
+                90
+            } else if needs_plugins {
+                120
+            } else {
+                60
+            };
             jobs.push(IntegrationTestJob {
                 name: format!("{package} / {test}"),
                 package: package.clone(),
@@ -140,9 +171,29 @@ fn reachable_rust_files(root: &Path) -> Vec<PathBuf> {
         let Some(parent) = path.parent() else {
             continue;
         };
-        for name in parse_mod_names(&src) {
+        let mut explicit_path = None;
+        for line in src.lines() {
+            let line = line.trim();
+            if let Some(path) = line
+                .strip_prefix("#[path = \"")
+                .and_then(|path| path.strip_suffix("\"]"))
+            {
+                explicit_path = Some(path);
+                continue;
+            }
+            let names = parse_mod_names(line);
+            let Some(name) = names.first() else {
+                if !line.is_empty() && !line.starts_with("#[") && !line.starts_with("//") {
+                    explicit_path = None;
+                }
+                continue;
+            };
+            if let Some(path) = explicit_path.take() {
+                stack.push(parent.join(path));
+                continue;
+            }
             let sibling = parent.join(format!("{name}.rs"));
-            let dir_mod = parent.join(&name).join("mod.rs");
+            let dir_mod = parent.join(name).join("mod.rs");
             if sibling.is_file() {
                 stack.push(sibling);
             } else if dir_mod.is_file() {
@@ -186,10 +237,13 @@ fn uses_containers(src: &str) -> bool {
         || src.contains("testcontainers_modules")
         || src.contains("redis_helpers")
         || src.contains("k3s_helpers")
+        || src.contains("\"podman\"")
 }
 
 fn needs_cdylib_plugins(src: &str) -> bool {
-    src.contains("load_plugin_from_path") || src.contains("ffi_plugin_exists")
+    src.contains("load_plugin_from_path")
+        || src.contains("ffi_plugin_exists")
+        || src.contains("computation::load(")
 }
 
 #[cfg(test)]
@@ -319,5 +373,68 @@ async fn ffi() {
         let jobs = discover_jobs([("drasi-source-mssql".to_string(), dir.clone())]);
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(jobs[0].extra, "plugins");
+    }
+
+    #[test]
+    fn follows_explicit_fixture_paths_and_marks_native_podman_jobs() {
+        let dir = write_pkg(&[
+            (
+                "tests/native.rs",
+                "#[path = \"fixtures/database.rs\"]\nmod database;\n",
+            ),
+            (
+                "tests/fixtures/database.rs",
+                r#"
+#[tokio::test]
+#[ignore = "requires Podman"]
+async fn database() {
+    Command::new("podman");
+    computation::load("plugin");
+}
+"#,
+            ),
+        ]);
+        let jobs = discover_jobs([("drasi-host-sdk".to_string(), dir.clone())]);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].test, "native");
+        assert_eq!(jobs[0].extra, "plugins,podman");
+    }
+
+    #[test]
+    fn leaves_explicit_configuration_out_of_automatic_jobs() {
+        for marker in ["DRASI_MSSQL_TEST_MODE", "DRASI_NETWORK_CONTAINER"] {
+            let source = format!(
+                r#"
+#[test]
+#[ignore = "requires explicit ownership and credentials"]
+fn database() {{
+    std::env::var("{marker}");
+    Command::new("podman");
+}}
+"#,
+            );
+            let dir = write_pkg(&[("tests/configured.rs", &source)]);
+            let jobs = discover_jobs([("demo".to_string(), dir.clone())]);
+            let _ = fs::remove_dir_all(&dir);
+            assert!(jobs.is_empty(), "{marker} requires explicit preparation");
+        }
+    }
+
+    #[test]
+    fn keeps_feature_gated_container_tests_enabled() {
+        let dir = write_pkg(&[(
+            "tests/recovery.rs",
+            r#"
+#![cfg(feature = "garnet-tests")]
+#[tokio::test]
+#[ignore = "requires a container"]
+async fn recovery() { redis_helpers::setup_redis().await; }
+"#,
+        )]);
+        let jobs = discover_jobs([("lib-integration-tests".to_string(), dir.clone())]);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].extra, "garnet-tests");
     }
 }

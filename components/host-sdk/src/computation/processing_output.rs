@@ -6,6 +6,7 @@ use drasi_computation_contracts::{BinaryEnvelopeCodec, ChangeEnvelope, GraphProd
 use drasi_core::computation::{
     ComputationIndexProvider, ComputationIndexes, ComputationTransaction,
 };
+use drasi_core_types::{CheckpointKey, ComponentId, OutputPartition};
 use drasi_lib::computation::v1::{
     OutputBindingError, OutputBindingState, OutputBindings, OutputReservations,
     OUTPUT_BINDINGS_CHECKPOINT,
@@ -39,7 +40,7 @@ pub(super) struct Output {
     pub(super) publication: Arc<OutputBindingState>,
     current: Mutex<Option<Stored>>,
     bound: AtomicBool,
-    component: String,
+    component: ComponentId,
     graph: String,
     codec: Arc<BinaryEnvelopeCodec>,
     atomic: bool,
@@ -47,7 +48,7 @@ pub(super) struct Output {
 
 impl Output {
     pub(super) fn new(
-        component: String,
+        component: ComponentId,
         graph: String,
         codec: Arc<BinaryEnvelopeCodec>,
         atomic: bool,
@@ -177,7 +178,11 @@ impl Draft {
         })
     }
 
-    async fn load(&self, resources: &ComputationIndexes, component: &str) -> Result<Stored> {
+    async fn load(
+        &self,
+        resources: &ComputationIndexes,
+        component: &ComponentId,
+    ) -> Result<Stored> {
         if let Some(state) = self
             .state
             .lock()
@@ -189,10 +194,12 @@ impl Draft {
         let store = resources
             .checkpoint_store()
             .context("missing output checkpoint store")?;
-        let delivered = store.read_checkpoint(DELIVERED).await?;
+        let delivered = store
+            .read_checkpoint(&CheckpointKey::Metadata(DELIVERED.into()))
+            .await?;
         let mut bindings = OutputBindings::load(
             store
-                .read_checkpoint(OUTPUT_BINDINGS_CHECKPOINT)
+                .read_checkpoint(&CheckpointKey::Metadata(OUTPUT_BINDINGS_CHECKPOINT.into()))
                 .await?
                 .as_ref(),
         )?;
@@ -201,7 +208,9 @@ impl Draft {
                 .as_ref()
                 .and_then(|value| value.source_position.as_ref()),
         )?;
-        let head = store.read_result_sequence(component).await?;
+        let head = store
+            .read_result_sequence(&OutputPartition::Component(component.clone()))
+            .await?;
         let delivered = delivered.map(|value| value.sequence);
         anyhow::ensure!(
             delivered.unwrap_or(0) <= head.unwrap_or(0)
@@ -236,7 +245,7 @@ impl Draft {
     pub(super) async fn read(
         &self,
         resources: &ComputationIndexes,
-        component: &str,
+        component: &ComponentId,
     ) -> Result<Option<u64>> {
         Ok(self.load(resources, component).await?.delivered)
     }
@@ -244,7 +253,7 @@ impl Draft {
     pub(super) async fn stage_delivery(
         &self,
         resources: &ComputationIndexes,
-        component: &str,
+        component: &ComponentId,
         sequence: u64,
     ) -> Result<()> {
         let mut state = self.load(resources, component).await?;
@@ -262,14 +271,14 @@ impl Draft {
             .context("missing output checkpoint store")?;
         store
             .stage_checkpoint(
-                OUTPUT_BINDINGS_CHECKPOINT,
+                &CheckpointKey::Metadata(OUTPUT_BINDINGS_CHECKPOINT.into()),
                 1,
                 Some(&state.bindings.encode()?),
             )
             .await?;
         store
             .stage_checkpoint(
-                DELIVERED,
+                &CheckpointKey::Metadata(DELIVERED.into()),
                 state.delivered.context("missing delivered output")?,
                 state.bindings.fingerprint(),
             )
@@ -284,7 +293,7 @@ impl Draft {
     pub(super) async fn bind(
         &self,
         resources: &ComputationIndexes,
-        component: &str,
+        component: &ComponentId,
         bindings: &OutputBindings,
     ) -> Result<()> {
         let mut state = self.load(resources, component).await?;
@@ -296,7 +305,7 @@ impl Draft {
     pub(super) async fn stage_head(
         &self,
         resources: &ComputationIndexes,
-        component: &str,
+        component: &ComponentId,
         sequence: u64,
     ) -> Result<()> {
         let mut state = self.load(resources, component).await?;
@@ -317,7 +326,7 @@ impl Draft {
     pub(super) async fn validate_append(
         &self,
         resources: &ComputationIndexes,
-        component: &str,
+        component: &ComponentId,
     ) -> Result<()> {
         anyhow::ensure!(
             !self.load(resources, component).await?.pending(),
@@ -342,7 +351,7 @@ impl Draft {
         let progress = GraphProducerProgress::from_envelope(&envelope)?
             .context("retained output lacks producer progress")?;
         anyhow::ensure!(
-            progress.identity().component_id().as_str() == self.output.component
+            progress.identity().component_id() == &self.output.component
                 && progress.identity().graph_id() == self.output.graph
                 && progress.identity().stream() == envelope.system().stream()
                 && progress.identity().persistent()
@@ -376,7 +385,7 @@ impl Draft {
     pub(super) async fn validate_reset(
         &self,
         resources: &ComputationIndexes,
-        component: &str,
+        component: &ComponentId,
         preserve: bool,
     ) -> Result<()> {
         let state = self.load(resources, component).await?;
@@ -408,7 +417,7 @@ impl Draft {
     pub(super) async fn initialize_reset_output(
         &self,
         resources: &ComputationIndexes,
-        component: &str,
+        component: &ComponentId,
         sequence: u64,
     ) -> Result<()> {
         anyhow::ensure!(
@@ -428,7 +437,7 @@ impl Draft {
         resources
             .checkpoint_store()
             .context("missing reset checkpoint store")?
-            .stage_result_sequence(component, sequence)
+            .stage_result_sequence(&OutputPartition::Component(component.clone()), sequence)
             .await?;
         Ok(())
     }

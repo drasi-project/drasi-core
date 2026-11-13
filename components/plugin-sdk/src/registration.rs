@@ -311,7 +311,7 @@ mod tests {
         }
         async fn create_source(
             &self,
-            _id: &str,
+            _id: &drasi_core_types::ComponentId,
             _config_json: &serde_json::Value,
             _auto_start: bool,
         ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {

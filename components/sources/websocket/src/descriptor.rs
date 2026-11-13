@@ -201,7 +201,7 @@ impl SourcePluginDescriptor for WebSocketSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::Source>> {
@@ -239,7 +239,7 @@ impl SourcePluginDescriptor for WebSocketSourceDescriptor {
             buffer_capacity: mapper.resolve_typed(&dto.buffer_capacity).await?,
         };
 
-        let mut source = WebSocketSourceBuilder::new(id)
+        let mut source = WebSocketSourceBuilder::new(id.clone())
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
@@ -538,7 +538,12 @@ mod tests {
         #[tokio::test]
         async fn creates_source_with_requested_auto_start_and_derived_schema() {
             let source = WebSocketSourceDescriptor
-                .create_source("source", &config_json(), false)
+                .create_source(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &config_json(),
+                    false,
+                )
                 .await
                 .unwrap();
 
@@ -555,7 +560,12 @@ mod tests {
         async fn preserves_descriptor_source_raw_properties() {
             let config = config_json();
             let source = WebSocketSourceDescriptor
-                .create_source("source", &config, false)
+                .create_source(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &config,
+                    false,
+                )
                 .await
                 .unwrap();
 
@@ -725,7 +735,12 @@ mod tests {
                 ("regexp", misspelled_regex),
             ] {
                 let error = WebSocketSourceDescriptor
-                    .create_source("source", &config, false)
+                    .create_source(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        &config,
+                        false,
+                    )
                     .await
                     .err()
                     .expect("unknown nested field should be rejected");
@@ -741,7 +756,12 @@ mod tests {
             config["mappings"][0]["effectiveFrom"]["unexpected"] = serde_json::json!("unix_millis");
 
             let error = WebSocketSourceDescriptor
-                .create_source("source", &config, false)
+                .create_source(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &config,
+                    false,
+                )
                 .await
                 .err()
                 .expect("unknown explicit effectiveFrom field should be rejected");
@@ -767,7 +787,12 @@ mod tests {
             }]);
 
             let source = WebSocketSourceDescriptor
-                .create_source("source", &config, true)
+                .create_source(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &config,
+                    true,
+                )
                 .await
                 .unwrap();
 

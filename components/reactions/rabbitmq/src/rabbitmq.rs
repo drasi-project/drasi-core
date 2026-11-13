@@ -39,7 +39,7 @@ pub struct RabbitMQReaction {
 
 impl RabbitMQReaction {
     /// Create a builder for RabbitMQReaction.
-    pub fn builder(id: impl Into<String>) -> RabbitMQReactionBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> RabbitMQReactionBuilder {
         RabbitMQReactionBuilder::new(id)
     }
 
@@ -59,11 +59,14 @@ impl RabbitMQReaction {
 
     /// Create a new RabbitMQ reaction.
     pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: RabbitMQReactionConfig,
     ) -> anyhow::Result<Self> {
-        Self::validate_config(&queries, &config)?;
+        Self::validate_config(
+            &drasi_lib::reactions::common::input_aliases(&queries),
+            &config,
+        )?;
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
             base: ReactionBase::new(params),
@@ -73,12 +76,15 @@ impl RabbitMQReaction {
 
     /// Create a new RabbitMQ reaction with custom priority queue capacity.
     pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: RabbitMQReactionConfig,
         priority_queue_capacity: usize,
     ) -> anyhow::Result<Self> {
-        Self::validate_config(&queries, &config)?;
+        Self::validate_config(
+            &drasi_lib::reactions::common::input_aliases(&queries),
+            &config,
+        )?;
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
         Ok(Self {
@@ -89,13 +95,16 @@ impl RabbitMQReaction {
 
     /// Create from builder (internal method).
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
+        id: drasi_lib::ComponentId,
+        queries: Vec<drasi_lib::config::ComponentReference>,
         config: RabbitMQReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> anyhow::Result<Self> {
-        Self::validate_config(&queries, &config)?;
+        Self::validate_config(
+            &drasi_lib::reactions::common::input_aliases(&queries),
+            &config,
+        )?;
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
@@ -218,7 +227,7 @@ impl RabbitMQReaction {
     #[allow(clippy::too_many_arguments)]
     async fn establish_connection(
         connection_string: &str,
-        reaction_name: &str,
+        reaction_id: &drasi_lib::ComponentId,
         tls_enabled: bool,
         tls_cert_path: Option<&str>,
         tls_pfx_path: Option<&str>,
@@ -228,7 +237,7 @@ impl RabbitMQReaction {
         exchange_durable: bool,
     ) -> Result<(Connection, Channel)> {
         let connection_props =
-            ConnectionProperties::default().with_connection_name(reaction_name.to_string().into());
+            ConnectionProperties::default().with_connection_name(reaction_id.to_string().into());
 
         let connection = if tls_enabled {
             let tls_config = Self::build_tls_config(tls_cert_path, tls_pfx_path, tls_pfx_password)?;
@@ -264,10 +273,10 @@ impl RabbitMQReaction {
         before: Option<&Value>,
         after: Option<&Value>,
         raw_data: &Value,
-        query_id: &str,
+        emission: &drasi_lib::channels::QueryResult,
         timestamp: &chrono::DateTime<chrono::Utc>,
         metadata: &HashMap<String, Value>,
-        reaction_name: &str,
+        reaction_id: &drasi_lib::ComponentId,
     ) -> Result<()> {
         let mut context = Map::new();
 
@@ -279,7 +288,15 @@ impl RabbitMQReaction {
         }
         context.insert("data".to_string(), raw_data.clone());
 
-        context.insert("query_id".to_string(), Value::String(query_id.to_string()));
+        context.insert("query_id".to_string(), serde_json::json!(emission.query_id));
+        context.insert(
+            "query_name".to_string(),
+            serde_json::json!(emission.query_name),
+        );
+        context.insert(
+            "input_alias".to_string(),
+            serde_json::json!(emission.input_alias),
+        );
         context.insert(
             "operation".to_string(),
             Value::String(operation.to_string()),
@@ -296,11 +313,9 @@ impl RabbitMQReaction {
         let routing_key = handlebars.render_template(&publish_spec.routing_key, &context)?;
 
         let body = if let Some(template) = &publish_spec.body_template {
-            debug!(
-                "[{reaction_name}] Rendering body template: {template} with context: {context:?}"
-            );
+            debug!("[{reaction_id}] Rendering body template: {template} with context: {context:?}");
             let rendered = handlebars.render_template(template, &context)?;
-            debug!("[{reaction_name}] Rendered body: {rendered}");
+            debug!("[{reaction_id}] Rendered body: {rendered}");
             rendered
         } else {
             serde_json::to_string(raw_data)?
@@ -323,7 +338,7 @@ impl RabbitMQReaction {
         properties = properties.with_headers(headers);
 
         debug!(
-            "[{reaction_name}] Publishing to exchange '{exchange_name}' with routing key '{routing_key}'"
+            "[{reaction_id}] Publishing to exchange '{exchange_name}' with routing key '{routing_key}'"
         );
 
         channel
@@ -343,7 +358,7 @@ impl RabbitMQReaction {
 
 #[async_trait]
 impl Reaction for RabbitMQReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -376,7 +391,7 @@ impl Reaction for RabbitMQReaction {
         props
     }
 
-    fn query_ids(&self) -> Vec<String> {
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
         self.base.queries.clone()
     }
 
@@ -392,17 +407,17 @@ impl Reaction for RabbitMQReaction {
         ReactionRecoveryPolicy::AutoSkipGap
     }
 
-    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
         log_component_start("RabbitMQ Reaction", &self.base.id);
 
-        let reaction_name = self.base.id.clone();
+        let reaction_id = self.base.id.clone();
         let exchange_name = self.config.exchange_name.clone();
         info!(
-            "[{reaction_name}] RabbitMQ reaction starting - publishing to exchange: {exchange_name}"
+            "[{reaction_id}] RabbitMQ reaction starting - publishing to exchange: {exchange_name}"
         );
 
         self.base
@@ -436,7 +451,7 @@ impl Reaction for RabbitMQReaction {
             // Establish initial connection
             let (mut connection, mut channel) = match Self::establish_connection(
                 &connection_string,
-                &reaction_name,
+                &reaction_id,
                 tls_enabled,
                 tls_cert_path.as_deref(),
                 tls_pfx_path.as_deref(),
@@ -449,7 +464,7 @@ impl Reaction for RabbitMQReaction {
             {
                 Ok(result) => result,
                 Err(e) => {
-                    error!("[{reaction_name}] Failed to connect to RabbitMQ: {e}");
+                    error!("[{reaction_id}] Failed to connect to RabbitMQ: {e}");
                     status_handle
                         .set_status(
                             ComponentStatus::Error,
@@ -462,7 +477,7 @@ impl Reaction for RabbitMQReaction {
                 }
             };
 
-            info!("[{reaction_name}] Connected to RabbitMQ successfully");
+            info!("[{reaction_id}] Connected to RabbitMQ successfully");
             status_handle
                 .set_status(
                     ComponentStatus::Running,
@@ -479,7 +494,7 @@ impl Reaction for RabbitMQReaction {
                 let query_result_arc = tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => {
-                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
+                        debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
                         break;
                     }
                     result = priority_queue.dequeue() => result,
@@ -496,7 +511,7 @@ impl Reaction for RabbitMQReaction {
                 if let Some(cp) = checkpoints.get(&query_result.query_id) {
                     if seq <= cp.sequence {
                         debug!(
-                            "[{reaction_name}] Skipping already-processed event: query={}, seq={seq} (checkpoint={})",
+                            "[{reaction_id}] Skipping already-processed event: query={}, seq={seq} (checkpoint={})",
                             query_result.query_id, cp.sequence
                         );
                         continue;
@@ -505,7 +520,7 @@ impl Reaction for RabbitMQReaction {
 
                 // Check connection health and reconnect if needed
                 if !channel.status().connected() {
-                    info!("[{reaction_name}] Channel disconnected, attempting to reconnect...");
+                    info!("[{reaction_id}] Channel disconnected, attempting to reconnect...");
                     let mut reconnected = false;
                     let mut shutdown_requested = false;
                     for attempt in 1u32..=max_reconnect_attempts {
@@ -514,7 +529,7 @@ impl Reaction for RabbitMQReaction {
                         tokio::select! {
                             biased;
                             _ = &mut shutdown_rx => {
-                                debug!("[{reaction_name}] Shutdown signal received during reconnect backoff");
+                                debug!("[{reaction_id}] Shutdown signal received during reconnect backoff");
                                 shutdown_requested = true;
                                 break;
                             }
@@ -524,13 +539,13 @@ impl Reaction for RabbitMQReaction {
                         let conn_result = tokio::select! {
                             biased;
                             _ = &mut shutdown_rx => {
-                                debug!("[{reaction_name}] Shutdown signal received during reconnect attempt");
+                                debug!("[{reaction_id}] Shutdown signal received during reconnect attempt");
                                 shutdown_requested = true;
                                 break;
                             }
                             r = Self::establish_connection(
                                 &connection_string,
-                                &reaction_name,
+                                &reaction_id,
                                 tls_enabled,
                                 tls_cert_path.as_deref(),
                                 tls_pfx_path.as_deref(),
@@ -545,20 +560,20 @@ impl Reaction for RabbitMQReaction {
                                 connection = new_conn;
                                 channel = new_chan;
                                 info!(
-                                    "[{reaction_name}] Reconnected to RabbitMQ on attempt {attempt}"
+                                    "[{reaction_id}] Reconnected to RabbitMQ on attempt {attempt}"
                                 );
                                 reconnected = true;
                                 break;
                             }
                             Err(e) => {
-                                error!("[{reaction_name}] Reconnect attempt {attempt} failed: {e}");
+                                error!("[{reaction_id}] Reconnect attempt {attempt} failed: {e}");
                             }
                         }
                     }
                     if !reconnected {
                         if !shutdown_requested {
                             error!(
-                                "[{reaction_name}] Failed to reconnect after {max_reconnect_attempts} attempts, shutting down"
+                                "[{reaction_id}] Failed to reconnect after {max_reconnect_attempts} attempts, shutting down"
                             );
                             status_handle
                                 .set_status(
@@ -572,38 +587,46 @@ impl Reaction for RabbitMQReaction {
                 }
 
                 if query_result.results.is_empty() {
-                    debug!("[{reaction_name}] Received empty result set from query");
+                    debug!("[{reaction_id}] Received empty result set from query");
                     continue;
                 }
 
-                let query_name = &query_result.query_id;
-                let query_config = query_configs.get(query_name).or_else(|| {
-                    query_name
-                        .split('.')
-                        .next_back()
-                        .and_then(|name| query_configs.get(name))
+                let query_id = &query_result.query_id;
+                let alias = drasi_lib::reactions::common::input_alias(
+                    query_result.input_alias.as_deref(),
+                    query_result.query_name.as_ref(),
+                );
+                let query_config = alias.and_then(|alias| {
+                    query_configs.get(alias).or_else(|| {
+                        alias
+                            .rsplit_once('.')
+                            .and_then(|(_, last)| query_configs.get(last))
+                    })
                 });
+                let routing_alias = alias
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| query_id.to_string());
 
                 let default_config;
                 let query_config = match query_config {
                     Some(config) => config,
                     None => {
                         debug!(
-                            "[{reaction_name}] No configuration for query '{query_name}', using default"
+                            "[{reaction_id}] No configuration for query '{query_id}', using default"
                         );
                         default_config = QueryPublishConfig {
                             added: Some(PublishSpec {
-                                routing_key: format!("changes.{query_name}"),
+                                routing_key: format!("changes.{routing_alias}"),
                                 headers: HashMap::new(),
                                 body_template: None,
                             }),
                             updated: Some(PublishSpec {
-                                routing_key: format!("changes.{query_name}"),
+                                routing_key: format!("changes.{routing_alias}"),
                                 headers: HashMap::new(),
                                 body_template: None,
                             }),
                             deleted: Some(PublishSpec {
-                                routing_key: format!("changes.{query_name}"),
+                                routing_key: format!("changes.{routing_alias}"),
                                 headers: HashMap::new(),
                                 body_template: None,
                             }),
@@ -613,9 +636,7 @@ impl Reaction for RabbitMQReaction {
                 };
 
                 let result_count = query_result.results.len();
-                debug!(
-                    "[{reaction_name}] Processing {result_count} results from query '{query_name}'"
-                );
+                debug!("[{reaction_id}] Processing {result_count} results from query '{query_id}'");
 
                 let mut publish_failed = false;
                 for result in &query_result.results {
@@ -632,14 +653,14 @@ impl Reaction for RabbitMQReaction {
                                     None,
                                     Some(data),
                                     data,
-                                    query_name,
+                                    query_result,
                                     &query_result.timestamp,
                                     &query_result.metadata,
-                                    &reaction_name,
+                                    &reaction_id,
                                 )
                                 .await
                                 {
-                                    error!("[{reaction_name}] Failed to publish result: {e}");
+                                    error!("[{reaction_id}] Failed to publish result: {e}");
                                     publish_failed = true;
                                 }
                             }
@@ -656,14 +677,14 @@ impl Reaction for RabbitMQReaction {
                                     Some(data),
                                     None,
                                     data,
-                                    query_name,
+                                    query_result,
                                     &query_result.timestamp,
                                     &query_result.metadata,
-                                    &reaction_name,
+                                    &reaction_id,
                                 )
                                 .await
                                 {
-                                    error!("[{reaction_name}] Failed to publish result: {e}");
+                                    error!("[{reaction_id}] Failed to publish result: {e}");
                                     publish_failed = true;
                                 }
                             }
@@ -685,14 +706,14 @@ impl Reaction for RabbitMQReaction {
                                     Some(before),
                                     Some(after),
                                     data,
-                                    query_name,
+                                    query_result,
                                     &query_result.timestamp,
                                     &query_result.metadata,
-                                    &reaction_name,
+                                    &reaction_id,
                                 )
                                 .await
                                 {
-                                    error!("[{reaction_name}] Failed to publish result: {e}");
+                                    error!("[{reaction_id}] Failed to publish result: {e}");
                                     publish_failed = true;
                                 }
                             }
@@ -709,20 +730,20 @@ impl Reaction for RabbitMQReaction {
                                     before.as_ref(),
                                     Some(after),
                                     after,
-                                    query_name,
+                                    query_result,
                                     &query_result.timestamp,
                                     &query_result.metadata,
-                                    &reaction_name,
+                                    &reaction_id,
                                 )
                                 .await
                                 {
-                                    error!("[{reaction_name}] Failed to publish result: {e}");
+                                    error!("[{reaction_id}] Failed to publish result: {e}");
                                     publish_failed = true;
                                 }
                             }
                         }
                         ResultDiff::Noop => {
-                            debug!("[{reaction_name}] Ignoring noop result");
+                            debug!("[{reaction_id}] Ignoring noop result");
                         }
                     }
                 }
@@ -730,22 +751,22 @@ impl Reaction for RabbitMQReaction {
                 // Advance checkpoint only if all publishes succeeded.
                 if !publish_failed {
                     let config_hash = checkpoints
-                        .get(query_name)
+                        .get(query_id)
                         .map(|cp| cp.config_hash)
                         .unwrap_or(0);
                     let cp = ReactionCheckpoint {
                         sequence: seq,
                         config_hash,
                     };
-                    if let Err(e) = base_clone.write_checkpoint(query_name, &cp).await {
-                        error!("[{reaction_name}] Failed to write checkpoint for query '{query_name}': {e}");
+                    if let Err(e) = base_clone.write_checkpoint(query_id, &cp).await {
+                        error!("[{reaction_id}] Failed to write checkpoint for query '{query_id}': {e}");
                     } else {
-                        checkpoints.insert(query_name.to_string(), cp);
+                        checkpoints.insert(query_id.clone(), cp);
                     }
                 }
             }
 
-            info!("[{reaction_name}] RabbitMQ reaction stopped");
+            info!("[{reaction_id}] RabbitMQ reaction stopped");
             status_handle
                 .set_status(
                     ComponentStatus::Stopped,

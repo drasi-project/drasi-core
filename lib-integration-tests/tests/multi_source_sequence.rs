@@ -36,10 +36,13 @@ use drasi_lib::Source;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 
 /// Streaming subscription settings (no bootstrap, no resume).
-fn streaming_settings(source_id: &str, query_id: &str) -> SourceSubscriptionSettings {
+fn streaming_settings(
+    source_id: drasi_core::ComponentId,
+    query_id: drasi_core::ComponentId,
+) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: source_id.to_string(),
-        query_id: query_id.to_string(),
+        source_id,
+        query_id,
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
@@ -62,7 +65,8 @@ async fn next_sequence(rx: &mut Box<dyn ChangeReceiver<SourceEventWrapper>>) -> 
 async fn two_joined_sources_maintain_independent_sequences() {
     // Two independent sources, as a cross-source join would subscribe to.
     let (source_a, handle_a) = ApplicationSource::new(
-        "orders-source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000012e")
+            .expect("fixture UUID"),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: None,
@@ -70,7 +74,8 @@ async fn two_joined_sources_maintain_independent_sequences() {
     )
     .unwrap();
     let (source_b, handle_b) = ApplicationSource::new(
-        "customers-source",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000012f")
+            .expect("fixture UUID"),
         ApplicationSourceConfig {
             properties: HashMap::new(),
             durability: None,
@@ -81,12 +86,22 @@ async fn two_joined_sources_maintain_independent_sequences() {
     // Subscribe directly to each source's change stream so we can observe the
     // raw per-source sequence stamped by the framework.
     let mut rx_a = source_a
-        .subscribe(streaming_settings("orders-source", "seq-probe-a"))
+        .subscribe(streaming_settings(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000012e")
+                .expect("fixture UUID"),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000043e")
+                .expect("fixture UUID"),
+        ))
         .await
         .unwrap()
         .receiver;
     let mut rx_b = source_b
-        .subscribe(streaming_settings("customers-source", "seq-probe-b"))
+        .subscribe(streaming_settings(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000012f")
+                .expect("fixture UUID"),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000043f")
+                .expect("fixture UUID"),
+        ))
         .await
         .unwrap()
         .receiver;

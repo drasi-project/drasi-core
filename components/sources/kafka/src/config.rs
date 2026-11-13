@@ -22,7 +22,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KafkaSourceConfig {
     /// Source ID
-    pub id: String,
+    pub id: drasi_lib::ComponentId,
 
     /// Kafka bootstrap servers (comma-separated)
     pub bootstrap_servers: String,
@@ -106,7 +106,7 @@ pub enum AutoOffsetReset {
 
 /// Builder for constructing a KafkaSource.
 pub struct KafkaSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     bootstrap_servers: Option<String>,
     topic: Option<String>,
     group_id: Option<String>,
@@ -122,9 +122,9 @@ pub struct KafkaSourceBuilder {
 }
 
 impl KafkaSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             bootstrap_servers: None,
             topic: None,
             group_id: None,
@@ -231,7 +231,7 @@ impl KafkaSourceBuilder {
         config.validate()?;
 
         let mut params =
-            SourceBaseParams::new(&config.id).with_dispatch_mode(DispatchMode::Channel);
+            SourceBaseParams::new(config.id.clone()).with_dispatch_mode(DispatchMode::Channel);
         if let Some(provider) = self.bootstrap_provider {
             params = params.with_bootstrap_provider(provider);
         }
@@ -249,7 +249,8 @@ mod tests {
     #[test]
     fn test_config_validation_valid() {
         let config = KafkaSourceConfig {
-            id: "test".to_string(),
+            id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
             bootstrap_servers: "localhost:9092".to_string(),
             topic: "test-topic".to_string(),
             group_id: "test-group".to_string(),
@@ -269,7 +270,8 @@ mod tests {
     #[test]
     fn test_config_validation_missing_bootstrap_servers() {
         let config = KafkaSourceConfig {
-            id: "test".to_string(),
+            id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
             bootstrap_servers: "".to_string(),
             topic: "test-topic".to_string(),
             group_id: "test-group".to_string(),
@@ -290,7 +292,8 @@ mod tests {
     #[test]
     fn test_config_validation_missing_topic() {
         let config = KafkaSourceConfig {
-            id: "test".to_string(),
+            id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
             bootstrap_servers: "localhost:9092".to_string(),
             topic: "".to_string(),
             group_id: "test-group".to_string(),
@@ -316,7 +319,7 @@ mod tests {
     #[test]
     fn test_config_deserialization() {
         let json = r#"{
-            "id": "my-kafka",
+            "id": "00000000-0000-0000-0000-000000000051",
             "bootstrap_servers": "broker1:9092,broker2:9092",
             "topic": "orders",
             "group_id": "drasi-orders",
@@ -325,8 +328,17 @@ mod tests {
         }"#;
 
         let config: KafkaSourceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.id.as_str(), "00000000-0000-0000-0000-000000000051");
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["id"],
+            "00000000-0000-0000-0000-000000000051"
+        );
         assert_eq!(config.bootstrap_servers, "broker1:9092,broker2:9092");
         assert_eq!(config.topic, "orders");
         assert_eq!(config.auto_offset_reset, AutoOffsetReset::Latest);
+        assert!(serde_json::from_str::<KafkaSourceConfig>(
+            &json.replace("00000000-0000-0000-0000-000000000051", "my-kafka")
+        )
+        .is_err());
     }
 }

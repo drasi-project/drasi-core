@@ -762,6 +762,7 @@ async fn initialize(shared: &Arc<Shared>) -> Result<()> {
     ));
     *shared.resources.write().unwrap_or_else(|e| e.into_inner()) = Some(resources.clone());
     let mut builder = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_id(&shared.config.instance_id)
         .with_component_factories(factories)
         .with_management_resources(resources);
@@ -872,9 +873,9 @@ async fn execute(shared: &Arc<Shared>, command: ControlCommand) -> Result<serde_
                     .confirm_previous_exit(&component, generation)
                     .await?;
             }
-            core.computation_component(&component)?.stop().await?;
+            core.component_by_id(&component)?.stop().await?;
             let observation = shared.supervisor.repair(&component, generation).await?;
-            core.computation_component(&component)?.start().await?;
+            core.component_by_id(&component)?.start().await?;
             shared.phase(HostPhase::Running, None);
             Ok(serde_json::to_value(observation)?)
         }
@@ -999,7 +1000,7 @@ async fn stop_tree(shared: &Arc<Shared>) -> Result<()> {
                 let children = shared.supervisor.observations();
                 let child = children
                     .iter()
-                    .find(|child| child.component == component.as_str())
+                    .find(|child| child.component == *component)
                     .context("stop cut child was not realized")?;
                 if let Some(generation) = child.generation {
                     let stopped = shared.supervisor.stop(&child.component, generation).await?;

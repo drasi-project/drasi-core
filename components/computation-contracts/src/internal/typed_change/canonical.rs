@@ -333,7 +333,7 @@ impl CanonicalEncoder {
     }
 
     fn element_reference(&mut self, value: &ElementReference) {
-        self.string(&value.source_id);
+        self.string(&value.namespace);
         self.string(&value.element_id);
     }
 

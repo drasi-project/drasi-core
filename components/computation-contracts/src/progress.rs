@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum SourceProgressKey {
-    Source(String),
+    Source(ComponentId),
     Stream(StreamId),
 }
 

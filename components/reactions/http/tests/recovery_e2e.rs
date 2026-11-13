@@ -40,7 +40,6 @@
 //!   stays Running, and later batches are delivered.
 
 mod mock_server;
-mod mock_source;
 #[path = "../../tests/recovery_support.rs"]
 mod recovery_support;
 
@@ -49,40 +48,48 @@ use std::time::Duration;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::state_store::StateStoreProvider;
-use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query};
+use drasi_lib::{ComponentId, ComponentName, DrasiLib, Query};
 use drasi_reaction_http::{AdaptiveBatchConfig, HttpReaction};
 use serde_json::Value;
+use shared_tests::{
+    mock_source,
+    recovery_test_helpers::{build_core_with_reaction, DurableMemoryStateStoreProvider},
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use recovery_support::{outbox, require_current_runtime, wait_for_checkpoint, wait_for_outbox};
+use recovery_support::{
+    component_id, outbox, require_current_runtime, wait_for_checkpoint, wait_for_outbox,
+};
 
 const SOURCE: &str = "e2e-source";
 const QUERY: &str = "e2e-query";
 const REACTION: &str = "e2e-http";
 
-/// Build a `source → query(outbox) → http reaction` pipeline that persists
-/// checkpoints to `store` and posts to `base_url` with the given recovery
-/// policy. Standard (per-result) delivery unless `adaptive` is set.
+/// Build a `source → query(outbox) → http reaction` pipeline backed by the shared
+/// checkpoint store, with the given recovery policy and downstream response.
+/// Standard (per-result) delivery unless `adaptive` is set.
 async fn build_core(
-    base_url: String,
-    store: Arc<dyn StateStoreProvider>,
+    server: &MockServer,
+    status: u16,
     policy: ReactionRecoveryPolicy,
     adaptive: bool,
-) -> (Arc<DrasiLib>, mock_source::MockSourceHandle) {
-    let (mock_source, handle) = mock_source::MockSource::new(SOURCE).expect("mock source");
-
-    let query = Query::cypher(QUERY)
+) -> (
+    Arc<DrasiLib>,
+    mock_source::MockSourceHandle,
+    Arc<DurableMemoryStateStoreProvider>,
+) {
+    let query = Query::cypher(ComponentName::try_new(QUERY).expect("fixture query name"))
         .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_input(SOURCE)
+        .from_input_by_name(ComponentName::try_new(SOURCE).expect("fixture source name"))
         .with_outbox_capacity(100)
         .auto_start(true)
-        .build();
+        .build()
+        .expect("fixture query");
 
-    let mut builder = HttpReaction::builder(REACTION)
-        .with_base_url(base_url)
-        .from_query(QUERY)
+    let mut builder = HttpReaction::builder(ComponentId::generate())
+        .with_base_url(server.uri())
+        .from_query_by_name(ComponentName::try_new(QUERY).expect("fixture query name"))
         .with_recovery_policy(policy);
     if adaptive {
         builder = builder
@@ -97,33 +104,23 @@ async fn build_core(
     let reaction = builder.build().expect("reaction builder");
 
     require_current_runtime();
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_query_factory(
-                drasi_lib::computation::v1::FactoryRegistry::standard()
-                    .get(
-                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
-                            "drasi/continuous-query",
-                            "1",
-                        )
-                        .expect("reference query identity"),
-                    )
-                    .expect("reference query factory")
-                    .clone(),
-            )
-            .with_id("e2e-core")
-            .with_source(mock_source)
-            .with_query(query)
-            .with_reaction(reaction)
-            .with_state_store_provider(store)
-            .build()
-            .await
-            .expect("build core"),
-    );
+    let (core, handle, store) = build_core_with_reaction(
+        "e2e",
+        query,
+        &ComponentName::try_new(REACTION).expect("fixture reaction name"),
+        reaction,
+    )
+    .await
+    .expect("build core with the supported native query factory");
     core.computation_control()
         .expect("ComputationGraph controller");
-
-    (core, handle)
+    let request_path = if adaptive {
+        "/batch".to_string()
+    } else {
+        format!("/changes/{}", component_id(&core, QUERY))
+    };
+    respond_with(server, &request_path, status).await;
+    (core, handle, store)
 }
 
 async fn insert_person(handle: &mock_source::MockSourceHandle, id: &str, name: &str) {
@@ -180,6 +177,12 @@ async fn assert_received(core: &DrasiLib, server: &MockServer, expected: &[(u64,
     let mut changes = Vec::new();
     for request in server.received_requests().await.expect("recorded requests") {
         let body: Value = serde_json::from_slice(&request.body).expect("HTTP result JSON");
+        let expected_path = if body.get("batch").is_some() {
+            "/batch".to_string()
+        } else {
+            format!("/changes/{}", component_id(core, QUERY))
+        };
+        assert_eq!(request.url.path(), expected_path);
         if let Some(batch) = body.get("batch") {
             changes.extend(batch.as_array().expect("batch array").iter().cloned());
         } else {
@@ -197,7 +200,7 @@ async fn assert_received(core: &DrasiLib, server: &MockServer, expected: &[(u64,
             panic!("one added person per query result: {result:?}");
         };
         assert_eq!(data, &serde_json::json!({"name": name, "age": 30}));
-        assert_eq!(change["queryId"], QUERY);
+        assert_eq!(change["queryId"], component_id(core, QUERY).as_str());
         assert_eq!(change["sequenceId"], *sequence);
         assert_eq!(change["operation"], "ADD");
         assert_eq!(change["after"], *data);
@@ -255,10 +258,10 @@ async fn wait_for_reaction_status(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if core
-            .get_reaction_status(REACTION)
+            .get_reaction_status_by_id(&component_id(core, REACTION))
             .await
-            .map(|s| s == status)
-            .unwrap_or(false)
+            .expect("reaction status")
+            == status
         {
             return true;
         }
@@ -270,7 +273,9 @@ async fn wait_for_reaction_status(
 }
 
 async fn stop_reaction_and_wait(core: &DrasiLib) {
-    core.stop_reaction(REACTION).await.expect("stop reaction");
+    core.stop_reaction_by_id(&component_id(core, REACTION))
+        .await
+        .expect("stop reaction");
     assert!(
         wait_for_reaction_status(core, ComponentStatus::Stopped, Duration::from_secs(5)).await,
         "reaction did not reach Stopped"
@@ -284,15 +289,8 @@ async fn stop_reaction_and_wait(core: &DrasiLib) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn at_least_once_replays_unacked_events_after_restart() {
     let server = mock_server::start().await;
-    respond_with(&server, "/changes/e2e-query", 200).await;
-    let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) = build_core(
-        server.uri(),
-        store.clone(),
-        ReactionRecoveryPolicy::Strict,
-        false,
-    )
-    .await;
+    let (core, handle, store) =
+        build_core(&server, 200, ReactionRecoveryPolicy::Strict, false).await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -314,7 +312,7 @@ async fn at_least_once_replays_unacked_events_after_restart() {
     wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
     // Restart — the reaction replays the two missed events from the outbox.
-    core.start_reaction(REACTION)
+    core.start_reaction_by_id(&component_id(&core, REACTION))
         .await
         .expect("restart reaction");
     assert_eq!(
@@ -344,15 +342,8 @@ async fn at_least_once_replays_unacked_events_after_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clean_restart_does_not_redeliver_acked_events() {
     let server = mock_server::start().await;
-    respond_with(&server, "/changes/e2e-query", 200).await;
-    let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) = build_core(
-        server.uri(),
-        store.clone(),
-        ReactionRecoveryPolicy::Strict,
-        false,
-    )
-    .await;
+    let (core, handle, store) =
+        build_core(&server, 200, ReactionRecoveryPolicy::Strict, false).await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -365,7 +356,7 @@ async fn clean_restart_does_not_redeliver_acked_events() {
     let checkpoint = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
     stop_reaction_and_wait(&core).await;
-    core.start_reaction(REACTION)
+    core.start_reaction_by_id(&component_id(&core, REACTION))
         .await
         .expect("restart reaction");
     assert!(
@@ -395,19 +386,8 @@ async fn clean_restart_does_not_redeliver_acked_events() {
 async fn permanent_4xx_event_is_dropped_and_not_replayed_after_restart() {
     let server = mock_server::start().await;
     // The downstream permanently rejects every request with a 404 (poison).
-    Mock::given(method("POST"))
-        .and(path("/changes/e2e-query"))
-        .respond_with(ResponseTemplate::new(404))
-        .mount(&server)
-        .await;
-    let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) = build_core(
-        server.uri(),
-        store.clone(),
-        ReactionRecoveryPolicy::Strict,
-        false,
-    )
-    .await;
+    let (core, handle, store) =
+        build_core(&server, 404, ReactionRecoveryPolicy::Strict, false).await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -428,12 +408,17 @@ async fn permanent_4xx_event_is_dropped_and_not_replayed_after_restart() {
 
     // Switch the endpoint to healthy and CLEAR the request log, so any Alice
     // request seen from here on can only be a replay.
-    respond_with(&server, "/changes/e2e-query", 200).await;
+    respond_with(
+        &server,
+        &format!("/changes/{}", component_id(&core, QUERY)),
+        200,
+    )
+    .await;
 
     // Restart: if the dropped event's sequence had NOT been checkpointed, the
     // forwarder would replay Alice from the outbox. It must not.
     stop_reaction_and_wait(&core).await;
-    core.start_reaction(REACTION)
+    core.start_reaction_by_id(&component_id(&core, REACTION))
         .await
         .expect("restart reaction");
     insert_person(&handle, "p2", "Bob").await;
@@ -460,15 +445,8 @@ async fn permanent_4xx_event_is_dropped_and_not_replayed_after_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_hash_preserved_across_repeated_restarts() {
     let server = mock_server::start().await;
-    respond_with(&server, "/changes/e2e-query", 200).await;
-    let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) = build_core(
-        server.uri(),
-        store.clone(),
-        ReactionRecoveryPolicy::Strict,
-        false,
-    )
-    .await;
+    let (core, handle, store) =
+        build_core(&server, 200, ReactionRecoveryPolicy::Strict, false).await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -480,7 +458,7 @@ async fn config_hash_preserved_across_repeated_restarts() {
     let first = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
 
     stop_reaction_and_wait(&core).await;
-    core.start_reaction(REACTION)
+    core.start_reaction_by_id(&component_id(&core, REACTION))
         .await
         .expect("restart #1 must succeed — no false config_hash mismatch");
     insert_person(&handle, "p2", "Bob").await;
@@ -492,7 +470,7 @@ async fn config_hash_preserved_across_repeated_restarts() {
     assert_eq!(second.config_hash, first.config_hash);
 
     stop_reaction_and_wait(&core).await;
-    core.start_reaction(REACTION)
+    core.start_reaction_by_id(&component_id(&core, REACTION))
         .await
         .expect("restart #2 must succeed — no false config_hash mismatch");
     insert_person(&handle, "p3", "Carol").await;
@@ -523,15 +501,8 @@ async fn config_hash_preserved_across_repeated_restarts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
     let server = mock_server::start().await;
-    respond_with(&server, "/changes/e2e-query", 503).await; // downstream is down
-    let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) = build_core(
-        server.uri(),
-        store.clone(),
-        ReactionRecoveryPolicy::Strict,
-        false,
-    )
-    .await;
+    let (core, handle, store) =
+        build_core(&server, 503, ReactionRecoveryPolicy::Strict, false).await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -546,8 +517,13 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
 
     // Recover: downstream comes back (this also clears the failed-attempt log),
     // operator restarts the reaction (valid Error → Starting transition).
-    respond_with(&server, "/changes/e2e-query", 200).await;
-    core.start_reaction(REACTION)
+    respond_with(
+        &server,
+        &format!("/changes/{}", component_id(&core, QUERY)),
+        200,
+    )
+    .await;
+    core.start_reaction_by_id(&component_id(&core, REACTION))
         .await
         .expect("restart reaction from Error");
 
@@ -571,15 +547,8 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
     let server = mock_server::start().await;
-    respond_with(&server, "/changes/e2e-query", 503).await;
-    let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) = build_core(
-        server.uri(),
-        store.clone(),
-        ReactionRecoveryPolicy::AutoSkipGap,
-        false,
-    )
-    .await;
+    let (core, handle, store) =
+        build_core(&server, 503, ReactionRecoveryPolicy::AutoSkipGap, false).await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -597,7 +566,12 @@ async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
     );
 
     // Downstream recovers; later events are delivered.
-    respond_with(&server, "/changes/e2e-query", 200).await;
+    respond_with(
+        &server,
+        &format!("/changes/{}", component_id(&core, QUERY)),
+        200,
+    )
+    .await;
     insert_person(&handle, "p2", "Bob").await;
     assert_eq!(
         wait_for_name_count(&server, 1, Duration::from_secs(10)).await,
@@ -619,15 +593,8 @@ async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adaptive_permanent_4xx_is_dropped_and_reaction_keeps_running() {
     let server = mock_server::start().await;
-    respond_with(&server, "/batch", 400).await; // permanent client error
-    let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) = build_core(
-        server.uri(),
-        store.clone(),
-        ReactionRecoveryPolicy::Strict,
-        true,
-    )
-    .await;
+    let (core, handle, store) =
+        build_core(&server, 400, ReactionRecoveryPolicy::Strict, true).await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -655,7 +622,7 @@ async fn adaptive_permanent_4xx_is_dropped_and_reaction_keeps_running() {
     assert_received(&core, &server, &[(2, "Bob")]).await;
     wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
     stop_reaction_and_wait(&core).await;
-    core.start_reaction(REACTION)
+    core.start_reaction_by_id(&component_id(&core, REACTION))
         .await
         .expect("restart adaptive reaction");
     assert!(

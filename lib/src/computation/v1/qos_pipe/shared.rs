@@ -46,7 +46,7 @@ impl Persistent {
                 .resources()
                 .checkpoint_store()
                 .expect("validated transaction")
-                .read_checkpoint(&self.key)
+                .read_checkpoint(&self.checkpoint_key())
                 .await;
         }
         let rows = self
@@ -54,7 +54,7 @@ impl Persistent {
             .resources()
             .outbox_writer()
             .expect("validated transaction")
-            .read_from(METADATA_KEY, 0)
+            .read_from(&self.key.metadata(METADATA_KEY), 0)
             .await?;
         let [(1, bytes)] = rows.as_slice() else {
             return if rows.is_empty() {
@@ -87,7 +87,7 @@ impl Persistent {
                 .resources()
                 .checkpoint_store()
                 .expect("validated transaction")
-                .stage_checkpoint(&self.key, head, Some(bytes))
+                .stage_checkpoint(&self.checkpoint_key(), head, Some(bytes))
                 .await;
         }
         if bytes.len() > admission::MAX_METADATA_BYTES {
@@ -103,7 +103,7 @@ impl Persistent {
             .resources()
             .outbox_writer()
             .expect("validated transaction")
-            .append(METADATA_KEY, 1, &record)
+            .append(&self.key.metadata(METADATA_KEY), 1, &record)
             .await
     }
 }

@@ -14,6 +14,9 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 use std::{
     collections::{BTreeMap, HashMap},
     num::NonZeroUsize,
@@ -167,15 +170,19 @@ fn query_envelopes_preserve_order_aggregation_flags_and_legacy_projection() {
         },
     ];
     let metadata = QueryOutputMetadata {
-        query_id: "query".into(),
-        source_id: Some("source".into()),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID"),
+        input_origin: Some(drasi_computation_contracts::QueryInputOrigin::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+        )),
         timestamp: chrono::Utc::now(),
         metadata: HashMap::new(),
         profiling: None,
     };
     let envelope = QueryChangeCodec::encode_evaluation(
         None,
-        &ComponentId::try_new("query").expect("id"),
+        &fixture_support::component_id(46),
         SystemMetadata::new(StreamId::try_new("query/out").expect("stream"), 7),
         &test_projector("test/query-codec-envelopes"),
         &results,
@@ -214,7 +221,11 @@ fn query_envelopes_preserve_order_aggregation_flags_and_legacy_projection() {
     assert!(!default_after);
     assert_eq!(grouping_keys, &["value"]);
     let legacy = QueryChangeCodec::to_legacy_result(&envelope).expect("legacy projection");
-    assert_eq!(legacy.query_id, "query");
+    assert_eq!(
+        legacy.query_id,
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID")
+    );
     assert_eq!(legacy.sequence, 7);
     assert!(matches!(
         legacy.results.as_slice(),
@@ -243,10 +254,10 @@ fn row_identity_is_scoped_by_dataset_and_a_foreign_projection_cannot_relabel_a_s
     );
     assert!(QueryChangeCodec::decode_row_in(&second_scope, &first).is_err());
 
-    let encode = |projector: &ResultNodeProjector, query: &str| {
+    let encode = |projector: &ResultNodeProjector, query: ComponentId| {
         QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new("first").expect("id"),
+            &fixture_support::component_id(451),
             SystemMetadata::new(StreamId::try_new("first/out").expect("stream"), 1),
             projector,
             &[QueryPartEvaluationContext::Adding {
@@ -254,8 +265,8 @@ fn row_identity_is_scoped_by_dataset_and_a_foreign_projection_cannot_relabel_a_s
                 row_signature: 1,
             }],
             QueryOutputMetadata {
-                query_id: query.into(),
-                source_id: None,
+                query_id: query,
+                input_origin: None,
                 timestamp: chrono::Utc::now(),
                 metadata: HashMap::new(),
                 profiling: None,
@@ -264,8 +275,8 @@ fn row_identity_is_scoped_by_dataset_and_a_foreign_projection_cannot_relabel_a_s
         .expect("encode")
         .expect("event")
     };
-    let mut envelope = encode(&first_scope, "first");
-    let foreign = encode(&second_scope, "first");
+    let mut envelope = encode(&first_scope, fixture_support::component_id(451));
+    let foreign = encode(&second_scope, fixture_support::component_id(451));
     let projection = foreign
         .annotations()
         .entries()
@@ -293,7 +304,7 @@ fn direct_network_row_projection_matches_the_existing_result_json_contract() {
         let values = variables(value);
         let envelope = QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new("query").expect("id"),
+            &fixture_support::component_id(46),
             SystemMetadata::new(StreamId::try_new("query/out").expect("stream"), 1),
             &test_projector("test/query-codec-network-json"),
             &[QueryPartEvaluationContext::Adding {
@@ -301,8 +312,14 @@ fn direct_network_row_projection_matches_the_existing_result_json_contract() {
                 row_signature: 42,
             }],
             QueryOutputMetadata {
-                query_id: "query".into(),
-                source_id: Some("source".into()),
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000002e",
+                )
+                .expect("fixture UUID"),
+                input_origin: Some(drasi_computation_contracts::QueryInputOrigin::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                )),
                 timestamp: chrono::Utc::now(),
                 metadata: HashMap::new(),
                 profiling: None,
@@ -320,7 +337,7 @@ fn direct_network_row_projection_matches_the_existing_result_json_contract() {
 
 #[test]
 fn native_volatile_producer_identity_preserves_scope_and_rejects_wrong_output_streams() {
-    let component = ComponentId::try_new("source").expect("component");
+    let component = fixture_support::component_id(77);
     let stream = StreamId::try_new("source/out").expect("stream");
     let first = GraphProducerIdentity::volatile(
         "instance".into(),

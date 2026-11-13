@@ -66,16 +66,17 @@ impl MySqlStoredProcSink {
             cleanup_required: false,
         })
     }
+    pub fn ports() -> Result<Vec<PortDescriptor>> {
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("in")?,
+            PortDirection::Input,
+            GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("in")?,
-                PortDirection::Input,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(ComponentDescriptor::try_new(id, Self::ports()?)?)
     }
     async fn finish(&mut self) -> Result<()> {
         let result = self
@@ -325,21 +326,23 @@ mod tests {
     };
     use serde_json::json;
 
+    const OUTPUT_COMPONENT_ID: &str = "68b2acc4-86bd-5b9c-998b-67a11634c870";
+
     fn sink() -> Result<MySqlStoredProcSink> {
         let inputs = [InputBinding {
             input_port: PortId::try_new("in")?,
             output: drasi_computation_contracts::OutputEndpoint::new(
-                ComponentId::try_new("facilities-db")?,
+                ComponentId::try_new(OUTPUT_COMPONENT_ID)?,
                 PortId::try_new("out")?,
             ),
             stream: StreamId::try_new("facilities-db/out")?,
         }];
         MySqlStoredProcSink::new(
-            ComponentId::try_new("sink")?,
+            ComponentId::try_new("e43a695e-d537-52b4-892b-117de3000c96")?,
             serde_json::from_value(json!({
                 "hostname": "no-connection-at-construction", "database": "d",
                 "user": "u", "password": "p",
-                "outputs": {"facilities-db": {"component": "facilities-db", "port": "out"}},
+                "outputs": {"facilities-db": {"component": OUTPUT_COMPONENT_ID, "port": "out"}},
                 "default_template": {
                     "added": {"template": "CALL a({{param operation}},{{param identity.id}},{{param after.name}})"},
                     "updated": {"template": "CALL u({{param operation}},{{param after.name}})"},
@@ -352,7 +355,7 @@ mod tests {
 
     fn metadata() -> ElementMetadata {
         ElementMetadata {
-            reference: ElementReference::new("facilities-db", "room-1"),
+            reference: ElementReference::new(OUTPUT_COMPONENT_ID, "room-1"),
             labels: std::sync::Arc::from([std::sync::Arc::<str>::from("Room")]),
             effective_from: 1_000,
         }

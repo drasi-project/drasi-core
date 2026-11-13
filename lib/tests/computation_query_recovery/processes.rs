@@ -3,6 +3,7 @@
 
 use super::*;
 use drasi_core::evaluation::variable_value::VariableValue;
+use drasi_core::interface::OutputPartition;
 use drasi_lib::DrasiLib;
 use serde_json::{json, Value};
 use std::{path::Path, time::Duration};
@@ -19,7 +20,6 @@ const INSTANCE: &str = "query-child";
 const WORKER: &str = "processes::query_child_crash_worker";
 const ORIGINAL: &str = "MATCH (n:Person) RETURN n.name AS name";
 const CHANGED: &str = "MATCH (n:Person) RETURN n.name AS renamed";
-const RESET: &str = "computation-reset-v1:query";
 
 struct Input {
     descriptor: ComponentDescriptor,
@@ -86,7 +86,7 @@ async fn native_query(
     ContinuousQueryTransformer::new_with_options(
         definition,
         Arc::new(FaultProvider {
-            inner: provider(path),
+            inner: provider(&path.join("storage")),
             fault,
         }),
         QueryOptions {
@@ -114,53 +114,59 @@ async fn fixture(
     let query = native_query(path, text, recovery, fault).await;
     let results = query.results();
     let output = PortId::try_new("out").expect("output port id");
-    let source = ComponentId::try_new("source").expect("source component id");
+    let source = super::fixture_support::component_id(77);
     let batch = ComponentBatch::builder()
-        .source(Box::new(Input {
-            descriptor: ComponentDescriptor::try_new(
-                source.clone(),
-                vec![PortDescriptor::new(
-                    output.clone(),
-                    PortDirection::Output,
-                    GraphChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )
-            .expect("actual source descriptor"),
-            live: live.then(|| OutputEnvelope {
-                port: output.clone(),
-                envelope: envelope(2, "Alicia", true),
+        .source(
+            ComponentName::try_new("input").expect("source name"),
+            Box::new(Input {
+                descriptor: ComponentDescriptor::try_new(
+                    source.clone(),
+                    vec![PortDescriptor::new(
+                        output.clone(),
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )
+                .expect("actual source descriptor"),
+                live: live.then(|| OutputEnvelope {
+                    port: output.clone(),
+                    envelope: envelope(2, "Alicia", true),
+                }),
             }),
-        }))
-        .transformer(Box::new(query))
-        .sink(Box::new(Output(
-            ComponentDescriptor::try_new(
-                ComponentId::try_new("output").expect("output component id"),
-                vec![PortDescriptor::new(
-                    PortId::try_new("in").expect("input port id"),
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )
-            .expect("actual sink descriptor"),
-        )))
+        )
+        .transformer(
+            ComponentName::try_new("query").expect("query name"),
+            Box::new(query),
+        )
+        .sink(
+            ComponentName::try_new("output").expect("sink name"),
+            Box::new(Output(
+                ComponentDescriptor::try_new(
+                    super::fixture_support::component_id(311),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in").expect("input port id"),
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )
+                .expect("actual sink descriptor"),
+            )),
+        )
         .bind_stream(
             Endpoint::new(source.clone(), output.clone()),
             StreamId::try_new("source/out").expect("source stream id"),
         )
         .bind_stream(
-            Endpoint::new(
-                ComponentId::try_new("query").expect("query component id"),
-                output.clone(),
-            ),
+            Endpoint::new(super::fixture_support::component_id(46), output.clone()),
             StreamId::try_new("query/out").expect("query stream id"),
         )
         .connect(
             EdgeDefinition::new(
                 Endpoint::new(source, output),
                 Endpoint::new(
-                    ComponentId::try_new("query").expect("query component id"),
+                    super::fixture_support::component_id(46),
                     PortId::try_new("in").expect("input port id"),
                 ),
             ),
@@ -169,11 +175,11 @@ async fn fixture(
         .connect(
             EdgeDefinition::new(
                 Endpoint::new(
-                    ComponentId::try_new("query").expect("query component id"),
+                    super::fixture_support::component_id(46),
                     PortId::try_new("out").expect("output port id"),
                 ),
                 Endpoint::new(
-                    ComponentId::try_new("output").expect("output component id"),
+                    super::fixture_support::component_id(311),
                     PortId::try_new("in").expect("input port id"),
                 ),
             ),
@@ -183,6 +189,7 @@ async fn fixture(
         .expect("build actual query pipeline");
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -237,41 +244,72 @@ fn rows(results: &QueryResults) -> Vec<Value> {
 }
 
 async fn remove_output(core: &DrasiLib) {
+    let sink = super::fixture_support::component_id(311);
+    let edge = EdgeDefinition::new(
+        Endpoint::new(
+            super::fixture_support::component_id(46),
+            PortId::try_new("out").expect("output port id"),
+        ),
+        Endpoint::new(sink.clone(), PortId::try_new("in").expect("input port id")),
+    );
+    let mut target = core
+        .desired_configuration()
+        .expect("actual managed configuration owner");
+    assert!(target
+        .desired
+        .topology
+        .components
+        .iter()
+        .any(|node| node.descriptor.id() == &sink));
+    assert!(target
+        .desired
+        .topology
+        .relationships
+        .iter()
+        .any(|relationship| relationship.definition == edge));
+    target
+        .desired
+        .topology
+        .components
+        .retain(|node| node.descriptor.id() != &sink);
+    target
+        .desired
+        .topology
+        .relationships
+        .retain(|relationship| relationship.definition != edge);
+    target
+        .desired
+        .topology
+        .boundary_relationships
+        .retain(|relationship| relationship.definition != edge);
+    core.apply_desired_state(target.revision, "detach-query-output", target.desired)
+        .await
+        .expect("accept actual sink detachment at the managed revision");
+    let report = core
+        .reconcile_desired_state()
+        .await
+        .expect("reconcile actual sink detachment");
+    assert!(
+        report.applied && report.error.is_none() && report.resource_errors.is_empty(),
+        "{report:?}"
+    );
     let control = core
         .computation_control()
         .expect("normal query graph control");
-    let preview = control
-        .preview(
-            control.desired_snapshot().revision,
-            vec![
-                DesiredMutation::Unbind {
-                    edge: EdgeDefinition::new(
-                        Endpoint::new(
-                            ComponentId::try_new("query").expect("query component id"),
-                            PortId::try_new("out").expect("output port id"),
-                        ),
-                        Endpoint::new(
-                            ComponentId::try_new("output").expect("output component id"),
-                            PortId::try_new("in").expect("input port id"),
-                        ),
-                    ),
-                    policy: RemovalPolicy::Reject,
-                },
-                DesiredMutation::RemoveComponents {
-                    selection: GraphSelection::Exact(vec![
-                        ComponentId::try_new("output").expect("output component id")
-                    ]),
-                    policy: RemovalPolicy::Reject,
-                },
-            ],
-        )
-        .await
-        .expect("preview actual sink detachment");
-    let report = control
-        .reconcile(preview, TopologyBindings::default())
-        .await
-        .expect("reconcile actual sink detachment");
-    assert!(report.failures.is_empty(), "{report:?}");
+    let desired = control.desired_snapshot();
+    assert!(desired
+        .nodes
+        .iter()
+        .all(|node| node.descriptor.id() != &sink));
+    assert!(desired
+        .edges
+        .iter()
+        .all(|relationship| relationship.definition != edge));
+    let observed = control.observed();
+    assert!(!observed.components.contains_key(&sink), "{observed:?}");
+    for (id, component) in &observed.components {
+        assert!(component.failure.is_none(), "{id}: {component:?}");
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -297,14 +335,16 @@ async fn query_child_crash_worker() {
     if phase.starts_with("resume") || phase == "seed" {
         let (core, results) = if phase == "resume-deprovision-partial" {
             remove_output(&core).await;
-            core.remove_query("query").await.unwrap();
+            core.remove_query_by_id(&super::fixture_support::component_id(46))
+                .await
+                .unwrap();
             assert!(core
                 .computation_control()
                 .unwrap()
                 .desired_snapshot()
                 .nodes
                 .iter()
-                .all(|node| node.descriptor.id().as_str() != "query"));
+                .all(|node| node.descriptor.id() != &super::fixture_support::component_id(46)));
             core.shutdown().await.unwrap();
             fixture(
                 &path,
@@ -346,7 +386,9 @@ async fn query_child_crash_worker() {
     if !reset {
         core.start().await.unwrap();
         assert_eq!(rows(&results), [json!({"name":"Alicia"})]);
-        core.stop_query("query").await.unwrap();
+        core.stop_query_by_id(&super::fixture_support::component_id(46))
+            .await
+            .unwrap();
         remove_output(&core).await;
     }
     fault
@@ -361,7 +403,9 @@ async fn query_child_crash_worker() {
         if reset {
             operation_core.start().await
         } else {
-            operation_core.remove_query("query").await
+            operation_core
+                .remove_query_by_id(&super::fixture_support::component_id(46))
+                .await
         }
     });
     tokio::time::timeout(WATCHDOG, async {
@@ -410,7 +454,10 @@ fn normal_drasi_query_recovers_after_child_death_during_reset_and_deprovision() 
         let mut child = OwnedChild::start(path, WORKER, phase, GRAPH);
         child.wait(path, phase, true);
         runtime.block_on(async {
-            match provider(path).create_indexes(GRAPH, "query").await {
+            match provider(&path.join("storage"))
+                .create_indexes(GRAPH, &super::fixture_support::component_id(46))
+                .await
+            {
                 Err(error) => assert!(
                     error.to_string().to_ascii_lowercase().contains("lock"),
                     "unexpected storage rejection instead of exclusive ownership: {error:#}"
@@ -425,11 +472,15 @@ fn normal_drasi_query_recovers_after_child_death_during_reset_and_deprovision() 
         let reset = phase.starts_with("reset");
         let completed = phase == "deprovision-wipe-after";
         runtime.block_on(async {
-            let resources = provider(path).create_indexes(GRAPH, "query").await.unwrap();
+            let resources = provider(&path.join("storage"))
+                .create_indexes(GRAPH, &super::fixture_support::component_id(46))
+                .await
+                .unwrap();
+            let output = OutputPartition::Component(super::fixture_support::component_id(46));
             let marker = resources
                 .outbox_writer()
                 .unwrap()
-                .read_from(RESET, 0)
+                .read_from(&output.metadata("computation-reset-v1"), 0)
                 .await
                 .unwrap();
             assert_eq!(marker.len(), 1, "{phase}");
@@ -442,7 +493,7 @@ fn normal_drasi_query_recovers_after_child_death_during_reset_and_deprovision() 
                 resources
                     .checkpoint_store()
                     .unwrap()
-                    .read_result_sequence("query")
+                    .read_result_sequence(&output)
                     .await
                     .unwrap(),
                 Some(u64::from(!completed)),
@@ -452,7 +503,7 @@ fn normal_drasi_query_recovers_after_child_death_during_reset_and_deprovision() 
                 resources
                     .live_results_writer()
                     .unwrap()
-                    .read_snapshot("query")
+                    .read_snapshot(&super::fixture_support::component_id(46))
                     .await
                     .unwrap()
                     .len(),

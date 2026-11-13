@@ -13,7 +13,7 @@ use drasi_core::{
         variable_value::VariableValue,
         EvaluationError,
     },
-    interface::{IndexError, ResultKey, ResultOwner},
+    interface::{CheckpointKey, IndexError, ResultKey, ResultOwner},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
@@ -25,7 +25,7 @@ use drasi_query_cypher::CypherParser;
 use serde_json::json;
 
 const GRAPH: &str = "mutation-integrity";
-const QUERY: &str = "query";
+const QUERY: &str = "00000000-0000-4000-8000-000000000001";
 const TEXT: &str = "MATCH (n:Item) RETURN n.key AS key, n.value AS value";
 
 fn provider(path: &std::path::Path) -> Arc<dyn ComputationIndexProvider> {
@@ -212,7 +212,10 @@ async fn core_query(provider: &Arc<dyn ComputationIndexProvider>) -> Computation
     ComputationQuery::try_build(
         QueryBuilder::new(TEXT, Arc::new(CypherParser::new(functions.clone())))
             .with_function_registry(functions),
-        provider.create_indexes(GRAPH, QUERY).await.unwrap(),
+        provider
+            .create_indexes(GRAPH, &ComponentId::try_new(QUERY).unwrap())
+            .await
+            .unwrap(),
     )
     .await
     .unwrap()
@@ -447,11 +450,12 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
         };
         let mut query = create().await.unwrap();
         query.start().await.unwrap();
+        let source_id = ComponentId::try_new("00000000-0000-4000-8000-000000000002").unwrap();
         let change = SourceChange::Insert {
-            element: node("a", "one", 10, 7),
+            element: node(if grouped { source_id.as_str() } else { "a" }, "one", 10, 7),
         };
         let event = if grouped {
-            let mut batch = SourceTransactionBuilder::new("a", limits).unwrap();
+            let mut batch = SourceTransactionBuilder::new(&source_id, limits).unwrap();
             batch.push(change).unwrap();
             InputEnvelope {
                 port: PortId::try_new("in").unwrap(),
@@ -477,11 +481,14 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
         query.stop().await.unwrap();
         drop(query);
 
-        let storage = provider.create_indexes(GRAPH, QUERY).await.unwrap();
+        let storage = provider
+            .create_indexes(GRAPH, &ComponentId::try_new(QUERY).unwrap())
+            .await
+            .unwrap();
         let checkpoints = storage.checkpoint_store().unwrap().clone();
         let owner = ComputationTransaction::try_new(storage).unwrap();
         let current = checkpoints
-            .read_checkpoint(CONFIGURATION)
+            .read_checkpoint(&CheckpointKey::Metadata(CONFIGURATION.into()))
             .await
             .unwrap()
             .unwrap()
@@ -498,7 +505,11 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
         owner
             .run(async {
                 checkpoints
-                    .stage_checkpoint(CONFIGURATION, 1, Some(&prior))
+                    .stage_checkpoint(
+                        &CheckpointKey::Metadata(CONFIGURATION.into()),
+                        1,
+                        Some(&prior),
+                    )
                     .await?;
                 Ok(())
             })
@@ -515,12 +526,15 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
         ));
         incompatible.stop().await.unwrap();
         drop(incompatible);
-        let storage = provider.create_indexes(GRAPH, QUERY).await.unwrap();
+        let storage = provider
+            .create_indexes(GRAPH, &ComponentId::try_new(QUERY).unwrap())
+            .await
+            .unwrap();
         let checkpoints = storage.checkpoint_store().unwrap().clone();
         let owner = ComputationTransaction::try_new(storage).unwrap();
         assert_eq!(
             checkpoints
-                .read_checkpoint(CONFIGURATION)
+                .read_checkpoint(&CheckpointKey::Metadata(CONFIGURATION.into()))
                 .await
                 .unwrap()
                 .unwrap()
@@ -530,7 +544,11 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
         owner
             .run(async {
                 checkpoints
-                    .stage_checkpoint(CONFIGURATION, 1, Some(&current))
+                    .stage_checkpoint(
+                        &CheckpointKey::Metadata(CONFIGURATION.into()),
+                        1,
+                        Some(&current),
+                    )
                     .await?;
                 Ok(())
             })

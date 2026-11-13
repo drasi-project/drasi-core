@@ -145,8 +145,9 @@ First rebuild all three matched native libraries. Then, with the required
 environment injected and owner-only state root prepared:
 
 ```sh
-cargo +1.95.0 test --offline --locked -p drasi-host-sdk \
-  --test native_mssql_components -- --test-threads=1
+make build-test-plugins
+cargo test --locked -p drasi-host-sdk \
+  --test native_mssql_components -- --include-ignored --test-threads=1
 # In the existing drasi-server checkout:
 cargo +1.95.0 test --offline --locked --test native_mssql_test -- --test-threads=1
 ```

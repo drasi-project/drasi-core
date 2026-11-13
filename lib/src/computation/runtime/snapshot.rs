@@ -16,10 +16,10 @@ use super::*;
 use crate::component_graph::{ComponentKind, ComponentNode, GraphEdge, RelationshipKind};
 
 pub(super) struct ProviderProjection {
-    id: String,
+    id: GraphEntityId,
     kind: ComponentKind,
     metadata: HashMap<String, String>,
-    consumers: Vec<String>,
+    consumers: Vec<ComponentId>,
     relationship: RelationshipKind,
 }
 
@@ -31,11 +31,11 @@ impl ProviderProjection {
                 [
                     GraphEdge {
                         from: self.id.clone(),
-                        to: consumer.clone(),
+                        to: GraphEntityId::Component(consumer.clone()),
                         relationship: self.relationship.clone(),
                     },
                     GraphEdge {
-                        from: consumer.clone(),
+                        from: GraphEntityId::Component(consumer.clone()),
                         to: self.id.clone(),
                         relationship: self.relationship.reverse(),
                     },
@@ -48,7 +48,7 @@ impl ProviderProjection {
 impl Runtime {
     pub(super) fn provider_projections(
         &self,
-        records: &BTreeMap<String, Record>,
+        records: &BTreeMap<ComponentId, Record>,
     ) -> anyhow::Result<Vec<ProviderProjection>> {
         let mut result = Vec::new();
         for (id, record) in records {
@@ -58,7 +58,7 @@ impl Runtime {
                     metadata.insert(key.clone(), serde_json::to_string(value)?);
                 }
                 result.push(ProviderProjection {
-                    id: format!("{id}-bootstrap"),
+                    id: GraphEntityId::BootstrapProvider(id.clone()),
                     kind: ComponentKind::BootstrapProvider,
                     metadata,
                     consumers: vec![id.clone()],
@@ -68,7 +68,7 @@ impl Runtime {
         }
         if self.services.identity.is_some() {
             result.push(ProviderProjection {
-                id: "identity-provider".into(),
+                id: GraphEntityId::InstanceIdentityProvider,
                 kind: ComponentKind::IdentityProvider,
                 metadata: HashMap::from([("kind".into(), "identity_provider".into())]),
                 consumers: records
@@ -91,7 +91,8 @@ impl Runtime {
         let mut snapshot = crate::component_graph::GraphSnapshot {
             instance_id: self.config.id.clone(),
             nodes: vec![ComponentNode {
-                id: self.config.id.clone(),
+                id: GraphEntityId::Instance(self.config.id.clone()),
+                name: None,
                 kind: ComponentKind::Instance,
                 status: instance_status,
                 metadata: HashMap::new(),
@@ -110,6 +111,12 @@ impl Runtime {
                 .get(&record.node)
                 .ok_or_else(|| anyhow::anyhow!("graph component {id} has no observation"))?;
             let mut metadata = record.metadata.clone();
+            let name = publication
+                .desired
+                .component_by_id(&record.node)
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .clone();
             metadata.insert(
                 "autoStart".into(),
                 publication.desired.lifecycle_policies[&record.node]
@@ -130,12 +137,16 @@ impl Runtime {
                 metadata.insert("error".into(), format!("{:#}", failure.cause));
             }
             snapshot.nodes.push(ComponentNode {
-                id: id.clone(),
+                id: GraphEntityId::Component(id.clone()),
+                name: Some(name),
                 kind,
                 status: inspection::status(record, observed),
                 metadata,
             });
-            snapshot.edges.extend(ownership_edges(&self.config.id, id));
+            snapshot.edges.extend(ownership_edges(
+                &self.config.id,
+                &GraphEntityId::Component(id.clone()),
+            ));
         }
         for node in publication
             .desired
@@ -144,12 +155,16 @@ impl Runtime {
             .filter(|node| Self::public_component_kind(&publication.desired, node).is_some())
         {
             let id = node.descriptor.id();
-            if snapshot.nodes.iter().any(|node| node.id == id.as_str()) {
+            if snapshot
+                .nodes
+                .iter()
+                .any(|node| node.id.component_id() == Some(id))
+            {
                 continue;
             }
             let kind = Self::public_component_kind(&publication.desired, node)
                 .expect("filtered component kind");
-            let state = self.component_observation_at(&publication, id.as_str(), kind)?;
+            let state = self.component_observation_at(&publication, id, kind)?;
             let mut metadata = HashMap::from([(
                 "autoStart".into(),
                 publication.desired.lifecycle_policies[id]
@@ -159,15 +174,15 @@ impl Runtime {
             if kind == "query" {
                 metadata.insert(
                     "query".into(),
-                    self.native_query_configuration_at(&publication, id.as_str())?
-                        .query,
+                    self.native_query_configuration_at(&publication, id)?.query,
                 );
             }
             if let Some(failure) = &state.failure {
                 metadata.insert("error".into(), format!("{:#}", failure.cause));
             }
             snapshot.nodes.push(ComponentNode {
-                id: id.to_string(),
+                id: GraphEntityId::Component(id.clone()),
+                name: Some(node.name.clone()),
                 kind: match kind {
                     "source" => ComponentKind::Source,
                     "query" => ComponentKind::Query,
@@ -176,44 +191,47 @@ impl Runtime {
                 status: events::observed_status(state, ComponentStatus::Added),
                 metadata,
             });
-            snapshot
-                .edges
-                .extend(ownership_edges(&self.config.id, id.as_str()));
+            snapshot.edges.extend(ownership_edges(
+                &self.config.id,
+                &GraphEntityId::Component(id.clone()),
+            ));
         }
         let connections: BTreeSet<_> = publication
             .desired
             .data_connections()
             .filter(|(from, to)| {
-                snapshot.nodes.iter().any(|node| node.id == from.as_str())
-                    && snapshot.nodes.iter().any(|node| node.id == to.as_str())
+                snapshot
+                    .nodes
+                    .iter()
+                    .any(|node| node.id.component_id() == Some(from))
+                    && snapshot
+                        .nodes
+                        .iter()
+                        .any(|node| node.id.component_id() == Some(to))
             })
             .collect();
         for (from, to) in connections {
             snapshot.edges.extend([
                 GraphEdge {
-                    from: from.to_string(),
-                    to: to.to_string(),
+                    from: GraphEntityId::Component(from.clone()),
+                    to: GraphEntityId::Component(to.clone()),
                     relationship: RelationshipKind::Feeds,
                 },
                 GraphEdge {
-                    from: to.to_string(),
-                    to: from.to_string(),
+                    from: GraphEntityId::Component(to.clone()),
+                    to: GraphEntityId::Component(from.clone()),
                     relationship: RelationshipKind::SubscribesTo,
                 },
             ]);
         }
         for provider in self.provider_projections(&records)? {
-            // Provider recipes are inspection metadata, never runtime members.
-            // Do not mask a graph-owned component with the same public ID.
-            if snapshot.nodes.iter().any(|node| node.id == provider.id) {
-                continue;
-            }
             snapshot.edges.extend(provider.edges());
             snapshot
                 .edges
                 .extend(ownership_edges(&self.config.id, &provider.id));
             snapshot.nodes.push(ComponentNode {
                 id: provider.id,
+                name: None,
                 kind: provider.kind,
                 status: ComponentStatus::Running,
                 metadata: provider.metadata,
@@ -223,16 +241,16 @@ impl Runtime {
     }
 }
 
-pub(super) fn ownership_edges(instance: &str, id: &str) -> [GraphEdge; 2] {
+pub(super) fn ownership_edges(instance: &str, id: &GraphEntityId) -> [GraphEdge; 2] {
     [
         GraphEdge {
-            from: instance.into(),
-            to: id.into(),
+            from: GraphEntityId::Instance(instance.to_owned()),
+            to: id.clone(),
             relationship: RelationshipKind::Owns,
         },
         GraphEdge {
-            from: id.into(),
-            to: instance.into(),
+            from: id.clone(),
+            to: GraphEntityId::Instance(instance.to_owned()),
             relationship: RelationshipKind::OwnedBy,
         },
     ]

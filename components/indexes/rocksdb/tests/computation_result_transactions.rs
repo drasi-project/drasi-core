@@ -46,6 +46,15 @@ use serde_json::json;
 
 const QUERY: &str = "people";
 
+fn query_id() -> drasi_core_types::ComponentId {
+    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+        .expect("fixture UUID")
+}
+
+fn query_partition() -> drasi_core_types::OutputPartition {
+    drasi_core_types::OutputPartition::Component(query_id())
+}
+
 #[path = "computation_result_transactions/source_transactions.rs"]
 mod source_transactions;
 
@@ -70,7 +79,11 @@ fn provider(path: &Path) -> RocksDbComputationProvider {
 
 async fn resources(path: &Path, graph: &str) -> ComputationIndexes {
     provider(path)
-        .create_indexes(graph, QUERY)
+        .create_indexes(
+            graph,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                .expect("fixture UUID"),
+        )
         .await
         .expect("graph-owned indexes")
 }
@@ -85,7 +98,11 @@ async fn constructed_durability_does_not_upgrade_transaction_participation() {
         StorageDurability::LOCAL_PROCESS_RESTART
     );
     let resources = provider
-        .create_indexes("durability", QUERY)
+        .create_indexes(
+            "durability",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                .expect("fixture UUID"),
+        )
         .await
         .expect("resources");
     assert_eq!(resources.durability(), provider.durability());
@@ -137,7 +154,14 @@ impl TransactionGroupMutation for GroupJournalAppend {
             .resources()
             .outbox_writer()
             .expect("journal")
-            .append("pipe-output", 1, b"pending")
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000337")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"pending",
+            )
             .await?;
         match self.outcome {
             GroupAppendOutcome::Reject => Err(IndexError::IOError),
@@ -202,7 +226,13 @@ async fn shared_group_preserves_atomic_output_and_independent_member_lifetimes()
         assert_eq!(visible.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_empty_committed_output(&fixture).await;
         assert!(pipe
-            .read_from("pipe-output", 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000337")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .expect("rolled back pipe")
             .is_empty());
@@ -231,7 +261,17 @@ async fn shared_group_preserves_atomic_output_and_independent_member_lifetimes()
         drop(fixture);
         journal
             .run(async {
-                pipe.append("pipe-handled", 1, b"handled").await?;
+                pipe.append(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000338",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    1,
+                    b"handled",
+                )
+                .await?;
                 Ok(())
             })
             .await
@@ -244,13 +284,24 @@ async fn shared_group_preserves_atomic_output_and_independent_member_lifetimes()
         assert_eq!(
             replacement
                 .checkpoint
-                .read_result_sequence(QUERY)
+                .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .unwrap(),
             Some(1)
         );
         assert_eq!(
-            pipe.read_from("pipe-output", 0).await.unwrap(),
+            pipe.read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000337")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await
+            .unwrap(),
             [(1, b"pending".to_vec())]
         );
         replacement
@@ -270,7 +321,10 @@ async fn shared_group_preserves_atomic_output_and_independent_member_lifetimes()
             .resources()
             .checkpoint_store()
             .unwrap()
-            .read_result_sequence(QUERY)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .unwrap(),
         Some(1)
@@ -278,12 +332,26 @@ async fn shared_group_preserves_atomic_output_and_independent_member_lifetimes()
     let outbox = reopened.resources().outbox_writer().unwrap();
     let pipe = journal.resources().outbox_writer().unwrap();
     for (writer, key, value) in [
-        (outbox, QUERY, b"output".as_slice()),
-        (pipe, "pipe-output", b"pending"),
-        (pipe, "pipe-handled", b"handled"),
+        (outbox, query_partition(), b"output".as_slice()),
+        (
+            pipe,
+            drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000337")
+                    .expect("fixture UUID"),
+            ),
+            b"pending",
+        ),
+        (
+            pipe,
+            drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000338")
+                    .expect("fixture UUID"),
+            ),
+            b"handled",
+        ),
     ] {
         assert_eq!(
-            writer.read_from(key, 0).await.unwrap(),
+            writer.read_from(&key, 0).await.unwrap(),
             [(1, value.to_vec())]
         );
     }
@@ -315,8 +383,30 @@ async fn shared_group_journals_survive_processor_clear_without_cross_member_evic
             member
                 .run(async {
                     let outbox = member.resources().outbox_writer().unwrap();
-                    outbox.append("same", 1, value).await?;
-                    outbox.append("metadata", 1, b"metadata").await?;
+                    outbox
+                        .append(
+                            &drasi_core_types::OutputPartition::Component(
+                                drasi_core_types::ComponentId::try_new(
+                                    "00000000-0000-0000-0000-000000000339",
+                                )
+                                .expect("fixture UUID"),
+                            ),
+                            1,
+                            value,
+                        )
+                        .await?;
+                    outbox
+                        .append(
+                            &drasi_core_types::OutputPartition::Component(
+                                drasi_core_types::ComponentId::try_new(
+                                    "00000000-0000-0000-0000-0000000002eb",
+                                )
+                                .expect("fixture UUID"),
+                            ),
+                            1,
+                            b"metadata",
+                        )
+                        .await?;
                     Ok(())
                 })
                 .await
@@ -325,8 +415,22 @@ async fn shared_group_journals_survive_processor_clear_without_cross_member_evic
         let producer_output = processor.resources().outbox_writer().unwrap();
         processor
             .run(async {
-                producer_output.clear("same").await?;
-                producer_output.clear("metadata").await?;
+                producer_output
+                    .clear(&drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000339",
+                        )
+                        .expect("fixture UUID"),
+                    ))
+                    .await?;
+                producer_output
+                    .clear(&drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-0000000002eb",
+                        )
+                        .expect("fixture UUID"),
+                    ))
+                    .await?;
                 Ok(())
             })
             .await
@@ -339,14 +443,31 @@ async fn shared_group_journals_survive_processor_clear_without_cross_member_evic
             .await
             .unwrap();
         let output = first.resources().outbox_writer().unwrap();
-        assert_eq!(output.read_latest_sequence("same").await.unwrap(), Some(1));
+        assert_eq!(
+            output
+                .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000339")
+                        .expect("fixture UUID")
+                ))
+                .await
+                .unwrap(),
+            Some(1)
+        );
         for (member, value) in [(&first, b"first".as_slice()), (&second, b"second")] {
             assert_eq!(
                 member
                     .resources()
                     .outbox_writer()
                     .unwrap()
-                    .read_from("same", 0)
+                    .read_from(
+                        &drasi_core_types::OutputPartition::Component(
+                            drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-000000000339"
+                            )
+                            .expect("fixture UUID")
+                        ),
+                        0
+                    )
                     .await
                     .unwrap(),
                 [(1, value.to_vec())]
@@ -354,35 +475,118 @@ async fn shared_group_journals_survive_processor_clear_without_cross_member_evic
         }
         first
             .run(async {
-                output.append("same", 2, b"two").await?;
-                assert_eq!(output.append_and_trim("same", 3, b"three", 2).await?, 1);
+                output
+                    .append(
+                        &drasi_core_types::OutputPartition::Component(
+                            drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-000000000339",
+                            )
+                            .expect("fixture UUID"),
+                        ),
+                        2,
+                        b"two",
+                    )
+                    .await?;
+                assert_eq!(
+                    output
+                        .append_and_trim(
+                            &drasi_core_types::OutputPartition::Component(
+                                drasi_core_types::ComponentId::try_new(
+                                    "00000000-0000-0000-0000-000000000339"
+                                )
+                                .expect("fixture UUID")
+                            ),
+                            3,
+                            b"three",
+                            2
+                        )
+                        .await?,
+                    1
+                );
                 Ok(())
             })
             .await
             .unwrap();
         let failed: Result<(), ComputationQueryError> = first
             .run(async {
-                assert_eq!(output.trim_before("same", 3).await?, 1);
+                assert_eq!(
+                    output
+                        .trim_before(
+                            &drasi_core_types::OutputPartition::Component(
+                                drasi_core_types::ComponentId::try_new(
+                                    "00000000-0000-0000-0000-000000000339"
+                                )
+                                .expect("fixture UUID")
+                            ),
+                            3
+                        )
+                        .await?,
+                    1
+                );
                 Err(IndexError::IOError.into())
             })
             .await;
         assert!(failed.is_err());
         assert_eq!(
-            output.read_from("same", 0).await.unwrap(),
+            output
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000339"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap(),
             [(2, b"two".to_vec()), (3, b"three".to_vec())]
         );
         first
             .run(async {
-                assert_eq!(output.trim_to_capacity("same", 1).await?, 1);
+                assert_eq!(
+                    output
+                        .trim_to_capacity(
+                            &drasi_core_types::OutputPartition::Component(
+                                drasi_core_types::ComponentId::try_new(
+                                    "00000000-0000-0000-0000-000000000339"
+                                )
+                                .expect("fixture UUID")
+                            ),
+                            1
+                        )
+                        .await?,
+                    1
+                );
                 Ok(())
             })
             .await
             .unwrap();
         assert_eq!(
-            output.read_from("same", 2).await.unwrap(),
+            output
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000339"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    2
+                )
+                .await
+                .unwrap(),
             [(3, b"three".to_vec())]
         );
-        assert_eq!(output.read_latest_sequence("same").await.unwrap(), Some(3));
+        assert_eq!(
+            output
+                .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000339")
+                        .expect("fixture UUID")
+                ))
+                .await
+                .unwrap(),
+            Some(3)
+        );
         processor.shutdown().await.unwrap();
         first.shutdown().await.unwrap();
         second.shutdown().await.unwrap();
@@ -396,7 +600,13 @@ async fn shared_group_journals_survive_processor_clear_without_cross_member_evic
         .resources()
         .outbox_writer()
         .unwrap()
-        .read_from("same", 0)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000339")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
         .await
         .unwrap()
         .is_empty());
@@ -404,11 +614,33 @@ async fn shared_group_journals_survive_processor_clear_without_cross_member_evic
         let journal = group.journal_transaction(name).unwrap();
         let output = journal.resources().outbox_writer().unwrap();
         assert_eq!(
-            output.read_from("same", 0).await.unwrap(),
+            output
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000339"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap(),
             [(position, value.to_vec())]
         );
         assert_eq!(
-            output.read_from("metadata", 0).await.unwrap(),
+            output
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-0000000002eb"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap(),
             [(1, b"metadata".to_vec())]
         );
         journal.shutdown().await.unwrap();
@@ -459,7 +691,7 @@ async fn shared_group_scheduled_output_rolls_back_and_preserves_source_provenanc
             .process_due_futures_with_transaction_group(&fixture.transaction, |result| {
                 let fixture = &fixture;
                 async move {
-                    assert_eq!(result.source_id.as_ref(), "source");
+                    assert_eq!(result.future.element_ref.namespace.as_ref(), "source");
                     stage(fixture, 1, result.results[0].row_signature()).await?;
                     Ok(vec![mutation])
                 }
@@ -472,7 +704,19 @@ async fn shared_group_scheduled_output_rolls_back_and_preserves_source_provenanc
             ));
             assert!(!group.recovery_required());
             assert_empty_committed_output(&fixture).await;
-            assert!(pipe.read_from("pipe-output", 0).await.unwrap().is_empty());
+            assert!(pipe
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000337"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap()
+                .is_empty());
             assert_eq!(
                 fixture
                     .query
@@ -486,9 +730,28 @@ async fn shared_group_scheduled_output_rolls_back_and_preserves_source_provenanc
             );
             assert_eq!(visible.load(std::sync::atomic::Ordering::SeqCst), 0);
         } else {
-            assert_eq!(result.unwrap().unwrap().source_id.as_ref(), "source");
             assert_eq!(
-                pipe.read_from("pipe-output", 0).await.unwrap(),
+                result
+                    .unwrap()
+                    .unwrap()
+                    .future
+                    .element_ref
+                    .namespace
+                    .as_ref(),
+                "source"
+            );
+            assert_eq!(
+                pipe.read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000337"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .unwrap(),
                 [(1, b"pending".to_vec())]
             );
             assert_eq!(visible.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -587,12 +850,22 @@ async fn shared_group_recovers_atomic_output_after_process_exit() {
         assert_eq!(
             fixture
                 .checkpoint
-                .read_result_sequence(QUERY)
+                .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .unwrap(),
             committed.then_some(1)
         );
-        let progress = fixture.checkpoint.read_checkpoint("source").await.unwrap();
+        let progress = fixture
+            .checkpoint
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap();
         assert_eq!(
             progress.as_ref().map(|value| value.sequence),
             committed.then_some(1)
@@ -604,15 +877,18 @@ async fn shared_group_recovers_atomic_output_after_process_exit() {
             );
         }
         for (writer, key, value) in [
-            (&fixture.outbox, QUERY, b"output".as_slice()),
+            (&fixture.outbox, query_partition(), b"output".as_slice()),
             (
                 journal.resources().outbox_writer().unwrap(),
-                "pipe-output",
+                drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000337")
+                        .expect("fixture UUID"),
+                ),
                 b"pending",
             ),
         ] {
             assert_eq!(
-                writer.read_from(key, 0).await.unwrap(),
+                writer.read_from(&key, 0).await.unwrap(),
                 if committed {
                     vec![(1, value.to_vec())]
                 } else {
@@ -620,7 +896,14 @@ async fn shared_group_recovers_atomic_output_after_process_exit() {
                 }
             );
         }
-        let live = fixture.live.read_snapshot(QUERY).await.unwrap();
+        let live = fixture
+            .live
+            .read_snapshot(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
         assert_eq!(live.len(), usize::from(committed));
         fixture
             .query
@@ -747,18 +1030,51 @@ fn person(id: &str) -> SourceChange {
 async fn stage(fixture: &Fixture, sequence: u64, signature: u64) -> Result<(), IndexError> {
     fixture
         .checkpoint
-        .stage_checkpoint("source", sequence, Some(&Bytes::from_static(b"position")))
+        .stage_checkpoint(
+            &drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
+            sequence,
+            Some(&Bytes::from_static(b"position")),
+        )
         .await?;
     fixture
         .checkpoint
-        .stage_result_sequence(QUERY, sequence)
+        .stage_result_sequence(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID"),
+            ),
+            sequence,
+        )
         .await?;
-    fixture.outbox.append(QUERY, sequence, b"output").await?;
-    fixture.outbox.trim_to_capacity(QUERY, 1).await?;
+    fixture
+        .outbox
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID"),
+            ),
+            sequence,
+            b"output",
+        )
+        .await?;
+    fixture
+        .outbox
+        .trim_to_capacity(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID"),
+            ),
+            1,
+        )
+        .await?;
     fixture
         .live
         .apply_mutations(
-            QUERY,
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                .expect("fixture UUID"),
             &[RowMutation {
                 row_signature: signature,
                 data: Some(b"live-row"),
@@ -770,25 +1086,40 @@ async fn stage(fixture: &Fixture, sequence: u64, signature: u64) -> Result<(), I
 async fn assert_empty(fixture: &Fixture) {
     assert!(fixture
         .checkpoint
-        .read_checkpoint("source")
+        .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")
+        ))
         .await
         .expect("read checkpoint")
         .is_none());
     assert!(fixture
         .checkpoint
-        .read_result_sequence(QUERY)
+        .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                .expect("fixture UUID")
+        ))
         .await
         .expect("read sequence")
         .is_none());
     assert!(fixture
         .outbox
-        .read_from(QUERY, 0)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
         .await
         .expect("read output")
         .is_empty());
     assert!(fixture
         .live
-        .read_snapshot(QUERY)
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                .expect("fixture UUID")
+        )
         .await
         .expect("read live")
         .is_empty());
@@ -832,17 +1163,39 @@ async fn graph_query_commits_indexes_checkpoint_sequence_outbox_and_live_rows_to
         assert_eq!(
             fixture
                 .checkpoint
-                .read_result_sequence(QUERY)
+                .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .expect("sequence"),
             Some(1)
         );
         assert_eq!(
-            fixture.outbox.read_from(QUERY, 0).await.expect("outbox"),
+            fixture
+                .outbox
+                .read_from(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000336"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    0
+                )
+                .await
+                .expect("outbox"),
             [(1, b"output".to_vec())]
         );
         assert_eq!(
-            fixture.live.read_snapshot(QUERY).await.expect("live"),
+            fixture
+                .live
+                .read_snapshot(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                )
+                .await
+                .expect("live"),
             [(results[0].row_signature(), b"live-row".to_vec())]
         );
     }
@@ -851,7 +1204,10 @@ async fn graph_query_commits_indexes_checkpoint_sequence_outbox_and_live_rows_to
         reopened
             .checkpoint_store()
             .expect("checkpoint")
-            .read_result_sequence(QUERY)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("reopened sequence"),
         Some(1)
@@ -860,7 +1216,13 @@ async fn graph_query_commits_indexes_checkpoint_sequence_outbox_and_live_rows_to
         reopened
             .outbox_writer()
             .expect("outbox")
-            .read_from(QUERY, 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .expect("reopened outbox"),
         [(1, b"output".to_vec())]
@@ -871,20 +1233,32 @@ async fn assert_empty_committed_output(fixture: &Fixture) {
     assert_eq!(
         fixture
             .checkpoint
-            .read_result_sequence(QUERY)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("sequence"),
         None
     );
     assert!(fixture
         .outbox
-        .read_from(QUERY, 0)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
         .await
         .expect("output")
         .is_empty());
     assert!(fixture
         .live
-        .read_snapshot(QUERY)
+        .read_snapshot(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                .expect("fixture UUID")
+        )
         .await
         .expect("live")
         .is_empty());
@@ -1060,7 +1434,17 @@ async fn cancelled_hook_rolls_back_output_and_rejects_unsafe_same_instance_retry
         fixture.query.process_source_change(person("alice")).await,
         Err(ComputationQueryError::RecoveryRequired)
     ));
-    assert!(fixture.outbox.read_from(QUERY, 0).await.is_err());
+    assert!(fixture
+        .outbox
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
+        .await
+        .is_err());
     fixture
         .query
         .shutdown()
@@ -1137,7 +1521,7 @@ async fn due_future_rollback_retains_source_provenance_and_replayable_work() {
         .process_due_futures_with_result_hook(&fixture.transaction, |result| {
             let fixture = &fixture;
             async move {
-                assert_eq!(result.source_id.as_ref(), "source");
+                assert_eq!(result.future.element_ref.namespace.as_ref(), "source");
                 stage(fixture, 1, result.results[0].row_signature()).await?;
                 Err(IndexError::CorruptedData)
             }
@@ -1168,7 +1552,7 @@ async fn due_future_rollback_retains_source_provenance_and_replayable_work() {
         .await
         .expect("replay")
         .expect("due work retained");
-    assert_eq!(result.source_id.as_ref(), "source");
+    assert_eq!(result.future.element_ref.namespace.as_ref(), "source");
     assert!(fixture
         .query
         .process_due_futures_with_result_hook(&fixture.transaction, |_| async {
@@ -1186,30 +1570,115 @@ async fn graph_writers_require_a_session_and_transactional_trim_rolls_back() {
     let outbox = resources.outbox_writer().expect("outbox");
     let live = resources.live_results_writer().expect("live");
     let checkpoint = resources.checkpoint_store().expect("checkpoint");
-    assert!(outbox.append(QUERY, 1, b"no-session").await.is_err());
-    assert!(checkpoint.stage_result_sequence(QUERY, 1).await.is_err());
-    assert!(live.apply_mutations(QUERY, &[]).await.is_err());
+    assert!(outbox
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            1,
+            b"no-session"
+        )
+        .await
+        .is_err());
+    assert!(checkpoint
+        .stage_result_sequence(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            1
+        )
+        .await
+        .is_err());
+    assert!(live
+        .apply_mutations(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                .expect("fixture UUID"),
+            &[]
+        )
+        .await
+        .is_err());
     {
         let guard = SessionGuard::begin(resources.indexes().session_control.clone())
             .await
             .expect("session");
-        outbox.append(QUERY, 1, b"one").await.expect("one");
-        outbox.append(QUERY, 2, b"two").await.expect("two");
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                ),
+                1,
+                b"one",
+            )
+            .await
+            .expect("one");
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                ),
+                2,
+                b"two",
+            )
+            .await
+            .expect("two");
         guard.commit().await.expect("commit");
     }
     {
         let _guard = SessionGuard::begin(resources.indexes().session_control.clone())
             .await
             .expect("session");
-        outbox.append(QUERY, 3, b"three").await.expect("three");
-        assert_eq!(outbox.trim_to_capacity(QUERY, 1).await.expect("trim"), 2);
+        outbox
+            .append(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                ),
+                3,
+                b"three",
+            )
+            .await
+            .expect("three");
+        assert_eq!(
+            outbox
+                .trim_to_capacity(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000336"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    1
+                )
+                .await
+                .expect("trim"),
+            2
+        );
     }
     assert_eq!(
-        outbox.read_from(QUERY, 0).await.expect("rolled-back trim"),
+        outbox
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await
+            .expect("rolled-back trim"),
         [(1, b"one".to_vec()), (2, b"two".to_vec())]
     );
     assert!(outbox
-        .read_from(QUERY, u64::MAX)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            u64::MAX
+        )
         .await
         .expect("after end")
         .is_empty());
@@ -1223,25 +1692,52 @@ async fn output_generation_and_committed_head_survive_checkpoint_clear_and_reope
         let checkpoint = resources.checkpoint_store().expect("checkpoint");
         assert_eq!(
             checkpoint
-                .read_output_generation(QUERY)
+                .read_output_generation(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .expect("new generation"),
             None
         );
         checkpoint
-            .write_output_generation(QUERY, u64::MAX)
+            .write_output_generation(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                ),
+                u64::MAX,
+            )
             .await
             .expect("persist lifetime");
         checkpoint
-            .write_result_sequence(QUERY, 41)
+            .write_result_sequence(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID"),
+                ),
+                41,
+            )
             .await
             .expect("persist standalone head");
         checkpoint
-            .write_output_generation("other-query", 3)
+            .write_output_generation(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000033a")
+                        .expect("fixture UUID"),
+                ),
+                3,
+            )
             .await
             .expect("other lifetime");
         checkpoint
-            .write_result_sequence("other-query", 9)
+            .write_result_sequence(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000033a")
+                        .expect("fixture UUID"),
+                ),
+                9,
+            )
             .await
             .expect("other head");
         checkpoint
@@ -1252,7 +1748,14 @@ async fn output_generation_and_committed_head_survive_checkpoint_clear_and_reope
             .await
             .expect("begin source checkpoint");
         checkpoint
-            .stage_checkpoint("source", 7, Some(&Bytes::from_static(b"position")))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                ),
+                7,
+                Some(&Bytes::from_static(b"position")),
+            )
             .await
             .expect("stage source");
         session.commit().await.expect("commit source");
@@ -1261,12 +1764,25 @@ async fn output_generation_and_committed_head_survive_checkpoint_clear_and_reope
                 .await
                 .expect("begin discarded head");
             checkpoint
-                .stage_result_sequence(QUERY, 42)
+                .stage_result_sequence(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000336",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    42,
+                )
                 .await
                 .expect("stage head");
             assert_eq!(
                 checkpoint
-                    .read_result_sequence(QUERY)
+                    .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000336"
+                        )
+                        .expect("fixture UUID")
+                    ))
                     .await
                     .expect("committed head"),
                 Some(41)
@@ -1287,28 +1803,40 @@ async fn output_generation_and_committed_head_survive_checkpoint_clear_and_reope
         );
         assert_eq!(
             checkpoint
-                .read_result_sequence(QUERY)
+                .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .expect("retained head"),
             Some(41)
         );
         assert_eq!(
             checkpoint
-                .read_output_generation(QUERY)
+                .read_output_generation(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .expect("retained lifetime"),
             Some(u64::MAX)
         );
         assert_eq!(
             checkpoint
-                .read_output_generation("other-query")
+                .read_output_generation(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000033a")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .expect("other retained lifetime"),
             Some(3)
         );
         assert_eq!(
             checkpoint
-                .read_result_sequence("other-query")
+                .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000033a")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .expect("other retained head"),
             Some(9)
@@ -1330,14 +1858,20 @@ async fn output_generation_and_committed_head_survive_checkpoint_clear_and_reope
     );
     assert_eq!(
         checkpoint
-            .read_result_sequence(QUERY)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("head after reopen"),
         Some(41)
     );
     assert_eq!(
         checkpoint
-            .read_output_generation(QUERY)
+            .read_output_generation(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("lifetime after reopen"),
         Some(u64::MAX)
@@ -1347,7 +1881,10 @@ async fn output_generation_and_committed_head_survive_checkpoint_clear_and_reope
         other
             .checkpoint_store()
             .expect("checkpoint")
-            .read_output_generation(QUERY)
+            .read_output_generation(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("isolated lifetime"),
         None
@@ -1362,13 +1899,52 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
     let session = SessionGuard::begin(resources.indexes().session_control.clone())
         .await
         .expect("begin seed");
-    outbox.append(QUERY, 1, b"one").await.expect("one");
-    outbox.append(QUERY, 2, b"two").await.expect("two");
     outbox
-        .append("metadata", 1, b"marker")
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"one",
+        )
+        .await
+        .expect("one");
+    outbox
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID"),
+            ),
+            2,
+            b"two",
+        )
+        .await
+        .expect("two");
+    outbox
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002eb")
+                    .expect("fixture UUID"),
+            ),
+            1,
+            b"marker",
+        )
         .await
         .expect("metadata");
-    assert_eq!(outbox.trim_before(QUERY, 0).await.expect("retain all"), 0);
+    assert_eq!(
+        outbox
+            .trim_before(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
+            .await
+            .expect("retain all"),
+        0
+    );
     session.commit().await.expect("commit seed");
     {
         let _session = SessionGuard::begin(resources.indexes().session_control.clone())
@@ -1376,14 +1952,27 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
             .expect("begin rolled back retention");
         assert_eq!(
             outbox
-                .append_and_trim(QUERY, 3, b"three", 3)
+                .append_and_trim(
+                    &drasi_core_types::OutputPartition::Component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000336"
+                        )
+                        .expect("fixture UUID")
+                    ),
+                    3,
+                    b"three",
+                    3
+                )
                 .await
                 .expect("staged trim"),
             2
         );
         assert_eq!(
             outbox
-                .read_latest_sequence(QUERY)
+                .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ))
                 .await
                 .expect("committed head"),
             Some(2)
@@ -1391,7 +1980,13 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
     }
     assert_eq!(
         outbox
-            .read_from(QUERY, 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .expect("rolled back retention"),
         [(1, b"one".to_vec()), (2, b"two".to_vec())]
@@ -1401,7 +1996,15 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
         .expect("begin committed retention");
     assert_eq!(
         outbox
-            .append_and_trim(QUERY, 3, b"three", 3)
+            .append_and_trim(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                3,
+                b"three",
+                3
+            )
             .await
             .expect("staged trim"),
         2
@@ -1409,7 +2012,13 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
     session.commit().await.expect("commit retention");
     assert_eq!(
         outbox
-            .read_from(QUERY, 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .expect("retained staged append"),
         [(3, b"three".to_vec())]
@@ -1418,19 +2027,40 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
         .await
         .expect("begin boundary writes");
     outbox
-        .append(QUERY, u64::MAX - 1, b"penultimate")
+        .append(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID"),
+            ),
+            u64::MAX - 1,
+            b"penultimate",
+        )
         .await
         .expect("penultimate");
     assert_eq!(
         outbox
-            .append_and_trim(QUERY, u64::MAX, b"last", u64::MAX - 1)
+            .append_and_trim(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                u64::MAX,
+                b"last",
+                u64::MAX - 1
+            )
             .await
             .expect("boundary retention"),
         1
     );
     assert_eq!(
         outbox
-            .trim_to_capacity(QUERY, 1)
+            .trim_to_capacity(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                1
+            )
             .await
             .expect("retain maximum"),
         1
@@ -1438,32 +2068,59 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
     resources
         .checkpoint_store()
         .expect("checkpoint")
-        .stage_result_sequence(QUERY, u64::MAX)
+        .stage_result_sequence(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID"),
+            ),
+            u64::MAX,
+        )
         .await
         .expect("stage maximum head");
     session.commit().await.expect("commit maximum");
     assert_eq!(
         outbox
-            .read_latest_sequence(QUERY)
+            .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("maximum head"),
         Some(u64::MAX)
     );
     assert_eq!(
         outbox
-            .read_from(QUERY, u64::MAX - 1)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                u64::MAX - 1
+            )
             .await
             .expect("read maximum"),
         [(u64::MAX, b"last".to_vec())]
     );
     assert!(outbox
-        .read_from(QUERY, u64::MAX)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            u64::MAX
+        )
         .await
         .expect("past maximum")
         .is_empty());
     assert_eq!(
         outbox
-            .read_from("metadata", 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002eb")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .expect("metadata is isolated"),
         [(1, b"marker".to_vec())]
@@ -1475,33 +2132,57 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
         reopened
             .checkpoint_store()
             .expect("checkpoint")
-            .read_result_sequence(QUERY)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("reopened maximum head"),
         Some(u64::MAX)
     );
     assert_eq!(
         outbox
-            .read_latest_sequence(QUERY)
+            .read_latest_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("reopened outbox head"),
         Some(u64::MAX)
     );
     assert_eq!(
         outbox
-            .read_from(QUERY, 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .expect("persisted retention"),
         [(u64::MAX, b"last".to_vec())]
     );
     assert!(outbox
-        .read_from(QUERY, u64::MAX)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            u64::MAX
+        )
         .await
         .expect("reopened past maximum")
         .is_empty());
     assert_eq!(
         outbox
-            .read_from("metadata", 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002eb")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .expect("reopened metadata"),
         [(1, b"marker".to_vec())]
@@ -1509,23 +2190,26 @@ async fn native_retention_includes_staged_entries_and_respects_full_width_sequen
 }
 
 #[tokio::test]
-async fn existing_native_outbox_namespaces_remain_readable_without_migration() {
+async fn unversioned_native_outbox_namespaces_are_rejected_without_rewriting() {
     let temp = tempfile::tempdir().expect("temp dir");
     let graph = "persisted-format";
     let metadata_id = "recovery:people";
     let marker = br#"{"sequence":7,"in_progress":false,"generation":3}"#;
     let encode = |id: &str| -> String { id.bytes().map(|byte| format!("{byte:02x}")).collect() };
-    let path = temp.path().join("computation-v1").join(encode(graph));
+    let path = temp
+        .path()
+        .join("computation-v1")
+        .join(encode(graph))
+        .join(QUERY);
     {
-        let options = RocksIndexOptions::new(
-            false,
-            false,
-            RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).expect("memory budget"),
-        );
-        let db = drasi_index_rocksdb::open_unified_db(
-            path.to_str().expect("UTF-8 path"),
-            &encode(QUERY),
+        let mut options = rocksdb::Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = drasi_index_rocksdb::IndexDb::open_cf(
             &options,
+            &rocksdb::TransactionDBOptions::default(),
+            &path,
+            ["outbox"],
         )
         .expect("existing native database");
         let cf = db.cf_handle("outbox").expect("outbox column");
@@ -1540,38 +2224,52 @@ async fn existing_native_outbox_namespaces_remain_readable_without_migration() {
                 .expect("persist existing key format");
         }
     }
-    let reopened = resources(temp.path(), graph).await;
-    let outbox = reopened.outbox_writer().expect("outbox");
-    assert_eq!(
-        outbox.read_from(QUERY, 0).await.expect("existing envelope"),
-        [(7, b"envelope".to_vec())]
+    let snapshot = || {
+        let mut files = std::collections::BTreeMap::new();
+        let mut directories = vec![temp.path().to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).expect("stored directory") {
+                let path = entry.expect("stored entry").path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else {
+                    files.insert(
+                        path.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                        std::fs::read(path).expect("stored bytes"),
+                    );
+                }
+            }
+        }
+        files
+    };
+    let before = snapshot();
+    assert!(
+        !before.is_empty(),
+        "legacy fixture must contain durable bytes"
     );
-    assert_eq!(
-        outbox
-            .read_from(metadata_id, 0)
-            .await
-            .expect("existing recovery metadata"),
-        [(1, marker.to_vec())]
-    );
-    let session = SessionGuard::begin(reopened.indexes().session_control.clone())
+    let Err(error) = provider(temp.path())
+        .create_indexes(graph, &query_id())
         .await
-        .expect("begin primary clear");
-    outbox.clear(QUERY).await.expect("clear primary");
-    session.commit().await.expect("commit clear");
+    else {
+        panic!("unversioned native storage must be rejected");
+    };
+    assert!(error.to_string().contains("unversioned RocksDB storage"));
     assert_eq!(
-        outbox
-            .read_from(metadata_id, 0)
-            .await
-            .expect("recovery metadata survives"),
-        [(1, marker.to_vec())]
+        snapshot(),
+        before,
+        "rejection must not rewrite existing bytes"
     );
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
 }
 
 #[tokio::test]
 async fn computation_and_legacy_queries_with_same_id_use_separate_persistent_storage() {
     let temp = tempfile::tempdir().expect("temp dir");
     let legacy = RocksDbIndexProvider::new(temp.path(), false, false)
-        .create_indexes(QUERY)
+        .create_indexes(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                .expect("fixture UUID"),
+        )
         .await
         .expect("legacy provider");
     let fixture = fixture(
@@ -1591,19 +2289,36 @@ async fn computation_and_legacy_queries_with_same_id_use_separate_persistent_sto
     assert!(legacy
         .checkpoint_store
         .expect("legacy checkpoint")
-        .read_checkpoint("source")
+        .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID")
+        ))
         .await
         .expect("legacy read")
         .is_none());
     assert!(legacy
         .outbox_writer
         .expect("legacy outbox")
-        .read_from(QUERY, 0)
+        .read_from(
+            &drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ),
+            0
+        )
         .await
         .expect("legacy output")
         .is_empty());
-    assert!(temp.path().join(QUERY).is_dir());
-    assert!(temp.path().join("computation-v1").is_dir());
+    let ordinary_scope = drasi_core_types::StorageScope::default();
+    let computation_scope = drasi_core_types::StorageScope::new("computation")
+        .nested(&drasi_core_types::StorageScope::new("graph"));
+    let ordinary_path = temp.path().join(ordinary_scope.component_key(&query_id()));
+    let computation_path = temp
+        .path()
+        .join(computation_scope.component_key(&query_id()));
+    assert_ne!(ordinary_path, computation_path);
+    assert!(ordinary_path.is_dir());
+    assert!(computation_path.is_dir());
 }
 
 struct CommitThenWait {
@@ -1672,7 +2387,10 @@ async fn cancelled_commit_requires_recovery_without_falsely_claiming_output_roll
         reopened
             .checkpoint_store()
             .expect("checkpoint")
-            .read_result_sequence(QUERY)
+            .read_result_sequence(&drasi_core_types::OutputPartition::Component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                    .expect("fixture UUID")
+            ))
             .await
             .expect("recover committed sequence"),
         Some(1)
@@ -1681,7 +2399,13 @@ async fn cancelled_commit_requires_recovery_without_falsely_claiming_output_roll
         reopened
             .outbox_writer()
             .expect("outbox")
-            .read_from(QUERY, 0)
+            .read_from(
+                &drasi_core_types::OutputPartition::Component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000336")
+                        .expect("fixture UUID")
+                ),
+                0
+            )
             .await
             .expect("recover committed output"),
         [(1, b"output".to_vec())]

@@ -89,7 +89,7 @@ impl StoredElement {
 impl From<&ElementReference> for StoredElementReference {
     fn from(reference: &ElementReference) -> Self {
         StoredElementReference {
-            source_id: reference.source_id.to_string(),
+            source_id: reference.namespace.to_string(),
             element_id: reference.element_id.to_string(),
         }
     }
@@ -136,7 +136,7 @@ impl TryFrom<&Element> for StoredElement {
 impl From<StoredElementReference> for ElementReference {
     fn from(val: StoredElementReference) -> Self {
         ElementReference {
-            source_id: Arc::from(val.source_id),
+            namespace: Arc::from(val.source_id),
             element_id: Arc::from(val.element_id),
         }
     }
@@ -182,7 +182,7 @@ mod tests {
     fn metadata(id: &str) -> ElementMetadata {
         ElementMetadata {
             reference: ElementReference {
-                source_id: Arc::from("source"),
+                namespace: Arc::from("source"),
                 element_id: Arc::from(id),
             },
             labels: Arc::from([Arc::<str>::from("Label")]),

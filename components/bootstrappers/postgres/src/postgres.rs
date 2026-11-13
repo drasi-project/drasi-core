@@ -309,13 +309,13 @@ impl PostgresConfig {
 /// Handles bootstrap operations for PostgreSQL source
 struct PostgresBootstrapHandler {
     config: PostgresConfig,
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     /// Stores primary key information for each table
     table_primary_keys: HashMap<String, Vec<String>>,
 }
 
 impl PostgresBootstrapHandler {
-    fn new(config: PostgresConfig, source_id: String) -> Self {
+    fn new(config: PostgresConfig, source_id: drasi_lib::ComponentId) -> Self {
         Self {
             config,
             source_id,
@@ -687,7 +687,7 @@ impl PostgresBootstrapHandler {
         };
 
         let metadata = ElementMetadata {
-            reference: ElementReference::new(&self.source_id, &elem_id),
+            reference: ElementReference::new(self.source_id.as_str(), &elem_id),
             labels: Arc::from(vec![Arc::from(table)]),
             effective_from: chrono::Utc::now().timestamp_millis() as u64,
         };

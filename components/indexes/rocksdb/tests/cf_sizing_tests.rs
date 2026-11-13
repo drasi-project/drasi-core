@@ -135,9 +135,17 @@ fn assert_tier_sizes(
 fn effective_sizes_match_the_tier_policy_on_every_cf() {
     let dir = tempfile::tempdir().expect("tempdir");
     let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
-    let db = open_unified_db(dir.path().to_str().unwrap(), "sizing-test", &options).expect("open");
+    let owner = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003ae")
+        .expect("fixture UUID");
+    let db = open_unified_db(
+        dir.path().to_str().unwrap(),
+        &drasi_core_types::StorageScope::default(),
+        &owner,
+        &options,
+    )
+    .expect("open");
 
-    let sizes = effective_sizes(&dir.path().join("sizing-test"));
+    let sizes = effective_sizes(&dir.path().join(owner.as_str()));
     assert_tier_sizes(
         &sizes,
         DEFAULT_LARGE_WRITE_BUFFER_SIZE,
@@ -164,12 +172,14 @@ async fn provider_derives_tier_sizes_from_total_memory_budget() {
         WRITE_BUFFER_BUDGET
     );
 
+    let owner = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000e7")
+        .expect("fixture UUID");
     let created = provider
-        .create_indexes("provider-test")
+        .create_indexes(&owner)
         .await
         .expect("create indexes");
 
-    let sizes = effective_sizes(&dir.path().join("provider-test"));
+    let sizes = effective_sizes(&dir.path().join(owner.as_str()));
     assert_tier_sizes(&sizes, 32 * MIB as u64, 16 * MIB as u64);
 
     drop(created);
@@ -181,9 +191,17 @@ fn effective_sizes_cap_at_the_maximum_tier_sizes() {
     let budget =
         RocksDbMemoryBudget::new(1024 * MIB, 1024 * MIB, false).expect("valid memory budget");
     let options = RocksIndexOptions::new(true, false, budget);
-    let db = open_unified_db(dir.path().to_str().unwrap(), "cap-test", &options).expect("open");
+    let owner = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003af")
+        .expect("fixture UUID");
+    let db = open_unified_db(
+        dir.path().to_str().unwrap(),
+        &drasi_core_types::StorageScope::default(),
+        &owner,
+        &options,
+    )
+    .expect("open");
 
-    let sizes = effective_sizes(&dir.path().join("cap-test"));
+    let sizes = effective_sizes(&dir.path().join(owner.as_str()));
     assert_tier_sizes(&sizes, 64 * MIB as u64, 32 * MIB as u64);
 
     drop(db);
@@ -195,7 +213,15 @@ async fn clear_recreates_cfs_with_the_sizing_policy() {
     let budget =
         RocksDbMemoryBudget::new(256 * MIB, 256 * MIB, false).expect("valid memory budget");
     let options = RocksIndexOptions::new(true, false, budget);
-    let db = open_unified_db(dir.path().to_str().unwrap(), "clear-test", &options).expect("open");
+    let owner = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003b0")
+        .expect("fixture UUID");
+    let db = open_unified_db(
+        dir.path().to_str().unwrap(),
+        &drasi_core_types::StorageScope::default(),
+        &owner,
+        &options,
+    )
+    .expect("open");
 
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
     let element_index =
@@ -219,7 +245,7 @@ async fn clear_recreates_cfs_with_the_sizing_policy() {
     // the internal tier sizing and history bound rather than RocksDB defaults.
     let large = (32 * MIB as u64, 32 * MIB as u64 / 64, HISTORY_BYTES);
     let small = (16 * MIB as u64, 16 * MIB as u64 / 64, HISTORY_BYTES);
-    let sizes = effective_sizes(&dir.path().join("clear-test"));
+    let sizes = effective_sizes(&dir.path().join(owner.as_str()));
     for cf in ["elements", "inbound", "outbound", "values", "archive"] {
         assert_eq!(sizes[cf], large, "CF '{cf}'");
     }

@@ -209,7 +209,7 @@ fn a_native_query_receives_the_application_snapshot() {
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: "application-bootstrap-test".into(),
-                id: ComponentId::try_new("people").unwrap(),
+                id: ComponentId::try_new("3107f144-36ab-55ef-8d78-c4789acfbf5e").unwrap(),
                 query: "MATCH (n:Person) RETURN n AS person".into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: StreamId::try_new("people/out").unwrap(),

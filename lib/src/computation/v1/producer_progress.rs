@@ -15,7 +15,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use drasi_core::interface::{CheckpointKey, CheckpointStore, IndexError, SourceCheckpoint};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -24,11 +24,8 @@ use super::{
 
 pub(super) const INPUT_OWNER_PREFIX: &str = "computation:input-owner:";
 
-pub(super) fn producer_owner_key(stream: &StreamId) -> String {
-    format!(
-        "{INPUT_OWNER_PREFIX}{}",
-        super::query::progress_key(stream.as_str(), None)
-    )
+pub(super) fn producer_owner_key(stream: &StreamId) -> CheckpointKey {
+    CheckpointKey::Stream(stream.clone()).associated(INPUT_OWNER_PREFIX)
 }
 
 use drasi_computation_contracts::has_distinct_producer_lineage;
@@ -62,7 +59,7 @@ impl QueryInputOwner {
 pub struct GraphInputProgress {
     stream: StreamId,
     transport_sequence: Option<u64>,
-    pub(crate) key: String,
+    pub(crate) key: CheckpointKey,
     pub(crate) identity: SourceProgressKey,
     pub(crate) sequence: u64,
     pub(crate) position: Option<Bytes>,
@@ -158,7 +155,7 @@ impl GraphInputProgress {
     fn from_system(system: &Arc<SystemMetadata>, sequence: u64) -> Self {
         let stream = system.stream().clone();
         Self {
-            key: super::query::progress_key(stream.as_str(), None),
+            key: super::query::progress_key(&stream, None),
             identity: SourceProgressKey::Stream(stream.clone()),
             stream,
             transport_sequence: None,
@@ -208,7 +205,7 @@ impl GraphInputProgress {
             };
             owner.validate(false)?;
             anyhow::ensure!(
-                super::QueryChangeCodec::metadata(input)?.query_id == owner.identity.query_id(),
+                &super::QueryChangeCodec::metadata(input)?.query_id == owner.identity.query_id(),
                 "query input metadata does not match its producer identity"
             );
             return Ok((
@@ -241,7 +238,7 @@ impl GraphInputProgress {
             return Ok(Self {
                 stream: system.stream().clone(),
                 transport_sequence: None,
-                key: super::query::progress_key(system.stream().as_str(), None),
+                key: super::query::progress_key(system.stream(), None),
                 identity: SourceProgressKey::Stream(system.stream().clone()),
                 sequence: progress.sequence(),
                 position: None,
@@ -263,7 +260,7 @@ impl GraphInputProgress {
             return Ok(Self {
                 stream: system.stream().clone(),
                 transport_sequence: Some(system.sequence()),
-                key: super::query::progress_key(system.stream().as_str(), Some(&source)),
+                key: super::query::progress_key(system.stream(), Some(&source)),
                 identity: SourceProgressKey::Source(source),
                 sequence,
                 position: system.source_position().cloned(),
@@ -276,15 +273,12 @@ impl GraphInputProgress {
         let stable = raw.as_ref().and_then(|metadata| {
             metadata
                 .sequence
-                .map(|sequence| (metadata.source_id.as_str(), sequence))
+                .map(|sequence| (&metadata.source_id, sequence))
         });
         Ok(Self {
             stream: system.stream().clone(),
             transport_sequence: stable.map(|_| system.sequence()),
-            key: super::query::progress_key(
-                system.stream().as_str(),
-                stable.map(|(source, _)| source),
-            ),
+            key: super::query::progress_key(system.stream(), stable.map(|(source, _)| source)),
             identity: match stable {
                 Some((source, _)) => SourceProgressKey::Source(source.to_owned()),
                 None => SourceProgressKey::Stream(system.stream().clone()),
@@ -358,8 +352,7 @@ impl GraphInputProgress {
                                 .map(Bytes::from)
                                 .or_else(|| origin.source_position().cloned());
                         }
-                        self.key =
-                            super::query::progress_key(origin.stream().as_str(), Some(source));
+                        self.key = super::query::progress_key(origin.stream(), Some(source));
                         self.producer = None;
                     }
                     SourceProgressKey::Stream(stream) => {
@@ -372,7 +365,7 @@ impl GraphInputProgress {
                                 .map_or(origin.sequence(), GraphProducerProgress::sequence)
                         };
                         self.position = origin.source_position().cloned();
-                        self.key = super::query::progress_key(stream.as_str(), None);
+                        self.key = super::query::progress_key(stream, None);
                     }
                 }
                 self.identity = policy.key().clone();
@@ -416,7 +409,7 @@ impl GraphInputProgress {
             .map_or(&self.stream, |(stream, _)| stream)
     }
 
-    pub fn owner_key(&self) -> String {
+    pub fn owner_key(&self) -> CheckpointKey {
         producer_owner_key(self.owner_stream())
     }
 
@@ -519,11 +512,8 @@ impl GraphInputProgress {
         Ok(())
     }
 
-    fn transport_key(stream: &StreamId) -> String {
-        format!(
-            "{INPUT_TRANSPORT_PREFIX}{}",
-            super::query::progress_key(stream.as_str(), None)
-        )
+    fn transport_key(stream: &StreamId) -> CheckpointKey {
+        CheckpointKey::Stream(stream.clone()).associated(INPUT_TRANSPORT_PREFIX)
     }
 
     pub async fn needs_transport_update(
@@ -566,11 +556,11 @@ impl GraphInputProgress {
 pub(super) const INPUT_TRANSPORT_PREFIX: &str = "\0computation:input-transport:v1:";
 
 pub(super) fn transport_identity(
-    key: &str,
+    key: &CheckpointKey,
     checkpoint: &SourceCheckpoint,
 ) -> anyhow::Result<StreamId> {
     let key = key
-        .strip_prefix(INPUT_TRANSPORT_PREFIX)
+        .associated_checkpoint(INPUT_TRANSPORT_PREFIX)
         .ok_or_else(|| anyhow::anyhow!("invalid input transport checkpoint"))?;
     let identity = super::query::progress_identity(key)?;
     anyhow::ensure!(
@@ -590,11 +580,9 @@ mod tests {
     #[test]
     fn output_progress_is_independent_of_semantic_identity() {
         let node = |role, kind, progress| {
-            let mut descriptor = super::super::ComponentDescriptor::try_new(
-                ComponentId::try_new("producer").unwrap(),
-                Vec::new(),
-            )
-            .unwrap();
+            let mut descriptor =
+                super::super::ComponentDescriptor::try_new(ComponentId::generate(), Vec::new())
+                    .unwrap();
             if let Some(kind) = kind {
                 descriptor = descriptor.with_semantic_kind(kind);
             }
@@ -602,6 +590,7 @@ mod tests {
                 descriptor = descriptor.with_output_progress(progress);
             }
             super::super::NodeSnapshot {
+                name: crate::config::ComponentName::try_new("producer").unwrap(),
                 descriptor,
                 role,
                 completion: None,
@@ -641,7 +630,7 @@ mod tests {
             let identity = GraphProducerIdentity::new(
                 "scope".into(),
                 "graph".into(),
-                ComponentId::try_new("producer").expect("producer"),
+                crate::test_helpers::component_id(749),
                 stream.clone(),
                 persistent,
             )
@@ -651,7 +640,7 @@ mod tests {
                 .expect("stateless relay");
             let owner = super::super::QuerySourceProgress::new(
                 "graph",
-                ComponentId::try_new("owner").expect("owner"),
+                crate::test_helpers::component_id(718),
             )
             .expect("progress owner");
             owner
@@ -668,10 +657,7 @@ mod tests {
                 .expect("producer progress");
             assert_eq!(input.sequence, 3);
             assert_eq!(input.identity, SourceProgressKey::Stream(stream.clone()));
-            assert_eq!(
-                input.key,
-                super::super::query::progress_key(stream.as_str(), None)
-            );
+            assert_eq!(input.key, super::super::query::progress_key(&stream, None));
             assert_eq!(input.producer.as_ref(), Some(&identity));
             assert_eq!(input.volatile_producer, !persistent);
             let mut transports = BTreeMap::new();
@@ -687,7 +673,7 @@ mod tests {
         let identity = GraphProducerIdentity::volatile(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("producer").unwrap(),
+            crate::test_helpers::component_id(749),
             stream.clone(),
         )
         .unwrap();
@@ -699,7 +685,7 @@ mod tests {
         let replacement = GraphProducerIdentity::volatile(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("producer").unwrap(),
+            crate::test_helpers::component_id(749),
             stream,
         )
         .unwrap();
@@ -714,9 +700,10 @@ mod tests {
         use crate::computation::v1::{SourceTransactionBuilder, SourceTransactionLimits};
         use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
         use std::num::{NonZeroU64, NonZeroUsize};
+        let source_id = crate::test_helpers::component_id(77);
         for sequence in [1, 2] {
             let mut builder = SourceTransactionBuilder::new(
-                "source",
+                &source_id,
                 SourceTransactionLimits {
                     max_changes: NonZeroUsize::MIN,
                     max_bytes: NonZeroUsize::new(4096).expect("size"),
@@ -727,7 +714,7 @@ mod tests {
             builder
                 .push(SourceChange::Delete {
                     metadata: ElementMetadata {
-                        reference: ElementReference::new("source", "item"),
+                        reference: ElementReference::new(source_id.as_str(), "item"),
                         labels: Arc::from([]),
                         effective_from: 1000,
                     },
@@ -750,7 +737,7 @@ mod tests {
             assert_eq!(progress.sequence, 42);
             assert_eq!(
                 progress.identity,
-                SourceProgressKey::Source("source".into())
+                SourceProgressKey::Source(source_id.clone())
             );
             assert_eq!(
                 progress.position.as_deref(),
@@ -767,7 +754,7 @@ mod tests {
         let identity = GraphProducerIdentity::volatile(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("first").unwrap(),
+            crate::test_helpers::component_id(451),
             stream,
         )
         .unwrap();

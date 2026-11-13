@@ -14,15 +14,27 @@
 
 #![cfg(feature = "computation")]
 
-use drasi_lib::{computation::v1::*, DrasiLib};
+use drasi_lib::{
+    computation::v1::*,
+    config::{ComponentName, QueryInputConfig},
+    DrasiLib,
+};
 use drasi_plugin_sdk::computation::{
     PluginConfiguration, ReactionPluginFactory, SourcePluginFactory,
 };
 use std::{sync::Arc, time::Duration};
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 #[tokio::test]
 async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_change() {
+    let source_id = ComponentId::generate();
+    let query_id = ComponentId::generate();
+    let reaction_id = ComponentId::generate();
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -42,7 +54,7 @@ async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_chan
     let pipeline = drasi.computation_pipeline().expect("pipeline");
     let source = SourcePluginFactory::new(
         Arc::new(drasi_source_mock::descriptor::MockSourceDescriptor),
-        "mock",
+        source_id.clone(),
         PluginConfiguration::new(
             "mock",
             "1.0.0",
@@ -57,8 +69,10 @@ async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_chan
         .expect("source factory");
     let reaction = ReactionPluginFactory::new(
         Arc::new(drasi_reaction_log::descriptor::LogReactionDescriptor),
-        "log",
-        vec!["query".into()],
+        reaction_id.clone(),
+        vec![drasi_lib::config::ComponentReference::by_id(
+            query_id.clone(),
+        )],
         PluginConfiguration::new("log", "1.0.0", serde_json::json!({})),
         true,
     )
@@ -80,13 +94,21 @@ async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_chan
         .source(host, SourceSubscriptionOptions::default())
         .expect("source")
         .query(
-            drasi_lib::Query::cypher("query")
-                .query("MATCH (n) RETURN count(n) AS total")
-                .from_input("mock")
-                .enable_bootstrap(false)
-                .build(),
+            drasi_lib::Query::cypher(
+                drasi_core_types::ComponentName::try_new("query").expect("fixture component name"),
+            )
+            .query("MATCH (n) RETURN count(n) AS total")
+            .with_input(QueryInputConfig::by_id(source_id))
+            .enable_bootstrap(false)
+            .build()
+            .expect("valid query configuration")
+            .with_assigned_id(query_id.clone()),
         )
-        .reaction(reaction, true)
+        .reaction(
+            ComponentName::try_new("log").expect("valid reaction name"),
+            reaction,
+            true,
+        )
         .build()
         .expect("graph");
     drasi.add_components(graph).await.expect("register");
@@ -99,7 +121,7 @@ async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_chan
         QueryChangeCodec::metadata(&event)
             .expect("metadata")
             .query_id,
-        "query"
+        query_id.clone()
     );
     drasi.shutdown().await.expect("owned plugin shutdown");
 }
@@ -109,14 +131,14 @@ fn configuration_versions_and_schema_fail_before_plugin_construction() {
     let descriptor = Arc::new(drasi_source_mock::descriptor::MockSourceDescriptor);
     assert!(SourcePluginFactory::new(
         descriptor.clone(),
-        "mock",
+        component_id(789).clone(),
         PluginConfiguration::new("mock", "99.0.0", serde_json::json!({})),
         true
     )
     .is_err());
     assert!(SourcePluginFactory::new(
         descriptor,
-        "mock",
+        component_id(789).clone(),
         PluginConfiguration::new(
             "mock",
             "1.0.0",
@@ -132,7 +154,7 @@ fn original_reference_configuration_remains_unresolved_in_the_recipe() {
     let config = serde_json::json!({"intervalMs":{"kind":"EnvironmentVariable","name":"DRASI_UNUSED_TEST_INTERVAL","default":"10"}});
     let source = SourcePluginFactory::new(
         Arc::new(drasi_source_mock::descriptor::MockSourceDescriptor),
-        "mock",
+        component_id(789).clone(),
         PluginConfiguration::new("mock", "1.0.0", config.clone()),
         true,
     )
@@ -140,7 +162,7 @@ fn original_reference_configuration_remains_unresolved_in_the_recipe() {
     assert_eq!(source.configuration().config, config);
 }
 
-struct ResolvingDescriptor(std::sync::Mutex<Vec<(String, String)>>);
+struct ResolvingDescriptor(std::sync::Mutex<Vec<(drasi_lib::ComponentId, String)>>);
 #[async_trait::async_trait]
 impl drasi_plugin_sdk::descriptor::SourcePluginDescriptor for ResolvingDescriptor {
     fn kind(&self) -> &str {
@@ -157,7 +179,7 @@ impl drasi_plugin_sdk::descriptor::SourcePluginDescriptor for ResolvingDescripto
     }
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_core_types::ComponentId,
         config: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::Source>> {
@@ -224,9 +246,11 @@ async fn concurrent_descriptor_creation_uses_instance_secrets_without_global_res
         .build()
         .await
         .expect("second instance");
-    let first = SourcePluginFactory::new(descriptor.clone(), "one", recipe.clone(), true)
+    let one_id = component_id(790);
+    let two_id = component_id(791);
+    let first = SourcePluginFactory::new(descriptor.clone(), one_id.clone(), recipe.clone(), true)
         .expect("first recipe");
-    let second = SourcePluginFactory::new(descriptor.clone(), "two", recipe.clone(), true)
+    let second = SourcePluginFactory::new(descriptor.clone(), two_id.clone(), recipe.clone(), true)
         .expect("second recipe");
     let (a, b) = tokio::join!(
         first.host(one.computation_plugin_services().expect("first services")),
@@ -239,8 +263,8 @@ async fn concurrent_descriptor_creation_uses_instance_secrets_without_global_res
     assert_eq!(
         values,
         vec![
-            ("one".into(), "first-value".into()),
-            ("two".into(), "second-value".into())
+            (one_id.clone(), "first-value".into()),
+            (two_id.clone(), "second-value".into())
         ]
     );
     assert_eq!(first.configuration().config, recipe.config);
@@ -331,14 +355,18 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
     let result = bootstrap
         .bootstrap(
             drasi_lib::bootstrap::BootstrapRequest {
-                query_id: "query".into(),
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-00000000002e",
+                )
+                .expect("fixture UUID"),
                 node_labels: vec![],
                 relation_labels: vec![],
                 request_id: "request".into(),
             },
             &drasi_lib::bootstrap::BootstrapContext::new_minimal(
                 services.scope.to_string(),
-                "source".into(),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
             ),
             sender,
             None,
@@ -361,8 +389,12 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
     )
     .await
     .expect("existing index plugin");
+    let query_id = component_id(46);
+    let source_id = component_id(77);
+    let query_partition = drasi_core_types::OutputPartition::Component(query_id.clone());
+    let source_key = drasi_core_types::CheckpointKey::Source(source_id.clone());
     let indexes = provider
-        .create_indexes("families", "query")
+        .create_indexes("families", &query_id)
         .await
         .expect("native index resources");
     indexes
@@ -376,19 +408,23 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         let outbox = indexes.outbox_writer().expect("outbox");
         let live = indexes.live_results_writer().expect("live rows");
         checkpoint
-            .stage_checkpoint("source", 7, Some(&bytes::Bytes::from_static(b"position")))
+            .stage_checkpoint(
+                &source_key,
+                7,
+                Some(&bytes::Bytes::from_static(b"position")),
+            )
             .await
             .expect("stage source progress");
         checkpoint
-            .stage_result_sequence("query", 1)
+            .stage_result_sequence(&query_partition, 1)
             .await
             .expect("stage output sequence");
         outbox
-            .append("query", 1, b"output")
+            .append(&query_partition, 1, b"output")
             .await
             .expect("stage output");
         live.apply_mutations(
-            "query",
+            &query_id,
             &[RowMutation {
                 row_signature: 42,
                 data: Some(b"row"),
@@ -403,7 +439,7 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         }
         assert_eq!(
             checkpoint
-                .read_checkpoint("source")
+                .read_checkpoint(&source_key)
                 .await
                 .expect("read source progress")
                 .map(|value| value.sequence),
@@ -411,13 +447,16 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         );
         assert_eq!(
             checkpoint
-                .read_result_sequence("query")
+                .read_result_sequence(&query_partition)
                 .await
                 .expect("read result sequence"),
             commit.then_some(1)
         );
         assert_eq!(
-            outbox.read_from("query", 0).await.expect("read outbox"),
+            outbox
+                .read_from(&query_partition, 0)
+                .await
+                .expect("read outbox"),
             if commit {
                 vec![(1, b"output".to_vec())]
             } else {
@@ -425,7 +464,7 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
             }
         );
         assert_eq!(
-            live.read_snapshot("query").await.expect("read live rows"),
+            live.read_snapshot(&query_id).await.expect("read live rows"),
             if commit {
                 vec![(42, b"row".to_vec())]
             } else {
@@ -450,14 +489,14 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
     .await
     .expect("reopen same descriptor scope");
     let reopened = reopened_provider
-        .create_indexes("families", "query")
+        .create_indexes("families", &query_id)
         .await
         .expect("reopen index resources");
     assert_eq!(
         reopened
             .checkpoint_store()
             .expect("reopened checkpoints")
-            .read_checkpoint("source")
+            .read_checkpoint(&source_key)
             .await
             .expect("read recovered source progress")
             .expect("committed source progress")
@@ -468,7 +507,7 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         reopened
             .checkpoint_store()
             .expect("reopened checkpoints")
-            .read_result_sequence("query")
+            .read_result_sequence(&query_partition)
             .await
             .expect("read recovered result sequence"),
         Some(1)
@@ -477,7 +516,7 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         reopened
             .outbox_writer()
             .expect("reopened outbox")
-            .read_from("query", 0)
+            .read_from(&query_partition, 0)
             .await
             .expect("read recovered output"),
         [(1, b"output".to_vec())]
@@ -486,7 +525,7 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         reopened
             .live_results_writer()
             .expect("reopened live rows")
-            .read_snapshot("query")
+            .read_snapshot(&query_id)
             .await
             .expect("read recovered snapshot"),
         [(42, b"row".to_vec())]

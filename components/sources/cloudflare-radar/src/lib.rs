@@ -83,14 +83,14 @@ impl CloudflareRadarSource {
     }
 
     /// Create a builder for configuring the Cloudflare Radar source.
-    pub fn builder(id: impl Into<String>) -> CloudflareRadarSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> CloudflareRadarSourceBuilder {
         CloudflareRadarSourceBuilder::new(id)
     }
 }
 
 #[async_trait]
 impl Source for CloudflareRadarSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -216,8 +216,8 @@ impl Source for CloudflareRadarSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
         if let Some(store) = context.state_store {
             *self.state_store.write().await = Some(store);
             debug!(
@@ -237,7 +237,7 @@ impl Source for CloudflareRadarSource {
 
 /// Builder for Cloudflare Radar source
 pub struct CloudflareRadarSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: CloudflareRadarConfig,
     dispatch_mode: Option<drasi_lib::channels::DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -247,9 +247,9 @@ pub struct CloudflareRadarSourceBuilder {
 }
 
 impl CloudflareRadarSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: CloudflareRadarConfig::default(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -390,7 +390,7 @@ impl CloudflareRadarSourceBuilder {
             return Err(anyhow!("At least one category must be enabled"));
         }
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
 
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
@@ -421,7 +421,7 @@ fn build_client(api_token: &str) -> Result<Client> {
 }
 
 async fn polling_loop(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: CloudflareRadarConfig,
     client: Client,
     base: SourceBase,
@@ -569,7 +569,7 @@ fn build_url(base: &str, path: &str, params: &[(&str, String)]) -> String {
 }
 
 async fn poll_outages(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &CloudflareRadarConfig,
     client: &Client,
     base: &SourceBase,
@@ -649,7 +649,7 @@ async fn poll_outages(
 }
 
 async fn poll_bgp_hijacks(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &CloudflareRadarConfig,
     client: &Client,
     base: &SourceBase,
@@ -736,7 +736,7 @@ async fn poll_bgp_hijacks(
 }
 
 async fn poll_bgp_leaks(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &CloudflareRadarConfig,
     client: &Client,
     base: &SourceBase,
@@ -820,7 +820,7 @@ async fn poll_bgp_leaks(
 }
 
 async fn poll_http_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &CloudflareRadarConfig,
     client: &Client,
     base: &SourceBase,
@@ -863,7 +863,7 @@ async fn poll_http_summary(
 }
 
 async fn poll_attack_l7_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &CloudflareRadarConfig,
     client: &Client,
     base: &SourceBase,
@@ -906,7 +906,7 @@ async fn poll_attack_l7_summary(
 }
 
 async fn poll_attack_l3_summary(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &CloudflareRadarConfig,
     client: &Client,
     base: &SourceBase,
@@ -949,7 +949,7 @@ async fn poll_attack_l3_summary(
 }
 
 async fn poll_domain_rankings(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &CloudflareRadarConfig,
     client: &Client,
     base: &SourceBase,
@@ -1006,7 +1006,7 @@ async fn poll_domain_rankings(
 }
 
 async fn poll_dns_top_locations(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     config: &CloudflareRadarConfig,
     client: &Client,
     base: &SourceBase,
@@ -1051,7 +1051,7 @@ async fn poll_dns_top_locations(
 }
 
 async fn dispatch_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     base: &SourceBase,
     changes: Vec<SourceChange>,
 ) -> Result<()> {
@@ -1060,7 +1060,7 @@ async fn dispatch_changes(
         let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
         let wrapper = SourceEventWrapper::with_profiling(
-            source_id.to_string(),
+            source_id.clone(),
             event,
             Utc::now(),
             profiling,
@@ -1153,41 +1153,95 @@ fn is_after_min_timestamp(min_timestamp: Option<i64>, timestamp: &Option<String>
 }
 
 async fn load_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     store: Option<&Arc<dyn StateStoreProvider>>,
 ) -> Result<PollingState> {
     if let Some(store) = store {
         let mut state = PollingState::new();
-        if let Some(bytes) = store.get(source_id, "initialized").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "initialized",
+            )
+            .await?
+        {
             state.initialized =
                 deserialize_or_warn::<bool>(source_id, "initialized", &bytes).unwrap_or(false);
         }
-        if let Some(bytes) = store.get(source_id, "seen_hijack_ids").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "seen_hijack_ids",
+            )
+            .await?
+        {
             state.seen_hijack_ids =
                 deserialize_or_warn(source_id, "seen_hijack_ids", &bytes).unwrap_or_default();
         }
-        if let Some(bytes) = store.get(source_id, "seen_leak_ids").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "seen_leak_ids",
+            )
+            .await?
+        {
             state.seen_leak_ids =
                 deserialize_or_warn(source_id, "seen_leak_ids", &bytes).unwrap_or_default();
         }
-        if let Some(bytes) = store.get(source_id, "seen_outage_ids").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "seen_outage_ids",
+            )
+            .await?
+        {
             state.seen_outage_ids =
                 deserialize_or_warn(source_id, "seen_outage_ids", &bytes).unwrap_or_default();
         }
-        if let Some(bytes) = store.get(source_id, "last_http_hash").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "last_http_hash",
+            )
+            .await?
+        {
             state.last_http_hash = deserialize_or_warn(source_id, "last_http_hash", &bytes);
         }
-        if let Some(bytes) = store.get(source_id, "last_l7_hash").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "last_l7_hash",
+            )
+            .await?
+        {
             state.last_l7_hash = deserialize_or_warn(source_id, "last_l7_hash", &bytes);
         }
-        if let Some(bytes) = store.get(source_id, "last_l3_hash").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "last_l3_hash",
+            )
+            .await?
+        {
             state.last_l3_hash = deserialize_or_warn(source_id, "last_l3_hash", &bytes);
         }
-        if let Some(bytes) = store.get(source_id, "last_dns_hash").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "last_dns_hash",
+            )
+            .await?
+        {
             state.last_dns_hash =
                 deserialize_or_warn(source_id, "last_dns_hash", &bytes).unwrap_or_default();
         }
-        if let Some(bytes) = store.get(source_id, "known_rankings").await? {
+        if let Some(bytes) = store
+            .get(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "known_rankings",
+            )
+            .await?
+        {
             state.known_rankings =
                 deserialize_or_warn(source_id, "known_rankings", &bytes).unwrap_or_default();
         }
@@ -1197,7 +1251,7 @@ async fn load_state(
 }
 
 fn deserialize_or_warn<T: serde::de::DeserializeOwned>(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     field: &str,
     bytes: &[u8],
 ) -> Option<T> {
@@ -1211,63 +1265,75 @@ fn deserialize_or_warn<T: serde::de::DeserializeOwned>(
 }
 
 async fn save_state(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     store: &Arc<dyn StateStoreProvider>,
     state: &PollingState,
 ) -> Result<()> {
     store
         .set(
-            source_id,
+            &drasi_lib::StorePartition::component(source_id.clone()),
             "initialized",
             serde_json::to_vec(&state.initialized)?,
         )
         .await?;
     store
         .set(
-            source_id,
+            &drasi_lib::StorePartition::component(source_id.clone()),
             "seen_hijack_ids",
             serde_json::to_vec(&state.seen_hijack_ids)?,
         )
         .await?;
     store
         .set(
-            source_id,
+            &drasi_lib::StorePartition::component(source_id.clone()),
             "seen_leak_ids",
             serde_json::to_vec(&state.seen_leak_ids)?,
         )
         .await?;
     store
         .set(
-            source_id,
+            &drasi_lib::StorePartition::component(source_id.clone()),
             "seen_outage_ids",
             serde_json::to_vec(&state.seen_outage_ids)?,
         )
         .await?;
     if let Some(hash) = state.last_http_hash {
         store
-            .set(source_id, "last_http_hash", serde_json::to_vec(&hash)?)
+            .set(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "last_http_hash",
+                serde_json::to_vec(&hash)?,
+            )
             .await?;
     }
     if let Some(hash) = state.last_l7_hash {
         store
-            .set(source_id, "last_l7_hash", serde_json::to_vec(&hash)?)
+            .set(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "last_l7_hash",
+                serde_json::to_vec(&hash)?,
+            )
             .await?;
     }
     if let Some(hash) = state.last_l3_hash {
         store
-            .set(source_id, "last_l3_hash", serde_json::to_vec(&hash)?)
+            .set(
+                &drasi_lib::StorePartition::component(source_id.clone()),
+                "last_l3_hash",
+                serde_json::to_vec(&hash)?,
+            )
             .await?;
     }
     store
         .set(
-            source_id,
+            &drasi_lib::StorePartition::component(source_id.clone()),
             "last_dns_hash",
             serde_json::to_vec(&state.last_dns_hash)?,
         )
         .await?;
     store
         .set(
-            source_id,
+            &drasi_lib::StorePartition::component(source_id.clone()),
             "known_rankings",
             serde_json::to_vec(&state.known_rankings)?,
         )
@@ -1319,13 +1385,16 @@ mod tests {
             }
         });
         let store = Arc::new(MemoryStateStoreProvider::new());
-        let source = CloudflareRadarSource::builder("lifecycle")
-            .with_api_token("test-token")
-            .with_api_base_url(format!("http://{address}/client/v4"))
-            .with_category("bgp_hijacks", true)
-            .with_poll_interval_secs(60)
-            .with_state_store(store.clone())
-            .build()?;
+        let source = CloudflareRadarSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000034")
+                .expect("fixture UUID"),
+        )
+        .with_api_token("test-token")
+        .with_api_base_url(format!("http://{address}/client/v4"))
+        .with_category("bgp_hijacks", true)
+        .with_poll_interval_secs(60)
+        .with_state_store(store.clone())
+        .build()?;
         source.stop().await?;
         for cycle in 0..3 {
             let mut receiver = source.base.try_test_subscribe().await?;
@@ -1367,7 +1436,14 @@ mod tests {
                     .to_string(),
                 "Channel closed"
             );
-            assert!(store.key_count(source.id()).await? > 0);
+            assert!(
+                store
+                    .key_count(&drasi_core::interface::StorePartition::component(
+                        (source.id()).clone()
+                    ))
+                    .await?
+                    > 0
+            );
         }
         server.await??;
         source.stop().await?;
@@ -1377,11 +1453,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn polling_errors_and_panics_retain_typed_causes_until_cleanup() -> Result<()> {
         for panic in [false, true] {
-            let source = CloudflareRadarSource::builder("failed")
-                .with_api_token("test-token")
-                .with_api_base_url("http://127.0.0.1:1")
-                .with_category("bgp_hijacks", true)
-                .build()?;
+            let source = CloudflareRadarSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000035")
+                    .expect("fixture UUID"),
+            )
+            .with_api_token("test-token")
+            .with_api_base_url("http://127.0.0.1:1")
+            .with_category("bgp_hijacks", true)
+            .build()?;
             *source.cleanup_required.lock().await = true;
             spawn_owned_worker(&source.polling_task, async move {
                 assert!(!panic, "injected Cloudflare polling panic");
@@ -1442,7 +1521,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_changes_stamps_monotonic_sequence() {
         let source_id = "cloudflare-radar-seq-source";
-        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b9")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let mut rx = base.test_subscribe().await;
 
         let changes = vec![
@@ -1452,9 +1535,14 @@ mod tests {
         ];
         let expected = changes.len() as u64;
 
-        dispatch_changes(source_id, &base, changes)
-            .await
-            .expect("dispatch_changes should succeed");
+        dispatch_changes(
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b9")
+                .expect("fixture UUID"),
+            &base,
+            changes,
+        )
+        .await
+        .expect("dispatch_changes should succeed");
 
         let mut sequences = Vec::new();
         for _ in 0..expected {

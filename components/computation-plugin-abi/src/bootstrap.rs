@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(size_of::<BootstrapVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<crate::ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(size_of::<crate::Transaction>(), 16 + 4 * pointer);
-        assert_eq!(crate::ABI_VERSION, "1.0.0");
-        assert_eq!(crate::WIRE_VERSION, 1);
+        assert_eq!(crate::ABI_VERSION, "3.0.0");
+        assert_eq!(crate::WIRE_VERSION, 3);
     }
 }

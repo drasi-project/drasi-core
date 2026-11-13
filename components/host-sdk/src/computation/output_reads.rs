@@ -17,14 +17,16 @@ use drasi_computation_plugin_abi::{self as abi, output_reads as ext};
 use drasi_computation_plugin_sdk::{
     metadata::FactoryMetadata,
     output_reads::{Outcome, WireCursor, WireQueryHead},
-    transport::{checked_table, take_status, Failure, OperationFuture, ReceivedBytes},
+    transport::{
+        checked_table, take_status, Failure, OperationCancellation, OperationFuture, ReceivedBytes,
+    },
 };
 use drasi_lib::computation::v1::*;
 use serde::Deserialize;
 use std::result::Result;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex, RwLock,
 };
 use tokio::sync::watch;
 #[cfg(test)]
@@ -38,9 +40,11 @@ use {
 pub(super) struct Fence {
     generation: AtomicU64,
     retired: AtomicBool,
+    updating: AtomicBool,
     changed: watch::Sender<()>,
     recovery_ready: AtomicBool,
     recovery_changed: watch::Sender<()>,
+    operations: Mutex<Vec<OperationCancellation>>,
 }
 
 impl Fence {
@@ -48,13 +52,16 @@ impl Fence {
         Self {
             generation: AtomicU64::new(0),
             retired: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
             changed: watch::channel(()).0,
             recovery_ready: AtomicBool::new(false),
             recovery_changed: watch::channel(()).0,
+            operations: Mutex::new(Vec::new()),
         }
     }
 
     pub(super) fn advance(&self) {
+        self.cancel_operations();
         self.recovery_ready.store(false, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.changed.send_modify(|_| ());
@@ -62,6 +69,7 @@ impl Fence {
     }
 
     pub(super) fn retire(&self) {
+        self.cancel_operations();
         self.retired.store(true, Ordering::Release);
         self.changed.send_modify(|_| ());
         self.recovery_changed.send_modify(|_| ());
@@ -72,11 +80,38 @@ impl Fence {
         if self.retired.load(Ordering::Acquire) {
             return Err(OutputReadError::Retired);
         }
+        if self.updating.load(Ordering::Acquire) {
+            return Err(OutputReadError::NotReady(
+                "native output update is not complete".into(),
+            ));
+        }
         Ok((self.generation.load(Ordering::Acquire), changed))
+    }
+
+    pub(super) fn track(&self, operation: &OperationFuture) {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        operations.retain(OperationCancellation::is_active);
+        operations.push(operation.cancellation());
+    }
+
+    fn cancel_operations(&self) {
+        let operations = std::mem::take(
+            &mut *self
+                .operations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        for operation in operations {
+            let _ = operation.cancel();
+        }
     }
 
     pub(super) fn is_current(&self, generation: u64) -> bool {
         !self.retired.load(Ordering::Acquire)
+            && !self.updating.load(Ordering::Acquire)
             && self.generation.load(Ordering::Acquire) == generation
     }
 }
@@ -183,6 +218,7 @@ impl Reader {
     async fn read(&self, code: u32, input: &[u8]) -> Result<ReceivedBytes, OutputReadError> {
         let (generation, mut changed) = self.fence.enter()?;
         let operation = self.handle.begin(code, input).map_err(failure_error)?;
+        self.fence.track(&operation);
         let bytes = tokio::select! {
             biased;
             _ = changed.changed() => return Err(OutputReadError::Retired),
@@ -385,17 +421,27 @@ impl ReplayProvider for NativeReplayProvider {
 
 struct NativeQueryProvider {
     reader: Reader,
-    description: drasi_computation_contracts::QueryDescription,
+    description: RwLock<drasi_computation_contracts::QueryDescription>,
     observations: bool,
     recovery_views: bool,
 }
 
 impl NativeQueryProvider {
+    fn current_description(
+        &self,
+    ) -> Result<drasi_computation_contracts::QueryDescription, OutputReadError> {
+        self.description
+            .read()
+            .map(|description| description.clone())
+            .map_err(|_| invalid("native query description poisoned"))
+    }
+
     fn validate_cursor(&self, cursor: &OutputCursor) -> Result<(), OutputReadError> {
         self.reader.check_cursor(cursor)?;
-        if cursor.producer().stream() != &self.description.output_stream
-            || cursor.producer().graph_id() != self.description.graph_id
-            || cursor.producer().persistent() == self.description.volatile
+        let description = self.current_description()?;
+        if cursor.producer().stream() != &description.output_stream
+            || cursor.producer().graph_id() != description.graph_id
+            || cursor.producer().persistent() == description.volatile
         {
             return Err(invalid(
                 "query output disagrees with its construction description",
@@ -411,15 +457,16 @@ impl NativeQueryProvider {
     ) -> Result<(), OutputReadError> {
         self.validate_cursor(replay.head())?;
         let producer = replay.head().producer();
+        let description = self.current_description()?;
         for envelope in replay.envelopes() {
             let identity = QueryRecoveryIdentity::from_query_output(envelope).map_err(invalid)?;
             let progress = GraphProducerProgress::from_envelope(envelope)
                 .map_err(invalid)?
                 .ok_or_else(|| invalid("query replay has no producer progress"))?;
-            if identity.configuration_hash() != self.description.configuration_hash
+            if identity.configuration_hash() != description.configuration_hash
                 || identity.graph_id() != producer.graph_id()
                 || identity.construction_scope() != producer.construction_scope()
-                || identity.query_id() != producer.component_id().as_str()
+                || identity.query_id() != producer.component_id()
                 || identity.incarnation()
                     != (!producer.persistent()).then_some(producer.incarnation())
                 || QueryChangeCodec::query_generation(envelope).map_err(invalid)? != generation
@@ -456,7 +503,8 @@ impl NativeQueryProvider {
     ) -> Result<(OutputCursor, drasi_computation_contracts::QueryOutputView), OutputReadError> {
         self.validate_cursor(snapshot.cursor())?;
         let producer = snapshot.cursor().producer();
-        if config_hash != self.description.configuration_hash {
+        let description = self.current_description()?;
+        if config_hash != description.configuration_hash {
             return Err(invalid("query view has inconsistent configuration"));
         }
         if replay.head() != snapshot.cursor() {
@@ -469,7 +517,7 @@ impl NativeQueryProvider {
             snapshot: QueryResultSnapshot {
                 projector: ResultNodeProjector::try_new(
                     snapshot.dataset(),
-                    self.description.execution.result.label.as_deref(),
+                    description.execution.result.label.as_deref(),
                 )
                 .map_err(invalid)?,
                 as_of_sequence: snapshot.cursor().sequence(),
@@ -487,7 +535,10 @@ impl NativeQueryProvider {
 #[async_trait]
 impl drasi_computation_contracts::QueryViewProvider for NativeQueryProvider {
     fn description(&self) -> drasi_computation_contracts::QueryDescription {
-        self.description.clone()
+        self.description
+            .read()
+            .expect("native query description poisoned")
+            .clone()
     }
 
     fn supports_observations(&self) -> bool {
@@ -587,6 +638,7 @@ impl drasi_computation_contracts::QueryViewProvider for NativeQueryProvider {
 pub(super) struct NativeOutputReads {
     fence: Arc<Fence>,
     readers: OutputReaders,
+    queries: std::collections::BTreeMap<PortId, Arc<NativeQueryProvider>>,
 }
 
 impl NativeOutputReads {
@@ -664,28 +716,82 @@ impl NativeOutputReads {
             )?;
             readers = readers.with_snapshot_follow(port.clone(), Arc::new(provider));
         }
+        let mut query_providers = std::collections::BTreeMap::new();
         for port in &capabilities.output_queries {
             let description = queries
                 .get(port)
                 .context("native query output omitted its construction description")?
                 .clone();
             let reader = open(port, ext::capability::QUERY, OutputCapability::Snapshot)?;
-            readers = readers.with_query(
-                port.clone(),
-                Arc::new(NativeQueryProvider {
-                    reader,
-                    description,
-                    observations: capabilities.query_observations,
-                    recovery_views: capabilities.query_recovery_views,
-                }),
-            );
+            let provider = Arc::new(NativeQueryProvider {
+                reader,
+                description: RwLock::new(description),
+                observations: capabilities.query_observations,
+                recovery_views: capabilities.query_recovery_views,
+            });
+            readers = readers.with_query(port.clone(), provider.clone());
+            query_providers.insert(port.clone(), provider);
         }
         readers.validate(descriptor)?;
-        Ok(Some(Self { fence, readers }))
+        Ok(Some(Self {
+            fence,
+            readers,
+            queries: query_providers,
+        }))
+    }
+
+    pub(super) fn refresh_queries(
+        &self,
+        descriptions: &std::collections::BTreeMap<
+            PortId,
+            drasi_computation_contracts::QueryDescription,
+        >,
+        data: ComponentUpdateData,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.queries.keys().eq(descriptions.keys()),
+            "native update changed its declared query readers"
+        );
+        let mut descriptions = self
+            .queries
+            .values()
+            .zip(descriptions.values())
+            .map(|(provider, proposed)| {
+                let current = provider
+                    .description
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("native query description poisoned"))?;
+                anyhow::ensure!(
+                    current.graph_id == proposed.graph_id
+                        && current.output_stream == proposed.output_stream
+                        && current.volatile == proposed.volatile
+                        && (data != ComponentUpdateData::Preserve
+                            || current.configuration_hash == proposed.configuration_hash),
+                    "native update changed the identity or preservation contract of its query output"
+                );
+                Ok((current, proposed))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        for (current, proposed) in &mut descriptions {
+            **current = (*proposed).clone();
+        }
+        Ok(())
     }
 
     pub(super) fn readers(&self) -> OutputReaders {
         self.readers.clone()
+    }
+
+    pub(super) fn begin_update(&self) {
+        self.fence.updating.store(true, Ordering::Release);
+        self.fence.advance();
+    }
+
+    pub(super) fn finish_update(&self) {
+        self.fence.generation.fetch_add(1, Ordering::AcqRel);
+        self.fence.updating.store(false, Ordering::Release);
+        self.fence.changed.send_modify(|_| ());
+        self.published();
     }
 
     /// Stop/restart: reads begun before this call can no longer succeed.
@@ -717,6 +823,29 @@ mod tests {
         wire,
     };
     use std::{borrow::Cow, collections::BTreeMap, sync::atomic::AtomicUsize};
+
+    #[test]
+    fn native_update_fence_blocks_reads_until_metadata_is_refreshed() -> anyhow::Result<()> {
+        let fence = Arc::new(Fence::new());
+        let readers = NativeOutputReads {
+            fence: fence.clone(),
+            readers: OutputReaders::default(),
+            queries: BTreeMap::new(),
+        };
+        let (before, _) = fence.enter()?;
+        readers.begin_update();
+        assert!(matches!(fence.enter(), Err(OutputReadError::NotReady(_))));
+        assert!(!fence.is_current(before));
+        readers.refresh_queries(&BTreeMap::new(), ComponentUpdateData::Preserve)?;
+        readers.finish_update();
+        let (after, _) = fence.enter()?;
+        assert_ne!(before, after);
+        assert!(fence.is_current(after));
+        readers.retire();
+        readers.finish_update();
+        assert!(matches!(fence.enter(), Err(OutputReadError::Retired)));
+        Ok(())
+    }
 
     struct Scenario {
         reply: Vec<u8>,
@@ -769,7 +898,7 @@ mod tests {
                 handle,
                 context: Context {
                     endpoint: OutputEndpoint::new(
-                        ComponentId::try_new("component").unwrap(),
+                        ComponentId::try_new("0a1c171a-8016-56dc-957c-1ccd5c7e2cf3").unwrap(),
                         PortId::try_new("out").unwrap(),
                     ),
                     capability,
@@ -783,10 +912,16 @@ mod tests {
     }
 
     pub(super) fn producer(component: &str) -> GraphProducerIdentity {
+        let owner = ComponentId::try_new("b74c84a1-457f-5f17-8e90-599086fc4c64").unwrap();
+        let component_id = if component == "component" {
+            ComponentId::try_new("0a1c171a-8016-56dc-957c-1ccd5c7e2cf3").unwrap()
+        } else {
+            ComponentId::derive_owned(&owner, component).unwrap()
+        };
         GraphProducerIdentity::new(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new(component).unwrap(),
+            component_id,
             StreamId::try_new(format!("{component}/out")).unwrap(),
             true,
         )
@@ -799,7 +934,7 @@ mod tests {
             reader,
             observations: false,
             recovery_views: false,
-            description: drasi_computation_contracts::QueryDescription {
+            description: RwLock::new(drasi_computation_contracts::QueryDescription {
                 graph_id: "graph".into(),
                 query: "MATCH (n) RETURN n".into(),
                 language: ComputationQueryLanguage::Cypher,
@@ -810,7 +945,7 @@ mod tests {
                 auto_reset: false,
                 volatile: false,
                 configuration_hash: 17,
-            },
+            }),
         }
     }
 
@@ -833,8 +968,8 @@ mod tests {
                 },
             ],
             QueryOutputMetadata {
-                query_id: component.to_string(),
-                source_id: None,
+                query_id: component.clone(),
+                input_origin: None,
                 timestamp: "2026-01-01T00:00:00Z".parse().unwrap(),
                 metadata: Default::default(),
                 profiling: None,

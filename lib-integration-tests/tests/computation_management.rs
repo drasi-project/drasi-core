@@ -16,6 +16,199 @@ use drasi_lib::{computation::v1::*, management::*, DrasiLib};
 use drasi_state_store_redb::{ConfigurationStoreOptions, RedbConfigurationStore};
 use serde_json::{json, Value};
 
+struct IdleQueryInput(ComponentDescriptor);
+
+#[async_trait]
+impl ComputationComponent for IdleQueryInput {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.0
+    }
+    async fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSource for IdleQueryInput {
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        std::future::pending().await
+    }
+}
+
+struct IdleQueryInputFactory(FactoryDescriptor);
+
+#[async_trait]
+impl ComponentFactory for IdleQueryInputFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.0
+    }
+    fn validate(&self, specification: &ComponentSpecification) -> Result<()> {
+        anyhow::ensure!(
+            specification.descriptor.ports().len() == 1,
+            "expected one query input"
+        );
+        Ok(())
+    }
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        Ok(ConstructedComponent::source(Box::new(IdleQueryInput(
+            context.specification.descriptor.clone(),
+        ))))
+    }
+}
+
+#[tokio::test]
+async fn durable_query_semantic_update_completes_and_reopens_without_repeating_reset() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("config.redb"),
+        [27; 32],
+    )?);
+    let input = Arc::new(IdleQueryInputFactory(FactoryDescriptor {
+        implementation: ImplementationIdentity::try_new("test/durable-query-input", "1")?,
+        role: ComponentRole::Source,
+        configuration_version: 1,
+        configuration: ConfigurationSchema::default(),
+        dependencies: BTreeMap::new(),
+    }));
+    let open = || -> Result<_> {
+        let mut factories = FactoryRegistry::standard();
+        factories.register(input.clone())?;
+        Ok(lib_integration_tests::query_builder()
+            .with_id("durable-query-update")
+            .with_component_factories(factories)
+            .with_configuration_store(store.clone())
+            .with_default_index_provider(
+                "rocks",
+                Arc::new(drasi_index_rocksdb::RocksDbIndexProvider::new(
+                    directory.path().join("indexes"),
+                    false,
+                    false,
+                )),
+            ))
+    };
+    let core = open()?.build().await?;
+    let graph_id = core.desired_configuration()?.desired.topology.graph_id;
+    let construction = input.clone();
+    let receipt = core
+        .create_managed_components(0, "input", move |ids| {
+            (|| -> Result<_> {
+                let id = ids.allocate()?;
+                let descriptor = ComponentDescriptor::try_new(
+                    id.clone(),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("out")?,
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?;
+                let graph = ComputationGraph::builder(graph_id)
+                    .component(
+                        component_name("source"),
+                        ComponentSpecification {
+                            descriptor,
+                            role: ComponentRole::Source,
+                            completion: None,
+                            implementation: construction.0.implementation.clone(),
+                            configuration_version: 1,
+                            configuration: BTreeMap::new(),
+                            dependencies: BTreeMap::new(),
+                        },
+                        construction,
+                    )
+                    .bind_stream(
+                        Endpoint::new(id, PortId::try_new("out")?),
+                        StreamId::try_new("source/out")?,
+                    )
+                    .build()?;
+                Ok(graph.snapshot().select(GraphSelection::All)?)
+            })()
+            .map_err(|source| GraphError::ReferenceResolution { source })
+        })
+        .await?;
+    assert!(receipt.durable);
+    let source = receipt
+        .creation
+        .as_ref()
+        .expect("input creation")
+        .components[0]
+        .id
+        .clone();
+    let mut query = drasi_lib::Query::cypher(component_name("query"))
+        .query("MATCH (n:Item) RETURN n.value AS value")
+        .from_input_by_id(source)
+        .enable_bootstrap(false)
+        .with_storage_backend(drasi_lib::StorageBackendRef::Named("rocks".into()))
+        .build()?;
+    let receipt = core
+        .create_managed_ordinary_component(
+            receipt.revision,
+            "query",
+            OrdinaryComponentDefinition::query(query.clone())?,
+        )
+        .await?;
+    assert!(receipt.durable);
+    core.start().await?;
+    core.component_by_name(&component_name("query"))?
+        .wait_started()
+        .await?;
+    let previous = core
+        .query_manager()
+        .get_query_instance_by_name(&component_name("query"))
+        .await?
+        .fetch_snapshot()
+        .await?;
+    query.query = "MATCH (n:Item) WHERE n.value > 1 RETURN n.value AS value".into();
+    core.update_query_by_name(&component_name("query"), query)
+        .await?;
+    core.component_by_name(&component_name("query"))?
+        .wait_started()
+        .await?;
+    let reset = core
+        .query_manager()
+        .get_query_instance_by_name(&component_name("query"))
+        .await?
+        .fetch_snapshot()
+        .await?;
+    assert_ne!(reset.config_hash, previous.config_hash);
+    assert!(reset.output_generation > previous.output_generation);
+    assert!(core.desired_configuration()?.pending_updates.is_empty());
+    core.shutdown().await?;
+    let reopened = open()?.build().await?;
+    assert!(reopened.desired_configuration()?.pending_updates.is_empty());
+    reopened.start().await?;
+    reopened
+        .component_by_name(&component_name("query"))?
+        .wait_started()
+        .await?;
+    let recovered = reopened
+        .query_manager()
+        .get_query_instance_by_name(&component_name("query"))
+        .await?
+        .fetch_snapshot()
+        .await?;
+    assert_eq!(recovered.config_hash, reset.config_hash);
+    assert_eq!(recovered.output_generation, reset.output_generation);
+    assert_eq!(recovered.as_of_sequence, reset.as_of_sequence);
+    reopened.shutdown().await?;
+    Ok(())
+}
+
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
+fn component_name(name: &str) -> ComponentName {
+    ComponentName::try_new(name).expect("component name")
+}
+
 struct Service {
     descriptor: ComponentDescriptor,
     config: Value,
@@ -92,6 +285,39 @@ impl ComponentFactory for Factory {
     fn validate(&self, _: &ComponentSpecification) -> Result<()> {
         Ok(())
     }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current.implementation == self.descriptor.implementation
+                && current.configuration_version == self.descriptor.configuration_version
+                && current.role == self.descriptor.role,
+            "unsupported managed-service fixture implementation"
+        );
+        for specification in [current, proposed] {
+            anyhow::ensure!(
+                matches!(
+                    specification.configuration.get("fail"),
+                    Some(ConfigurationValue::Literal(value)) if value.is_boolean()
+                ),
+                "managed-service fixture requires a literal fail flag"
+            );
+        }
+        let mut expected = current.clone();
+        expected
+            .configuration
+            .insert("fail".into(), proposed.configuration["fail"].clone());
+        anyhow::ensure!(
+            &expected == proposed,
+            "managed-service fixture updates may only change the fail flag"
+        );
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
     async fn create(
         &self,
         context: ConstructionContext,
@@ -125,7 +351,7 @@ fn registry(created: Arc<AtomicUsize>) -> FactoryRegistry {
     factories
 }
 
-fn desired(values: &[(&str, bool)]) -> DesiredInstance {
+fn desired(values: &[(&str, u128, bool)]) -> DesiredInstance {
     let mut definition = ComputationGraph::empty("application")
         .expect("empty graph")
         .snapshot()
@@ -133,13 +359,11 @@ fn desired(values: &[(&str, bool)]) -> DesiredInstance {
         .expect("complete topology");
     definition.components = values
         .iter()
-        .map(|(id, fail)| {
-            let descriptor = ComponentDescriptor::try_new(
-                ComponentId::try_new(*id).expect("component ID"),
-                Vec::new(),
-            )
-            .expect("service descriptor");
+        .map(|(name, id, fail)| {
+            let descriptor = ComponentDescriptor::try_new(component_id(*id), Vec::new())
+                .expect("service descriptor");
             DesiredComponent {
+                name: component_name(name),
                 descriptor: descriptor.clone(),
                 role: ComponentRole::Service,
                 completion: None,
@@ -202,12 +426,12 @@ async fn managed_housekeeping_preserves_nonexpiring_defaults_and_rejects_expired
         let core = builder.build().await?;
         let first = core.new_configuration_request_id().await?;
         let first_receipt = core
-            .apply_desired_state(0, &first, desired(&[("a", false)]))
+            .apply_desired_state(0, &first, desired(&[("a", 1, false)]))
             .await?;
         core.snapshot_desired_configuration("first").await?;
         let second = core.new_configuration_request_id().await?;
         let second_receipt = core
-            .apply_desired_state(first_receipt.revision, &second, desired(&[("b", false)]))
+            .apply_desired_state(first_receipt.revision, &second, desired(&[("b", 2, false)]))
             .await?;
         core.snapshot_desired_configuration("second").await?;
         let page = core
@@ -244,7 +468,7 @@ async fn managed_housekeeping_preserves_nonexpiring_defaults_and_rejects_expired
                 .apply_desired_state(
                     second_receipt.revision,
                     &first,
-                    desired(&[("forbidden", false)])
+                    desired(&[("forbidden", 4, false)])
                 )
                 .await
                 .is_err());
@@ -260,7 +484,7 @@ async fn managed_housekeeping_preserves_nonexpiring_defaults_and_rejects_expired
             );
         }
         let third_receipt = core
-            .apply_desired_state(second_receipt.revision, &third, desired(&[("c", false)]))
+            .apply_desired_state(second_receipt.revision, &third, desired(&[("c", 3, false)]))
             .await?;
         core.shutdown().await?;
         assert!(core.new_configuration_request_id().await.is_err());
@@ -296,18 +520,40 @@ async fn managed_housekeeping_preserves_nonexpiring_defaults_and_rejects_expired
 #[tokio::test]
 async fn persistence_is_optional_and_object_injection_remains_lightweight() -> Result<()> {
     let core = lib_integration_tests::query_builder().build().await?;
-    assert!(core.desired_configuration().is_err());
-    let descriptor = ComponentDescriptor::try_new(ComponentId::try_new("injected")?, vec![])?;
-    core.add_computation_component(ComponentAddition::new(ConstructedComponent::service(
-        Box::new(Service {
-            descriptor,
-            config: json!({}),
-            start_gate: None,
-        }),
-    )))
-    .await?
-    .wait_created()
-    .await?;
+    let before = core.desired_configuration()?;
+    assert_eq!(before.revision, 0);
+    assert!(!core.management_status().await?.persistent);
+    assert!(core.allow_external_component_ids());
+    let descriptor = ComponentDescriptor::try_new(
+        ComponentId::try_new("fa84ff1a-4350-5d0d-af4e-97a871e8afee")?,
+        vec![],
+    )?;
+    let injected = core
+        .add_computation_component(ComponentAddition::new(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-addition-1")
+                .expect("fixture component name"),
+            ConstructedComponent::service(Box::new(Service {
+                descriptor,
+                config: json!({}),
+                start_gate: None,
+            })),
+        ))
+        .await?;
+    injected.wait_created().await?;
+    let accepted = core.desired_configuration()?;
+    assert_eq!(accepted.revision, before.revision + 1);
+    assert_eq!(accepted.desired.topology.components.len(), 1);
+    assert_eq!(
+        accepted.desired.topology.components[0].descriptor.id(),
+        injected.id()
+    );
+    assert!(matches!(
+        &accepted.desired.topology.components[0].construction,
+        ComponentConstruction::External { .. }
+    ));
+    let status = core.management_status().await?;
+    assert!(!status.persistent);
+    assert!(status.converged(), "{status:?}");
     core.shutdown().await?;
     Ok(())
 }
@@ -321,14 +567,14 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
         .build()
         .await?;
     let first = core
-        .apply_desired_state(0, "first", desired(&[("a", false), ("b", false)]))
+        .apply_desired_state(0, "first", desired(&[("a", 1, false), ("b", 2, false)]))
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     let handle = core.computation_control()?;
     let before = handle.observed();
     assert_eq!(count.load(Ordering::SeqCst), 2);
     let repeated = core
-        .apply_desired_state(0, "first", desired(&[("a", false), ("b", false)]))
+        .apply_desired_state(0, "first", desired(&[("a", 1, false), ("b", 2, false)]))
         .await?;
     assert_eq!(first, repeated);
     assert!(core.reconcile_desired_state().await?.converged());
@@ -337,19 +583,16 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
         .apply_desired_state(
             first.revision,
             "second",
-            desired(&[("a", false), ("c", false)]),
+            desired(&[("a", 1, false), ("c", 3, false)]),
         )
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     assert_eq!(count.load(Ordering::SeqCst), 3);
     assert_eq!(
-        handle.observed().components[&ComponentId::try_new("a")?].generation,
-        before.components[&ComponentId::try_new("a")?].generation
+        handle.observed().components[&component_id(1)].generation,
+        before.components[&component_id(1)].generation
     );
-    assert!(!handle
-        .observed()
-        .components
-        .contains_key(&ComponentId::try_new("b")?));
+    assert!(!handle.observed().components.contains_key(&component_id(2)));
     assert!(core
         .apply_desired_state(0, "stale", DesiredInstance::default())
         .await
@@ -362,7 +605,7 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
         handle
             .set_lifecycle_policy(
                 handle.desired_snapshot().revision,
-                ComponentId::try_new("a")?,
+                component_id(1),
                 LifecyclePolicy { auto_start: false }
             )
             .await
@@ -375,14 +618,7 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     let remaining = core.computation_control()?.desired_snapshot();
-    assert!(!remaining
-        .nodes
-        .iter()
-        .any(|node| ["a", "b", "c"].contains(&node.descriptor.id().as_str())));
-    assert!(remaining
-        .nodes
-        .iter()
-        .any(|node| node.descriptor.id().as_str() == "__component_graph__"));
+    assert!(remaining.nodes.is_empty());
     core.shutdown().await?;
     Ok(())
 }
@@ -397,18 +633,20 @@ async fn redb_recovers_every_declaration_and_isolates_instances_snapshots_and_re
     let a = open(store.clone(), "a", count.clone()).await?;
     let b = open(store.clone(), "b", count.clone()).await?;
     assert!(open(store.clone(), "a", count.clone()).await.is_err());
-    a.apply_desired_state(0, "request", desired(&[("good", false), ("bad", true)]))
-        .await?;
+    a.apply_desired_state(
+        0,
+        "request",
+        desired(&[("good", 5, false), ("bad", 6, true)]),
+    )
+    .await?;
     let report = a.reconcile_desired_state().await?;
     assert!(!report.converged());
     let observed = a.computation_control()?.observed();
     assert_eq!(
-        observed.components[&ComponentId::try_new("bad")?].realization,
+        observed.components[&component_id(6)].realization,
         RealizationState::CreationFailed
     );
-    assert!(observed.components[&ComponentId::try_new("bad")?]
-        .failure
-        .is_some());
+    assert!(observed.components[&component_id(6)].failure.is_some());
     assert_eq!(
         a.desired_configuration()?.desired.topology.components.len(),
         2
@@ -417,7 +655,7 @@ async fn redb_recovers_every_declaration_and_isolates_instances_snapshots_and_re
         a.snapshot_desired_configuration("before").await?.revision,
         1
     );
-    b.apply_desired_state(0, "request", desired(&[("only-b", false)]))
+    b.apply_desired_state(0, "request", desired(&[("only-b", 7, false)]))
         .await?;
     b.reconcile_desired_state().await?;
     assert_eq!(
@@ -436,11 +674,17 @@ async fn redb_recovers_every_declaration_and_isolates_instances_snapshots_and_re
         1
     );
     assert_eq!(
-        restored.computation_control()?.observed().components.len(),
-        3
+        restored
+            .computation_control()?
+            .observed()
+            .components
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![component_id(5), component_id(6)]
     );
     restored
-        .apply_desired_state(1, "fix", desired(&[("good", false), ("bad", false)]))
+        .apply_desired_state(1, "fix", desired(&[("good", 5, false), ("bad", 6, false)]))
         .await?;
     assert!(restored.reconcile_desired_state().await?.converged());
     restored
@@ -465,19 +709,22 @@ async fn unavailable_factory_is_visible_and_can_be_registered_after_restart() ->
         directory.path().join("config.redb"),
         [7; 32],
     )?);
-    let core = lib_integration_tests::query_builder()
+    let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_configuration_store(store.clone())
         .build()
         .await?;
-    core.apply_desired_state(0, "add", desired(&[("missing", false)]))
+    core.apply_desired_state(0, "add", desired(&[("missing", 8, false)]))
         .await?;
     assert!(!core.reconcile_desired_state().await?.converged());
     assert!(core
         .computation_control()?
         .observed()
         .components
-        .contains_key(&ComponentId::try_new("missing")?));
-    let waiting = core.computation_component("missing")?;
+        .contains_key(&component_id(8)));
+    let waiting = core.component_by_name(
+        &drasi_core::ComponentName::try_new("missing").expect("fixture component name"),
+    )?;
     assert!(waiting
         .observed()?
         .waiting_for
@@ -489,18 +736,43 @@ async fn unavailable_factory_is_visible_and_can_be_registered_after_restart() ->
     tokio::time::timeout(Duration::from_secs(3), waiting.wait_created()).await??;
     assert!(core.management_status().await?.converged());
     assert_eq!(count.load(Ordering::SeqCst), 1);
-    assert!(core
+    let accepted = core.desired_configuration()?;
+    let error = core
         .add_query(
-            drasi_lib::Query::cypher("opaque-query")
-                .query("RETURN 1")
-                .build()
+            drasi_lib::Query::cypher(
+                drasi_core::ComponentName::try_new("opaque-query").expect("fixture component name"),
+            )
+            .query("RETURN 1")
+            .build()?,
         )
         .await
-        .is_err());
-    assert!(core
-        .add_components(ComponentBatch::builder().build()?)
+        .expect_err("query creation must require an explicitly installed query factory");
+    assert!(
+        error.downcast_ref::<QueryFactoryNotRegistered>().is_some(),
+        "{error:#}"
+    );
+    assert_eq!(core.desired_configuration()?, accepted);
+    let opaque = ComponentBatch::builder()
+        .service(
+            component_name("opaque-service"),
+            Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(component_id(9), Vec::new())?,
+                config: json!({}),
+                start_gate: None,
+            }),
+        )
+        .build()?;
+    let error = core
+        .add_components(opaque)
         .await
-        .is_err());
+        .expect_err("durable admission must reject actual process-local bindings");
+    assert!(
+        format!("{error:#}")
+            .contains("process-local bindings are not persistently reconstructible"),
+        "{error:#}"
+    );
+    assert_eq!(core.desired_configuration()?, accepted);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     core.shutdown().await?;
     Ok(())
 }
@@ -555,7 +827,7 @@ async fn restoration_preserves_intent_when_secret_provider_or_factory_versions_a
             directory.path().join("restore.redb"),
             [45; 32],
         )?);
-        let mut target = desired(&[("dependent", false)]);
+        let mut target = desired(&[("dependent", 9, false)]);
         let resource = ResourceId::try_new("secrets")?;
         target.topology.resources.push(ResourceSpecification {
             id: resource.clone(),
@@ -581,7 +853,7 @@ async fn restoration_preserves_intent_when_secret_provider_or_factory_versions_a
         );
         let target = target.normalized()?;
         let session = store.open("restore").await?;
-        session.commit(0, "original", &target).await?;
+        session.commit(0, "original", &target, None, &[]).await?;
         session.snapshot("original").await?;
         session.close().await?;
         let created = Arc::new(AtomicUsize::new(0));
@@ -610,7 +882,7 @@ async fn restoration_preserves_intent_when_secret_provider_or_factory_versions_a
             "{unavailable}"
         );
         let observed = core.computation_control()?.observed();
-        let dependent = &observed.components[&ComponentId::try_new("dependent")?];
+        let dependent = &observed.components[&component_id(9)];
         assert!(
             dependent.realization != RealizationState::Created,
             "{unavailable}: {dependent:?}"
@@ -659,9 +931,9 @@ async fn cancelled_restore_retains_lease_until_reconciliation_and_cleanup_finish
         directory.path().join("interrupted.redb"),
         [47; 32],
     )?);
-    let target = desired(&[("restoring", false)]).normalized()?;
+    let target = desired(&[("restoring", 10, false)]).normalized()?;
     let seed = store.open("restore").await?;
-    seed.commit(0, "original", &target).await?;
+    seed.commit(0, "original", &target, None, &[]).await?;
     seed.close().await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -682,14 +954,43 @@ async fn cancelled_restore_retains_lease_until_reconciliation_and_cleanup_finish
         }
     });
     tokio::time::timeout(Duration::from_secs(3), entered.notified()).await?;
-    restoring.abort();
-    assert!(restoring.await.err().unwrap().is_cancelled());
+    // Opening publishes declarations; cancel readiness, not the completed builder.
+    let restored = restoring.await??;
+    let held = restored.component_by_name(&component_name("restoring"))?;
+    assert_eq!(held.id(), &component_id(10));
+    let mut readiness = Box::pin(held.wait_created());
+    tokio::select! {
+        biased;
+        result = &mut readiness => anyhow::bail!(
+            "held restoration completed before the constructor was released: {result:?}"
+        ),
+        _ = std::future::ready(()) => {}
+    }
+    drop(readiness);
     assert!(matches!(
-        store.open("restore").await.err().unwrap().downcast_ref(),
+        store
+            .open("restore")
+            .await
+            .err()
+            .expect("cancelled readiness must retain the configuration owner")
+            .downcast_ref(),
         Some(ManagementError::AlreadyOwned(_))
     ));
     release.notify_one();
     let released = tokio::time::timeout(Duration::from_secs(5), async {
+        held.wait_created().await?;
+        assert!(restored.reconcile_desired_state().await?.converged());
+        assert_eq!(created.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            store
+                .open("restore")
+                .await
+                .err()
+                .expect("completed restoration must retain the owner until shutdown")
+                .downcast_ref(),
+            Some(ManagementError::AlreadyOwned(_))
+        ));
+        restored.shutdown().await?;
         loop {
             match store.open("restore").await {
                 Ok(session) => return Ok::<_, anyhow::Error>(session),
@@ -706,8 +1007,9 @@ async fn cancelled_restore_retains_lease_until_reconciliation_and_cleanup_finish
     assert_eq!(released.load().await?.desired, target);
     assert_eq!(released.receipt("original").await?.unwrap().revision, 1);
     released.close().await?;
-    let reopened = open(store, "restore", created).await?;
+    let reopened = open(store, "restore", created.clone()).await?;
     assert!(reopened.reconcile_desired_state().await?.converged());
+    assert_eq!(created.load(Ordering::Acquire), 2);
     reopened.shutdown().await?;
     Ok(())
 }
@@ -729,7 +1031,7 @@ async fn instance_stop_retains_pending_managed_construction(
         .build()
         .await?;
     core.start().await?;
-    core.apply_desired_state(0, "held-definition", desired(&[("held", false)]))
+    core.apply_desired_state(0, "held-definition", desired(&[("held", 11, false)]))
         .await?;
     tokio::time::timeout(Duration::from_secs(3), entered.notified()).await?;
     assert_eq!(core.desired_configuration()?.revision, 1);
@@ -749,10 +1051,42 @@ async fn instance_stop_retains_pending_managed_construction(
         assert!(status.applied, "{status:?}");
         assert!(status.error.is_none(), "{status:?}");
     }
-    core.start().await?;
-    core.computation_component("held")?.wait_started().await?;
-    assert_eq!(created.load(Ordering::Acquire), 1);
-    core.shutdown().await?;
+    let restart = async {
+        core.start().await?;
+        let held = core.component_by_name(
+            &drasi_core::ComponentName::try_new("held").expect("fixture component name"),
+        )?;
+        tokio::time::timeout(Duration::from_secs(3), held.wait_started())
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(error).context(format!(
+                    "held did not start after restart (reconcile_while_stopped={}): {:?}",
+                    reconcile_while_stopped,
+                    held.observed()
+                ))
+            })??;
+        let actual_created = created.load(Ordering::Acquire);
+        anyhow::ensure!(
+            actual_created == 1,
+            "expected one completed construction, got {actual_created}"
+        );
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    let mut failures = Vec::new();
+    if let Err(error) = restart {
+        failures.push(error);
+    }
+    if let Err(error) = core.shutdown().await {
+        failures.push(error.into());
+    }
+    if !failures.is_empty() {
+        return Err(drasi_lib::error::OperationFailures::new(
+            "managed construction restart failed",
+            failures,
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -784,17 +1118,14 @@ async fn instance_start_joins_managed_activation() -> Result<()> {
         .with_startup_timeout_secs(3)
         .build()
         .await?;
-    core.apply_desired_state(0, "create", desired(&[("held", false)]))
+    core.apply_desired_state(0, "create", desired(&[("held", 11, false)]))
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     let control = core.computation_control()?;
     let revision = control.desired_snapshot().revision;
     let activation = tokio::spawn(async move {
         control
-            .start_components(
-                revision,
-                GraphSelection::Exact(vec![ComponentId::try_new("held")?]),
-            )
+            .start_components(revision, GraphSelection::Exact(vec![component_id(11)]))
             .await
     });
     tokio::time::timeout(Duration::from_secs(3), gate.entered.notified()).await?;
@@ -839,7 +1170,7 @@ async fn stored_definitions_and_snapshots_are_encrypted_and_wrong_keys_fail() ->
     let path = directory.path().join("encrypted.redb");
     let store = RedbConfigurationStore::new(&path, [9; 32])?;
     let session = store.open("instance").await?;
-    let mut definition = desired(&[("credential-component", false)]);
+    let mut definition = desired(&[("credential-component", 12, false)]);
     let ComponentConstruction::Factory(spec) = &mut definition.topology.components[0].construction
     else {
         unreachable!()
@@ -849,7 +1180,7 @@ async fn stored_definitions_and_snapshots_are_encrypted_and_wrong_keys_fail() ->
         Arc::from("credential"),
         ConfigurationValue::Literal(json!(secret)),
     );
-    session.commit(0, "request", &definition).await?;
+    session.commit(0, "request", &definition, None, &[]).await?;
     session.snapshot("saved").await?;
     session.close().await?;
     drop((session, store));
@@ -866,13 +1197,16 @@ async fn concurrent_revision_writers_cannot_overwrite_each_other() -> Result<()>
     let directory = tempfile::tempdir()?;
     let store = RedbConfigurationStore::new(directory.path().join("config.redb"), [5; 32])?;
     let session = store.open("instance").await?;
-    let one = desired(&[("one", false)]);
-    let two = desired(&[("two", false)]);
-    let (a, b) = tokio::join!(session.commit(0, "a", &one), session.commit(0, "b", &two));
+    let one = desired(&[("one", 13, false)]);
+    let two = desired(&[("two", 14, false)]);
+    let (a, b) = tokio::join!(
+        session.commit(0, "a", &one, None, &[]),
+        session.commit(0, "b", &two, None, &[])
+    );
     assert_ne!(a.is_ok(), b.is_ok());
     assert_eq!(session.load().await?.revision, 1);
     session.close().await?;
-    assert!(session.commit(1, "closed", &one).await.is_err());
+    assert!(session.commit(1, "closed", &one, None, &[]).await.is_err());
     let again = store.open("instance").await?;
     assert_eq!(again.load().await?.revision, 1);
     again.close().await?;
@@ -889,9 +1223,11 @@ async fn factory_objects_in_persistent_builder_are_explicitly_rejected() -> Resu
     let result = lib_integration_tests::query_builder()
         .with_configuration_store(store)
         .with_query(
-            drasi_lib::Query::cypher("not-a-recipe")
-                .query("RETURN 1")
-                .build(),
+            drasi_lib::Query::cypher(
+                drasi_core::ComponentName::try_new("not-a-recipe").expect("fixture component name"),
+            )
+            .query("RETURN 1")
+            .build()?,
         )
         .build()
         .await;
@@ -934,6 +1270,10 @@ mod close_cancellation {
 
     #[async_trait]
     impl ConfigurationStore for Store {
+        fn guarantees(&self) -> ConfigurationStoreGuarantees {
+            self.inner.guarantees()
+        }
+
         async fn open(&self, id: &str) -> Result<Arc<dyn ConfigurationSession>> {
             Ok(Arc::new(Session {
                 inner: self.inner.open(id).await?,
@@ -953,8 +1293,20 @@ mod close_cancellation {
             expected: u64,
             request: &str,
             desired: &DesiredInstance,
+            creation: Option<&AcceptedComponentCreation>,
+            updates: &[AcceptedComponentUpdate],
         ) -> Result<AcceptanceReceipt> {
-            self.inner.commit(expected, request, desired).await
+            self.inner
+                .commit(expected, request, desired, creation, updates)
+                .await
+        }
+
+        async fn complete_updates(
+            &self,
+            expected: u64,
+            updates: &[ComponentUpdateCompletion],
+        ) -> Result<CommittedConfiguration> {
+            self.inner.complete_updates(expected, updates).await
         }
 
         async fn receipt(&self, request: &str) -> Result<Option<AcceptanceReceipt>> {
@@ -1028,7 +1380,7 @@ mod close_cancellation {
             let created = Arc::new(AtomicUsize::new(0));
             let sibling = open(inner.clone(), "sibling", created.clone()).await?;
             sibling
-                .apply_desired_state(0, "add", desired(&[("unrelated", false)]))
+                .apply_desired_state(0, "add", desired(&[("unrelated", 15, false)]))
                 .await?;
             assert!(sibling.reconcile_desired_state().await?.converged());
             assert_eq!(created.load(Ordering::SeqCst), 1);
@@ -1117,6 +1469,10 @@ mod restore_errors {
 
     #[async_trait]
     impl ConfigurationStore for RestoreStore {
+        fn guarantees(&self) -> ConfigurationStoreGuarantees {
+            ConfigurationStoreGuarantees::DURABLE
+        }
+
         async fn open(&self, _: &str) -> Result<Arc<dyn ConfigurationSession>> {
             Ok(self.0.clone())
         }
@@ -1131,13 +1487,35 @@ mod restore_errors {
                     anyhow::Error::new(StoreFailure::Load).context("reading stored definition")
                 );
             }
-            let mut configuration = CommittedConfiguration::default();
-            configuration.desired.topology.version = 0;
+            let mut configuration = CommittedConfiguration {
+                desired: desired(&[("invalid", 1, false)]),
+                ..CommittedConfiguration::default()
+            };
+            configuration
+                .desired
+                .topology
+                .readiness_required
+                .insert(component_id(2));
             Ok(configuration)
         }
 
-        async fn commit(&self, _: u64, _: &str, _: &DesiredInstance) -> Result<AcceptanceReceipt> {
+        async fn commit(
+            &self,
+            _: u64,
+            _: &str,
+            _: &DesiredInstance,
+            _: Option<&AcceptedComponentCreation>,
+            _: &[AcceptedComponentUpdate],
+        ) -> Result<AcceptanceReceipt> {
             panic!("failed restore must not commit configuration");
+        }
+
+        async fn complete_updates(
+            &self,
+            _: u64,
+            _: &[ComponentUpdateCompletion],
+        ) -> Result<CommittedConfiguration> {
+            panic!("failed restore must not complete updates");
         }
 
         async fn receipt(&self, _: &str) -> Result<Option<AcceptanceReceipt>> {
@@ -1185,7 +1563,7 @@ mod restore_errors {
                     assert!(
                         matches!(error.downcast_ref::<GraphError>(),
                             Some(GraphError::Topology { reason })
-                                if reason == "unsupported desired topology version"),
+                                if reason == "desired topology references undeclared nodes or resources"),
                         "original validation cause was lost: {error:#}"
                     );
                     assert!(
@@ -1241,6 +1619,10 @@ struct FaultSession {
 }
 #[async_trait]
 impl ConfigurationStore for FaultStore {
+    fn guarantees(&self) -> ConfigurationStoreGuarantees {
+        self.inner.guarantees()
+    }
+
     async fn open(&self, id: &str) -> Result<Arc<dyn ConfigurationSession>> {
         Ok(Arc::new(FaultSession {
             inner: self.inner.open(id).await?,
@@ -1286,6 +1668,8 @@ impl ConfigurationSession for FaultSession {
         expected: u64,
         id: &str,
         definition: &DesiredInstance,
+        creation: Option<&AcceptedComponentCreation>,
+        updates: &[AcceptedComponentUpdate],
     ) -> Result<AcceptanceReceipt> {
         let fault = self.fault.swap(0, Ordering::SeqCst);
         if fault == 1 {
@@ -1294,7 +1678,10 @@ impl ConfigurationSession for FaultSession {
         if fault == 4 {
             std::process::exit(70);
         }
-        let mut receipt = self.inner.commit(expected, id, definition).await?;
+        let mut receipt = self
+            .inner
+            .commit(expected, id, definition, creation, updates)
+            .await?;
         if fault == 2 {
             anyhow::bail!("injected lost response after commit");
         }
@@ -1312,6 +1699,13 @@ impl ConfigurationSession for FaultSession {
             _ => {}
         }
         Ok(receipt)
+    }
+    async fn complete_updates(
+        &self,
+        expected: u64,
+        updates: &[ComponentUpdateCompletion],
+    ) -> Result<CommittedConfiguration> {
+        self.inner.complete_updates(expected, updates).await
     }
     async fn receipt(&self, id: &str) -> Result<Option<AcceptanceReceipt>> {
         self.inner.receipt(id).await
@@ -1357,7 +1751,7 @@ async fn inconsistent_store_receipts_do_not_report_acceptance_or_start_construct
             .await?;
         fault.store(fault_value, Ordering::SeqCst);
         let outcome = core
-            .apply_desired_state(0, "requested", desired(&[("saved", false)]))
+            .apply_desired_state(0, "requested", desired(&[("saved", 16, false)]))
             .await;
         assert!(
             outcome.is_err(),
@@ -1399,7 +1793,7 @@ async fn regressed_changed_and_invalid_store_reads_cannot_replace_confirmed_stat
             }))
             .build()
             .await?;
-        core.apply_desired_state(0, "initial", desired(&[("saved", false)]))
+        core.apply_desired_state(0, "initial", desired(&[("saved", 16, false)]))
             .await?;
         assert!(core.reconcile_desired_state().await?.converged());
         let confirmed = core.desired_configuration()?;
@@ -1441,7 +1835,7 @@ async fn commit_failure_prevents_construction_and_lost_response_is_resolved_by_r
         .build()
         .await?;
     assert!(core
-        .apply_desired_state(0, "before", desired(&[("saved", false)]))
+        .apply_desired_state(0, "before", desired(&[("saved", 16, false)]))
         .await
         .is_err());
     assert_eq!(core.desired_configuration()?.revision, 0);
@@ -1449,7 +1843,7 @@ async fn commit_failure_prevents_construction_and_lost_response_is_resolved_by_r
     assert_eq!(count.load(Ordering::SeqCst), 0);
     fault.store(2, Ordering::SeqCst);
     assert!(core
-        .apply_desired_state(0, "after", desired(&[("saved", false)]))
+        .apply_desired_state(0, "after", desired(&[("saved", 16, false)]))
         .await
         .is_err());
     assert_eq!(
@@ -1465,7 +1859,7 @@ async fn commit_failure_prevents_construction_and_lost_response_is_resolved_by_r
     let restored = open(store, "fault", count.clone()).await?;
     assert_eq!(count.load(Ordering::SeqCst), 2);
     let receipt = restored
-        .apply_desired_state(0, "after", desired(&[("saved", false)]))
+        .apply_desired_state(0, "after", desired(&[("saved", 16, false)]))
         .await?;
     assert_eq!(receipt.revision, 1);
     assert!(receipt.durable);
@@ -1496,7 +1890,7 @@ async fn unavailable_commit_confirmation_is_explicit_and_reconcile_reloads_autho
         .await?;
     fault.store(5, Ordering::SeqCst);
     let error = core
-        .apply_desired_state(0, "uncertain", desired(&[("saved", false)]))
+        .apply_desired_state(0, "uncertain", desired(&[("saved", 16, false)]))
         .await
         .expect_err("the response and its confirmation are unavailable");
     assert!(
@@ -1549,7 +1943,7 @@ async fn management_crash_worker() -> Result<()> {
     core.apply_desired_state(
         0,
         "crash-request",
-        desired(&[("retained", false), ("failed", true)]),
+        desired(&[("retained", 17, false), ("failed", 18, true)]),
     )
     .await?;
     core.reconcile_desired_state().await?;
@@ -1587,7 +1981,8 @@ fn process_crashes_before_commit_after_commit_and_during_creation_recover_exact_
             .build()?
             .block_on(async {
                 let store = Arc::new(RedbConfigurationStore::new(&path, [31; 32])?);
-                let core = open(store, "crash", Arc::new(AtomicUsize::new(0))).await?;
+                let count = Arc::new(AtomicUsize::new(0));
+                let core = open(store, "crash", count.clone()).await?;
                 assert_eq!(
                     core.desired_configuration()?.revision,
                     if phase == 4 { 0 } else { 1 }
@@ -1601,11 +1996,39 @@ fn process_crashes_before_commit_after_commit_and_during_creation_recover_exact_
                         1
                     );
                     let graph = core.computation_control()?;
-                    assert_eq!(graph.observed().components.len(), 3);
+                    let retained = graph.component_handle_by_id(&component_id(17))?;
+                    tokio::time::timeout(Duration::from_secs(3), retained.wait_created()).await??;
+                    let failed = graph.component_handle_by_id(&component_id(18))?;
+                    let error = tokio::time::timeout(Duration::from_secs(3), failed.wait_created())
+                        .await?
+                        .expect_err("the retained bad definition must fail construction");
+                    assert!(
+                        matches!(&error, GraphError::Reported { .. })
+                            && format!("{error:#}").contains("deliberate constructor failure"),
+                        "{error:#}"
+                    );
+                    let observed = graph.observed();
                     assert_eq!(
-                        graph.observed().components[&ComponentId::try_new("failed")?].realization,
+                        observed.components.keys().cloned().collect::<Vec<_>>(),
+                        vec![component_id(17), component_id(18)]
+                    );
+                    assert_eq!(
+                        observed.components[&component_id(18)].realization,
                         RealizationState::CreationFailed
                     );
+                    assert_eq!(
+                        observed.components[&component_id(18)]
+                            .failure
+                            .as_ref()
+                            .expect("the deliberate constructor failure must remain visible")
+                            .disposition,
+                        FailureDisposition::Terminal
+                    );
+                    assert_eq!(count.load(Ordering::Acquire), 2);
+                } else {
+                    assert!(core.computation_control()?.observed().components.is_empty());
+                    assert!(core.configuration_receipt("crash-request").await?.is_none());
+                    assert_eq!(count.load(Ordering::Acquire), 0);
                 }
                 core.shutdown().await?;
                 anyhow::Ok(())
@@ -1646,39 +2069,78 @@ async fn blocked_creation_does_not_delay_durable_acceptance_and_cancelled_waits_
     )?);
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
+    let created = Arc::new(AtomicUsize::new(0));
     let mut factories = FactoryRegistry::standard();
     factories.register(Arc::new(BlockingFactory {
-        inner: Factory::new(Arc::new(AtomicUsize::new(0))),
+        inner: Factory::new(created.clone()),
         entered: entered.clone(),
         release: release.clone(),
     }))?;
     let core = lib_integration_tests::query_builder()
+        .with_id("pending")
         .with_component_factories(factories)
-        .with_configuration_store(store)
+        .with_configuration_store(store.clone())
         .build()
         .await?;
     let receipt = tokio::time::timeout(
         Duration::from_secs(2),
-        core.apply_desired_state(0, "pending", desired(&[("pending", false)])),
+        core.apply_desired_state(0, "pending", desired(&[("pending", 19, false)])),
     )
     .await??;
     assert!(receipt.durable);
     tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
     assert!(!core.management_status().await?.converged());
     assert_eq!(
-        core.computation_control()?.observed().components[&ComponentId::try_new("pending")?]
-            .realization,
+        core.computation_control()?.observed().components[&component_id(19)].realization,
         RealizationState::Creating
     );
+    let requested =
+        tokio::time::timeout(Duration::from_secs(2), core.reconcile_desired_state()).await??;
+    assert!(requested.applied, "{requested:?}");
+    assert!(!requested.converged(), "{requested:?}");
+    assert!(requested.error.is_none(), "{requested:?}");
+    let pending = core.component_by_name(&component_name("pending"))?;
+    assert_eq!(pending.id(), &component_id(19));
+    let generation = pending.generation();
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), core.reconcile_desired_state())
+        tokio::time::timeout(Duration::from_millis(20), pending.wait_created())
             .await
             .is_err()
     );
+    assert_eq!(created.load(Ordering::Acquire), 0);
+    assert_eq!(pending.observed()?.realization, RealizationState::Creating);
+    assert_eq!(
+        core.configuration_receipt("pending").await?,
+        Some(receipt.clone())
+    );
+    assert!(matches!(
+        store
+            .open("pending")
+            .await
+            .err()
+            .expect("cancelled readiness must not release the active configuration owner")
+            .downcast_ref(),
+        Some(ManagementError::AlreadyOwned(_))
+    ));
     release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), pending.wait_created()).await??;
     assert!(core.reconcile_desired_state().await?.converged());
-    assert_eq!(core.desired_configuration()?.revision, 1);
+    assert_eq!(
+        core.component_by_name(&component_name("pending"))?
+            .generation(),
+        generation
+    );
+    assert_eq!(created.load(Ordering::Acquire), 1);
+    assert_eq!(core.desired_configuration()?.revision, receipt.revision);
+    assert_eq!(
+        core.configuration_receipt("pending").await?,
+        Some(receipt.clone())
+    );
     core.shutdown().await?;
+    let released = store.open("pending").await?;
+    assert_eq!(released.load().await?.revision, receipt.revision);
+    assert_eq!(released.receipt("pending").await?, Some(receipt));
+    released.close().await?;
     Ok(())
 }
 
@@ -1708,6 +2170,26 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
     }
     #[async_trait]
     impl ManagementResourceResolver for Resources {
+        fn plan_update(
+            &self,
+            resource: &ResourceId,
+            previous: &DesiredTopology,
+            desired: &DesiredTopology,
+        ) -> Result<ComponentUpdatePlan> {
+            for topology in [previous, desired] {
+                anyhow::ensure!(
+                    topology.resource_configurations[resource]["value"]
+                        .as_u64()
+                        .is_some(),
+                    "provider owner updates require an unsigned value"
+                );
+            }
+            Ok(ComponentUpdatePlan {
+                mode: ComponentUpdateMode::Recreate,
+                data: ComponentUpdateData::Preserve,
+            })
+        }
+
         async fn resolve(
             &self,
             _: &str,
@@ -1752,7 +2234,7 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
         }))
         .build()
         .await?;
-    let mut first = desired(&[("component", false)]);
+    let mut first = desired(&[("component", 20, false)]);
     let resource = ResourceId::try_new("state")?;
     first.topology.resources.push(ResourceSpecification {
         id: resource.clone(),
@@ -1794,33 +2276,81 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
 
 #[tokio::test]
 async fn desired_changes_preserve_direct_components_and_reject_implicit_adoption() -> Result<()> {
+    let descriptor = ComponentDescriptor::try_new(
+        ComponentId::try_new("da14c9e0-dc5a-536d-a9a8-bb4a191950c2")?,
+        Vec::new(),
+    )?;
     let batch = ComponentBatch::builder()
-        .service(Box::new(Service {
-            descriptor: ComponentDescriptor::try_new(ComponentId::try_new("new")?, Vec::new())?,
-            config: json!({"direct":true}),
-            start_gate: None,
-        }))
+        .service(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-service-1")
+                .expect("fixture component name"),
+            Box::new(Service {
+                descriptor: descriptor.clone(),
+                config: json!({"direct":true}),
+                start_gate: None,
+            }),
+        )
         .build()?;
+    let count = Arc::new(AtomicUsize::new(0));
     let core = lib_integration_tests::query_builder()
-        .with_component_factories(registry(Arc::new(AtomicUsize::new(0))))
+        .with_component_factories(registry(count.clone()))
         .with_components(batch)
         .build()
         .await?;
-    assert!(core
-        .apply_desired_state(0, "adopt", desired(&[("new", false)]))
+    let before = core.desired_configuration()?;
+    assert_eq!(before.desired.topology.components.len(), 1);
+    assert_eq!(before.desired.topology.components[0].descriptor, descriptor);
+    let mut adoption = desired(&[("fixture-service-1", 21, false)]);
+    adoption.topology.components[0].descriptor = descriptor.clone();
+    let ComponentConstruction::Factory(specification) =
+        &mut adoption.topology.components[0].construction
+    else {
+        unreachable!()
+    };
+    specification.descriptor = descriptor;
+    let error = core
+        .apply_desired_state(before.revision, "adopt", adoption)
         .await
+        .expect_err("a factory recipe must not adopt a preconstructed object");
+    assert!(
+        error
+            .to_string()
+            .contains("external objects require explicit removal and addition"),
+        "{error:#}"
+    );
+    assert_eq!(core.desired_configuration()?, before);
+    assert!(core.configuration_receipt("adopt").await?.is_none());
+    assert_eq!(count.load(Ordering::Acquire), 0);
+    let direct = core.component_by_name(&component_name("fixture-service-1"))?;
+    direct.start().await?;
+    let generation = direct.generation();
+    let mut managed = before.desired.clone();
+    managed
+        .topology
+        .components
+        .extend(desired(&[("managed", 22, false)]).topology.components);
+    let accepted = core
+        .apply_desired_state(before.revision, "managed", managed)
+        .await?;
+    assert_eq!(accepted.revision, before.revision + 1);
+    assert!(core.reconcile_desired_state().await?.converged());
+    let removed = core
+        .apply_desired_state(accepted.revision, "remove-managed", before.desired)
+        .await?;
+    assert_eq!(removed.revision, accepted.revision + 1);
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(
+        core.component_by_name(&component_name("fixture-service-1"))?
+            .generation(),
+        generation
+    );
+    assert_eq!(direct.observed()?.lifecycle, ComponentLifecycle::Running);
+    assert_eq!(count.load(Ordering::Acquire), 1);
+    assert!(core
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("managed").expect("fixture component name")
+        )
         .is_err());
-    assert_eq!(core.desired_configuration()?.revision, 0);
-    core.computation_component("new")?.start().await?;
-    let generation = core.computation_component("new")?.generation();
-    core.apply_desired_state(0, "managed", desired(&[("managed", false)]))
-        .await?;
-    assert!(core.reconcile_desired_state().await?.converged());
-    core.apply_desired_state(1, "remove-managed", DesiredInstance::default())
-        .await?;
-    assert!(core.reconcile_desired_state().await?.converged());
-    assert_eq!(core.computation_component("new")?.generation(), generation);
-    assert!(core.computation_component("managed").is_err());
     core.shutdown().await?;
     Ok(())
 }
@@ -1863,25 +2393,39 @@ async fn pending_managed_construction_allows_unrelated_admission_and_component_s
         .build()
         .await?;
     core.start().await?;
-    core.apply_desired_state(0, "pending", desired(&[("pending", false)]))
+    let accepted = core
+        .apply_desired_state(0, "pending", desired(&[("pending", 19, false)]))
         .await?;
     tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
     let unrelated = tokio::time::timeout(
         Duration::from_secs(2),
-        core.add_computation_component(ComponentAddition::new(ConstructedComponent::service(
-            Box::new(Service {
+        core.add_computation_component(ComponentAddition::new(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-addition-2")
+                .expect("fixture component name"),
+            ConstructedComponent::service(Box::new(Service {
                 descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new("unrelated")?,
+                    ComponentId::try_new("34477fb3-de45-50e4-adb1-60b10b895741")?,
                     Vec::new(),
                 )?,
                 config: json!({"unrelated":true}),
                 start_gate: None,
-            }),
-        ))),
+            })),
+        )),
     )
     .await??;
+    let after_addition = core.desired_configuration()?;
+    assert_eq!(after_addition.revision, accepted.revision + 1);
+    assert!(after_addition
+        .desired
+        .topology
+        .components
+        .iter()
+        .any(|node| node.descriptor.id() == unrelated.id()));
+    assert_eq!(core.configuration_receipt("pending").await?, Some(accepted));
     tokio::time::timeout(Duration::from_secs(2), unrelated.wait_started()).await??;
-    let pending = core.computation_component("pending")?;
+    let pending = core.component_by_name(
+        &drasi_core::ComponentName::try_new("pending").expect("fixture component name"),
+    )?;
     tokio::time::timeout(Duration::from_secs(2), pending.stop()).await??;
     assert_eq!(
         created.load(Ordering::Acquire),
@@ -1889,8 +2433,15 @@ async fn pending_managed_construction_allows_unrelated_admission_and_component_s
         "cancelled construction must not complete"
     );
     assert_eq!(unrelated.observed()?.lifecycle, ComponentLifecycle::Running);
-    assert_eq!(core.desired_configuration()?.revision, 1);
-    assert!(core.computation_component("pending").is_ok());
+    assert_eq!(
+        core.desired_configuration()?.revision,
+        after_addition.revision
+    );
+    assert!(core
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("pending").expect("fixture component name")
+        )
+        .is_ok());
     tokio::time::timeout(Duration::from_secs(2), core.shutdown()).await??;
     Ok(())
 }

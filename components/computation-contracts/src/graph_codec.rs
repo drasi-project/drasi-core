@@ -120,7 +120,7 @@ enum GraphControl {
 #[serde(deny_unknown_fields)]
 pub struct LegacySourceMetadata {
     pub version: u32,
-    pub source_id: String,
+    pub source_id: ComponentId,
     pub sequence: Option<u64>,
     pub source_position: Option<Vec<u8>>,
     pub timestamp: DateTime<Utc>,
@@ -186,9 +186,9 @@ impl GraphChangeCodec {
         SCHEMA.get_or_init(|| Arc::new(Schema::new(
             SchemaDescriptor::try_new(
                 SchemaId::try_new("drasi.graph-change").expect("constant schema id"),
-                SchemaVersion::try_new(1).expect("constant schema version"),
-                "drasi-element-msgpack-v1",
-                Bytes::from_static(b"ElementImage-v1;ElementReference-msgpack-key;add/full;replace/full;patch/ElementPatch;delete/ElementBeforeImage-or-identity;event-local-graph-controls-v1"),
+                SchemaVersion::try_new(2).expect("constant schema version"),
+                "drasi-element-msgpack-v2",
+                Bytes::from_static(b"ElementImage-v2;ElementReference-namespace-msgpack-key;add/full;replace/full;patch/ElementPatch;delete/ElementBeforeImage-or-identity;event-local-graph-controls-v1"),
             ).expect("constant graph schema"),
             Arc::new(GraphValidator),
         ))).clone()

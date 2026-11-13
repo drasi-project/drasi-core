@@ -74,7 +74,7 @@ pub fn validate_query_recovery(
             ))
         })?;
         if envelope.system().stream() != cursor.producer().stream()
-            || metadata.query_id != identity.query_id()
+            || &metadata.query_id != identity.query_id()
         {
             return Err(QueryRecoveryError::OwnershipMismatch.into());
         }
@@ -215,7 +215,10 @@ mod tests {
 
     #[test]
     fn reset_owner_ignores_only_the_configuration_fingerprint() {
-        let id = drasi_computation_contracts::ComponentId::try_new("query").expect("query ID");
+        let id = drasi_computation_contracts::ComponentId::try_new(
+            "8d4b0698-33c7-54a1-8939-9d950171837f",
+        )
+        .expect("query ID");
         let expected =
             QueryRecoveryIdentity::try_new("graph", id.clone(), 1, None).expect("current identity");
         let previous =

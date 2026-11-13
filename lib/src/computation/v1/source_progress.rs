@@ -564,23 +564,44 @@ impl CommittedProgressPublication {
     /// Claim one fresh graph-provided progress view. It remains paired with one
     /// actual writer; matching graph/component names cannot create a second owner.
     pub fn for_reader(progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
-        Self::with_mode(progress, false, true)
+        Self::with_mode(progress, false, true, false)
     }
 
     /// Publish completed volatile work without claiming atomicity or restart durability.
     pub fn for_volatile_reader(progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
-        Self::with_mode(progress, true, false)
+        Self::with_mode(progress, true, false, false)
     }
 
     /// Publish only after the non-atomic publication protocol has completed.
     pub fn for_non_atomic_reader(progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
-        Self::with_mode(progress, false, false)
+        Self::with_mode(progress, false, false, false)
+    }
+
+    /// Reclaim an initialized progress view after the graph has retired its prior
+    /// component generation. The old writer must already be released.
+    pub fn for_replacement_reader(progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
+        Self::with_mode(progress, false, true, true)
+    }
+
+    /// Volatile equivalent of [`Self::for_replacement_reader`].
+    pub fn for_replacement_volatile_reader(
+        progress: Arc<QuerySourceProgress>,
+    ) -> anyhow::Result<Self> {
+        Self::with_mode(progress, true, false, true)
+    }
+
+    /// Non-atomic equivalent of [`Self::for_replacement_reader`].
+    pub fn for_replacement_non_atomic_reader(
+        progress: Arc<QuerySourceProgress>,
+    ) -> anyhow::Result<Self> {
+        Self::with_mode(progress, false, false, true)
     }
 
     fn with_mode(
         progress: Arc<QuerySourceProgress>,
         volatile: bool,
         atomic: bool,
+        replacement: bool,
     ) -> anyhow::Result<Self> {
         let mut writer = progress
             .committed_writer
@@ -591,13 +612,26 @@ impl CommittedProgressPublication {
             "query progress already has a committed writer"
         );
         let snapshot = progress.snapshot();
-        anyhow::ensure!(
-            !snapshot.ready
-                && !snapshot.recovered
-                && snapshot.failure.is_none()
-                && !progress.replay_only(),
-            "committed progress requires an uninitialized query progress view"
-        );
+        if replacement {
+            anyhow::ensure!(
+                !progress.replay_only(),
+                "replacement progress is replay-only"
+            );
+            progress.state.send_modify(|snapshot| {
+                let snapshot = Arc::make_mut(snapshot);
+                snapshot.ready = false;
+                snapshot.admitting = false;
+                snapshot.failure = None;
+            });
+        } else {
+            anyhow::ensure!(
+                !snapshot.ready
+                    && !snapshot.recovered
+                    && snapshot.failure.is_none()
+                    && !progress.replay_only(),
+                "committed progress requires an uninitialized query progress view"
+            );
+        }
         anyhow::ensure!(
             progress
                 .volatile_writer
@@ -747,6 +781,24 @@ impl CommittedProgressPublication {
         result
     }
 
+    /// Withdraw readiness without reporting a processing failure or clearing one.
+    ///
+    /// A retired generation cannot suspend its replacement.
+    pub fn suspend(&self, generation: u64) -> anyhow::Result<()> {
+        let state = self
+            .owner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("committed progress owner poisoned"))?;
+        if state.generation == generation {
+            self.progress.state.send_modify(|snapshot| {
+                let snapshot = Arc::make_mut(snapshot);
+                snapshot.ready = false;
+                snapshot.admitting = false;
+            });
+        }
+        Ok(())
+    }
+
     pub fn fail(
         &self,
         generation: u64,
@@ -770,6 +822,8 @@ impl CommittedProgressPublication {
         }
     }
 
+    /// Retire the publisher epoch after cleanup without losing durable cursors
+    /// that an upstream producer still needs while it stops.
     pub fn reset_after_close(&self) -> anyhow::Result<()> {
         let mut state = self
             .owner
@@ -784,7 +838,11 @@ impl CommittedProgressPublication {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("committed progress generation exhausted"))?;
         state.bootstrap_managed = false;
-        self.progress.publish(SourceProgressSnapshot::default());
+        if self.progress.snapshot().persistent {
+            self.progress.pending();
+        } else {
+            self.progress.publish(SourceProgressSnapshot::default());
+        }
         Ok(())
     }
 
@@ -838,7 +896,7 @@ mod tests {
     }
 
     fn owner() -> Arc<QuerySourceProgress> {
-        Arc::new(QuerySourceProgress::new("graph", ComponentId::try_new("query").unwrap()).unwrap())
+        Arc::new(QuerySourceProgress::new("graph", crate::test_helpers::component_id(46)).unwrap())
     }
 
     #[test]
@@ -851,6 +909,86 @@ mod tests {
         drop(publication);
         let replacement = CommittedProgressPublication::for_reader(reader.clone())?;
         assert!(Arc::ptr_eq(&reader, &replacement.reader()));
+        Ok(())
+    }
+
+    #[test]
+    fn committed_progress_suspension_preserves_state_and_fences_old_generations(
+    ) -> anyhow::Result<()> {
+        let reader = owner();
+        let publication = CommittedProgressPublication::for_reader(reader.clone())?;
+        let generation = publication.generation()?;
+        let mut snapshot = SourceProgressSnapshot {
+            ready: true,
+            admitting: true,
+            recovered: true,
+            bootstrap_complete: true,
+            reset_generation: 11,
+            ..Default::default()
+        };
+        snapshot.checkpoints.insert(
+            SourceProgressKey::Source(crate::test_helpers::component_id(77)),
+            SourceCheckpoint::new(7, None),
+        );
+        reader.publish(snapshot.clone());
+        publication.suspend(generation)?;
+        let suspended = reader.snapshot();
+        assert!(!suspended.ready && !suspended.admitting);
+        assert!(suspended.recovered && suspended.bootstrap_complete);
+        assert_eq!(suspended.checkpoints, snapshot.checkpoints);
+        assert_eq!(suspended.reset_generation, snapshot.reset_generation);
+        assert!(suspended.failure.is_none());
+
+        publication.fail(generation, None);
+        publication.suspend(generation)?;
+        assert!(reader.snapshot().failure.is_some());
+
+        publication.reset_after_close()?;
+        reader.publish(snapshot);
+        publication.suspend(generation)?;
+        assert!(reader.snapshot().ready && reader.snapshot().admitting);
+        Ok(())
+    }
+
+    #[test]
+    fn completed_close_retains_only_durable_progress_without_readiness() -> anyhow::Result<()> {
+        for persistent in [false, true] {
+            let reader = owner();
+            let publication = CommittedProgressPublication::for_reader(reader.clone())?;
+            let generation = publication.generation()?;
+            let mut snapshot = SourceProgressSnapshot {
+                ready: true,
+                admitting: true,
+                recovered: true,
+                bootstrap_complete: true,
+                persistent,
+                reset_generation: 11,
+                ..Default::default()
+            };
+            snapshot.checkpoints.insert(
+                SourceProgressKey::Source(crate::test_helpers::component_id(77)),
+                SourceCheckpoint::new(7, None),
+            );
+            reader.publish(snapshot.clone());
+            publication.reset_after_close()?;
+
+            let stopped = reader.snapshot();
+            assert!(!stopped.ready && !stopped.admitting && !stopped.recovered);
+            assert!(stopped.failure.is_none());
+            assert_eq!(stopped.persistent, persistent);
+            if persistent {
+                assert_eq!(stopped.checkpoints, snapshot.checkpoints);
+                assert_eq!(stopped.reset_generation, snapshot.reset_generation);
+                assert!(stopped.bootstrap_complete);
+            } else {
+                assert!(stopped.checkpoints.is_empty());
+                assert_eq!(stopped.reset_generation, 0);
+                assert!(!stopped.bootstrap_complete);
+            }
+            assert_ne!(publication.generation()?, generation);
+            publication.fail(generation, None);
+            assert!(reader.snapshot().failure.is_none());
+        }
         Ok(())
     }
 
@@ -869,6 +1007,36 @@ mod tests {
             ..Default::default()
         });
         assert!(CommittedProgressPublication::for_reader(reader).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn graph_replacement_reclaims_released_initialized_progress() -> anyhow::Result<()> {
+        let reader = owner();
+        let publication = CommittedProgressPublication::for_reader(reader.clone())?;
+        reader.publish(SourceProgressSnapshot {
+            ready: true,
+            admitting: true,
+            recovered: true,
+            bootstrap_complete: true,
+            ..Default::default()
+        });
+        reader.fail();
+        assert!(
+            CommittedProgressPublication::for_replacement_reader(reader.clone()).is_err(),
+            "the old generation still owns publication"
+        );
+        drop(publication);
+        let replacement = CommittedProgressPublication::for_replacement_reader(reader.clone())?;
+        assert!(!reader.snapshot().ready);
+        assert!(!reader.snapshot().admitting);
+        assert!(reader.snapshot().recovered);
+        assert!(reader.snapshot().failure.is_none());
+        drop(replacement);
+        assert!(
+            CommittedProgressPublication::for_reader(reader).is_err(),
+            "ordinary construction cannot adopt initialized progress"
+        );
         Ok(())
     }
 
@@ -931,7 +1099,12 @@ mod tests {
                 reset_generation: 7,
                 checkpoints: BTreeMap::from([
                     (
-                        SourceProgressKey::Source("source".into()),
+                        SourceProgressKey::Source(
+                            drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                        ),
                         SourceCheckpoint::new(0, Some(bytes::Bytes::new())),
                     ),
                     (
@@ -963,7 +1136,10 @@ mod tests {
             assert_eq!(snapshot.reset_generation, 7);
             assert_eq!(snapshot.checkpoints.len(), 2);
             assert_eq!(
-                snapshot.checkpoints[&SourceProgressKey::Source("source".into())],
+                snapshot.checkpoints[&SourceProgressKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID")
+                )],
                 SourceCheckpoint::new(0, Some(bytes::Bytes::new()))
             );
             assert_eq!(
@@ -1104,7 +1280,7 @@ mod tests {
     #[test]
     fn ranked_admission_is_fenced_until_all_resume_preparation_completes() {
         let progress =
-            QuerySourceProgress::new("graph", ComponentId::try_new("query").unwrap()).unwrap();
+            QuerySourceProgress::new("graph", crate::test_helpers::component_id(46)).unwrap();
         progress.publish(SourceProgressSnapshot {
             recovered: true,
             reset_generation: 4,

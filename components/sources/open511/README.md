@@ -33,6 +33,13 @@ The source uses a hybrid polling strategy:
 
 See [GRAPH_SCHEMA.md](GRAPH_SCHEMA.md) for the complete graph model reference.
 
+Startup prepares the HTTP client before reporting Running and spawning polling
+work; client setup failures are returned by `start()`. Polling then loads retained
+state and fetches events asynchronously. Stop waits for an in-flight HTTP poll
+to finish and retains its worker on timeout or cancellation, preventing restart
+until cleanup completes. Completed stop clears channel subscribers; each restart
+requires fresh subscriptions.
+
 ## Quick Start
 
 ```rust

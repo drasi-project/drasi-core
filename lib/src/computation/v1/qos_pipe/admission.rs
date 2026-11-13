@@ -531,7 +531,7 @@ mod tests {
         AdmissionOptions {
             construction_scope: "scope".into(),
             graph_id: "graph".into(),
-            component_id: ComponentId::try_new("source").unwrap(),
+            component_id: crate::test_helpers::component_id(1),
             failure_scope: FailureMode::ProcessRestart,
             max_producers: NonZeroUsize::new(producers).unwrap(),
             receipts_per_producer: NonZeroUsize::new(receipts).unwrap(),
@@ -564,7 +564,7 @@ mod tests {
         let identity = GraphProducerIdentity::new(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("source").unwrap(),
+            crate::test_helpers::component_id(1),
             definition.stream.clone(),
             true,
         )
@@ -574,7 +574,7 @@ mod tests {
                 let head = u64::MAX / 1024;
                 let last_position = u64::MAX - (1023 - index) * 16;
                 (
-                    ComponentId::try_new(format!("{index:0256}")).unwrap(),
+                    crate::test_helpers::component_id(u128::from(index) + 1),
                     Producer {
                         epoch: index + 1,
                         head,

@@ -18,6 +18,7 @@ im = { workspace = true }
 drasi-ffi-primitives = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-core = { workspace = true }
+drasi-core-types = { workspace = true }
 drasi-query-common = { workspace = true }
 drasi-plugin-sdk = { workspace = true, features = ["computation"] }
 drasi-computation-plugin-abi = { workspace = true }
@@ -31,6 +32,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rmp-serde = "1"
 log = "0.4"
 tracing = "0.1"
 tokio-stream = "0.1"
@@ -62,7 +64,6 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
-drasi-core-types = { workspace = true }
 drasi-computation-bootstrap-mssql = { workspace = true }
 drasi-computation-source-mssql = { workspace = true }
 drasi-computation-sink-storedproc-mssql = { workspace = true }
@@ -89,7 +90,6 @@ drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }
 tempfile = "3"
 libloading = "0.8"
-rmp-serde = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "process"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }

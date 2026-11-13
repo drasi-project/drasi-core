@@ -69,7 +69,8 @@ impl Drop for TrackedReceiver {
 #[derive(Clone)]
 pub struct MockSourceHandle {
     tx: mpsc::Sender<SourceChange>,
-    source_id: String,
+    source_id: drasi_core_types::ComponentId,
+    namespace: String,
     subscriptions: watch::Sender<SubscriptionCounts>,
 }
 
@@ -111,7 +112,7 @@ impl MockSourceHandle {
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(self.source_id.as_str()),
+                    namespace: Arc::from(self.namespace.as_str()),
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
@@ -125,7 +126,7 @@ impl MockSourceHandle {
 
     /// Get the source ID
     #[allow(dead_code)]
-    pub fn source_id(&self) -> &str {
+    pub fn source_id(&self) -> &drasi_core_types::ComponentId {
         &self.source_id
     }
 }
@@ -141,8 +142,9 @@ pub struct MockSource {
 
 impl MockSource {
     /// Create a new mock source and its handle
-    pub fn new(id: impl Into<String>) -> Result<(Self, MockSourceHandle)> {
-        let id = id.into();
+    pub fn new(namespace: impl Into<String>) -> Result<(Self, MockSourceHandle)> {
+        let namespace = namespace.into();
+        let id = drasi_core_types::ComponentId::generate();
         let params = SourceBaseParams::new(id.clone());
         let (app_tx, app_rx) = mpsc::channel(1000);
         let subscriptions = watch::channel(SubscriptionCounts::default()).0;
@@ -150,6 +152,7 @@ impl MockSource {
         let handle = MockSourceHandle {
             tx: app_tx.clone(),
             source_id: id.clone(),
+            namespace,
             subscriptions: subscriptions.clone(),
         };
 
@@ -203,7 +206,7 @@ impl MockSource {
 
 #[async_trait]
 impl Source for MockSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core_types::ComponentId {
         &self.base.id
     }
 
@@ -279,8 +282,8 @@ impl Source for MockSource {
         self
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(

@@ -17,6 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use drasi_core_types::{CheckpointKey, OutputPartition};
 use rocksdb::{Direction, IteratorMode, WriteBatchWithTransaction};
 
 use crate::{checkpoint::STREAM_STATE_CF, IndexDb, RocksDbSessionState};
@@ -49,7 +50,7 @@ fn checkpoint(
 fn checkpoints(
     entries: impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
     get_position: impl Fn(&str) -> Result<Option<Vec<u8>>, IndexError>,
-) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
     let mut result = HashMap::new();
     for entry in entries {
         let (key, value) = entry.map_err(IndexError::other)?;
@@ -59,7 +60,7 @@ fn checkpoints(
         let source =
             std::str::from_utf8(&key[SOURCE_SEQUENCE.len()..]).map_err(IndexError::other)?;
         result.insert(
-            source.to_owned(),
+            CheckpointKey::from_storage_key(source)?,
             SourceCheckpoint {
                 sequence: number(value.to_vec())?,
                 source_position: get_position(source)?.map(Bytes::from),
@@ -108,11 +109,11 @@ impl CheckpointStore for ComputationCheckpointStore {
 
     async fn stage_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
         sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
-        let source_id = source_id.to_owned();
+        let source_id = source_id.storage_key().map_err(IndexError::other)?;
         let position = source_position.cloned();
         let db = self.db.clone();
         let session = self.session.clone();
@@ -142,8 +143,9 @@ impl CheckpointStore for ComputationCheckpointStore {
 
     async fn read_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
     ) -> Result<Option<SourceCheckpoint>, IndexError> {
+        let source_id = source_id.storage_key().map_err(IndexError::other)?;
         let sequence = format!("{SOURCE_SEQUENCE}{source_id}");
         let position = format!("{SOURCE_POSITION}{source_id}");
         let db = self.db.clone();
@@ -177,7 +179,9 @@ impl CheckpointStore for ComputationCheckpointStore {
             .await
     }
 
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
         let db = self.db.clone();
         let session = self.session.clone();
         self.work
@@ -263,8 +267,13 @@ impl CheckpointStore for ComputationCheckpointStore {
         self.read_number("config_hash".to_owned()).await
     }
 
-    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
-        let key = format!("result_sequence:{query_id}");
+    async fn stage_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
+        let key = format!("result_sequence:{}", query_id.storage_key());
         let db = self.db.clone();
         let session = self.session.clone();
         self.work
@@ -281,8 +290,13 @@ impl CheckpointStore for ComputationCheckpointStore {
             .await
     }
 
-    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
-        let key = format!("result_sequence:{query_id}");
+    async fn write_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
+        let key = format!("result_sequence:{}", query_id.storage_key());
         let db = self.db.clone();
         self.work
             .run(move || {
@@ -295,17 +309,22 @@ impl CheckpointStore for ComputationCheckpointStore {
             .await
     }
 
-    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
-        self.read_number(format!("result_sequence:{query_id}"))
+    async fn read_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
+        self.read_number(format!("result_sequence:{}", query_id.storage_key()))
             .await
     }
 
     async fn write_output_generation(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         generation: u64,
     ) -> Result<(), IndexError> {
-        let key = format!("output_generation:{query_id}");
+        query_id.validate()?;
+        let key = format!("output_generation:{}", query_id.storage_key());
         let db = self.db.clone();
         self.work
             .run(move || {
@@ -318,8 +337,12 @@ impl CheckpointStore for ComputationCheckpointStore {
             .await
     }
 
-    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
-        self.read_number(format!("output_generation:{query_id}"))
+    async fn read_output_generation(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
+        self.read_number(format!("output_generation:{}", query_id.storage_key()))
             .await
     }
 }

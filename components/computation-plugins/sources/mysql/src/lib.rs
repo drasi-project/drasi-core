@@ -9,7 +9,7 @@ mod tests;
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
@@ -74,10 +74,7 @@ fn metadata(name: &str, output: MySqlOutput) -> FactoryMetadata {
         role: ComponentRole::Source,
         configuration_version: 1,
         configuration,
-        ports: MySqlSource::describe(ComponentId::try_new("mysql").expect("id"), output)
-            .expect("descriptor")
-            .ports()
-            .to_vec(),
+        ports: MySqlSource::ports(output).expect("constant port descriptor"),
         completion: None,
         capabilities: Capabilities::default(),
     }
@@ -331,6 +328,7 @@ impl Factory for MySqlSharedChangesFactory {
         metadata.configuration.fields.insert(
             "persistent".into(),
             drasi_computation_plugin_sdk::ConfigField {
+                constraint: None,
                 value_type: ConfigType::Boolean,
                 required: false,
                 secret: false,

@@ -23,8 +23,17 @@ use tokio::net::TcpListener;
 
 #[test]
 fn test_sse_builder_defaults() {
-    let reaction = SseReactionBuilder::new("test-reaction").build().unwrap();
-    assert_eq!(reaction.id(), "test-reaction");
+    let reaction = SseReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .build()
+    .unwrap();
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
     let props = reaction.properties();
     assert_eq!(
         props.get("host"),
@@ -38,34 +47,66 @@ fn test_sse_builder_defaults() {
 
 #[test]
 fn test_sse_builder_custom() {
-    let reaction = SseReaction::builder("test-reaction")
-        .with_host("localhost")
-        .with_port(9090)
-        .with_sse_path("/stream")
-        .with_queries(vec!["query1".to_string()])
-        .build()
-        .unwrap();
+    let reaction = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_host("localhost")
+    .with_port(9090)
+    .with_sse_path("/stream")
+    .with_queries_by_name(vec![
+        drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+    ])
+    .build()
+    .unwrap();
 
-    assert_eq!(reaction.id(), "test-reaction");
-    assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+        )]
+    );
 }
 
 #[test]
 fn test_sse_new_constructor() {
     let config = SseReactionConfig::default();
-    let reaction = SseReaction::new("test-reaction", vec!["query1".to_string()], config);
-    assert_eq!(reaction.id(), "test-reaction");
+    let reaction = SseReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        )],
+        config,
+    );
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
 }
 
 #[test]
 fn test_sse_builder_with_heartbeat() {
-    let reaction = SseReaction::builder("test-reaction")
-        .with_heartbeat_interval_ms(5000)
-        .build()
-        .unwrap();
+    let reaction = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_heartbeat_interval_ms(5000)
+    .build()
+    .unwrap();
 
     let props = reaction.properties();
-    assert_eq!(reaction.id(), "test-reaction");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
     assert_eq!(
         props.get("ssePath"),
         Some(&serde_json::Value::String("/events".to_string()))
@@ -74,29 +115,57 @@ fn test_sse_builder_with_heartbeat() {
 
 #[test]
 fn test_sse_builder_with_priority_queue() {
-    let reaction = SseReaction::builder("test-reaction")
-        .with_priority_queue_capacity(5000)
-        .build()
-        .unwrap();
+    let reaction = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_priority_queue_capacity(5000)
+    .build()
+    .unwrap();
 
-    assert_eq!(reaction.id(), "test-reaction");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
 }
 
 #[test]
 fn test_sse_builder_chaining() {
-    let reaction = SseReaction::builder("chained-reaction")
-        .with_host("127.0.0.1")
-        .with_port(3000)
-        .with_sse_path("/events/stream")
-        .with_query("query1")
-        .with_query("query2")
-        .with_heartbeat_interval_ms(10000)
-        .with_auto_start(false)
-        .build()
-        .unwrap();
+    let reaction = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000083")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(3000)
+    .with_sse_path("/events/stream")
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("query2").expect("fixture component name"),
+    )
+    .with_heartbeat_interval_ms(10000)
+    .with_auto_start(false)
+    .build()
+    .unwrap();
 
-    assert_eq!(reaction.id(), "chained-reaction");
-    assert_eq!(reaction.query_ids(), vec!["query1", "query2"]);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000083")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+            ),
+            drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("query2").expect("fixture component name")
+            )
+        ]
+    );
     assert!(!reaction.auto_start());
 
     let props = reaction.properties();
@@ -116,7 +185,12 @@ fn test_sse_builder_chaining() {
 
 #[test]
 fn test_sse_type_name() {
-    let reaction = SseReaction::builder("test").build().unwrap();
+    let reaction = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+            .expect("fixture UUID"),
+    )
+    .build()
+    .unwrap();
     assert_eq!(reaction.type_name(), "sse");
 }
 
@@ -142,14 +216,28 @@ fn test_sse_builder_with_routes() {
         }),
     };
 
-    let reaction = SseReaction::builder("test-reaction")
-        .with_query("query1")
-        .with_route("query1", query_config)
-        .build()
-        .unwrap();
+    let reaction = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+    )
+    .with_route("query1", query_config)
+    .build()
+    .unwrap();
 
-    assert_eq!(reaction.id(), "test-reaction");
-    assert_eq!(reaction.query_ids(), vec!["query1"]);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        reaction.query_inputs(),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("query1").expect("fixture component name")
+        )]
+    );
 }
 
 #[test]
@@ -241,14 +329,24 @@ fn test_sse_builder_with_default_template() {
         }),
     };
 
-    let reaction = SseReaction::builder("test-reaction")
-        .with_queries(vec!["query1".to_string(), "query2".to_string()])
-        .with_default_template(default_template)
-        .build()
-        .unwrap();
+    let reaction = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_queries_by_name(vec![
+        drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+        drasi_core::ComponentName::try_new("query2").expect("fixture component name"),
+    ])
+    .with_default_template(default_template)
+    .build()
+    .unwrap();
 
-    assert_eq!(reaction.id(), "test-reaction");
-    assert_eq!(reaction.query_ids().len(), 2);
+    assert_eq!(
+        reaction.id(),
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID")
+    );
+    assert_eq!(reaction.query_inputs().len(), 2);
 }
 
 #[test]
@@ -262,10 +360,15 @@ fn test_sse_builder_invalid_template_fails() {
         deleted: None,
     };
 
-    let result = SseReaction::builder("test-reaction")
-        .with_query("query1")
-        .with_default_template(invalid_template)
-        .build();
+    let result = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+    )
+    .with_default_template(invalid_template)
+    .build();
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Invalid"));
@@ -282,10 +385,15 @@ fn test_sse_builder_route_validation_passes() {
         deleted: None,
     };
 
-    let result = SseReaction::builder("test-reaction")
-        .with_query("query1")
-        .with_route("query1", route_config)
-        .build();
+    let result = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+    )
+    .with_route("query1", route_config)
+    .build();
 
     assert!(result.is_ok());
 }
@@ -301,10 +409,15 @@ fn test_sse_builder_route_validation_fails() {
         deleted: None,
     };
 
-    let result = SseReaction::builder("test-reaction")
-        .with_query("query1")
-        .with_route("query2", route_config)
-        .build();
+    let result = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
+    )
+    .with_route("query2", route_config)
+    .build();
 
     assert!(result.is_err());
     assert!(result
@@ -325,10 +438,15 @@ fn test_sse_builder_route_validation_dotted_notation() {
     };
 
     // Should match "source.query1" with route "query1"
-    let result = SseReaction::builder("test-reaction")
-        .with_query("source.query1")
-        .with_route("query1", route_config)
-        .build();
+    let result = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("source.query1").expect("fixture component name"),
+    )
+    .with_route("query1", route_config)
+    .build();
 
     assert!(result.is_ok());
 }
@@ -361,14 +479,19 @@ fn test_config_with_default_template_serialization() {
 
 #[test]
 fn test_builder_fallback_produces_camel_case() {
-    let reaction = SseReactionBuilder::new("sse-fallback")
-        .with_host("127.0.0.1")
-        .with_port(9090)
-        .with_sse_path("/custom-events")
-        .with_heartbeat_interval_ms(15000)
-        .with_queries(vec!["q1".to_string()])
-        .build()
-        .unwrap();
+    let reaction = SseReactionBuilder::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000084")
+            .expect("fixture UUID"),
+    )
+    .with_host("127.0.0.1")
+    .with_port(9090)
+    .with_sse_path("/custom-events")
+    .with_heartbeat_interval_ms(15000)
+    .with_queries_by_name(vec![
+        drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+    ])
+    .build()
+    .unwrap();
 
     let props = reaction.properties();
 
@@ -411,10 +534,13 @@ fn test_builder_fallback_produces_camel_case() {
 
 #[test]
 fn test_recovery_trait_defaults() {
-    let reaction = SseReaction::builder("test-sse")
-        .with_port(0)
-        .build()
-        .unwrap();
+    let reaction = SseReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000085")
+            .expect("fixture UUID"),
+    )
+    .with_port(0)
+    .build()
+    .unwrap();
 
     assert!(!reaction.is_durable());
     assert!(!reaction.needs_snapshot_on_fresh_start());
@@ -424,7 +550,9 @@ fn test_recovery_trait_defaults() {
     );
 }
 
-pub(crate) async fn sse_reaction_with_reserved_port(id: &str) -> (SseReaction, TcpListener) {
+pub(crate) async fn sse_reaction_with_reserved_port(
+    id: drasi_core::ComponentId,
+) -> (SseReaction, TcpListener) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let reaction = SseReaction::builder(id)
         .with_host("127.0.0.1")
@@ -436,13 +564,18 @@ pub(crate) async fn sse_reaction_with_reserved_port(id: &str) -> (SseReaction, T
 
 #[tokio::test]
 async fn test_sse_lifecycle_bind_failure_reports_error_without_running() {
-    let (reaction, occupied_listener) = sse_reaction_with_reserved_port("occupied-port").await;
+    let (reaction, occupied_listener) = sse_reaction_with_reserved_port(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a3")
+            .expect("fixture UUID"),
+    )
+    .await;
     let addr = occupied_listener.local_addr().unwrap();
     let (update_tx, mut updates) = tokio::sync::mpsc::channel(16);
     reaction
-        .initialize(ReactionRuntimeContext::new(
+        .bind_runtime_context(ReactionRuntimeContext::new(
             "test-instance",
-            reaction.id(),
+            reaction.id().clone(),
+            vec![],
             None,
             update_tx,
             None,
@@ -485,7 +618,11 @@ async fn test_sse_lifecycle_bind_failure_reports_error_without_running() {
 
 #[tokio::test]
 async fn test_sse_lifecycle_start_binds_before_returning() {
-    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("ready-listener").await;
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a4")
+            .expect("fixture UUID"),
+    )
+    .await;
     let addr = reserved_listener.local_addr().unwrap();
     drop(reserved_listener);
 
@@ -508,7 +645,11 @@ async fn test_sse_lifecycle_start_binds_before_returning() {
 
 #[tokio::test]
 async fn test_sse_lifecycle_stop_start_reuses_configured_port() {
-    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("restart-listener").await;
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a5")
+            .expect("fixture UUID"),
+    )
+    .await;
     let addr = reserved_listener.local_addr().unwrap();
     drop(reserved_listener);
     let client = reqwest::Client::new();
@@ -552,7 +693,11 @@ async fn test_sse_lifecycle_stop_start_reuses_configured_port() {
 
 #[tokio::test]
 async fn test_sse_lifecycle_concurrent_starts_only_start_once() {
-    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("concurrent-starts").await;
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a6")
+            .expect("fixture UUID"),
+    )
+    .await;
     drop(reserved_listener);
     let startup_gate = reaction.base.shutdown_tx.write().await;
     let first = reaction.start();
@@ -576,7 +721,11 @@ async fn test_sse_lifecycle_concurrent_starts_only_start_once() {
 
 #[tokio::test]
 async fn test_sse_lifecycle_stop_waits_for_in_flight_start() {
-    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("concurrent-stop").await;
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a7")
+            .expect("fixture UUID"),
+    )
+    .await;
     let addr = reserved_listener.local_addr().unwrap();
     drop(reserved_listener);
     let startup_gate = reaction.base.shutdown_tx.write().await;
@@ -604,7 +753,11 @@ async fn test_sse_lifecycle_stop_waits_for_in_flight_start() {
 
 #[tokio::test]
 async fn test_sse_lifecycle_repeated_start_preserves_running_server() {
-    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("repeated-start").await;
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003a8")
+            .expect("fixture UUID"),
+    )
+    .await;
     let addr = reserved_listener.local_addr().unwrap();
     drop(reserved_listener);
 

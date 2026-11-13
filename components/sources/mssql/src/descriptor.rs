@@ -215,7 +215,7 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         _auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -243,7 +243,7 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
             .await?
             .into();
 
-        let mut builder = MsSqlSourceBuilder::new(id)
+        let mut builder = MsSqlSourceBuilder::new(id.clone())
             .with_host(host)
             .with_port(port)
             .with_database(database)

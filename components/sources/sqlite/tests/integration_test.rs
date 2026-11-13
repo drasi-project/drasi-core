@@ -77,14 +77,14 @@ where
 
 async fn wait_for_query_results<F>(
     core: &Arc<DrasiLib>,
-    query_id: &str,
+    query_id: &drasi_core_types::ComponentName,
     description: &str,
     predicate: F,
 ) where
     F: Fn(&[serde_json::Value]) -> bool,
 {
     for _ in 0..20 {
-        let rows = core.get_query_results(query_id).await.unwrap();
+        let rows = core.get_query_results_by_name(query_id).await.unwrap();
         if predicate(&rows) {
             return;
         }
@@ -99,28 +99,45 @@ async fn sqlite_handle_create_update_delete_flow() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("handle.db");
 
-    let source = SqliteSource::builder("sqlite-handle-source")
-        .with_path(db_path.to_string_lossy().to_string())
-        .with_table_keys(vec![TableKeyConfig {
-            table: "sensors".to_string(),
-            key_columns: vec!["id".to_string()],
-        }])
-        .build()
-        .unwrap();
+    let source = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000161")
+            .expect("fixture UUID"),
+    )
+    .with_path(db_path.to_string_lossy().to_string())
+    .with_table_keys(vec![TableKeyConfig {
+        table: "sensors".to_string(),
+        key_columns: vec!["id".to_string()],
+    }])
+    .build()
+    .unwrap();
     let handle = source.handle();
 
-    let query = Query::cypher("sqlite-handle-query")
-        .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name, s.temp AS temp")
-        .from_input("sqlite-handle-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("sqlite-handle-query")
+            .expect("fixture component name"),
+    )
+    .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name, s.temp AS temp")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("sqlite-handle-source")
+            .expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, reaction_handle) = ApplicationReactionBuilder::new("sqlite-handle-reaction")
-        .with_query("sqlite-handle-query")
-        .build();
+    let (reaction, reaction_handle) = ApplicationReactionBuilder::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000162")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core_types::ComponentName::try_new("sqlite-handle-query")
+            .expect("fixture component name"),
+    )
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -134,9 +151,17 @@ async fn sqlite_handle_create_update_delete_flow() {
                     .clone(),
             )
             .with_id("sqlite-handle-core")
-            .with_source(source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("sqlite-handle-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core_types::ComponentName::try_new("application")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -200,32 +225,49 @@ async fn sqlite_rest_crud_and_batch_flow() {
     let db_path = temp_dir.path().join("rest.db");
     let rest_port = find_available_port().await;
 
-    let source = SqliteSource::builder("sqlite-rest-source")
-        .with_path(db_path.to_string_lossy().to_string())
-        .with_table_keys(vec![TableKeyConfig {
-            table: "sensors".to_string(),
-            key_columns: vec!["id".to_string()],
-        }])
-        .with_rest_api(RestApiConfig {
-            host: "127.0.0.1".to_string(), // DevSkim: ignore DS137138
-            port: rest_port,
-        })
-        .build()
-        .unwrap();
+    let source = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000163")
+            .expect("fixture UUID"),
+    )
+    .with_path(db_path.to_string_lossy().to_string())
+    .with_table_keys(vec![TableKeyConfig {
+        table: "sensors".to_string(),
+        key_columns: vec!["id".to_string()],
+    }])
+    .with_rest_api(RestApiConfig {
+        host: "127.0.0.1".to_string(), // DevSkim: ignore DS137138
+        port: rest_port,
+    })
+    .build()
+    .unwrap();
     let handle = source.handle();
 
-    let query = Query::cypher("sqlite-rest-query")
-        .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name, s.temp AS temp")
-        .from_input("sqlite-rest-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("sqlite-rest-query")
+            .expect("fixture component name"),
+    )
+    .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name, s.temp AS temp")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("sqlite-rest-source")
+            .expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, reaction_handle) = ApplicationReactionBuilder::new("sqlite-rest-reaction")
-        .with_query("sqlite-rest-query")
-        .build();
+    let (reaction, reaction_handle) = ApplicationReactionBuilder::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000164")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core_types::ComponentName::try_new("sqlite-rest-query")
+            .expect("fixture component name"),
+    )
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -239,9 +281,17 @@ async fn sqlite_rest_crud_and_batch_flow() {
                     .clone(),
             )
             .with_id("sqlite-rest-core")
-            .with_source(source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("sqlite-rest-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core_types::ComponentName::try_new("application")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
@@ -338,7 +388,8 @@ async fn sqlite_rest_crud_and_batch_flow() {
 
     wait_for_query_results(
         &core,
-        "sqlite-rest-query",
+        &drasi_core_types::ComponentName::try_new("sqlite-rest-query")
+            .expect("fixture component name"),
         "batch rows in query results",
         |rows| {
             let has_30 = rows
@@ -380,20 +431,25 @@ async fn sqlite_bootstrap_loads_existing_rows() {
         }])
         .build();
 
-    let source = SqliteSource::builder("sqlite-bootstrap-source")
-        .with_path(db_path.to_string_lossy().to_string())
-        .with_table_keys(vec![TableKeyConfig {
-            table: "sensors".to_string(),
-            key_columns: vec!["id".to_string()],
-        }])
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()
-        .unwrap();
+    let source = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000165")
+            .expect("fixture UUID"),
+    )
+    .with_path(db_path.to_string_lossy().to_string())
+    .with_table_keys(vec![TableKeyConfig {
+        table: "sensors".to_string(),
+        key_columns: vec!["id".to_string()],
+    }])
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()
+    .unwrap();
 
     let settings = SourceSubscriptionSettings {
-        source_id: "sqlite-bootstrap-source".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000165")
+            .expect("fixture UUID"),
         enable_bootstrap: true,
-        query_id: "sqlite-bootstrap-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000166")
+            .expect("fixture UUID"),
         nodes: HashSet::from(["sensors".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
@@ -401,6 +457,16 @@ async fn sqlite_bootstrap_loads_existing_rows() {
         request_position_handle: false,
     };
 
+    let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
+    source
+        .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
+            "sqlite-bootstrap-core",
+            source.id().clone(),
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
     let response = source.subscribe(settings).await.unwrap();
     let mut bootstrap_rx = response
         .bootstrap_receiver
@@ -410,7 +476,11 @@ async fn sqlite_bootstrap_loads_existing_rows() {
         .expect("timed out waiting for bootstrap event")
         .expect("bootstrap channel closed");
 
-    assert_eq!(bootstrap_event.source_id, "sqlite-bootstrap-source");
+    assert_eq!(
+        bootstrap_event.source_id,
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000165")
+            .expect("fixture UUID")
+    );
     match bootstrap_event.change {
         SourceChange::Insert {
             element: Element::Node { properties, .. },
@@ -428,42 +498,65 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("multi-table.db");
 
-    let source = SqliteSource::builder("sqlite-multi-source")
-        .with_path(db_path.to_string_lossy().to_string())
-        .with_table_keys(vec![
-            TableKeyConfig {
-                table: "sensors".to_string(),
-                key_columns: vec!["id".to_string()],
-            },
-            TableKeyConfig {
-                table: "devices".to_string(),
-                key_columns: vec!["id".to_string()],
-            },
-        ])
-        .build()
-        .unwrap();
+    let source = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000167")
+            .expect("fixture UUID"),
+    )
+    .with_path(db_path.to_string_lossy().to_string())
+    .with_table_keys(vec![
+        TableKeyConfig {
+            table: "sensors".to_string(),
+            key_columns: vec!["id".to_string()],
+        },
+        TableKeyConfig {
+            table: "devices".to_string(),
+            key_columns: vec!["id".to_string()],
+        },
+    ])
+    .build()
+    .unwrap();
     let handle = source.handle();
 
-    let sensors_query = Query::cypher("sqlite-sensors-query")
-        .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name")
-        .from_input("sqlite-multi-source")
-        .auto_start(true)
-        .build();
-    let devices_query = Query::cypher("sqlite-devices-query")
-        .query("MATCH (d:devices) RETURN d.id AS id, d.name AS name")
-        .from_input("sqlite-multi-source")
-        .auto_start(true)
-        .build();
+    let sensors_query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("sqlite-sensors-query")
+            .expect("fixture component name"),
+    )
+    .query("MATCH (s:sensors) RETURN s.id AS id, s.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("sqlite-multi-source")
+            .expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
+    let devices_query = Query::cypher(
+        drasi_core_types::ComponentName::try_new("sqlite-devices-query")
+            .expect("fixture component name"),
+    )
+    .query("MATCH (d:devices) RETURN d.id AS id, d.name AS name")
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("sqlite-multi-source")
+            .expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, reaction_handle) = ApplicationReactionBuilder::new("sqlite-multi-reaction")
-        .with_queries(vec![
-            "sqlite-sensors-query".to_string(),
-            "sqlite-devices-query".to_string(),
-        ])
-        .build();
+    let (reaction, reaction_handle) = ApplicationReactionBuilder::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000168")
+            .expect("fixture UUID"),
+    )
+    .with_queries_by_name(vec![
+        drasi_core_types::ComponentName::try_new("sqlite-sensors-query")
+            .expect("fixture component name"),
+        drasi_core_types::ComponentName::try_new("sqlite-devices-query")
+            .expect("fixture component name"),
+    ])
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -477,15 +570,37 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
                     .clone(),
             )
             .with_id("sqlite-multi-core")
-            .with_source(source)
+            .with_source(
+                drasi_core_types::ComponentName::try_new("sqlite-multi-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(sensors_query)
             .with_query(devices_query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core_types::ComponentName::try_new("application")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .unwrap(),
     );
 
+    let sensors_query_id = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("sqlite-sensors-query").unwrap(),
+        )
+        .unwrap()
+        .id()
+        .clone();
+    let devices_query_id = core
+        .component_by_name(
+            &drasi_core_types::ComponentName::try_new("sqlite-devices-query").unwrap(),
+        )
+        .unwrap()
+        .id()
+        .clone();
     core.start().await.unwrap();
     sleep(Duration::from_millis(250)).await;
 
@@ -516,8 +631,8 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
     let mut saw_device_query = false;
     for _ in 0..20 {
         if let Some(result) = subscription.recv().await {
-            match result.query_id.as_str() {
-                "sqlite-sensors-query" => {
+            match &result.query_id {
+                id if id == &sensors_query_id => {
                     saw_sensor_query = result.results.iter().any(|diff| match diff {
                         ResultDiff::Add { data, .. } => {
                             data.get("name") == Some(&json!("sensor-one"))
@@ -525,7 +640,7 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
                         _ => false,
                     });
                 }
-                "sqlite-devices-query" => {
+                id if id == &devices_query_id => {
                     saw_device_query = result.results.iter().any(|diff| match diff {
                         ResultDiff::Add { data, .. } => {
                             data.get("name") == Some(&json!("device-nine"))
@@ -559,14 +674,17 @@ async fn sqlite_emitted_changes_have_monotonic_sequence() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("sequence.db");
 
-    let source = SqliteSource::builder("sqlite-seq-source")
-        .with_path(db_path.to_string_lossy().to_string())
-        .with_table_keys(vec![TableKeyConfig {
-            table: "items".to_string(),
-            key_columns: vec!["id".to_string()],
-        }])
-        .build()
-        .unwrap();
+    let source = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000169")
+            .expect("fixture UUID"),
+    )
+    .with_path(db_path.to_string_lossy().to_string())
+    .with_table_keys(vec![TableKeyConfig {
+        table: "items".to_string(),
+        key_columns: vec!["id".to_string()],
+    }])
+    .build()
+    .unwrap();
     let handle = source.handle();
 
     source.start().await.unwrap();
@@ -574,9 +692,11 @@ async fn sqlite_emitted_changes_have_monotonic_sequence() {
 
     // Subscribe for live change events (no bootstrap).
     let settings = SourceSubscriptionSettings {
-        source_id: "sqlite-seq-source".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000169")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
-        query_id: "sqlite-seq-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000016a")
+            .expect("fixture UUID"),
         nodes: HashSet::from(["items".to_string()]),
         relations: HashSet::new(),
         resume_from: None,

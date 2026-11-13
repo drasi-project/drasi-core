@@ -120,7 +120,16 @@ where
             if let Some(span) = ctx.span(id) {
                 let info = SpanComponentInfo {
                     instance_id: visitor.instance_id.unwrap_or_default(),
-                    component_id: visitor.component_id.unwrap_or_default(),
+                    component_id: match visitor.component_id {
+                        Some(value) => match crate::ComponentId::try_new(value) {
+                            Ok(id) => Some(id),
+                            Err(error) => {
+                                tracing::warn!(parent: None, "Invalid plugin tracing component identity: {error}");
+                                None
+                            }
+                        },
+                        None => None,
+                    },
                     _component_type: visitor.component_type.unwrap_or_default(),
                 };
                 span.extensions_mut().insert(info);
@@ -167,11 +176,14 @@ where
         // 2. Tracing span hierarchy (set by .instrument(span) in background tasks)
         // 3. Empty (global fallback — logs still reach host but without routing)
         let (instance_id, component_id) = if let Some(inst_ctx) = current_instance_log_ctx() {
-            (inst_ctx.instance_id.clone(), inst_ctx.component_id.clone())
+            (
+                inst_ctx.instance_id.clone(),
+                Some(inst_ctx.component_id.clone()),
+            )
         } else if let Some(ref info) = span_info {
             (info.instance_id.clone(), info.component_id.clone())
         } else {
-            (String::new(), String::new())
+            (String::new(), None)
         };
 
         // Use per-instance callback if TLS context has one
@@ -184,7 +196,12 @@ where
                     message: FfiStr::from_str(&message),
                     timestamp_us: super::types::now_us(),
                     instance_id: FfiStr::from_str(&instance_id),
-                    component_id: FfiStr::from_str(&component_id),
+                    component_id: FfiStr::from_str(
+                        component_id
+                            .as_ref()
+                            .map(crate::ComponentId::as_str)
+                            .unwrap_or_default(),
+                    ),
                 };
                 cb(inst_ctx.log_ctx, &entry);
                 return;
@@ -206,7 +223,12 @@ where
             message: FfiStr::from_str(&message),
             timestamp_us: super::types::now_us(),
             instance_id: FfiStr::from_str(&instance_id),
-            component_id: FfiStr::from_str(&component_id),
+            component_id: FfiStr::from_str(
+                component_id
+                    .as_ref()
+                    .map(crate::ComponentId::as_str)
+                    .unwrap_or_default(),
+            ),
         };
         cb(ctx_ptr, &entry);
     }
@@ -216,7 +238,7 @@ where
 #[derive(Clone)]
 struct SpanComponentInfo {
     instance_id: String,
-    component_id: String,
+    component_id: Option<crate::ComponentId>,
     _component_type: String,
 }
 

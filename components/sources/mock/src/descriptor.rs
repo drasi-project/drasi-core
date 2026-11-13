@@ -95,7 +95,7 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
 
     async fn create_source(
         &self,
-        id: &str,
+        id: &drasi_lib::ComponentId,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
@@ -113,11 +113,11 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
 
         let interval_ms: u64 = mapper.resolve_typed(&dto.interval_ms).await?;
 
-        let mut source = MockSourceBuilder::new(id)
+        let mut source = MockSourceBuilder::new(id.clone())
             .with_data_type(data_type)
             .with_interval_ms(interval_ms)
             .with_auto_start(auto_start)
-            .with_bootstrap_provider(crate::bootstrap::MockBootstrapProvider::new(id))
+            .with_bootstrap_provider(crate::bootstrap::MockBootstrapProvider::new(id.clone()))
             .build()?;
 
         source.base.set_raw_config(config_json.clone());

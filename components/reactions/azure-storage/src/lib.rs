@@ -35,17 +35,17 @@ use std::collections::HashMap;
 ///
 /// Use [`AzureStorageReaction::builder`] as the entry point.
 pub struct AzureStorageReactionBuilder {
-    id: String,
-    queries: Vec<String>,
+    id: drasi_lib::ComponentId,
+    queries: Vec<drasi_lib::config::ComponentReference>,
     config: AzureStorageReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
 }
 
 impl AzureStorageReactionBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             queries: Vec::new(),
             config: AzureStorageReactionConfig::default(),
             priority_queue_capacity: None,
@@ -53,14 +53,43 @@ impl AzureStorageReactionBuilder {
         }
     }
 
-    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
+    /// Add a query input by its current name.
+    pub fn with_query_by_name(mut self, query_name: drasi_lib::ComponentName) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_name(query_name));
         self
     }
 
-    pub fn with_queries(mut self, query_ids: Vec<String>) -> Self {
-        self.queries = query_ids;
+    /// Add a query input by its immutable ID.
+    pub fn with_query_by_id(mut self, query_id: drasi_lib::ComponentId) -> Self {
+        self.queries
+            .push(drasi_lib::config::ComponentReference::by_id(query_id));
         self
+    }
+
+    /// Set explicit name or ID references for every query input.
+    pub fn with_query_inputs(mut self, inputs: Vec<drasi_lib::config::ComponentReference>) -> Self {
+        self.queries = inputs;
+        self
+    }
+
+    /// Set all query inputs by their current names.
+    pub fn with_queries_by_name(self, names: Vec<drasi_lib::ComponentName>) -> Self {
+        self.with_query_inputs(
+            names
+                .into_iter()
+                .map(drasi_lib::config::ComponentReference::by_name)
+                .collect(),
+        )
+    }
+
+    /// Set all query inputs by their immutable IDs.
+    pub fn with_queries_by_id(self, ids: Vec<drasi_lib::ComponentId>) -> Self {
+        self.with_query_inputs(
+            ids.into_iter()
+                .map(drasi_lib::config::ComponentReference::by_id)
+                .collect(),
+        )
     }
 
     pub fn with_account_name(mut self, account_name: impl Into<String>) -> Self {
@@ -146,27 +175,44 @@ mod tests {
 
     #[test]
     fn test_builder_defaults() {
-        let reaction = AzureStorageReactionBuilder::new("azure-test")
-            .with_account_name("account")
-            .with_access_key("key")
-            .build()
-            .expect("build should succeed");
-        assert_eq!(reaction.id(), "azure-test");
+        let reaction = AzureStorageReactionBuilder::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000072")
+                .expect("fixture UUID"),
+        )
+        .with_account_name("account")
+        .with_access_key("key")
+        .build()
+        .expect("build should succeed");
+        assert_eq!(
+            reaction.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000072")
+                .expect("fixture UUID")
+        );
     }
 
     #[test]
     fn test_builder_custom_values() {
-        let reaction = AzureStorageReaction::builder("azure-test")
-            .with_account_name("acct")
-            .with_access_key("key")
-            .with_target(StorageTarget::Queue {
-                queue_name: "events".to_string(),
-            })
-            .with_query("q1")
-            .build()
-            .expect("build should succeed");
+        let reaction = AzureStorageReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000072")
+                .expect("fixture UUID"),
+        )
+        .with_account_name("acct")
+        .with_access_key("key")
+        .with_target(StorageTarget::Queue {
+            queue_name: "events".to_string(),
+        })
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .build()
+        .expect("build should succeed");
 
-        assert_eq!(reaction.query_ids(), vec!["q1".to_string()]);
+        assert_eq!(
+            reaction.query_inputs(),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("q1").expect("fixture component name")
+            )]
+        );
         let props = reaction.properties();
         assert_eq!(
             props.get("account_name"),
@@ -176,9 +222,12 @@ mod tests {
 
     #[test]
     fn test_config_validation_fails_without_account() {
-        let result = AzureStorageReaction::builder("azure-test")
-            .with_access_key("key")
-            .build();
+        let result = AzureStorageReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000072")
+                .expect("fixture UUID"),
+        )
+        .with_access_key("key")
+        .build();
         assert!(result.is_err());
     }
 }

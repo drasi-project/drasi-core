@@ -163,7 +163,7 @@ impl SharedBinding {
             SharedMode::Transactions => Arc::new(TransactionPositionComparator),
         };
         let policy = Arc::new(InputPositionPolicy::new(
-            SourceProgressKey::Source(source.to_string()),
+            SourceProgressKey::Source(source.clone()),
             comparator,
         )?);
         Ok(Self {
@@ -296,7 +296,7 @@ fn fresh_group_mode(
             snapshot.consumers.values().all(|state| {
                 state
                     .checkpoints
-                    .contains_key(&SourceProgressKey::Source(source.to_string()))
+                    .contains_key(&SourceProgressKey::Source(source.clone()))
                     || (!state.bootstrap_complete
                         && !state.transport_sequences.contains_key(stream)
                         && !state

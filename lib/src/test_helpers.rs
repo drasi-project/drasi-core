@@ -20,17 +20,19 @@
 //! # Usage
 //!
 //! ```ignore
-//! use crate::test_helpers::wait_for_component_status;
+//! use crate::{ComponentName, test_helpers::wait_for_component_status_by_name};
 //!
 //! // Subscribe BEFORE triggering the action
 //! let mut event_rx = graph.subscribe().unwrap();
 //!
-//! manager.start_source("my-source").await.unwrap();
+//! let name = ComponentName::try_new("my-source").unwrap();
+//! manager.start_source_by_name(&name).await.unwrap();
 //!
 //! // Wait for the event (no sleep!)
-//! wait_for_component_status(
+//! wait_for_component_status_by_name(
 //!     &mut event_rx,
-//!     "my-source",
+//!     &graph,
+//!     &name,
 //!     ComponentStatus::Running,
 //!     Duration::from_secs(5),
 //! ).await;
@@ -42,15 +44,22 @@ use tokio::sync::broadcast;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 pub(crate) mod checkpoints;
+pub(crate) mod creation;
 pub(crate) mod managers;
 mod runtime_behavior;
+pub(crate) mod updates;
+
+/// Stable fixture UUID selected independently of the component's name.
+pub(crate) fn component_id(value: u128) -> crate::config::ComponentId {
+    crate::config::ComponentId::from_uuid(uuid::Uuid::from_u128(value))
+}
 
 pub(crate) fn native_query_value(
     value: &drasi_core::evaluation::variable_value::VariableValue,
 ) -> serde_json::Value {
     use crate::computation::v1::*;
     use drasi_core::evaluation::context::QueryPartEvaluationContext;
-    let query = ComponentId::try_new("codec-parity").unwrap();
+    let query = component_id(765);
     let envelope = QueryChangeCodec::encode_evaluation(
         None,
         &query,
@@ -61,8 +70,8 @@ pub(crate) fn native_query_value(
             row_signature: 1,
         }],
         QueryOutputMetadata {
-            query_id: query.to_string(),
-            source_id: None,
+            query_id: query.clone(),
+            input_origin: None,
             timestamp: chrono::Utc::now(),
             metadata: Default::default(),
             profiling: None,
@@ -85,19 +94,35 @@ pub(crate) fn native_query_value(
 /// # Panics
 ///
 /// Panics if the timeout expires before a matching event is received (test failure).
-pub async fn wait_for_component_status(
+pub async fn wait_for_component_status_by_id(
     event_rx: &mut broadcast::Receiver<ComponentEvent>,
-    component_id: &str,
+    component_id: &crate::ComponentId,
     expected_status: ComponentStatus,
     timeout: Duration,
 ) -> ComponentEvent {
     wait_for_event(
         event_rx,
-        |e| e.component_id == component_id && e.status == expected_status,
+        |e| &e.component_id == component_id && e.status == expected_status,
         timeout,
         &format!("component '{component_id}' to reach {expected_status:?}"),
     )
     .await
+}
+
+/// Resolve the declared name once, then wait on that component's actual UUID.
+pub async fn wait_for_component_status_by_name(
+    event_rx: &mut broadcast::Receiver<ComponentEvent>,
+    graph: &crate::component_graph::ComponentGraphView,
+    name: &crate::ComponentName,
+    expected_status: ComponentStatus,
+    timeout: Duration,
+) -> ComponentEvent {
+    let snapshot = graph.snapshot().await.expect("fixture graph snapshot");
+    let id = snapshot
+        .get_component_by_name(name)
+        .and_then(|component| component.id.component_id())
+        .expect("fixture component must be declared");
+    wait_for_component_status_by_id(event_rx, id, expected_status, timeout).await
 }
 
 /// Wait for ANY event matching a predicate on the broadcast channel.
@@ -143,11 +168,11 @@ pub async fn wait_for_event(
 /// Panics if the timeout expires before all targets are satisfied.
 pub async fn wait_for_all_statuses(
     event_rx: &mut broadcast::Receiver<ComponentEvent>,
-    targets: &[(&str, ComponentStatus)],
+    targets: &[(&crate::ComponentId, ComponentStatus)],
     timeout: Duration,
 ) {
-    let mut remaining: Vec<(String, ComponentStatus)> =
-        targets.iter().map(|(id, s)| (id.to_string(), *s)).collect();
+    let mut remaining: Vec<(crate::ComponentId, ComponentStatus)> =
+        targets.iter().map(|(id, s)| ((*id).clone(), *s)).collect();
 
     match tokio::time::timeout(timeout, async {
         while !remaining.is_empty() {
@@ -183,9 +208,9 @@ mod tests {
     use super::*;
     use crate::channels::ComponentType;
 
-    fn make_event(id: &str, status: ComponentStatus) -> ComponentEvent {
+    fn make_event(id: crate::ComponentId, status: ComponentStatus) -> ComponentEvent {
         ComponentEvent {
-            component_id: id.to_string(),
+            component_id: id,
             component_type: ComponentType::Source,
             status,
             timestamp: chrono::Utc::now(),
@@ -196,43 +221,93 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_component_status_immediate() {
         let (tx, mut rx) = broadcast::channel(16);
-        tx.send(make_event("s1", ComponentStatus::Running)).unwrap();
-        let event = wait_for_component_status(
+        tx.send(make_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+        ))
+        .unwrap();
+        let event = wait_for_component_status_by_id(
             &mut rx,
-            "s1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
             ComponentStatus::Running,
             Duration::from_secs(1),
         )
         .await;
-        assert_eq!(event.component_id, "s1");
+        assert_eq!(
+            event.component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn test_wait_for_component_status_skips_non_matching() {
         let (tx, mut rx) = broadcast::channel(16);
-        tx.send(make_event("s1", ComponentStatus::Starting))
-            .unwrap();
-        tx.send(make_event("s2", ComponentStatus::Running)).unwrap();
-        tx.send(make_event("s1", ComponentStatus::Running)).unwrap();
-        let event = wait_for_component_status(
+        tx.send(make_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            ComponentStatus::Starting,
+        ))
+        .unwrap();
+        tx.send(make_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000282")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+        ))
+        .unwrap();
+        tx.send(make_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+        ))
+        .unwrap();
+        let event = wait_for_component_status_by_id(
             &mut rx,
-            "s1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
             ComponentStatus::Running,
             Duration::from_secs(1),
         )
         .await;
-        assert_eq!(event.component_id, "s1");
+        assert_eq!(
+            event.component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID")
+        );
         assert_eq!(event.status, ComponentStatus::Running);
     }
 
     #[tokio::test]
     async fn test_wait_for_all_statuses() {
         let (tx, mut rx) = broadcast::channel(16);
-        tx.send(make_event("s1", ComponentStatus::Running)).unwrap();
-        tx.send(make_event("s2", ComponentStatus::Running)).unwrap();
+        tx.send(make_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+        ))
+        .unwrap();
+        tx.send(make_event(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000282")
+                .expect("fixture UUID"),
+            ComponentStatus::Running,
+        ))
+        .unwrap();
         wait_for_all_statuses(
             &mut rx,
-            &[("s1", ComponentStatus::Running), ("s2", ComponentStatus::Running)],
+            &[
+                (
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                        .expect("fixture UUID"),
+                    ComponentStatus::Running,
+                ),
+                (
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000282")
+                        .expect("fixture UUID"),
+                    ComponentStatus::Running,
+                ),
+            ],
             Duration::from_secs(1),
         )
         .await;
@@ -242,9 +317,10 @@ mod tests {
     #[should_panic(expected = "Timed out")]
     async fn test_wait_for_component_status_timeout() {
         let (_tx, mut rx) = broadcast::channel::<ComponentEvent>(16);
-        wait_for_component_status(
+        wait_for_component_status_by_id(
             &mut rx,
-            "s1",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
             ComponentStatus::Running,
             Duration::from_millis(50),
         )

@@ -40,7 +40,10 @@ fn fixtures() -> anyhow::Result<Vec<Fixture>> {
         Some(path) => workspace.join(path),
         None => workspace.join("target"),
     };
-    let path = target.join("debug/examples").join(format!(
+    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| target.join("debug/plugins"));
+    let path = directory.join("examples").join(format!(
         "{}native_activation_credentials{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX,
@@ -125,7 +128,7 @@ impl IdentityProvider for Provider {
 }
 
 fn id() -> ComponentId {
-    ComponentId::try_new("credential-component").unwrap()
+    ComponentId::try_new("6fd5211d-e0d8-537e-b2af-984dddc5e491").unwrap()
 }
 
 async fn refresh_and_failure_matrix() -> anyhow::Result<()> {
@@ -139,6 +142,7 @@ async fn refresh_and_failure_matrix() -> anyhow::Result<()> {
             configuration.clone(),
             provider.resource(),
         )?;
+        proxy.initialize().await?;
         assert_eq!(provider.reads.load(Ordering::SeqCst), 0);
         assert_eq!((fixture.probe)(fixture::CONSTRUCTED), 1);
         assert_eq!(proxy.configuration()?, configuration);
@@ -195,6 +199,7 @@ async fn refresh_and_failure_matrix() -> anyhow::Result<()> {
         literal["user"] = json!("literal-user");
         literal["password"] = json!("literal-password");
         let mut literal_proxy = factory.create_component(id(), literal.clone())?;
+        literal_proxy.initialize().await?;
         literal_proxy.start().await?;
         literal_proxy.stop().await?;
         literal_proxy.start().await?;
@@ -225,6 +230,7 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             provider.resource(),
         )?;
+        old.initialize().await?;
         let mut start = Box::pin(old.start());
         assert!(poll!(start.as_mut()).is_pending());
         assert_eq!(provider.active.load(Ordering::SeqCst), 1);
@@ -250,6 +256,7 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             provider.resource(),
         )?;
+        replacement.initialize().await?;
         replacement.start().await?;
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 1);
         assert_eq!((fixture.probe)(fixture::LAST_SECRET), 2);
@@ -259,6 +266,7 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
         configuration["mode"] = json!("pending");
         let mut pending =
             factory.create_component_with_identity(id(), configuration, provider.resource())?;
+        pending.initialize().await?;
         let inner = pending.inner.clone();
         let mut start = Box::pin(pending.start());
         assert!(poll!(start.as_mut()).is_pending());
@@ -284,6 +292,7 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             provider.resource(),
         )?;
+        replacement.initialize().await?;
         replacement.start().await?;
         replacement.stop().await?;
         assert_eq!((fixture.probe)(fixture::COMPLETED), 2);
@@ -292,6 +301,7 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
         configuration["mode"] = json!("failure");
         let mut failed =
             factory.create_component_with_identity(id(), configuration, provider.resource())?;
+        failed.initialize().await?;
         let error = failed.start().await.unwrap_err();
         assert!(!format!("{error:#}").contains("second-secret"));
         failed.stop().await?;
@@ -299,6 +309,7 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
         configuration["mode"] = json!("panic");
         let mut panicked =
             factory.create_component_with_identity(id(), configuration, provider.resource())?;
+        panicked.initialize().await?;
         assert!(format!("{:#}", panicked.start().await.unwrap_err()).contains("panicked"));
         assert_eq!((fixture.probe)(fixture::IN_FLIGHT), 0);
         panicked.stop().await?;
@@ -312,6 +323,7 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             provider.resource(),
         )?;
+        malformed.initialize().await?;
         let before = (fixture.probe)(fixture::AUTHENTICATED);
         for payload in [
             vec![0; sdk::activation_credentials::MAX_CREDENTIAL_PAYLOAD_BYTES + 1],
@@ -391,7 +403,7 @@ async fn graph_binding_matrix() -> anyhow::Result<()> {
             } else {
                 provider.resource().resource()
             };
-            let source_id = ComponentId::try_new("input")?;
+            let source_id = ComponentId::try_new("7cbaa829-f2f9-5db0-9662-76334affaae0")?;
             let out = PortId::try_new("out")?;
             let graph = ComputationGraph::builder("activation-identity-graph")
                 .declare_resource(ResourceSpecification {
@@ -401,16 +413,23 @@ async fn graph_binding_matrix() -> anyhow::Result<()> {
                     binding: "identity".into(),
                 })?
                 .provide_resource(resource_id, resource)?
-                .source(Box::new(PendingSource(ComponentDescriptor::try_new(
-                    source_id.clone(),
-                    vec![PortDescriptor::new(
-                        out.clone(),
-                        PortDirection::Output,
-                        GraphChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?)))
-                .component(specification, factory.clone())
+                .source(
+                    ComponentName::try_new("input")?,
+                    Box::new(PendingSource(ComponentDescriptor::try_new(
+                        source_id.clone(),
+                        vec![PortDescriptor::new(
+                            out.clone(),
+                            PortDirection::Output,
+                            GraphChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?)),
+                )
+                .component(
+                    ComponentName::try_new("credential-source")?,
+                    specification,
+                    factory.clone(),
+                )
                 .bind_stream(
                     Endpoint::new(source_id.clone(), out.clone()),
                     StreamId::try_new("input/out")?,
@@ -546,6 +565,7 @@ async fn configured_identity_matrix() -> anyhow::Result<()> {
             .get::<NativeIdentityResource>()?;
         let mut proxy =
             factory.create_component_with_identity(id(), fixture::configuration(), resource)?;
+        proxy.initialize().await?;
         assert_eq!(creations.load(Ordering::SeqCst), 0);
         assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
         proxy.start().await?;
@@ -578,6 +598,7 @@ async fn configured_identity_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             Arc::new(resource),
         )?;
+        proxy.initialize().await?;
         proxy.start().await?;
         proxy.stop().await?;
         assert_eq!(

@@ -44,6 +44,23 @@ fn factories() -> Vec<Arc<dyn ComponentFactory>> {
 
 const GRAPH: &str = "__drasi_lib_runtime__";
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+const SOURCE_ID: &str = "5c3e49cc-32f8-5b75-888d-30b75b572221";
+const OTHER_SOURCE_ID: &str = "9a7efebd-4820-5bea-9eb3-17e12e60b60a";
+const QUERY_ID: &str = "adda9b25-a196-524a-91e2-aa6dbefa64cf";
+const BRIDGE_OUT_ID: &str = "f8c0597d-9354-50fc-a539-cb3112cc80ba";
+const BRIDGE_IN_ID: &str = "4ea31e22-2f20-57c8-8999-97cd2abc9ed0";
+const INPUT_ID: &str = "bfd083e9-2185-528c-a8c4-a8aac2825309";
+const CAPTURE_ID: &str = "e1a8a858-9db4-5691-801c-34e7928690fe";
+
+fn fixture_component_id(component: &str) -> &str {
+    match component {
+        "bridge-out" => BRIDGE_OUT_ID,
+        "bridge-in" => BRIDGE_IN_ID,
+        "input" => INPUT_ID,
+        "capture" => CAPTURE_ID,
+        _ => component,
+    }
+}
 
 struct Directory(PathBuf);
 
@@ -76,7 +93,7 @@ fn query_dataset() -> String {
     drasi_computation_contracts::output_identity::dataset_namespace(
         "left",
         GRAPH,
-        &ComponentId::try_new("plant/query").expect("component ID"),
+        &ComponentId::try_new(QUERY_ID).expect("component ID"),
         &PortId::try_new("out").expect("port ID"),
     )
     .expect("output dataset namespace")
@@ -89,7 +106,7 @@ fn query_projector() -> ResultNodeProjector {
 fn namespace() -> Namespace {
     Namespace {
         version: 1,
-        source_prefixes: vec!["plant/".into(), query_dataset()],
+        source_prefixes: vec![SOURCE_ID.into(), query_dataset()],
     }
 }
 
@@ -103,10 +120,18 @@ fn configuration(
         link_id: "link".into(),
         sender_instance: "left".into(),
         receiver_instance: "right".into(),
-        sender_endpoint: "bridge-out".into(),
-        receiver_endpoint: "bridge-in".into(),
-        stream: if source { "receiver/in" } else { "sender/out" }.into(),
-        peer_stream: if source { "sender/out" } else { "receiver/in" }.into(),
+        sender_endpoint: drasi_core_types::ComponentId::try_new(
+            "f8c0597d-9354-50fc-a539-cb3112cc80ba",
+        )
+        .expect("fixture UUID"),
+        receiver_endpoint: drasi_core_types::ComponentId::try_new(
+            "4ea31e22-2f20-57c8-8999-97cd2abc9ed0",
+        )
+        .expect("fixture UUID"),
+        stream: StreamId::try_new(if source { "receiver/in" } else { "sender/out" })
+            .expect("fixture stream"),
+        peer_stream: StreamId::try_new(if source { "sender/out" } else { "receiver/in" })
+            .expect("fixture stream"),
         delivery: schema,
         profile,
         failure_scope: FailureMode::ProcessRestart,
@@ -142,7 +167,7 @@ fn graph_input(sequence: u64, value: i64) -> Result<ChangeEnvelope> {
         SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new("plant/db", "item"),
+                    reference: ElementReference::new(SOURCE_ID, "item"),
                     labels: Arc::from([Arc::from("Item")]),
                     effective_from: 1_700_000_000_000,
                 },
@@ -164,7 +189,7 @@ fn graph_input(sequence: u64, value: i64) -> Result<ChangeEnvelope> {
     );
     for value in [3, 8] {
         envelope.append_annotation(ContextEntry::try_new(
-            ComponentId::try_new("plant/source")?,
+            ComponentId::try_new("ac7d3d4f-bac0-52cc-add7-caa0dba38431")?,
             "application/duplicate",
             ContextValue::Unsigned(value),
         )?)?;
@@ -208,13 +233,19 @@ fn query_results(
 ) -> Result<ChangeEnvelope> {
     Ok(QueryChangeCodec::encode_evaluation(
         None,
-        &ComponentId::try_new("plant/query")?,
+        &ComponentId::try_new(QUERY_ID)?,
         SystemMetadata::new(StreamId::try_new("sender/out")?, sequence),
         projector,
         results,
         QueryOutputMetadata {
-            query_id: "plant/query".into(),
-            source_id: Some("plant/db".into()),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-0000000000b8",
+            )
+            .expect("fixture UUID"),
+            input_origin: Some(drasi_computation_contracts::QueryInputOrigin::Source(
+                drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                    .expect("fixture UUID"),
+            )),
             timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 123_456_789)
                 .expect("timestamp"),
             metadata: Default::default(),
@@ -230,7 +261,11 @@ fn transaction_input(sequence: u64) -> Result<ChangeEnvelope> {
         max_bytes: NonZeroUsize::new(65_536).expect("nonzero byte limit"),
         max_duration_ms: std::num::NonZeroU64::new(10_000).expect("nonzero duration limit"),
     };
-    let mut transaction = SourceTransactionBuilder::new("plant/db", limits)?;
+    let mut transaction = SourceTransactionBuilder::new(
+        &drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+            .expect("fixture UUID"),
+        limits,
+    )?;
     for value in [1, 2] {
         for change in GraphChangeCodec::decode_changes(&graph_input(sequence, value)?)? {
             transaction.push(change)?;
@@ -260,7 +295,13 @@ fn provider(path: &Path) -> Arc<dyn ComputationIndexProvider> {
 }
 
 async fn indexes(path: &Path) -> Result<ComputationIndexes> {
-    Ok(provider(path).create_indexes("mapping", "sender").await?)
+    Ok(provider(path)
+        .create_indexes(
+            "mapping",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b7")
+                .expect("fixture UUID"),
+        )
+        .await?)
 }
 
 fn envelope_codec() -> Result<EnvelopeCodec> {
@@ -287,8 +328,9 @@ async fn channel(
     subscriber: &str,
     capacity: usize,
 ) -> Result<Arc<QosChannel>> {
+    let component = ComponentId::try_new(fixture_component_id(component))?;
     let indexes = provider(path)
-        .create_indexes("bridge-test-ingress", component)
+        .create_indexes("bridge-test-ingress", &component)
         .await?;
     Ok(QosChannel::persistent_with_recovery(
         definition(stream, subscriber, capacity)?,
@@ -298,7 +340,7 @@ async fn channel(
         QosRecoveryOptions::Admission(AdmissionOptions {
             construction_scope: instance.into(),
             graph_id: GRAPH.into(),
-            component_id: ComponentId::try_new(component)?,
+            component_id: component,
             failure_scope: FailureMode::ProcessRestart,
             max_producers: NonZeroUsize::MIN,
             receipts_per_producer: NonZeroUsize::MIN,
@@ -309,7 +351,7 @@ async fn channel(
 
 fn endpoint(component: &str, port: &str) -> Endpoint {
     Endpoint::new(
-        ComponentId::try_new(component).expect("component ID"),
+        ComponentId::try_new(fixture_component_id(component)).expect("component ID"),
         PortId::try_new(port).expect("port ID"),
     )
 }

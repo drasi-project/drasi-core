@@ -148,7 +148,10 @@ extern "C" fn sf_fetch_snapshot(
         make_error_response("panic in snapshot fetcher callback".into()),
         || {
             let fetcher = fetcher_ref(state);
-            let query_id_str = unsafe { query_id.to_string() };
+            let query_id = match drasi_lib::ComponentId::try_new(unsafe { query_id.to_string() }) {
+                Ok(id) => id,
+                Err(error) => return make_error_response(error.to_string()),
+            };
 
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -162,7 +165,7 @@ extern "C" fn sf_fetch_snapshot(
                 }
             };
 
-            let snapshot = match rt.block_on(fetcher.fetch_snapshot(&query_id_str)) {
+            let snapshot = match rt.block_on(fetcher.fetch_snapshot(&query_id)) {
                 Ok(s) => s,
                 Err(e) => return make_error_response(format!("{e}")),
             };
@@ -214,7 +217,10 @@ mod tests {
 
     #[async_trait]
     impl SnapshotFetcher for TrackingSnapshotFetcher {
-        async fn fetch_snapshot(&self, _query_id: &str) -> Result<SnapshotStream, FetchError> {
+        async fn fetch_snapshot(
+            &self,
+            _query_id: &drasi_core_types::ComponentId,
+        ) -> Result<SnapshotStream, FetchError> {
             let consumed = self.consumed_count.clone();
             let items = self.rows.clone();
 
@@ -230,11 +236,17 @@ mod tests {
     }
 
     /// A `SnapshotFetcher` that always returns an error.
-    struct FailingSnapshotFetcher;
+    struct FailingSnapshotFetcher {
+        calls: Arc<AtomicUsize>,
+    }
 
     #[async_trait]
     impl SnapshotFetcher for FailingSnapshotFetcher {
-        async fn fetch_snapshot(&self, _query_id: &str) -> Result<SnapshotStream, FetchError> {
+        async fn fetch_snapshot(
+            &self,
+            _query_id: &drasi_core_types::ComponentId,
+        ) -> Result<SnapshotStream, FetchError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Err(FetchError::NotRunning {
                 status: ComponentStatus::Error,
             })
@@ -272,7 +284,7 @@ mod tests {
         let vtable = SnapshotFetcherVtableBuilder::build(Arc::new(fetcher));
 
         // Fetch the iterator.
-        let query_id = "test-query\0";
+        let query_id = "585170f0-3260-46db-afcd-fc33b43573b6";
         let response = (vtable.fetch_snapshot_fn)(vtable.state, FfiStr::from_str(query_id));
         let err = unsafe { response.error.into_string() };
         assert!(err.is_empty(), "unexpected error: {err}");
@@ -312,7 +324,10 @@ mod tests {
         };
         let vtable = SnapshotFetcherVtableBuilder::build(Arc::new(fetcher));
 
-        let response = (vtable.fetch_snapshot_fn)(vtable.state, FfiStr::from_str("q\0"));
+        let response = (vtable.fetch_snapshot_fn)(
+            vtable.state,
+            FfiStr::from_str("585170f0-3260-46db-afcd-fc33b43573b6"),
+        );
         let err = unsafe { response.error.into_string() };
         assert!(err.is_empty());
 
@@ -330,11 +345,24 @@ mod tests {
 
     #[test]
     fn streaming_bridge_propagates_fetch_error() {
-        let vtable = SnapshotFetcherVtableBuilder::build(Arc::new(FailingSnapshotFetcher));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let vtable = SnapshotFetcherVtableBuilder::build(Arc::new(FailingSnapshotFetcher {
+            calls: calls.clone(),
+        }));
 
-        let response = (vtable.fetch_snapshot_fn)(vtable.state, FfiStr::from_str("q\0"));
+        let response = (vtable.fetch_snapshot_fn)(
+            vtable.state,
+            FfiStr::from_str("585170f0-3260-46db-afcd-fc33b43573b6"),
+        );
         let err = unsafe { response.error.into_string() };
-        assert!(!err.is_empty(), "expected an error message");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            err,
+            FetchError::NotRunning {
+                status: ComponentStatus::Error,
+            }
+            .to_string()
+        );
 
         // Iterator ctx should be null on error — drop is safe.
         assert!(response.iterator.iter_ctx.is_null());
@@ -352,7 +380,10 @@ mod tests {
         };
         let vtable = SnapshotFetcherVtableBuilder::build(Arc::new(fetcher));
 
-        let response = (vtable.fetch_snapshot_fn)(vtable.state, FfiStr::from_str("q\0"));
+        let response = (vtable.fetch_snapshot_fn)(
+            vtable.state,
+            FfiStr::from_str("585170f0-3260-46db-afcd-fc33b43573b6"),
+        );
         let err = unsafe { response.error.into_string() };
         assert!(err.is_empty());
 

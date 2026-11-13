@@ -35,7 +35,7 @@ fn scheduled_process_worker() -> Result<()> {
             inner: provider(&root)?,
             signals: signals.clone(),
         });
-        let mut component = create(loaded, provider, clock, false, false)?;
+        let mut component = create(loaded, provider, clock, false, false).await?;
         component.start().await?;
         assert!(component.continue_transform().await?.is_empty());
         signals.exit.store(
@@ -126,7 +126,8 @@ async fn restart_contract(loaded: bool, flavor: &str) -> Result<()> {
         clock.clone(),
         false,
         false,
-    )?;
+    )
+    .await?;
     component.start().await?;
     let replay = component.continue_transform().await?;
     assert_eq!(replay.len(), 1);
@@ -140,7 +141,7 @@ async fn restart_contract(loaded: bool, flavor: &str) -> Result<()> {
     component.stop().await?;
     drop(component);
 
-    let mut component = create(loaded, provider(directory.path())?, clock, false, false)?;
+    let mut component = create(loaded, provider(directory.path())?, clock, false, false).await?;
     component.start().await?;
     let replay_again = component.continue_transform().await?;
     assert_eq!(replay_again.len(), 1);
@@ -166,7 +167,8 @@ async fn restart_contract(loaded: bool, flavor: &str) -> Result<()> {
         Clock::new(20_000),
         false,
         false,
-    )?;
+    )
+    .await?;
     component.start().await?;
     assert!(
         component.continue_transform().await?.is_empty(),

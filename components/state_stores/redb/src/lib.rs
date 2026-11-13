@@ -64,6 +64,13 @@
 //! an external encryption key; definitions, receipts and snapshots are protected,
 //! and commits use immediate durability. This does not change ordinary processing
 //! state-store behavior or make it an automatically encrypted store.
+//!
+//! Accepted component-update plans and operation identities are committed with
+//! the target definition. Their pending records survive receipt expiry and are
+//! removed only by an exact, revision-checked completion acknowledgment. Completion
+//! does not rewrite retry receipts or saved snapshots. Configuration formats 7
+//! (indefinite receipts) and 8 (opt-in receipt expiry) include this update journal;
+//! older formats are rejected without migration or deletion of existing records.
 
 mod provider;
 

@@ -14,6 +14,9 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+
 mod computation_reaction_support;
 
 use computation_reaction_support::{checkpoint, wait_checkpoint, Gate, ProbeReaction, DEADLINE};
@@ -27,7 +30,11 @@ use drasi_lib::{
 use std::{num::NonZeroUsize, sync::atomic::Ordering, sync::Arc};
 
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).unwrap()
+    fixture_support::component_id(match value {
+        "q" => 1,
+        "sink" => 238,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
 }
 
 fn port(value: &str) -> PortId {
@@ -82,7 +89,7 @@ async fn emit(query: &mut ContinuousQueryTransformer, sequence: u64, value: u64)
     results.remove(0).envelope
 }
 
-fn host(
+async fn host(
     reaction: ProbeReaction,
     catalog: &QueryResultsCatalog,
     state: Arc<dyn StateStoreProvider>,
@@ -99,7 +106,8 @@ fn host(
         },
     )
     .unwrap();
-    let adapter = ReactionPluginAdapter::new(id("sink"), host.clone()).unwrap();
+    let mut adapter = ReactionPluginAdapter::new(id("sink"), host.clone()).unwrap();
+    adapter.initialize().await.unwrap();
     (host, adapter)
 }
 
@@ -125,8 +133,20 @@ async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_met
         if obsolete_metadata {
             state
                 .set(
-                    "reaction",
-                    "computation-query:71",
+                    &drasi_core_types::StorePartition::component(
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-0000000000ee",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    &format!(
+                        "computation-query:{}",
+                        id("q")
+                            .as_str()
+                            .bytes()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    ),
                     serde_json::to_vec(&serde_json::json!({
                         "config_hash": 0,
                         "reset_generation": 0,
@@ -138,12 +158,16 @@ async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_met
                 .await
                 .unwrap();
         }
-        let mut reaction = ProbeReaction::new("reaction", &["q"]);
+        let mut reaction = ProbeReaction::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+        );
         reaction.policy = policy;
         let gate = Gate::new();
         reaction.start_gate = Some(gate.clone());
         let probe = reaction.probe.clone();
-        let (host, mut adapter) = host(reaction, &catalog, state.clone());
+        let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
         let mut start = Box::pin(adapter.start());
         tokio::time::timeout(DEADLINE, async {
             tokio::select! {
@@ -159,7 +183,7 @@ async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_met
 
         assert!(probe.accepted.lock().unwrap().is_empty());
         assert_eq!(
-            checkpoint(state.as_ref(), "reaction", "q")
+            checkpoint(state.as_ref(), &id("sink"), &id("q"))
                 .await
                 .unwrap()
                 .sequence,
@@ -191,7 +215,7 @@ async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_met
             "only the arrival after the captured head is live, even during a slow start"
         );
         assert_eq!(
-            checkpoint(state.as_ref(), "reaction", "q")
+            checkpoint(state.as_ref(), &id("sink"), &id("q"))
                 .await
                 .unwrap()
                 .sequence,
@@ -208,11 +232,17 @@ async fn accepted_but_unhandled_results_replay_on_every_restart() {
     let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
     let mut query = query(&catalog, 8).await;
     let state = Arc::new(MemoryStateStoreProvider::new());
-    let reaction = ProbeReaction::new("reaction", &["q"]);
+    let reaction = ProbeReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+    );
     let probe = reaction.probe.clone();
-    let (host, mut adapter) = host(reaction, &catalog, state.clone());
+    let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
     adapter.start().await.unwrap();
-    let baseline = checkpoint(state.as_ref(), "reaction", "q").await.unwrap();
+    let baseline = checkpoint(state.as_ref(), &id("sink"), &id("q"))
+        .await
+        .unwrap();
     assert_eq!(baseline.sequence, 0);
     adapter
         .handle(InputEnvelope {
@@ -224,7 +254,9 @@ async fn accepted_but_unhandled_results_replay_on_every_restart() {
     for accepted_count in 1..=3 {
         assert_eq!(probe.accepted.lock().unwrap().len(), accepted_count);
         assert!(probe.handled.lock().unwrap().is_empty());
-        let saved = checkpoint(state.as_ref(), "reaction", "q").await.unwrap();
+        let saved = checkpoint(state.as_ref(), &id("sink"), &id("q"))
+            .await
+            .unwrap();
         assert_eq!(saved.sequence, baseline.sequence);
         assert_eq!(saved.config_hash, baseline.config_hash);
         adapter.stop().await.unwrap();
@@ -247,9 +279,13 @@ async fn strict_recovers_transport_loss_from_accepted_tail_without_checkpointing
     let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
     let mut query = query(&catalog, 2).await;
     let state = Arc::new(MemoryStateStoreProvider::new());
-    let reaction = ProbeReaction::new("reaction", &["q"]);
+    let reaction = ProbeReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+    );
     let probe = reaction.probe.clone();
-    let (host, mut adapter) = host(reaction, &catalog, state.clone());
+    let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
     adapter.start().await.unwrap();
     adapter
         .handle(InputEnvelope {
@@ -283,7 +319,7 @@ async fn strict_recovers_transport_loss_from_accepted_tail_without_checkpointing
     );
     assert!(probe.handled.lock().unwrap().is_empty());
     assert_eq!(
-        checkpoint(state.as_ref(), "reaction", "q")
+        checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
             .unwrap()
             .sequence,
@@ -299,9 +335,13 @@ async fn strict_rejects_unretained_transport_loss_without_later_deliveries() {
     let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
     let mut query = query(&catalog, 1).await;
     let state = Arc::new(MemoryStateStoreProvider::new());
-    let reaction = ProbeReaction::new("reaction", &["q"]);
+    let reaction = ProbeReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+    );
     let probe = reaction.probe.clone();
-    let (host, mut adapter) = host(reaction, &catalog, state.clone());
+    let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
     adapter.start().await.unwrap();
     adapter
         .handle(InputEnvelope {
@@ -332,7 +372,7 @@ async fn strict_rejects_unretained_transport_loss_without_later_deliveries() {
         vec![1]
     );
     assert_eq!(
-        checkpoint(state.as_ref(), "reaction", "q")
+        checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
             .unwrap()
             .sequence,
@@ -348,10 +388,14 @@ async fn an_explicit_gap_skip_does_not_acknowledge_later_queued_results() {
     let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
     let mut query = query(&catalog, 1).await;
     let state = Arc::new(MemoryStateStoreProvider::new());
-    let mut reaction = ProbeReaction::new("reaction", &["q"]);
+    let mut reaction = ProbeReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+    );
     reaction.policy = ReactionRecoveryPolicy::AutoSkipGap;
     let probe = reaction.probe.clone();
-    let (host, mut adapter) = host(reaction, &catalog, state.clone());
+    let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
     adapter.start().await.unwrap();
     adapter.stop().await.unwrap();
     emit(&mut query, 1, 1).await;
@@ -359,7 +403,7 @@ async fn an_explicit_gap_skip_does_not_acknowledge_later_queued_results() {
     adapter.start().await.unwrap();
     assert!(probe.accepted.lock().unwrap().is_empty());
     assert_eq!(
-        checkpoint(state.as_ref(), "reaction", "q")
+        checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
             .unwrap()
             .sequence,
@@ -386,7 +430,7 @@ async fn an_explicit_gap_skip_does_not_acknowledge_later_queued_results() {
         vec![3, 3]
     );
     assert_eq!(
-        checkpoint(state.as_ref(), "reaction", "q")
+        checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
             .unwrap()
             .sequence,
@@ -404,11 +448,15 @@ async fn replacing_a_query_during_reaction_start_does_not_seed_an_old_head() {
     let mut first = query(&catalog, 8).await;
     emit(&mut first, 1, 1).await;
     let state = Arc::new(MemoryStateStoreProvider::new());
-    let mut reaction = ProbeReaction::new("reaction", &["q"]);
+    let mut reaction = ProbeReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+    );
     let gate = Gate::new();
     reaction.start_gate = Some(gate.clone());
     let probe = reaction.probe.clone();
-    let (host, mut adapter) = host(reaction, &catalog, state.clone());
+    let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
     let mut start = Box::pin(adapter.start());
     tokio::time::timeout(DEADLINE, async {
         tokio::select! {
@@ -425,7 +473,9 @@ async fn replacing_a_query_during_reaction_start_does_not_seed_an_old_head() {
     gate.release.add_permits(1);
     let error = start.await.unwrap_err();
     assert!(format!("{error:#}").contains("changed"), "{error:#}");
-    assert!(checkpoint(state.as_ref(), "reaction", "q").await.is_none());
+    assert!(checkpoint(state.as_ref(), &id("sink"), &id("q"))
+        .await
+        .is_none());
     assert!(probe.accepted.lock().unwrap().is_empty());
     adapter.stop().await.unwrap();
     host.shutdown().await.unwrap();
@@ -437,12 +487,16 @@ async fn handler_failure_does_not_advance_progress_and_is_redelivered() {
     let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
     let mut query = query(&catalog, 8).await;
     let state = Arc::new(MemoryStateStoreProvider::new());
-    let mut reaction = ProbeReaction::new("reaction", &["q"]);
+    let mut reaction = ProbeReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+    );
     reaction.handles_results = true;
     reaction.probe.fail_effect.store(true, Ordering::SeqCst);
     let probe = reaction.probe.clone();
     let mut status = reaction.base.status_handle().subscribe_status();
-    let (host, mut adapter) = host(reaction, &catalog, state.clone());
+    let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
     adapter.start().await.unwrap();
     if let Err(error) = adapter
         .handle(InputEnvelope {
@@ -461,7 +515,7 @@ async fn handler_failure_does_not_advance_progress_and_is_redelivered() {
     .unwrap()
     .unwrap();
     assert_eq!(
-        checkpoint(state.as_ref(), "reaction", "q")
+        checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
             .unwrap()
             .sequence,
@@ -473,10 +527,10 @@ async fn handler_failure_does_not_advance_progress_and_is_redelivered() {
         adapter.stop().await.unwrap();
     }
     adapter.start().await.unwrap();
-    wait_checkpoint(state.as_ref(), "reaction", "q", 1).await;
+    wait_checkpoint(state.as_ref(), &id("sink"), &id("q"), 1).await;
     assert_eq!(
         *probe.attempts.lock().unwrap(),
-        vec![("q".into(), 1), ("q".into(), 1)]
+        vec![(id("q"), 1), (id("q"), 1)]
     );
     assert_eq!(probe.handled.lock().unwrap().len(), 1);
     adapter.stop().await.unwrap();
@@ -490,14 +544,18 @@ async fn bootstrap_checkpoint_waits_for_success_and_retries_a_partial_snapshot()
     let mut query = query(&catalog, 8).await;
     emit(&mut query, 1, 1).await;
     let state = Arc::new(MemoryStateStoreProvider::new());
-    let mut reaction = ProbeReaction::new("reaction", &["q"]);
+    let mut reaction = ProbeReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+    );
     reaction.snapshot = true;
     reaction.policy = ReactionRecoveryPolicy::AutoReset;
     reaction.probe.fail_bootstrap.store(true, Ordering::SeqCst);
     let gate = Gate::new();
     reaction.bootstrap_gate = Some(gate.clone());
     let probe = reaction.probe.clone();
-    let (host, mut adapter) = host(reaction, &catalog, state.clone());
+    let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
     let mut start = Box::pin(adapter.start());
     tokio::time::timeout(DEADLINE, async {
         tokio::select! {
@@ -507,15 +565,19 @@ async fn bootstrap_checkpoint_waits_for_success_and_retries_a_partial_snapshot()
     })
     .await
     .unwrap();
-    assert!(checkpoint(state.as_ref(), "reaction", "q").await.is_none());
+    assert!(checkpoint(state.as_ref(), &id("sink"), &id("q"))
+        .await
+        .is_none());
     gate.release.add_permits(1);
     let error = start.await.unwrap_err();
     assert!(format!("{error:#}").contains("bootstrap failure"));
-    assert!(checkpoint(state.as_ref(), "reaction", "q").await.is_none());
+    assert!(checkpoint(state.as_ref(), &id("sink"), &id("q"))
+        .await
+        .is_none());
     adapter.stop().await.unwrap();
     adapter.start().await.unwrap();
     assert_eq!(
-        checkpoint(state.as_ref(), "reaction", "q")
+        checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
             .unwrap()
             .sequence,
@@ -539,11 +601,15 @@ async fn a_new_volatile_query_incarnation_requires_snapshot_recovery() {
     let mut first = query(&catalog, 8).await;
     emit(&mut first, 1, 1).await;
     let state = Arc::new(MemoryStateStoreProvider::new());
-    let mut reaction = ProbeReaction::new("reaction", &["q"]);
+    let mut reaction = ProbeReaction::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+            .expect("fixture UUID"),
+        vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+    );
     reaction.snapshot = true;
     reaction.policy = ReactionRecoveryPolicy::AutoReset;
     let probe = reaction.probe.clone();
-    let (host, mut adapter) = host(reaction, &catalog, state.clone());
+    let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
     adapter.start().await.unwrap();
     adapter.stop().await.unwrap();
     first.stop().await.unwrap();
@@ -560,7 +626,7 @@ async fn a_new_volatile_query_incarnation_requires_snapshot_recovery() {
         assert_eq!(snapshots[1].3, vec![serde_json::json!({ "value": 99 })]);
     }
     assert_eq!(
-        checkpoint(state.as_ref(), "reaction", "q")
+        checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
             .unwrap()
             .sequence,
@@ -578,21 +644,30 @@ async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it(
         let mut query = query(&catalog, 8).await;
         emit(&mut query, 1, 1).await;
         let state = Arc::new(MemoryStateStoreProvider::new());
-        let mut reaction = ProbeReaction::new("reaction", &["q"]);
+        let mut reaction = ProbeReaction::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_id(id("q"))],
+        );
         reaction.policy = policy;
         let probe = reaction.probe.clone();
-        let (host, mut adapter) = host(reaction, &catalog, state.clone());
+        let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
         adapter.start().await.unwrap();
         adapter.stop().await.unwrap();
-        let baseline = checkpoint(state.as_ref(), "reaction", "q").await.unwrap();
+        let baseline = checkpoint(state.as_ref(), &id("sink"), &id("q"))
+            .await
+            .unwrap();
         let ahead = drasi_lib::ReactionCheckpoint {
             sequence: 100,
             config_hash: baseline.config_hash,
         };
         state
             .set(
-                "reaction",
-                "checkpoint:q",
+                &drasi_core_types::StorePartition::component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ee")
+                        .expect("fixture UUID"),
+                ),
+                &format!("checkpoint:{}", id("q")),
                 bincode::serialize(&ahead).unwrap(),
             )
             .await
@@ -602,13 +677,13 @@ async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it(
         if policy == ReactionRecoveryPolicy::Strict {
             assert!(result.is_err());
             assert_eq!(
-                checkpoint(state.as_ref(), "reaction", "q").await,
+                checkpoint(state.as_ref(), &id("sink"), &id("q")).await,
                 Some(ahead)
             );
         } else {
             result.unwrap();
             assert_eq!(
-                checkpoint(state.as_ref(), "reaction", "q").await,
+                checkpoint(state.as_ref(), &id("sink"), &id("q")).await,
                 Some(baseline.clone())
             );
             assert!(probe.accepted.lock().unwrap().is_empty());
@@ -633,7 +708,7 @@ async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it(
                 "rebasing an explicit skip must not checkpoint later enqueue acceptance"
             );
             assert_eq!(
-                checkpoint(state.as_ref(), "reaction", "q").await,
+                checkpoint(state.as_ref(), &id("sink"), &id("q")).await,
                 Some(baseline)
             );
         }

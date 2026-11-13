@@ -57,41 +57,78 @@ impl DurableMemoryStateStore {
 
 #[async_trait::async_trait]
 impl StateStoreProvider for DurableMemoryStateStore {
-    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+    async fn get(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<Option<Vec<u8>>> {
         self.inner.get(store_id, key).await
     }
-    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+    async fn set(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<()> {
         self.inner.set(store_id, key, value).await
     }
-    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn delete(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<bool> {
         self.inner.delete(store_id, key).await
     }
-    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn contains_key(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<bool> {
         self.inner.contains_key(store_id, key).await
     }
     async fn get_many(
         &self,
-        store_id: &str,
+        store_id: &drasi_core::interface::StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
         self.inner.get_many(store_id, keys).await
     }
-    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()> {
         self.inner.set_many(store_id, entries).await
     }
-    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+    async fn delete_many(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        keys: &[&str],
+    ) -> StateStoreResult<usize> {
         self.inner.delete_many(store_id, keys).await
     }
-    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn clear_store(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<usize> {
         self.inner.clear_store(store_id).await
     }
-    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+    async fn list_keys(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<Vec<String>> {
         self.inner.list_keys(store_id).await
     }
-    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+    async fn store_exists(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<bool> {
         self.inner.store_exists(store_id).await
     }
-    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn key_count(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<usize> {
         self.inner.key_count(store_id).await
     }
     fn is_durable(&self) -> bool {
@@ -187,12 +224,21 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
         )
         .await?;
 
-    let (source, handle) = ApplicationSource::new("test-source", durable_source_config())?;
-    let query = Query::cypher("test-query")
-        .query("MATCH (e:Entity) RETURN e.id AS id, e.name AS name")
-        .from_input("test-source")
-        .auto_start(true)
-        .build();
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+        durable_source_config(),
+    )?;
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+    )
+    .query("MATCH (e:Entity) RETURN e.id AS id, e.name AS name")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
     let mut routes = HashMap::new();
     routes.insert(
@@ -235,7 +281,14 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
         query_configs: routes,
     };
 
-    let reaction = RabbitMQReaction::new("test-reaction", vec!["test-query".to_string()], config)?;
+    let reaction = RabbitMQReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        )],
+        config,
+    )?;
 
     let tmp_dir = tempfile::TempDir::new()?;
     let wal_dir = tempfile::TempDir::new()?;
@@ -258,14 +311,24 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
         .with_default_index_provider("rocks", rocks)
         .with_wal_provider(wal)
         .with_state_store_provider(Arc::new(DurableMemoryStateStore::new()))
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("test-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 
     core.start().await?;
-    wait_for_reaction_running(&core, "test-reaction").await?;
+    wait_for_reaction_running(
+        &core,
+        &drasi_core::ComponentName::try_new("test-reaction").expect("fixture component name"),
+    )
+    .await?;
 
     let props = PropertyMapBuilder::new()
         .with_integer("id", 1)
@@ -365,13 +428,22 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
         )
         .await?;
 
-    let (source, handle) = ApplicationSource::new("agg-source", durable_source_config())?;
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000022")
+            .expect("fixture UUID"),
+        durable_source_config(),
+    )?;
 
-    let query = Query::cypher("agg-query")
-        .query("MATCH (i:Item) RETURN count(i) AS total, sum(i.amount) AS total_amount")
-        .from_input("agg-source")
-        .auto_start(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+    )
+    .query("MATCH (i:Item) RETURN count(i) AS total, sum(i.amount) AS total_amount")
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("agg-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .build()
+    .expect("valid query configuration");
 
     let mut routes = HashMap::new();
     routes.insert(
@@ -404,7 +476,14 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
         query_configs: routes,
     };
 
-    let reaction = RabbitMQReaction::new("agg-reaction", vec!["agg-query".to_string()], config)?;
+    let reaction = RabbitMQReaction::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000023")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_core::ComponentName::try_new("agg-query").expect("fixture component name"),
+        )],
+        config,
+    )?;
 
     let tmp_dir = tempfile::TempDir::new()?;
     let wal_dir = tempfile::TempDir::new()?;
@@ -427,14 +506,24 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
         .with_default_index_provider("rocks", rocks)
         .with_wal_provider(wal)
         .with_state_store_provider(Arc::new(DurableMemoryStateStore::new()))
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("agg-source").expect("fixture component name"),
+            source,
+        )
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction(
+            drasi_core::ComponentName::try_new("agg-reaction").expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await?;
 
     core.start().await?;
-    wait_for_reaction_running(&core, "agg-reaction").await?;
+    wait_for_reaction_running(
+        &core,
+        &drasi_core::ComponentName::try_new("agg-reaction").expect("fixture component name"),
+    )
+    .await?;
 
     // Insert first item — aggregation: total=1, total_amount=100
     let props = PropertyMapBuilder::new()
@@ -478,10 +567,13 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
 }
 
 /// Poll until the reaction reports `ComponentStatus::Running`, with a timeout.
-async fn wait_for_reaction_running(core: &DrasiLib, reaction_id: &str) -> Result<()> {
+async fn wait_for_reaction_running(
+    core: &DrasiLib,
+    reaction_id: &drasi_core::ComponentName,
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(status) = core.get_reaction_status(reaction_id).await {
+        if let Ok(status) = core.get_reaction_status_by_name(reaction_id).await {
             if matches!(status, ComponentStatus::Running) {
                 return Ok(());
             }

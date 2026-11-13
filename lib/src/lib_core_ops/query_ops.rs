@@ -16,15 +16,19 @@
 //!
 //! This module provides all query-related operations including creating, removing,
 //! starting, and stopping queries.
+//! `ComponentName` selectors are exact current query names, including UUID-shaped names.
+//! Use the paired `_by_id` methods for explicit [`crate::config::ComponentId`]
+//! selection.
 
 use futures::{stream::Stream, StreamExt};
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
-use crate::config::{QueryConfig, QueryRuntime};
+use crate::config::{ComponentId, QueryConfig, QueryRuntime};
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::queries::QueryResultSubscription;
+use crate::ComponentName;
 
 impl DrasiLib {
     /// Create a query in a running server
@@ -38,11 +42,11 @@ impl DrasiLib {
     /// # use drasi_lib::{DrasiLib, Query};
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// core.add_query(
-    ///     Query::cypher("new-query")
+    ///     Query::cypher(drasi_lib::ComponentName::try_new("new-query")?)
     ///         .query("MATCH (n) RETURN n")
-    ///         .from_input("source1")
+    ///         .from_input_by_name(drasi_lib::ComponentName::try_new("source1")?)
     ///         .auto_start(true)
-    ///         .build()
+    ///         .build()?
     /// ).await?;
     /// # Ok(())
     /// # }
@@ -70,15 +74,23 @@ impl DrasiLib {
         query: QueryConfig,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
-        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         query
             .validate_declarations()
             .map_err(|error| crate::error::DrasiError::validation(error.to_string()))?;
-        let id = query.id.clone();
+        let name = query.name.clone();
         self.computation_runtime
             .add_query(query, self.is_running().await)
             .await
-            .map_err(|error| crate::computation::runtime::map_addition_error("query", &id, error))
+            .and_then(|handle| self.computation_runtime.public_handle(handle))
+            .map_err(|error| {
+                crate::DrasiError::operation_failed(
+                    "query",
+                    crate::error::OperationSubject::Name(name),
+                    "add",
+                    format!("{error:#}"),
+                )
+                .with_cause(error)
+            })
     }
 
     /// Remove a query from a running server
@@ -89,11 +101,17 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.remove_query("old-query").await?;
+    /// core.remove_query_by_name(&drasi_lib::ComponentName::try_new("old-query")?).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_query(&self, id: &str) -> Result<()> {
+    pub async fn remove_query_by_name(&self, name: &ComponentName) -> Result<()> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.remove_query_by_id(&id).await
+    }
+
+    /// Remove the query with the supplied immutable UUID.
+    pub async fn remove_query_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
@@ -113,11 +131,17 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.start_query("my-query").await?;
+    /// core.start_query_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn start_query(&self, id: &str) -> Result<()> {
+    pub async fn start_query_by_name(&self, name: &ComponentName) -> Result<()> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.start_query_by_id(&id).await
+    }
+
+    /// Start the query with the supplied immutable UUID.
+    pub async fn start_query_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime.start_component(id, "query").await,
@@ -141,11 +165,17 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.stop_query("my-query").await?;
+    /// core.stop_query_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn stop_query(&self, id: &str) -> Result<()> {
+    pub async fn stop_query_by_name(&self, name: &ComponentName) -> Result<()> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.stop_query_by_id(&id).await
+    }
+
+    /// Stop the query with the supplied immutable UUID.
+    pub async fn stop_query_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime.stop_component(id, "query").await,
@@ -155,21 +185,37 @@ impl DrasiLib {
         )
     }
 
-    /// Update a query by replacing it with a new configuration.
+    /// Ask the registered query factory to assess and apply a configuration change.
     ///
-    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
-    /// and event history. The old query is stopped, the runtime is swapped, and the
-    /// query is restarted if it was running. Failed queries are also stopped to
-    /// release retained resources, but their replacement is not automatically started.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query doesn't exist, if the new configuration
-    /// references non-existent sources, or if provisioning fails.
-    pub async fn update_query(&self, id: &str, config: QueryConfig) -> Result<()> {
+    /// The UUID and name are preserved. No reset flag or reconstruction strategy
+    /// is inferred from a changed query. Rebootstrap plans are rejected unless
+    /// the owner can establish snapshot/live and downstream-reset guarantees.
+    pub async fn update_query_by_name(
+        &self,
+        name: &ComponentName,
+        config: QueryConfig,
+    ) -> Result<()> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.update_query_by_id(&id, config).await
+    }
+
+    /// Update the query with the supplied immutable UUID.
+    pub async fn update_query_by_id(&self, id: &ComponentId, config: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
+        let assigned = id.clone();
+        if config
+            .id
+            .as_ref()
+            .is_some_and(|supplied| supplied != &assigned)
+        {
+            return Err(crate::DrasiError::invalid_config(
+                "an update cannot change the component UUID",
+            ));
+        }
         map_component_error(
-            self.computation_runtime.update_query(id, config).await,
+            self.computation_runtime
+                .update_query(id, config.with_assigned_id(assigned))
+                .await,
             "query",
             id,
             "update",
@@ -183,13 +229,13 @@ impl DrasiLib {
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
     /// let queries = core.list_queries().await?;
-    /// for (id, status) in queries {
-    ///     println!("Query {}: {:?}", id, status);
+    /// for component in queries {
+    ///     println!("Query {}: {:?}", component.id, component.status);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn list_queries(&self) -> Result<Vec<(String, ComponentStatus)>> {
+    pub async fn list_queries(&self) -> Result<Vec<crate::config::ComponentListEntry>> {
         self.inspection.list_queries().await
     }
 
@@ -199,15 +245,21 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let query_info = core.get_query_info("my-query").await?;
+    /// let query_info = core.get_query_info_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// println!("Query: {}", query_info.query);
     /// println!("Status: {:?}", query_info.status);
     /// println!("Inputs: {:?}", query_info.inputs);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_info(&self, id: &str) -> Result<QueryRuntime> {
-        self.inspection.get_query_info(id).await
+    pub async fn get_query_info_by_name(&self, name: &ComponentName) -> Result<QueryRuntime> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_info_by_id(&id).await
+    }
+
+    /// Get detailed query information by immutable UUID.
+    pub async fn get_query_info_by_id(&self, id: &ComponentId) -> Result<QueryRuntime> {
+        self.inspection.get_query_info_by_id(id).await
     }
 
     /// Get the current status of a specific query
@@ -216,13 +268,19 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let status = core.get_query_status("my-query").await?;
+    /// let status = core.get_query_status_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// println!("Query status: {:?}", status);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_status(&self, id: &str) -> Result<ComponentStatus> {
-        self.inspection.get_query_status(id).await
+    pub async fn get_query_status_by_name(&self, name: &ComponentName) -> Result<ComponentStatus> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_status_by_id(&id).await
+    }
+
+    /// Get query status by immutable UUID.
+    pub async fn get_query_status_by_id(&self, id: &ComponentId) -> Result<ComponentStatus> {
+        self.inspection.get_query_status_by_id(id).await
     }
 
     /// Get the current result set for a running query
@@ -231,13 +289,25 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let results = core.get_query_results("my-query").await?;
+    /// let results = core.get_query_results_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// println!("Current results: {} items", results.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
-        self.inspection.get_query_results(id).await
+    pub async fn get_query_results_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<Vec<serde_json::Value>> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_results_by_id(&id).await
+    }
+
+    /// Get the current query result set by immutable UUID.
+    pub async fn get_query_results_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.inspection.get_query_results_by_id(id).await
     }
 
     /// Read a consistent snapshot followed by changes, without a reaction or worker.
@@ -251,7 +321,19 @@ impl DrasiLib {
     /// This is a connection-local reader, not a durable consumer checkpoint.
     /// Replacement, output reset and owner shutdown invalidate it. Dropping the
     /// stream unregisters it synchronously, even if it was never polled.
-    pub async fn subscribe_query_results(&self, id: &str) -> Result<QueryResultSubscription> {
+    pub async fn subscribe_query_results_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<QueryResultSubscription> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.subscribe_query_results_by_id(&id).await
+    }
+
+    /// Subscribe to query results by immutable UUID.
+    pub async fn subscribe_query_results_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<QueryResultSubscription> {
         self.state_guard.require_initialized()?;
         let result = async {
             self.computation_runtime
@@ -262,7 +344,7 @@ impl DrasiLib {
         }
         .await;
         let (snapshot, stream) = map_component_error(result, "query", id, "subscribe")?;
-        let id = id.to_owned();
+        let id = id.clone();
         Ok(QueryResultSubscription {
             snapshot,
             stream: stream
@@ -274,19 +356,31 @@ impl DrasiLib {
     /// Get the full configuration for a specific query
     ///
     /// This returns the complete query configuration including all fields like auto_start and joins,
-    /// unlike `get_query_info()` which only returns runtime information.
+    /// unlike `get_query_info_by_name()` which only returns runtime information.
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let config = core.get_query_config("my-query").await?;
+    /// let config = core.get_query_config_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// println!("Auto-start: {}", config.auto_start);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_config(&self, id: &str) -> Result<QueryConfig> {
-        self.inspection.get_query_config(id).await
+    pub async fn get_query_config_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<crate::config::AssignedQueryConfig> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_config_by_id(&id).await
+    }
+
+    /// Get query configuration by immutable UUID.
+    pub async fn get_query_config_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<crate::config::AssignedQueryConfig> {
+        self.inspection.get_query_config_by_id(id).await
     }
 
     /// Get lifecycle events for a specific query as an async stream.
@@ -299,15 +393,27 @@ impl DrasiLib {
     /// # use drasi_lib::DrasiLib;
     /// # use futures::StreamExt;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut events = core.get_query_events("my-query").await?;
+    /// let mut events = core.get_query_events_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     /// while let Some(event) = events.next().await {
     ///     println!("Event: {:?} - {:?}", event.status, event.message);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_events(&self, id: &str) -> Result<impl Stream<Item = ComponentEvent>> {
-        self.inspection.get_query_events(id).await
+    pub async fn get_query_events_by_name(
+        &self,
+        name: &ComponentName,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_events_by_id(&id).await
+    }
+
+    /// Get query lifecycle events by immutable UUID.
+    pub async fn get_query_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_query_events_by_id(id).await
     }
 
     /// Get all lifecycle events across all queries as an async stream.
@@ -339,7 +445,7 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// let (history, mut receiver) = core.subscribe_query_logs("my-query").await?;
+    /// let (history, mut receiver) = core.subscribe_query_logs_by_name(&drasi_lib::ComponentName::try_new("my-query")?).await?;
     ///
     /// // Print historical logs
     /// for log in history {
@@ -353,14 +459,26 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn subscribe_query_logs(
+    pub async fn subscribe_query_logs_by_name(
         &self,
-        id: &str,
+        name: &ComponentName,
     ) -> Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
-        self.inspection.subscribe_query_logs(id).await
+        let id = self.resolve_component_name(name, "query")?;
+        self.subscribe_query_logs_by_id(&id).await
+    }
+
+    /// Subscribe to query logs by immutable UUID.
+    pub async fn subscribe_query_logs_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        self.inspection.subscribe_query_logs_by_id(id).await
     }
 
     /// Subscribe to live events for a query.
@@ -368,14 +486,26 @@ impl DrasiLib {
     /// Returns the event history (oldest first) and a broadcast receiver for new events
     /// as they occur. Events include lifecycle status changes such as Starting, Running,
     /// Error, Stopped.
-    pub async fn subscribe_query_events(
+    pub async fn subscribe_query_events_by_name(
         &self,
-        id: &str,
+        name: &ComponentName,
     ) -> Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.inspection.subscribe_query_events(id).await
+        let id = self.resolve_component_name(name, "query")?;
+        self.subscribe_query_events_by_id(&id).await
+    }
+
+    /// Subscribe to query lifecycle events by immutable UUID.
+    pub async fn subscribe_query_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_query_events_by_id(id).await
     }
 }
 
@@ -384,11 +514,12 @@ mod tests {
     use crate::channels::ComponentStatus;
     use crate::error::DrasiError;
     use crate::sources::tests::TestMockSource;
+    use crate::test_helpers::creation::BuilderFixtures;
     use crate::{DrasiLib, Query};
 
     /// Build a DrasiLib with a single mock source, started and ready for queries.
     async fn build_core_with_source() -> DrasiLib {
-        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let source = TestMockSource::fixture("test-source", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -403,7 +534,7 @@ mod tests {
                     .clone(),
             )
             .with_id("test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
@@ -419,28 +550,42 @@ mod tests {
     async fn add_query_happy_path() {
         let core = build_core_with_source().await;
 
-        let config = Query::cypher("q1")
-            .query("MATCH (n:Test) RETURN n")
-            .from_input("test-source")
-            .auto_start(false)
-            .build();
+        let config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .query("MATCH (n:Test) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
 
         core.add_query(config).await.unwrap();
 
         // Query should appear in list
         let queries = core.list_queries().await.unwrap();
-        assert!(queries.iter().any(|(id, _)| id == "q1"));
+        assert!(queries
+            .iter()
+            .any(|entry| entry.name == crate::ComponentName::try_new("q1").unwrap()));
     }
 
     #[tokio::test]
     async fn add_query_missing_source_is_retained_as_waiting() {
         let core = build_core_with_source().await;
 
-        let config = Query::cypher("q-bad")
-            .query("MATCH (n) RETURN n")
-            .from_input("nonexistent-source")
-            .auto_start(false)
-            .build();
+        let config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("q-bad").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("nonexistent-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
 
         let handle = core.add_query_with_handle(config).await.unwrap();
         let observed = handle.observed().unwrap();
@@ -453,7 +598,11 @@ mod tests {
             .waiting_reason()
             .unwrap()
             .contains("nonexistent-source"));
-        core.remove_query("q-bad").await.unwrap();
+        core.remove_query_by_name(
+            &drasi_core_types::ComponentName::try_new("q-bad").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         core.shutdown().await.unwrap();
     }
 
@@ -465,26 +614,43 @@ mod tests {
     async fn remove_query_happy_path() {
         let core = build_core_with_source().await;
 
-        let config = Query::cypher("q-remove")
-            .query("MATCH (n:Test) RETURN n")
-            .from_input("test-source")
-            .auto_start(false)
-            .build();
+        let config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("q-remove").expect("fixture component name"),
+        )
+        .query("MATCH (n:Test) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
         core.add_query(config).await.unwrap();
 
         // Remove should succeed
-        core.remove_query("q-remove").await.unwrap();
+        core.remove_query_by_name(
+            &drasi_core_types::ComponentName::try_new("q-remove").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
 
         // Query should no longer appear in list
         let queries = core.list_queries().await.unwrap();
-        assert!(!queries.iter().any(|(id, _)| id == "q-remove"));
+        assert!(!queries
+            .iter()
+            .any(|entry| entry.name == crate::ComponentName::try_new("q-remove").unwrap()));
     }
 
     #[tokio::test]
     async fn remove_query_nonexistent_returns_error() {
         let core = build_core_with_source().await;
 
-        let result = core.remove_query("does-not-exist").await;
+        let result = core
+            .remove_query_by_name(
+                &drasi_core_types::ComponentName::try_new("does-not-exist")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_err());
     }
 
@@ -492,12 +658,19 @@ mod tests {
     async fn remove_query_does_not_deregister_a_source() {
         let core = build_core_with_source().await;
 
-        let result = core.remove_query("test-source").await;
+        let result = core
+            .remove_query_by_name(
+                &drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_err());
 
         let sources = core.list_sources().await.unwrap();
         assert!(
-            sources.iter().any(|(id, _)| id == "test-source"),
+            sources
+                .iter()
+                .any(|entry| entry.name == crate::ComponentName::try_new("test-source").unwrap()),
             "remove_query must not deregister a source id, got {sources:?}"
         );
     }
@@ -515,23 +688,35 @@ mod tests {
         assert!(queries.is_empty(), "expected no queries initially");
 
         // Add two queries
-        let config1 = Query::cypher("q-list-1")
-            .query("MATCH (n) RETURN n")
-            .from_input("test-source")
-            .auto_start(false)
-            .build();
-        let config2 = Query::cypher("q-list-2")
-            .query("MATCH (n) RETURN n")
-            .from_input("test-source")
-            .auto_start(false)
-            .build();
+        let config1 = Query::cypher(
+            drasi_core_types::ComponentName::try_new("q-list-1").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
+        let config2 = Query::cypher(
+            drasi_core_types::ComponentName::try_new("q-list-2").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
         core.add_query(config1).await.unwrap();
         core.add_query(config2).await.unwrap();
 
         let queries = core.list_queries().await.unwrap();
-        let ids: Vec<&str> = queries.iter().map(|(id, _)| id.as_str()).collect();
-        assert!(ids.contains(&"q-list-1"));
-        assert!(ids.contains(&"q-list-2"));
+        let names: Vec<_> = queries.iter().map(|entry| &entry.name).collect();
+        assert!(names.contains(&&crate::ComponentName::try_new("q-list-1").unwrap()));
+        assert!(names.contains(&&crate::ComponentName::try_new("q-list-2").unwrap()));
         assert_eq!(queries.len(), 2);
     }
 
@@ -543,15 +728,27 @@ mod tests {
     async fn get_query_status_returns_correct_status() {
         let core = build_core_with_source().await;
 
-        let config = Query::cypher("q-status")
-            .query("MATCH (n:Test) RETURN n")
-            .from_input("test-source")
-            .auto_start(false)
-            .build();
+        let config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("q-status").expect("fixture component name"),
+        )
+        .query("MATCH (n:Test) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
         core.add_query(config).await.unwrap();
 
         // Query added without auto-start should be Added
-        let status = core.get_query_status("q-status").await.unwrap();
+        let status = core
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("q-status")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Added);
     }
 
@@ -559,7 +756,12 @@ mod tests {
     async fn get_query_status_nonexistent_returns_error() {
         let core = build_core_with_source().await;
 
-        let result = core.get_query_status("ghost-query").await;
+        let result = core
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("ghost-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -576,40 +778,71 @@ mod tests {
     async fn start_and_stop_query_lifecycle() {
         let core = build_core_with_source().await;
 
-        let config = Query::cypher("q-lifecycle")
-            .query("MATCH (n:Test) RETURN n")
-            .from_input("test-source")
-            .auto_start(false)
-            .build();
+        let config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("q-lifecycle")
+                .expect("fixture component name"),
+        )
+        .query("MATCH (n:Test) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
         core.add_query(config).await.unwrap();
 
         // Subscribe to events before triggering actions
         let mut event_rx = core.subscribe_all_component_events();
 
         // Start the query
-        core.start_query("q-lifecycle").await.unwrap();
+        core.start_query_by_name(
+            &drasi_core_types::ComponentName::try_new("q-lifecycle")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
 
-        crate::test_helpers::wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "q-lifecycle",
+            &core.component_graph(),
+            &crate::ComponentName::try_new("q-lifecycle").expect("fixture component name"),
             ComponentStatus::Running,
             std::time::Duration::from_secs(5),
         )
         .await;
-        let status = core.get_query_status("q-lifecycle").await.unwrap();
+        let status = core
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("q-lifecycle")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Running);
 
         // Stop the query
-        core.stop_query("q-lifecycle").await.unwrap();
+        core.stop_query_by_name(
+            &drasi_core_types::ComponentName::try_new("q-lifecycle")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
 
-        crate::test_helpers::wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "q-lifecycle",
+            &core.component_graph(),
+            &crate::ComponentName::try_new("q-lifecycle").expect("fixture component name"),
             ComponentStatus::Stopped,
             std::time::Duration::from_secs(5),
         )
         .await;
-        let status = core.get_query_status("q-lifecycle").await.unwrap();
+        let status = core
+            .get_query_status_by_name(
+                &drasi_core_types::ComponentName::try_new("q-lifecycle")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
         assert_eq!(status, ComponentStatus::Stopped);
     }
 
@@ -621,18 +854,44 @@ mod tests {
     async fn get_query_config_returns_correct_fields() {
         let core = build_core_with_source().await;
 
-        let config = Query::cypher("q-config")
-            .query("MATCH (n:Person) RETURN n.name")
-            .from_input("test-source")
-            .auto_start(false)
-            .build();
+        let config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("q-config").expect("fixture component name"),
+        )
+        .query("MATCH (n:Person) RETURN n.name")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
         core.add_query(config).await.unwrap();
 
-        let retrieved = core.get_query_config("q-config").await.unwrap();
-        assert_eq!(retrieved.id, "q-config");
+        let retrieved = core
+            .get_query_config_by_name(
+                &drasi_core_types::ComponentName::try_new("q-config")
+                    .expect("fixture component name"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            &retrieved.id,
+            core.component_by_name(&retrieved.name).unwrap().id()
+        );
+        assert_eq!(retrieved.name.as_str(), "q-config");
         assert_eq!(retrieved.query, "MATCH (n:Person) RETURN n.name");
         assert!(!retrieved.auto_start);
         assert_eq!(retrieved.inputs.len(), 1);
-        assert_eq!(retrieved.inputs[0].component, "test-source");
+        assert_eq!(
+            retrieved.inputs[0].component.as_id(),
+            Some(
+                core.component_by_name(
+                    &drasi_core_types::ComponentName::try_new("test-source")
+                        .expect("fixture component name")
+                )
+                .unwrap()
+                .id()
+            )
+        );
     }
 }

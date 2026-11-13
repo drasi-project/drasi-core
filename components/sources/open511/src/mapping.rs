@@ -31,7 +31,7 @@ pub const IN_AREA_LABEL: &str = "IN_AREA";
 /// Map a newly discovered Open511 event to source changes.
 pub fn map_new_event(
     event: &Open511Event,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     known_areas: &mut HashSet<String>,
 ) -> Vec<SourceChange> {
     let mut changes = Vec::new();
@@ -51,7 +51,7 @@ pub fn map_new_event(
 pub fn map_updated_event(
     previous: &Open511Event,
     current: &Open511Event,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     known_areas: &mut HashSet<String>,
 ) -> Vec<SourceChange> {
     let mut changes = Vec::new();
@@ -79,7 +79,10 @@ pub fn map_updated_event(
 }
 
 /// Map a removed Open511 event to source changes.
-pub fn map_removed_event(event: &Open511Event, source_id: &str) -> Vec<SourceChange> {
+pub fn map_removed_event(
+    event: &Open511Event,
+    source_id: &drasi_lib::ComponentId,
+) -> Vec<SourceChange> {
     let mut changes = Vec::new();
     let effective_from = event_effective_from(event);
 
@@ -95,7 +98,7 @@ pub fn map_removed_event(event: &Open511Event, source_id: &str) -> Vec<SourceCha
 
 fn append_road_inserts(
     event: &Open511Event,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     effective_from: u64,
     changes: &mut Vec<SourceChange>,
 ) {
@@ -122,7 +125,7 @@ fn append_road_inserts(
 
 fn append_road_deletes(
     event: &Open511Event,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     effective_from: u64,
     changes: &mut Vec<SourceChange>,
 ) {
@@ -148,7 +151,7 @@ fn append_road_deletes(
 
 fn append_area_inserts(
     event: &Open511Event,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     effective_from: u64,
     known_areas: &mut HashSet<String>,
     changes: &mut Vec<SourceChange>,
@@ -178,7 +181,7 @@ fn append_area_inserts(
 
 fn append_area_relation_deletes(
     event: &Open511Event,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     effective_from: u64,
     changes: &mut Vec<SourceChange>,
 ) {
@@ -193,7 +196,11 @@ fn append_area_relation_deletes(
     }
 }
 
-fn build_event_node(event: &Open511Event, source_id: &str, effective_from: u64) -> Element {
+fn build_event_node(
+    event: &Open511Event,
+    source_id: &drasi_lib::ComponentId,
+    effective_from: u64,
+) -> Element {
     let mut properties = ElementPropertyMap::new();
     properties.insert("id", string_value(&event.id));
     properties.insert("status", string_value(&event.status));
@@ -246,7 +253,7 @@ fn build_road_node(
     event: &Open511Event,
     road: &Open511Road,
     index: usize,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     effective_from: u64,
 ) -> Element {
     let mut properties = ElementPropertyMap::new();
@@ -270,7 +277,7 @@ fn build_area_node(
     event: &Open511Event,
     area: &Open511Area,
     index: usize,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     effective_from: u64,
 ) -> Element {
     let mut properties = ElementPropertyMap::new();
@@ -286,7 +293,7 @@ fn build_area_node(
 }
 
 fn build_affects_road_relation(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     relation_id: &str,
     event_id: &str,
     road_id: &str,
@@ -303,14 +310,14 @@ fn build_affects_road_relation(
             effective_from,
         ),
         // Convention in this repository is in_node=start, out_node=end.
-        in_node: ElementReference::new(source_id, event_id),
-        out_node: ElementReference::new(source_id, road_id),
+        in_node: ElementReference::new(source_id.as_str(), event_id),
+        out_node: ElementReference::new(source_id.as_str(), road_id),
         properties,
     }
 }
 
 fn build_in_area_relation(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     relation_id: &str,
     event_id: &str,
     area_id: &str,
@@ -319,20 +326,20 @@ fn build_in_area_relation(
     Element::Relation {
         metadata: metadata(source_id, relation_id, &[IN_AREA_LABEL], effective_from),
         // Convention in this repository is in_node=start, out_node=end.
-        in_node: ElementReference::new(source_id, event_id),
-        out_node: ElementReference::new(source_id, area_id),
+        in_node: ElementReference::new(source_id.as_str(), event_id),
+        out_node: ElementReference::new(source_id.as_str(), area_id),
         properties: ElementPropertyMap::new(),
     }
 }
 
 fn metadata(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     labels: &[&str],
     effective_from: u64,
 ) -> ElementMetadata {
     ElementMetadata {
-        reference: ElementReference::new(source_id, element_id),
+        reference: ElementReference::new(source_id.as_str(), element_id),
         labels: Arc::from(
             labels
                 .iter()
@@ -446,7 +453,12 @@ mod tests {
     fn map_new_event_emits_event_road_area_graph() {
         let event = sample_event("event-1");
         let mut known_areas = HashSet::new();
-        let changes = map_new_event(&event, "open511-source", &mut known_areas);
+        let changes = map_new_event(
+            &event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004f")
+                .expect("fixture UUID"),
+            &mut known_areas,
+        );
 
         assert_eq!(changes.len(), 5);
         assert!(known_areas.contains("drivebc.ca/3"));
@@ -455,7 +467,11 @@ mod tests {
     #[test]
     fn map_removed_event_emits_deletes() {
         let event = sample_event("event-2");
-        let changes = map_removed_event(&event, "open511-source");
+        let changes = map_removed_event(
+            &event,
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004f")
+                .expect("fixture UUID"),
+        );
 
         // event node delete + road relation delete + road delete + area relation delete
         assert_eq!(changes.len(), 4);

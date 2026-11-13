@@ -22,7 +22,11 @@ mod tests {
 
     #[tokio::test]
     async fn stop_joins_the_wal_pruner() {
-        let (source, _) = create_test_application_source("pruner").await;
+        let (source, _) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000080")
+                .expect("fixture UUID"),
+        )
+        .await;
         let (started, ready) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             started.send(()).unwrap();
@@ -38,11 +42,17 @@ mod tests {
 
     #[tokio::test]
     async fn restart_preserves_existing_handles_buffered_input_and_source_sequence() {
-        let (source, handle) = create_test_application_source("restart-source").await;
+        let (source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000037e")
+                .expect("fixture UUID"),
+        )
+        .await;
         let mut subscription = source
             .subscribe(drasi_lib::config::SourceSubscriptionSettings {
-                source_id: "restart-source".into(),
-                query_id: "query".into(),
+                source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000037e")
+                    .expect("fixture UUID"),
+                query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
                 enable_bootstrap: false,
                 nodes: Default::default(),
                 relations: Default::default(),
@@ -97,7 +107,7 @@ mod tests {
 
     /// Helper to create an application source for testing
     async fn create_test_application_source(
-        id: &str,
+        id: drasi_core::ComponentId,
     ) -> (ApplicationSource, crate::ApplicationSourceHandle) {
         let config = ApplicationSourceConfig {
             properties: HashMap::new(),
@@ -109,14 +119,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_application_source_creation() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
-        assert_eq!(handle.source_id(), "test-source");
+        assert_eq!(
+            handle.source_id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn test_send_node_insert() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         let props = PropertyMapBuilder::new()
             .with_string("name", "John")
@@ -131,7 +153,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_node_update() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         let props = PropertyMapBuilder::new()
             .with_string("name", "Jane")
@@ -146,7 +172,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_delete() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         let result = handle.send_delete("node-1", vec!["Person"]).await;
         assert!(result.is_ok(), "Should send delete successfully");
@@ -154,7 +184,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_relation_insert() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         let props = PropertyMapBuilder::new()
             .with_string("since", "2020")
@@ -168,7 +202,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_batch() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         // Create empty batch - no need for props
         let changes = vec![];
@@ -248,7 +286,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_node_inserts() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         for i in 1..=5 {
             let props = PropertyMapBuilder::new()
@@ -265,7 +307,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_with_multiple_labels() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         let props = PropertyMapBuilder::new()
             .with_string("name", "MultiLabel")
@@ -290,7 +336,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_clone() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         let handle2 = handle.clone();
         assert_eq!(handle.source_id(), handle2.source_id());
@@ -312,7 +362,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_relation_direction() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         // Send nodes
         let node_props = PropertyMapBuilder::new().build();
@@ -351,7 +405,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_relation_insert_with_empty_properties() {
-        let (_source, handle) = create_test_application_source("test-source").await;
+        let (_source, handle) = create_test_application_source(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         let props = PropertyMapBuilder::new().build();
 

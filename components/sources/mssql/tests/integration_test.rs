@@ -212,7 +212,6 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
             .context("Failed to prepare MSSQL database")?;
 
         let bootstrap_provider = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -246,7 +245,8 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
             .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .build();
+            .build()
+            .expect("valid query configuration");
 
         let (reaction, handle) = ApplicationReaction::builder("app-reaction")
             .with_query(QUERY_ID)
@@ -266,9 +266,9 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-integration-test")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -372,7 +372,6 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
         sleep(Duration::from_secs(5)).await;
 
         let bootstrap_provider = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -607,7 +606,7 @@ async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-schema-test")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -775,7 +774,6 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
             .context("Failed to prepare MSSQL types database")?;
 
         let bootstrap_provider = MsSqlBootstrapProvider::builder()
-            .with_source_id(TYPES_SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -785,19 +783,22 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
             .build()
             .context("Failed to build MSSQL bootstrap provider")?;
 
-        let source = MsSqlSource::builder(TYPES_SOURCE_ID)
-            .with_host(&db_config.host)
-            .with_port(db_config.port)
-            .with_database(&db_config.database)
-            .with_user(&db_config.user)
-            .with_password(&db_config.password)
-            .with_table(TYPES_TABLE)
-            .with_poll_interval_ms(500)
-            .with_start_position(StartPosition::Current)
-            .with_trust_server_certificate(true)
-            .with_bootstrap_provider(bootstrap_provider)
-            .build()
-            .context("Failed to build MSSQL source")?;
+        let source = MsSqlSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000032b")
+                .expect("fixture UUID"),
+        )
+        .with_host(&db_config.host)
+        .with_port(db_config.port)
+        .with_database(&db_config.database)
+        .with_user(&db_config.user)
+        .with_password(&db_config.password)
+        .with_table(TYPES_TABLE)
+        .with_poll_interval_ms(500)
+        .with_start_position(StartPosition::Current)
+        .with_trust_server_certificate(true)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()
+        .context("Failed to build MSSQL source")?;
 
         // Seed a row before start so bootstrap snapshot is exercised, then
         // update it via CDC and assert the same property shapes/values.
@@ -819,9 +820,11 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
         )
         .await?;
 
-        let query = Query::cypher(TYPES_QUERY_ID)
-            .query(
-                r#"
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("types-query").expect("fixture component name"),
+        )
+        .query(
+            r#"
                 MATCH (t:TypesTest)
                 RETURN t.Id AS id,
                        t.IntVal AS int_val,
@@ -845,15 +848,24 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
                        t.TimeVal AS time_val,
                        t.DateTimeOffsetVal AS datetimeoffset_val
             "#,
-            )
-            .from_input(TYPES_SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .build();
+        )
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("mssql-types-source")
+                .expect("fixture component name"),
+        )
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .build()
+        .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("types-reaction")
-            .with_query(TYPES_QUERY_ID)
-            .build();
+        let (reaction, handle) = ApplicationReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000043")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("types-query").expect("fixture component name"),
+        )
+        .build();
 
         let core = DrasiLib::builder()
             .with_query_factory(
@@ -869,9 +881,17 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-types-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("mssql-types-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("types-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -1166,7 +1186,6 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
         sleep(Duration::from_secs(3)).await;
 
         let bp = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -1199,7 +1218,8 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+            .build()
+            .expect("valid query configuration");
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-rt1")
             .with_query(QUERY_ID)
             .build();
@@ -1219,9 +1239,9 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-recovery-test")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1331,7 +1351,6 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .context("Failed to prepare MSSQL database")?;
 
         let bp = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -1364,7 +1383,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+            .build().expect("valid query configuration");
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-bs1")
             .with_query(QUERY_ID)
             .build();
@@ -1372,9 +1391,9 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
 
         let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
             .with_id("mssql-bootstrap-resume-test")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1490,7 +1509,6 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
         sleep(Duration::from_secs(3)).await;
 
         let bp = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -1523,7 +1541,8 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+            .build()
+            .expect("valid query configuration");
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-full-restart")
             .with_query(QUERY_ID)
             .build();
@@ -1543,9 +1562,9 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-full-restart-test")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1675,7 +1694,6 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         sleep(Duration::from_secs(3)).await;
 
         let bp = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -1754,11 +1772,11 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-multi-query-test")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(query1)
             .with_query(query2)
-            .with_reaction(reaction1)
-            .with_reaction(reaction2)
+            .with_reaction(drasi_lib::Reaction::id(&reaction1).to_owned(), reaction1)
+            .with_reaction(drasi_lib::Reaction::id(&reaction2).to_owned(), reaction2)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -2086,7 +2104,8 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+            .build()
+            .expect("valid query configuration");
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-ffi-restart")
             .with_query(QUERY_ID)
             .build();
@@ -2105,9 +2124,9 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-ffi-restart-test")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -2215,7 +2234,7 @@ const PLAUSIBLE_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000_000_000_000..=4_
 /// Subscribe directly to a started source and return its bootstrap + CDC receivers.
 async fn subscribe_direct(
     source: &MsSqlSource,
-    query_id: &str,
+    query_id: drasi_core::ComponentId,
 ) -> Result<(
     tokio::sync::mpsc::Receiver<drasi_lib::channels::BootstrapEvent>,
     Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>>,
@@ -2233,9 +2252,10 @@ async fn subscribe_direct(
     );
 
     let settings = SourceSubscriptionSettings {
-        source_id: SOURCE_ID.to_string(),
+        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000032a")
+            .expect("fixture UUID"),
         enable_bootstrap: true,
-        query_id: query_id.to_string(),
+        query_id,
         nodes: HashSet::from(["Products".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
@@ -2282,7 +2302,6 @@ async fn test_mssql_effective_from_populated() -> Result<()> {
         sleep(Duration::from_secs(5)).await;
 
         let bootstrap_provider = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -2421,7 +2440,6 @@ async fn test_mssql_bootstrap_cdc_element_id_match() -> Result<()> {
 
         // Deliberately divergent table-name formats (the real-world trigger).
         let bootstrap_provider = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -2549,7 +2567,6 @@ async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
 
         // Divergent table-name formats (the real-world trigger for Bug 2).
         let bootstrap_provider = MsSqlBootstrapProvider::builder()
-            .with_source_id(SOURCE_ID)
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -2583,7 +2600,7 @@ async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
             .from_input(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .build();
+            .build().expect("valid query configuration");
 
         let (reaction, handle) = ApplicationReaction::builder("app-reaction")
             .with_query(QUERY_ID)
@@ -2591,9 +2608,9 @@ async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
 
         let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
             .with_id("mssql-dup-test")
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
             .build()
             .await
             .context("Failed to build DrasiLib")?;

@@ -558,6 +558,8 @@ unsafe extern "C" fn wake_host(context: *mut c_void) {
 pub struct OperationFuture {
     handle: OperationHandle,
     wake: Arc<WakeContext>,
+    active: Arc<AtomicBool>,
+    calls: Arc<Mutex<()>>,
     done: bool,
 }
 // The native operation contract permits moving the owner between threads. It
@@ -578,12 +580,55 @@ impl OperationFuture {
         Ok(Self {
             handle,
             wake: Arc::new(WakeContext::new()),
+            active: Arc::new(AtomicBool::new(true)),
+            calls: Arc::new(Mutex::new(())),
             done: false,
         })
     }
+    pub fn cancellation(&self) -> OperationCancellation {
+        OperationCancellation {
+            state: self.handle.state,
+            vtable: self.handle.vtable,
+            active: Arc::downgrade(&self.active),
+            calls: Arc::downgrade(&self.calls),
+        }
+    }
     pub fn cancel(&mut self) -> Result<(), Failure> {
-        let table = unsafe { &*self.handle.vtable };
-        unsafe { take_status(table.cancel.expect("validated")(self.handle.state)) }
+        self.cancellation().cancel()
+    }
+}
+
+#[derive(Clone)]
+pub struct OperationCancellation {
+    state: *mut std::ffi::c_void,
+    vtable: *const abi::OperationVTable,
+    active: std::sync::Weak<AtomicBool>,
+    calls: std::sync::Weak<Mutex<()>>,
+}
+unsafe impl Send for OperationCancellation {}
+unsafe impl Sync for OperationCancellation {}
+impl OperationCancellation {
+    pub fn is_active(&self) -> bool {
+        self.active
+            .upgrade()
+            .is_some_and(|active| active.load(Ordering::Acquire))
+    }
+
+    pub fn cancel(&self) -> Result<(), Failure> {
+        let Some(calls) = self.calls.upgrade() else {
+            return Ok(());
+        };
+        let _call = calls
+            .lock()
+            .map_err(|_| Failure::protocol("native operation call lock is poisoned"))?;
+        let Some(active) = self.active.upgrade() else {
+            return Ok(());
+        };
+        if !active.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let table = unsafe { &*self.vtable };
+        unsafe { take_status(table.cancel.expect("validated")(self.state)) }
     }
 }
 impl Future for OperationFuture {
@@ -596,6 +641,15 @@ impl Future for OperationFuture {
         }
         *self.wake.waker.lock().unwrap_or_else(|e| e.into_inner()) = Some(cx.waker().clone());
         let wake = WakeContext::table(&self.wake);
+        let calls = self.calls.clone();
+        let _call = match calls.lock() {
+            Ok(call) => call,
+            Err(_) => {
+                return Poll::Ready(Err(Failure::protocol(
+                    "native operation call lock is poisoned",
+                )));
+            }
+        };
         let table = unsafe { &*self.handle.vtable };
         let polled = unsafe { table.poll.expect("validated")(self.handle.state, &wake) };
         let reply = unsafe { take_reply(polled.reply) };
@@ -603,6 +657,7 @@ impl Future for OperationFuture {
             return Poll::Pending;
         }
         self.done = true;
+        self.active.store(false, Ordering::Release);
         self.wake.closed.store(true, Ordering::Release);
         Poll::Ready(match polled.state {
             abi::POLL_READY => reply,
@@ -615,6 +670,11 @@ impl Future for OperationFuture {
 }
 impl Drop for OperationFuture {
     fn drop(&mut self) {
+        let _call = self.calls.lock().unwrap_or_else(|error| {
+            eprintln!("Native operation call lock is poisoned during release");
+            error.into_inner()
+        });
+        self.active.store(false, Ordering::Release);
         self.wake.closed.store(true, Ordering::Release);
         self.wake
             .waker
@@ -645,6 +705,84 @@ pub unsafe fn write_out<T>(out: *mut T, value: T) -> Result<(), Failure> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn cancellation_cannot_enter_a_foreign_operation_while_it_is_polled() {
+        struct Probe {
+            polling: AtomicBool,
+            overlap: AtomicBool,
+            entered: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        unsafe extern "C" fn poll(state: *mut c_void, _: *const abi::Wake) -> abi::PollResult {
+            let probe = unsafe { &*state.cast::<Arc<Probe>>() };
+            probe.polling.store(true, Ordering::Release);
+            probe.entered.send(()).unwrap();
+            probe.release.lock().unwrap().recv().unwrap();
+            probe.polling.store(false, Ordering::Release);
+            abi::PollResult {
+                state: abi::POLL_PENDING,
+                reply: Reply::empty(),
+            }
+        }
+
+        unsafe extern "C" fn cancel(state: *mut c_void) -> Status {
+            let probe = unsafe { &*state.cast::<Arc<Probe>>() };
+            if probe.polling.load(Ordering::Acquire) {
+                probe.overlap.store(true, Ordering::Release);
+            }
+            Status::ok()
+        }
+
+        unsafe extern "C" fn release(state: *mut c_void) {
+            drop(unsafe { Box::from_raw(state.cast::<Arc<Probe>>()) });
+        }
+
+        static TABLE: abi::OperationVTable = abi::OperationVTable {
+            header: Header::new::<abi::OperationVTable>(),
+            poll: Some(poll),
+            cancel: Some(cancel),
+            release: Some(release),
+        };
+        let (entered, entering) = std::sync::mpsc::channel();
+        let (release_poll, released) = std::sync::mpsc::channel();
+        let probe = Arc::new(Probe {
+            polling: AtomicBool::new(false),
+            overlap: AtomicBool::new(false),
+            entered,
+            release: Mutex::new(released),
+        });
+        let handle = OperationHandle {
+            state: Box::into_raw(Box::new(probe.clone())).cast(),
+            vtable: &TABLE,
+        };
+        let mut operation = unsafe { OperationFuture::new(handle) }.unwrap();
+        let cancellation = operation.cancellation();
+        let polling = std::thread::spawn(move || {
+            assert!(Pin::new(&mut operation)
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending());
+        });
+        entering.recv().unwrap();
+        let (attempted, attempts) = std::sync::mpsc::channel();
+        let (finished, finishes) = std::sync::mpsc::channel();
+        let cancelling = std::thread::spawn(move || {
+            attempted.send(()).unwrap();
+            cancellation.cancel().unwrap();
+            finished.send(()).unwrap();
+        });
+        attempts.recv().unwrap();
+        let before_release = finishes.recv_timeout(std::time::Duration::from_millis(100));
+        release_poll.send(()).unwrap();
+        polling.join().unwrap();
+        cancelling.join().unwrap();
+        assert!(matches!(
+            before_release,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(!probe.overlap.load(Ordering::Acquire));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn poll_wake_and_owned_output_cross_the_real_c_table() {

@@ -91,7 +91,7 @@
 //!
 //! // Add source to Drasi
 //! let source = Arc::new(source);
-//! drasi.add_source(source).await?;
+//! drasi.add_source(drasi_lib::Source::id(&source).to_owned(), source).await?;
 //!
 //! // Clone handle for use in different parts of your application
 //! let handle_clone = handle.clone();
@@ -177,7 +177,7 @@ struct InternalEvent {
 #[derive(Clone)]
 pub struct ApplicationSourceHandle {
     tx: mpsc::Sender<InternalEvent>,
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     requires_wal: bool,
     /// Shared WAL reference — populated when the source is started with durability enabled
     wal: Arc<tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>>,
@@ -195,7 +195,14 @@ impl ApplicationSourceHandle {
         let wal_seq = {
             let wal_guard = self.wal.read().await;
             if let Some(ref wal) = *wal_guard {
-                match wal.append(&self.source_id, &change).await {
+                match wal
+                    .append(
+                        &drasi_lib::StorageScope::default(),
+                        &self.source_id,
+                        &change,
+                    )
+                    .await
+                {
                     Ok(seq) => Some(seq),
                     Err(WalError::CapacityExhausted(msg)) => {
                         return Err(anyhow::anyhow!("WAL capacity exhausted: {msg}"));
@@ -235,7 +242,7 @@ impl ApplicationSourceHandle {
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(self.source_id.as_str()),
+                    namespace: Arc::from(self.source_id.as_str()),
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
@@ -262,7 +269,7 @@ impl ApplicationSourceHandle {
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(self.source_id.as_str()),
+                    namespace: Arc::from(self.source_id.as_str()),
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
@@ -287,7 +294,7 @@ impl ApplicationSourceHandle {
 
         let metadata = ElementMetadata {
             reference: ElementReference {
-                source_id: Arc::from(self.source_id.as_str()),
+                namespace: Arc::from(self.source_id.as_str()),
                 element_id: element_id.into(),
             },
             labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
@@ -314,7 +321,7 @@ impl ApplicationSourceHandle {
         let element = Element::Relation {
             metadata: ElementMetadata {
                 reference: ElementReference {
-                    source_id: Arc::from(self.source_id.as_str()),
+                    namespace: Arc::from(self.source_id.as_str()),
                     element_id: element_id.into(),
                 },
                 labels: Arc::from(labels.into_iter().map(|l| l.into()).collect::<Vec<_>>()),
@@ -322,11 +329,11 @@ impl ApplicationSourceHandle {
             },
             properties,
             in_node: ElementReference {
-                source_id: Arc::from(self.source_id.as_str()),
+                namespace: Arc::from(self.source_id.as_str()),
                 element_id: start_node_id.into(),
             },
             out_node: ElementReference {
-                source_id: Arc::from(self.source_id.as_str()),
+                namespace: Arc::from(self.source_id.as_str()),
                 element_id: end_node_id.into(),
             },
         };
@@ -343,7 +350,7 @@ impl ApplicationSourceHandle {
     }
 
     /// Get the source ID that this handle is connected to
-    pub fn source_id(&self) -> &str {
+    pub fn source_id(&self) -> &drasi_lib::ComponentId {
         &self.source_id
     }
 }
@@ -410,10 +417,10 @@ impl ApplicationSource {
     /// let (source, handle) = ApplicationSource::new("my-source", config)?;
     /// ```
     pub fn new(
-        id: impl Into<String>,
+        id: drasi_lib::ComponentId,
         config: ApplicationSourceConfig,
     ) -> Result<(Self, ApplicationSourceHandle)> {
-        let id = id.into();
+        let id = id.clone();
         let params = SourceBaseParams::new(id.clone());
         let (app_tx, app_rx) = mpsc::channel(1000);
 
@@ -555,7 +562,7 @@ impl ApplicationSource {
 
 #[async_trait]
 impl Source for ApplicationSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -598,15 +605,19 @@ impl Source for ApplicationSource {
                     .as_ref()
                     .expect("durability checked above")
                     .to_wal_config();
-                wal.register(&self.base.id, wal_config.clone())
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to register WAL for source '{}': {}",
-                            self.base.id,
-                            e
-                        )
-                    })?;
+                wal.register(
+                    &drasi_lib::StorageScope::default(),
+                    &self.base.id,
+                    wal_config.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to register WAL for source '{}': {}",
+                        self.base.id,
+                        e
+                    )
+                })?;
 
                 info!(
                     "[{}] WAL registered: max_events={}, policy={:?}",
@@ -614,9 +625,12 @@ impl Source for ApplicationSource {
                 );
 
                 // Resume sequence counter from WAL head
-                let head = wal.head_sequence(&self.base.id).await.with_context(|| {
-                    format!("Failed to read WAL head for source '{}'", self.base.id)
-                })?;
+                let head = wal
+                    .head_sequence(&drasi_lib::StorageScope::default(), &self.base.id)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to read WAL head for source '{}'", self.base.id)
+                    })?;
                 if head > 0 {
                     self.base.set_next_sequence(head);
                     info!(
@@ -645,11 +659,11 @@ impl Source for ApplicationSource {
                     interval.tick().await;
                     if let Some(confirmed) = base.compute_confirmed_position().await {
                         if confirmed > 0 {
-                            match wal.prune_up_to(&source_id, confirmed).await {
+                            match wal.prune_up_to(&drasi_lib::StorageScope::default(), &source_id, confirmed).await {
                                 Ok(pruned) => {
                                     if pruned > 0 {
                                         let remaining =
-                                            wal.event_count(&source_id).await.unwrap_or(0);
+                                            wal.event_count(&drasi_lib::StorageScope::default(), &source_id).await.unwrap_or(0);
                                         debug!(
                                             "[{source_id}] WAL pruned: count={pruned}, confirmed_seq={confirmed}, remaining={remaining}"
                                         );
@@ -728,16 +742,17 @@ impl Source for ApplicationSource {
         self.config.durability.as_ref().is_some_and(|d| d.enabled)
     }
 
-    async fn deprovision(&self) -> Result<()> {
+    async fn delete_owned_resources(&self) -> Result<()> {
         // Delete WAL data if durability was enabled
         let wal_guard = self.wal.read().await;
         if let Some(ref wal) = *wal_guard {
-            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
-            if let Err(e) = wal.delete_wal(&self.base.id).await {
-                warn!(
-                    "[{}] Failed to delete WAL during deprovision: {}",
-                    self.base.id, e
-                );
+            info!("[{}] Deleting owned WAL data", self.base.id);
+            if let Err(e) = wal
+                .delete_wal(&drasi_lib::StorageScope::default(), &self.base.id)
+                .await
+            {
+                warn!("[{}] Failed to delete owned WAL data: {}", self.base.id, e);
+                return Err(e.into());
             }
         }
         drop(wal_guard);
@@ -748,8 +763,8 @@ impl Source for ApplicationSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(

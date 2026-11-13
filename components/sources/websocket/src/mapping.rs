@@ -83,7 +83,7 @@ impl FrameMapper {
 
     pub(crate) fn map_text(
         &self,
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         text: &str,
     ) -> Result<Vec<SourceChange>, FrameError> {
         if text.len() > self.max_message_size_bytes {
@@ -147,7 +147,10 @@ impl FrameMapper {
                     continue;
                 }
 
-                match self.engine.process_mapping(mapping, &context, source_id) {
+                match self
+                    .engine
+                    .process_mapping(mapping, &context, source_id.as_str())
+                {
                     Ok(change) => changes.push(change),
                     Err(_) => {
                         warn!(
@@ -328,7 +331,7 @@ mod tests {
             let mapper = FrameMapper::new(&config());
             let changes = mapper
             .map_text(
-                "source",
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"),
                 r#"{"type":"batch","items":[{"kind":"sensor","id":"a","value":1},{"kind":"sensor","id":"b","value":2}]}"#,
             )
             .unwrap();
@@ -347,7 +350,7 @@ mod tests {
             let mapper = FrameMapper::new(&config);
             let changes = mapper
             .map_text(
-                "source",
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"),
                 r#"[{"kind":"sensor","id":"a","value":1},{"kind":"sensor","id":"b","value":2}]"#,
             )
             .unwrap();
@@ -364,7 +367,8 @@ mod tests {
             let mapper = FrameMapper::new(&config());
             let changes = mapper
                 .map_text(
-                    "source",
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
                     r#"{"items":[{"kind":"sensor","id":"a","value":1}]}"#,
                 )
                 .unwrap();
@@ -382,7 +386,11 @@ mod tests {
         fn missing_array_field_selects_no_items() {
             let mapper = FrameMapper::new(&config());
             assert!(mapper
-                .map_text("source", r#"{"type":"heartbeat"}"#)
+                .map_text(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    r#"{"type":"heartbeat"}"#
+                )
                 .unwrap()
                 .is_empty());
         }
@@ -406,7 +414,8 @@ mod tests {
 
             let changes = mapper
                 .map_text(
-                    "source",
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
                     r#"{"type":"batch","items":[{"id":"a","value":1},{"id":"b","value":2}]}"#,
                 )
                 .unwrap();
@@ -454,10 +463,13 @@ mod tests {
             config.mappings[0].template.id =
                 "{{source_id}}/{{envelope.type}}/{{payload.id}}".to_string();
             let mapper = FrameMapper::new(&config);
+            let source_id =
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID");
 
             let change = mapper
                 .map_text(
-                    "source",
+                    &source_id,
                     r#"{"type":"batch","items":[{"id":"sensor-1","value":1}]}"#,
                 )
                 .unwrap()
@@ -466,7 +478,7 @@ mod tests {
 
             assert_eq!(
                 change.get_reference().element_id.as_ref(),
-                "source/batch/sensor-1"
+                format!("{source_id}/batch/sensor-1")
             );
         }
 
@@ -481,7 +493,11 @@ mod tests {
                 .collect::<Vec<_>>();
 
             let changes = FrameMapper::new(&config)
-                .map_text("source", &json!({"items": items}).to_string())
+                .map_text(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &json!({"items": items}).to_string(),
+                )
                 .unwrap();
             assert!(changes.is_empty());
         }
@@ -494,7 +510,11 @@ mod tests {
                 .collect::<Vec<_>>();
 
             let error = FrameMapper::new(&config)
-                .map_text("source", &json!({"items": items}).to_string())
+                .map_text(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &json!({"items": items}).to_string(),
+                )
                 .unwrap_err();
             assert_eq!(
                 error.to_string(),
@@ -528,11 +548,19 @@ mod tests {
             let mapper = FrameMapper::new(&config);
 
             assert!(mapper
-                .map_text("source", r#"{"type":"heartbeat"}"#)
+                .map_text(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    r#"{"type":"heartbeat"}"#
+                )
                 .unwrap()
                 .is_empty());
             assert!(mapper
-                .map_text("source", r#"{"op":"subscribed"}"#)
+                .map_text(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    r#"{"op":"subscribed"}"#
+                )
                 .unwrap()
                 .is_empty());
         }
@@ -557,15 +585,18 @@ mod tests {
                 },
             }];
 
+            let source_id =
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID");
             let change = FrameMapper::new(&config)
-                .map_text("source", r#"{"id":"sensor-1"}"#)
+                .map_text(&source_id, r#"{"id":"sensor-1"}"#)
                 .unwrap()
                 .pop()
                 .unwrap();
 
             match change {
                 SourceChange::Delete { metadata } => {
-                    assert_eq!(metadata.reference.source_id.as_ref(), "source");
+                    assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                     assert_eq!(metadata.reference.element_id.as_ref(), "sensor-1");
                     assert_eq!(metadata.labels[0].as_ref(), "Sensor");
                 }
@@ -585,7 +616,8 @@ mod tests {
 
             let change = FrameMapper::new(&config)
                 .map_text(
-                    "source",
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
                     r#"{"kind":"sensor","id":"sensor-1","value":10,"timestamp":1770000000000}"#,
                 )
                 .unwrap()
@@ -622,7 +654,8 @@ mod tests {
 
             let change = FrameMapper::new(&config)
                 .map_text(
-                    "source",
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
                     r#"{"id":"reading-1","reader":"reader-1","sensor":"sensor-1"}"#,
                 )
                 .unwrap()
@@ -651,7 +684,13 @@ mod tests {
         #[test]
         fn classifies_malformed_json_as_recoverable_without_exposing_payload() {
             let mapper = FrameMapper::new(&config());
-            let malformed = mapper.map_text("source", "{invalid").unwrap_err();
+            let malformed = mapper
+                .map_text(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "{invalid",
+                )
+                .unwrap_err();
             assert!(malformed.is_recoverable());
             assert!(!malformed.to_string().contains("{invalid"));
         }
@@ -660,7 +699,11 @@ mod tests {
         fn classifies_non_array_items_field_as_fatal() {
             let mapper = FrameMapper::new(&config());
             let invalid_items = mapper
-                .map_text("source", r#"{"items":"not-an-array"}"#)
+                .map_text(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    r#"{"items":"not-an-array"}"#,
+                )
                 .unwrap_err();
             assert_eq!(
                 invalid_items.to_string(),

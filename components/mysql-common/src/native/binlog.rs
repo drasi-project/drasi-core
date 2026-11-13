@@ -517,9 +517,7 @@ impl Binlog {
                 );
             }
             let builder = (self.config.output == MySqlOutput::Transactions)
-                .then(|| {
-                    SourceTransactionBuilder::new(self.source.as_str(), self.config.transactions)
-                })
+                .then(|| SourceTransactionBuilder::new(&self.source, self.config.transactions))
                 .transpose()?;
             self.pending = Some(Pending {
                 start,

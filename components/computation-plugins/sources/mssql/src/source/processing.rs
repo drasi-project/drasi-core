@@ -26,7 +26,7 @@ impl NativeSource for MsSqlSource {
                     .checked_add(1)
                     .context("SQL Server sequence exhausted")?;
                 let event = SourceEventWrapper::new(
-                    self.descriptor.id().to_string(),
+                    self.descriptor.id().clone(),
                     SourceEvent::Change(change.change),
                     chrono::Utc::now(),
                     self.sequence,

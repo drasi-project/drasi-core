@@ -62,7 +62,12 @@ fn test_trade_mapping() {
         tid: 42,
     };
 
-    let changes = map_trade_to_changes("hl", &trade).unwrap();
+    let changes = map_trade_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        &trade,
+    )
+    .unwrap();
     assert_eq!(changes.len(), 2);
 
     match &changes[0] {
@@ -103,10 +108,24 @@ fn test_midprice_insert_update() {
     mids.insert("BTC".to_string(), "100.0".to_string());
 
     let mut initialized = InitializedEntities::new();
-    let first = map_mid_prices_to_changes("hl", &mids, &mut initialized, 1000).unwrap();
+    let first = map_mid_prices_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        &mids,
+        &mut initialized,
+        1000,
+    )
+    .unwrap();
     assert_eq!(first.len(), 2);
 
-    let second = map_mid_prices_to_changes("hl", &mids, &mut initialized, 2000).unwrap();
+    let second = map_mid_prices_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        &mids,
+        &mut initialized,
+        2000,
+    )
+    .unwrap();
     assert_eq!(second.len(), 1);
 }
 
@@ -130,10 +149,22 @@ fn test_order_book_insert_update() {
     };
 
     let mut initialized = InitializedEntities::new();
-    let first = map_order_book_to_changes("hl", &book, &mut initialized).unwrap();
+    let first = map_order_book_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        &book,
+        &mut initialized,
+    )
+    .unwrap();
     assert_eq!(first.len(), 2);
 
-    let second = map_order_book_to_changes("hl", &book, &mut initialized).unwrap();
+    let second = map_order_book_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        &book,
+        &mut initialized,
+    )
+    .unwrap();
     assert_eq!(second.len(), 1);
 }
 
@@ -148,7 +179,12 @@ fn test_liquidation_mapping() {
         hash: None,
     };
 
-    let changes = map_liquidation_to_changes("hl", &liquidation).unwrap();
+    let changes = map_liquidation_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        &liquidation,
+    )
+    .unwrap();
     assert_eq!(changes.len(), 2);
 
     // Without hash, ID uses timestamp
@@ -177,7 +213,12 @@ fn test_liquidation_id_uses_hash_when_present() {
         hash: Some("0xdeadbeef".to_string()),
     };
 
-    let changes = map_liquidation_to_changes("hl", &liquidation).unwrap();
+    let changes = map_liquidation_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        &liquidation,
+    )
+    .unwrap();
     assert_eq!(changes.len(), 2);
 
     // With hash, ID uses hash instead of timestamp to avoid collisions
@@ -229,13 +270,27 @@ fn test_funding_mapping() {
     };
 
     let mut initialized = InitializedEntities::new();
-    let (changes, snapshot) =
-        map_funding_rate_to_changes("hl", "BTC", &ctx, &mut initialized, 123).unwrap();
+    let (changes, snapshot) = map_funding_rate_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        "BTC",
+        &ctx,
+        &mut initialized,
+        123,
+    )
+    .unwrap();
     assert_eq!(changes.len(), 2);
     assert_eq!(snapshot.rate, 0.0001);
 
-    let (changes, _) =
-        map_funding_rate_to_changes("hl", "BTC", &ctx, &mut initialized, 124).unwrap();
+    let (changes, _) = map_funding_rate_to_changes(
+        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cc")
+            .expect("fixture UUID"),
+        "BTC",
+        &ctx,
+        &mut initialized,
+        124,
+    )
+    .unwrap();
     assert_eq!(changes.len(), 1);
 }
 
@@ -269,7 +324,11 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
     }
 
     let source_id = "hl-seq-source";
-    let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+    let base = SourceBase::new(SourceBaseParams::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000425")
+            .expect("fixture UUID"),
+    ))
+    .unwrap();
     let mut rx = base.test_subscribe().await;
 
     let per_task = 250u64;
@@ -288,7 +347,8 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
         for i in 0..per_task {
             barrier_a.wait().await;
             dispatch_changes(
-                &sid_a,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000425")
+                    .expect("fixture UUID"),
                 &base_a,
                 vec![insert_node(&sid_a, &format!("ws-{i}"))],
             )
@@ -299,7 +359,8 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
         for i in 0..per_task {
             barrier_b.wait().await;
             dispatch_changes(
-                &sid_b,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000425")
+                    .expect("fixture UUID"),
                 &base_b,
                 vec![insert_node(&sid_b, &format!("funding-{i}"))],
             )
@@ -318,7 +379,11 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
         sequences.push(event.sequence);
-        assert_eq!(event.source_id, source_id);
+        assert_eq!(
+            event.source_id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000425")
+                .expect("fixture UUID")
+        );
         assert!(event.profiling.as_ref().unwrap().source_send_ns.is_some());
     }
 

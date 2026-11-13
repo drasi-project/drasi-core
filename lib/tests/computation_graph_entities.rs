@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::{
@@ -40,12 +44,48 @@ fn resource(id: &str) -> ResourceId {
     ResourceId::try_new(id).expect("resource ID")
 }
 
+fn named_component(name: &str) -> ComponentId {
+    let value = match name {
+        "public-source" => 735,
+        "public-query" => 736,
+        "public-reaction" => 737,
+        "control-only" => 1018,
+        "external-source" => 2_005,
+        "external-query" => 2_006,
+        "external-reaction" => 2_007,
+        "factory-source" => 2_008,
+        "factory-query" => 2_009,
+        "factory-reaction" => 2_010,
+        "same" => 2_011,
+        "a:b" => 2_012,
+        "a" => 2_013,
+        "b:c" => 2_014,
+        "雪" => 2_015,
+        "source" => 77,
+        "query" => 46,
+        "reaction" => 2_018,
+        "dynamic-source" => 1019,
+        "dynamic-reaction" => 1020,
+        "transformer" => 431,
+        "sink" => 101,
+        "service" => 432,
+        "first" => 451,
+        "second" => 768,
+        "missing" => 738,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    };
+    fixture_support::component_id(value)
+}
+
 struct IdleService {
     descriptor: ComponentDescriptor,
     running: bool,
 }
 
-fn service(id: &str, identity: Option<PluginIdentity>) -> Box<IdleService> {
+fn service(
+    id: &drasi_core_types::ComponentId,
+    identity: Option<PluginIdentity>,
+) -> Box<IdleService> {
     let mut descriptor = descriptor(id, &[], &[]);
     if let Some(identity) = identity {
         descriptor = descriptor
@@ -83,7 +123,10 @@ impl ComputationService for IdleService {
     }
 }
 
-fn specification(id: &str, identity: Option<PluginIdentity>) -> ComponentSpecification {
+fn specification(
+    id: &drasi_core_types::ComponentId,
+    identity: Option<PluginIdentity>,
+) -> ComponentSpecification {
     let mut implementation =
         ImplementationIdentity::try_new("fixture/service", "7").expect("implementation");
     implementation.plugin = identity;
@@ -99,7 +142,7 @@ fn specification(id: &str, identity: Option<PluginIdentity>) -> ComponentSpecifi
 }
 
 fn runtime_specification(
-    id: &str,
+    id: &drasi_core_types::ComponentId,
     kind: &str,
     semantic_kind: Option<ComponentSemanticKind>,
 ) -> ComponentSpecification {
@@ -108,7 +151,10 @@ fn runtime_specification(
             .expect("runtime adapter"),
         configuration_version: 1,
         configuration: BTreeMap::from([
-            (Arc::from("id"), ConfigurationValue::Literal(id.into())),
+            (
+                Arc::from("id"),
+                ConfigurationValue::Literal(id.to_string().into()),
+            ),
             (Arc::from("kind"), ConfigurationValue::Literal(kind.into())),
             (
                 Arc::from("record_token"),
@@ -150,6 +196,7 @@ fn factory(spec: &ComponentSpecification, fail: bool) -> Arc<ServiceFactory> {
                         (
                             key.clone(),
                             ConfigurationField {
+                                constraint: None,
                                 value_type: ConfigurationType::Json,
                                 required: true,
                                 secret: matches!(
@@ -189,6 +236,26 @@ impl ComponentFactory for ServiceFactory {
         Ok(())
     }
 
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current.descriptor == proposed.descriptor
+                && current.implementation == proposed.implementation
+                && current.configuration_version == proposed.configuration_version
+                && current.role == proposed.role
+                && current.completion == proposed.completion
+                && current.dependencies == proposed.dependencies,
+            "the stateless inspection fixture cannot change identity, interface or resources"
+        );
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
+
     async fn create(
         &self,
         context: ConstructionContext,
@@ -222,13 +289,26 @@ fn pipeline() -> ComputationGraphBuilder {
         RetentionPolicy::Backpressure,
     ))));
     ComputationGraph::builder("entities")
-        .source(Box::new(FiniteSource::new("source", vec![])))
-        .sink(Box::new(CollectSink::new(
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![],
+        )))
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             Received::default(),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .declare_resource(ResourceSpecification {
             id: resource("store"),
             role: ResourceRole::StateStore,
@@ -242,7 +322,12 @@ fn pipeline() -> ComputationGraphBuilder {
         )
         .expect("provide store")
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(RetainedPipeConfig {
                 resource: resource("store"),
                 capacity,
@@ -252,7 +337,12 @@ fn pipeline() -> ComputationGraphBuilder {
             }),
         )
         .relationship_policy(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             RelationshipPolicy {
                 required_for_binding: false,
                 orphan_permitted: true,
@@ -262,7 +352,11 @@ fn pipeline() -> ComputationGraphBuilder {
 }
 
 fn subscription_graph() -> ComputationGraph {
-    let mut builder = pipeline().service(service("control-only", None));
+    let mut builder = pipeline().fixture_service(service(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003fa")
+            .expect("fixture UUID"),
+        None,
+    ));
     for (id, kind, semantic_kind) in [
         ("public-source", "source", ComponentSemanticKind::Source),
         ("public-query", "query", ComponentSemanticKind::Query),
@@ -272,20 +366,21 @@ fn subscription_graph() -> ComputationGraph {
             ComponentSemanticKind::Reaction,
         ),
     ] {
-        let spec = runtime_specification(id, kind, Some(semantic_kind));
-        builder = builder.component(spec.clone(), factory(&spec, false));
+        let component_id = named_component(id);
+        let spec = runtime_specification(&component_id, kind, Some(semantic_kind));
+        builder = builder.fixture_component(spec.clone(), factory(&spec, false));
     }
     builder
-        .require_downstream_ready(component("public-source"))
-        .require_downstream_ready(component("public-query"))
+        .require_downstream_ready(component(735))
+        .require_downstream_ready(component(736))
         .build()
         .expect("subscription graph")
 }
 
 fn subscription(from: &str, to: &str) -> GraphEntityId {
     GraphEntityId::Subscription {
-        from: component(from),
-        to: component(to),
+        from: named_component(from),
+        to: named_component(to),
     }
 }
 
@@ -380,7 +475,12 @@ fn label_count(elements: &BTreeMap<String, Element>, label: &str) -> usize {
 
 #[test]
 fn descriptor_provenance_round_trips_without_weakening_validation() {
-    let plain = descriptor("component:/雪", &["in"], &["out"]);
+    let plain = descriptor(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bc")
+            .expect("fixture UUID"),
+        &["in"],
+        &["out"],
+    );
     let identity = plugin("plugin:/雪", "1.2.3");
     let descriptor = plain
         .clone()
@@ -442,14 +542,22 @@ fn descriptor_provenance_round_trips_without_weakening_validation() {
 
 #[test]
 fn descriptor_semantic_metadata_is_optional_and_part_of_descriptor_equality() {
-    let legacy_json = serde_json::json!({"id": "legacy", "ports": []});
+    let plain_json = serde_json::json!({"id": component(445), "ports": []});
     let plain: ComponentDescriptor =
-        serde_json::from_value(legacy_json.clone()).expect("legacy descriptor");
-    assert_eq!(plain, descriptor("legacy", &[], &[]));
+        serde_json::from_value(plain_json.clone()).expect("plain descriptor");
+    assert_eq!(
+        plain,
+        descriptor(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001bd")
+                .expect("fixture UUID"),
+            &[],
+            &[]
+        )
+    );
     assert!(plain.semantic_kind().is_none());
     assert_eq!(
-        serde_json::to_value(&plain).expect("serialize legacy descriptor"),
-        legacy_json
+        serde_json::to_value(&plain).expect("serialize plain descriptor"),
+        plain_json
     );
     let identity = plugin("explicit-plugin", "1");
     for original in [
@@ -520,17 +628,19 @@ fn explicit_semantic_metadata_is_independent_of_construction_and_survives_import
     ];
     let mut builder = ComputationGraph::builder("explicit-semantics");
     for (name, kind) in cases {
-        let mut instance = service(&format!("external-{name}"), None);
+        let external_id = named_component(&format!("external-{name}"));
+        let factory_id = named_component(&format!("factory-{name}"));
+        let mut instance = service(&external_id, None);
         instance.descriptor = instance.descriptor.clone().with_semantic_kind(kind);
-        let mut spec = specification(&format!("factory-{name}"), None);
+        let mut spec = specification(&factory_id, None);
         spec.descriptor = spec.descriptor.with_semantic_kind(kind);
         spec.configuration.insert(
             Arc::from("kind"),
             ConfigurationValue::Literal(serde_json::json!("service")),
         );
         builder = builder
-            .service(instance)
-            .component(spec.clone(), factory(&spec, false));
+            .fixture_service(instance)
+            .fixture_component(spec.clone(), factory(&spec, false));
     }
     let graph = builder.build().expect("graph");
     let topology = graph.inspector().topology();
@@ -541,7 +651,7 @@ fn explicit_semantic_metadata_is_independent_of_construction_and_survives_import
     let imported = DesiredTopology::from_json(&desired.to_json().expect("export")).expect("import");
     for (name, kind) in cases {
         for construction in ["external", "factory"] {
-            let id = component(&format!("{construction}-{name}"));
+            let id = named_component(&format!("{construction}-{name}"));
             let GraphEntity::Component(node) =
                 &topology.nodes[&GraphEntityId::Component(id.clone())]
             else {
@@ -566,7 +676,7 @@ fn entity_keys_are_namespaced_and_encode_complete_identity_tuples() {
     let names = ["same", "a:b", "a", "b:c", "雪"];
     let mut ids = Vec::new();
     for first in names {
-        ids.push(GraphEntityId::Component(component(first)));
+        ids.push(GraphEntityId::Component(named_component(first)));
         ids.push(GraphEntityId::Resource(resource(first)));
         ids.push(GraphEntityId::PluginFamily(Arc::from(first)));
         for second in names {
@@ -575,8 +685,8 @@ fn entity_keys_are_namespaced_and_encode_complete_identity_tuples() {
             for third in names {
                 for fourth in names {
                     ids.push(GraphEntityId::Pipe(EdgeDefinition::new(
-                        endpoint(first, second),
-                        endpoint(third, fourth),
+                        endpoint(&named_component(first), second),
+                        endpoint(&named_component(third), fourth),
                     )));
                 }
             }
@@ -600,10 +710,10 @@ fn subscription_pipes_preserve_endpoint_observations_without_native_binding_clai
     let query_reaction = subscription("public-query", "public-reaction");
     let boundary = subscription("public-query", "missing");
     Arc::make_mut(&mut inspection.desired).subscriptions = Arc::from([
-        (component("public-source"), component("public-query")),
-        (component("public-query"), component("public-reaction")),
-        (component("public-source"), component("public-query")),
-        (component("public-query"), component("missing")),
+        (component(735), component(736)),
+        (component(736), component(737)),
+        (component(735), component(736)),
+        (component(736), component(738)),
     ]);
     let cause = Arc::new(GraphError::Topology {
         reason: "private-endpoint-failure".into(),
@@ -611,7 +721,7 @@ fn subscription_pipes_preserve_endpoint_observations_without_native_binding_clai
     let observed = Arc::make_mut(&mut inspection.observed);
     let producer = observed
         .components
-        .get_mut(&component("public-source"))
+        .get_mut(&component(735))
         .expect("producer");
     producer.generation = ComponentGeneration(41);
     producer.started = true;
@@ -624,7 +734,7 @@ fn subscription_pipes_preserve_endpoint_observations_without_native_binding_clai
     });
     let consumer = observed
         .components
-        .get_mut(&component("public-query"))
+        .get_mut(&component(736))
         .expect("consumer");
     consumer.generation = ComponentGeneration(42);
     consumer.started = false;
@@ -638,10 +748,7 @@ fn subscription_pipes_preserve_endpoint_observations_without_native_binding_clai
     assert_eq!(topology.nodes[&source_query].kind(), GraphEntityKind::Pipe);
     let pipe = inspected_subscription(&topology, &source_query);
     assert_eq!(pipe.representation(), PipeRepresentation::HostSubscription);
-    assert_eq!(
-        (&pipe.from, &pipe.to),
-        (&component("public-source"), &component("public-query"))
-    );
+    assert_eq!((&pipe.from, &pipe.to), (&component(735), &component(736)));
     assert_eq!(pipe.producer_generation(), Some(ComponentGeneration(41)));
     assert_eq!(pipe.consumer_generation(), Some(ComponentGeneration(42)));
     assert_eq!(pipe.producer_started(), Some(true));
@@ -675,7 +782,7 @@ fn subscription_pipes_preserve_endpoint_observations_without_native_binding_clai
     );
     assert!(!topology
         .nodes
-        .contains_key(&GraphEntityId::Component(component("missing"))));
+        .contains_key(&GraphEntityId::Component(component(738))));
     assert_eq!(
         topology
             .links
@@ -685,13 +792,21 @@ fn subscription_pipes_preserve_endpoint_observations_without_native_binding_clai
             .count(),
         1
     );
-    let native = inspected_pipe(&topology, &edge("source", "sink"));
+    let native = inspected_pipe(
+        &topology,
+        &edge(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+        ),
+    );
     assert_eq!(native.representation(), PipeRepresentation::NativeProvider);
     assert!(native.capabilities.is_some());
     let keys: BTreeSet<_> = topology.nodes.keys().cloned().collect();
     Arc::make_mut(&mut inspection.observed)
         .components
-        .get_mut(&component("public-query"))
+        .get_mut(&component(736))
         .expect("consumer")
         .generation = ComponentGeneration(100);
     let updated = inspection.topology();
@@ -715,22 +830,22 @@ async fn ordinary_source_query_reaction_subscriptions_are_first_class_pipe_nodes
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.expect("deployment");
         control
-            .set_control_connections(vec![(
-                component("public-source"),
-                component("control-only"),
-            )])
+            .set_control_connections(vec![(component(735), component(1018))])
             .await
             .expect("control-only wiring");
-        let subscriptions = vec![
-            (component("public-source"), component("public-query")),
-            (component("public-query"), component("public-reaction")),
-        ];
+        let subscriptions =
+            vec![(component(735), component(736)), (component(736), component(737))];
         control
             .set_subscriptions(subscriptions.clone())
             .await
             .expect("configured data subscriptions");
         let topology = inspector.topology();
-        let native_id = GraphEntityId::Pipe(edge("source", "sink"));
+        let native_id = GraphEntityId::Pipe(edge(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+        ));
         assert_eq!(kind_count(&topology, GraphEntityKind::Pipe), 3);
         assert!(matches!(topology.nodes[&native_id], GraphEntity::Pipe(_)));
         assert!(!topology
@@ -742,18 +857,15 @@ async fn ordinary_source_query_reaction_subscriptions_are_first_class_pipe_nodes
             ("public-reaction", ComponentSemanticKind::Reaction),
         ] {
             let GraphEntity::Component(node) =
-                &topology.nodes[&GraphEntityId::Component(component(id))]
+                &topology.nodes[&GraphEntityId::Component(named_component(id))]
             else {
                 panic!("ordinary wrapper");
             };
             assert_eq!(node.kind, kind);
             assert_eq!(node.desired.role, ComponentRole::Service);
         }
-        let mut source = ComputationTopologySource::new(
-            component("topology"),
-            stream("topology"),
-            inspector.clone(),
-        );
+        let mut source =
+            ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
         source.start().await.expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
@@ -947,18 +1059,25 @@ async fn ordinary_source_query_reaction_subscriptions_are_first_class_pipe_nodes
 fn external_provenance_is_not_a_reconstruction_recipe() {
     let identity = plugin("explicit-plugin", "1");
     let graph = ComputationGraph::builder("external")
-        .service(service("known", Some(identity.clone())))
-        .service(service("opaque", None))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b7")
+                .expect("fixture UUID"),
+            Some(identity.clone()),
+        ))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002dc")
+                .expect("fixture UUID"),
+            None,
+        ))
         .build()
         .expect("graph");
     let topology = graph.inspector().topology();
     assert_eq!(kind_count(&topology, GraphEntityKind::Plugin), 1);
     assert_eq!(
         inspected_plugin(&topology, &identity).dependent_components,
-        BTreeSet::from([component("known")])
+        BTreeSet::from([component(439)])
     );
-    let GraphEntity::Component(opaque) =
-        &topology.nodes[&GraphEntityId::Component(component("opaque"))]
+    let GraphEntity::Component(opaque) = &topology.nodes[&GraphEntityId::Component(component(732))]
     else {
         panic!("component");
     };
@@ -979,7 +1098,7 @@ fn external_provenance_is_not_a_reconstruction_recipe() {
         imported
             .components
             .iter()
-            .find(|node| node.descriptor.id() == &component("known"))
+            .find(|node| node.descriptor.id() == &component(439))
             .expect("known instance")
             .descriptor
             .plugin_identity(),
@@ -1008,24 +1127,25 @@ async fn ordinary_runtime_kinds_and_descriptor_provenance_are_projected() {
     ];
     let mut builder = ComputationGraph::builder("ordinary-entities");
     for (id, kind, semantic_kind, known_plugin) in cases {
-        let mut spec = runtime_specification(id, kind, Some(semantic_kind));
+        let component_id = named_component(id);
+        let mut spec = runtime_specification(&component_id, kind, Some(semantic_kind));
         if known_plugin {
             spec.descriptor = spec
                 .descriptor
                 .with_plugin_identity(identity.clone())
                 .expect("provenance");
         }
-        builder = builder.component(spec.clone(), factory(&spec, false));
+        builder = builder.fixture_component(spec.clone(), factory(&spec, false));
     }
     let graph = builder.build().expect("graph");
     let topology = graph.inspector().topology();
     for (id, _, expected_kind, known_plugin) in cases {
         let GraphEntity::Component(node) =
-            &topology.nodes[&GraphEntityId::Component(component(id))]
+            &topology.nodes[&GraphEntityId::Component(named_component(id))]
         else {
             panic!("component");
         };
-        assert_eq!(node.desired.descriptor.id().as_str(), id);
+        assert_eq!(node.desired.descriptor.id(), &named_component(id));
         assert_eq!(node.kind, expected_kind);
         assert_eq!(node.desired.role, ComponentRole::Service);
         assert_eq!(node.plugin_identity(), known_plugin.then_some(&identity));
@@ -1041,22 +1161,19 @@ async fn ordinary_runtime_kinds_and_descriptor_provenance_are_projected() {
     assert_eq!(kind_count(&topology, GraphEntityKind::Plugin), 1);
     assert_eq!(
         inspected_plugin(&topology, &identity).dependent_components,
-        BTreeSet::from([component("public-source"), component("public-reaction")])
+        BTreeSet::from([component(735), component(737)])
     );
 
-    let mut source = ComputationTopologySource::new(
-        component("topology"),
-        stream("topology"),
-        graph.inspector(),
-    );
+    let mut source =
+        ComputationTopologySource::new(component(733), stream("topology"), graph.inspector());
     source.start().await.expect("start topology source");
     let mut elements = BTreeMap::new();
     apply(&mut elements, &drain(&mut source).await);
     for (id, _, expected_kind, known_plugin) in cases {
-        let node = &elements[&GraphEntityId::Component(component(id)).key()];
+        let node = &elements[&GraphEntityId::Component(named_component(id)).key()];
         assert_eq!(
             node.get_property("id"),
-            &ElementValue::String(Arc::from(id))
+            &ElementValue::String(Arc::from(named_component(id).as_str()))
         );
         assert_eq!(
             node.get_property("role"),
@@ -1097,18 +1214,21 @@ async fn ordinary_runtime_kinds_and_descriptor_provenance_are_projected() {
 fn explicit_factory_provenance_takes_precedence_over_descriptor_provenance() {
     let factory_identity = plugin("factory-plugin", "7");
     let descriptor_identity = plugin("descriptor-plugin", "2");
-    let mut spec = specification("component", Some(factory_identity.clone()));
+    let mut spec = specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000033")
+            .expect("fixture UUID"),
+        Some(factory_identity.clone()),
+    );
     spec.descriptor = spec
         .descriptor
         .with_plugin_identity(descriptor_identity.clone())
         .expect("provenance");
     let graph = ComputationGraph::builder("precedence")
-        .component(spec.clone(), factory(&spec, false))
+        .fixture_component(spec.clone(), factory(&spec, false))
         .build()
         .expect("graph");
     let topology = graph.inspector().topology();
-    let GraphEntity::Component(node) =
-        &topology.nodes[&GraphEntityId::Component(component("component"))]
+    let GraphEntity::Component(node) = &topology.nodes[&GraphEntityId::Component(component(51))]
     else {
         panic!("component");
     };
@@ -1135,22 +1255,34 @@ fn explicit_factory_provenance_takes_precedence_over_descriptor_provenance() {
 fn host_origins_are_authoritative_and_count_each_dependent_once() {
     let declared = plugin("shared-library", "1");
     let actual = plugin("shared-library", "2");
-    let mut spec = specification("factory", Some(declared.clone()));
+    let mut spec = specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002e3")
+            .expect("fixture UUID"),
+        Some(declared.clone()),
+    );
     spec.descriptor = spec
         .descriptor
         .with_plugin_identity(declared.clone())
         .expect("descriptor provenance");
     let graph = ComputationGraph::builder("host-origins")
-        .component(spec.clone(), factory(&spec, false))
-        .service(service("dynamic", None))
-        .service(service("opaque", None))
+        .fixture_component(spec.clone(), factory(&spec, false))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002e4")
+                .expect("fixture UUID"),
+            None,
+        ))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002dc")
+                .expect("fixture UUID"),
+            None,
+        ))
         .build()
         .expect("graph");
     let mut inspection = graph.inspector().snapshot().as_ref().clone();
     Arc::make_mut(&mut inspection.desired).component_plugins = BTreeMap::from([
-        (component("factory"), declared.clone()),
-        (component("dynamic"), declared.clone()),
-        (component("removed"), plugin("unused-origin", "1")),
+        (component(739), declared.clone()),
+        (component(740), declared.clone()),
+        (component(741), plugin("unused-origin", "1")),
     ]);
     let topology = inspection.topology();
     assert_eq!(kind_count(&topology, GraphEntityKind::Plugin), 1);
@@ -1161,7 +1293,7 @@ fn host_origins_are_authoritative_and_count_each_dependent_once() {
     );
     assert_eq!(
         inspected_plugin(&topology, &declared).dependent_components,
-        BTreeSet::from([component("factory"), component("dynamic")])
+        BTreeSet::from([component(739), component(740)])
     );
     assert_eq!(
         topology
@@ -1173,10 +1305,9 @@ fn host_origins_are_authoritative_and_count_each_dependent_once() {
 
     Arc::make_mut(&mut inspection.desired)
         .component_plugins
-        .insert(component("factory"), actual.clone());
+        .insert(component(739), actual.clone());
     let topology = inspection.topology();
-    let GraphEntity::Component(node) =
-        &topology.nodes[&GraphEntityId::Component(component("factory"))]
+    let GraphEntity::Component(node) = &topology.nodes[&GraphEntityId::Component(component(739))]
     else {
         panic!("component");
     };
@@ -1184,7 +1315,7 @@ fn host_origins_are_authoritative_and_count_each_dependent_once() {
     assert_eq!(node.plugin_identity(), Some(&actual));
     assert_eq!(node.desired.descriptor, spec.descriptor);
     assert_eq!(
-        inspection.desired.specifications[&component("factory")].implementation,
+        inspection.desired.specifications[&component(739)].implementation,
         spec.implementation,
         "inspection does not rewrite construction metadata"
     );
@@ -1204,12 +1335,12 @@ fn host_origins_are_authoritative_and_count_each_dependent_once() {
     );
     assert_eq!(
         family.dependent_components,
-        BTreeSet::from([component("factory"), component("dynamic"),])
+        BTreeSet::from([component(739), component(740),])
     );
 
     Arc::make_mut(&mut inspection.desired)
         .component_plugins
-        .remove(&component("factory"));
+        .remove(&component(739));
     let topology = inspection.topology();
     assert!(!topology.nodes.contains_key(&GraphEntityId::Plugin(actual)));
     assert_eq!(
@@ -1218,10 +1349,9 @@ fn host_origins_are_authoritative_and_count_each_dependent_once() {
     );
     Arc::make_mut(&mut inspection.desired)
         .component_plugins
-        .remove(&component("dynamic"));
+        .remove(&component(740));
     let topology = inspection.topology();
-    let GraphEntity::Component(node) =
-        &topology.nodes[&GraphEntityId::Component(component("dynamic"))]
+    let GraphEntity::Component(node) = &topology.nodes[&GraphEntityId::Component(component(740))]
     else {
         panic!("component");
     };
@@ -1239,19 +1369,25 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
 
     let identity = plugin("dynamic-library", "9.4.2");
     let source_spec = runtime_specification(
-        "dynamic-source",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003fb")
+            .expect("fixture UUID"),
         "source",
         Some(ComponentSemanticKind::Source),
     );
     let reaction_spec = runtime_specification(
-        "dynamic-reaction",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003fc")
+            .expect("fixture UUID"),
         "reaction",
         Some(ComponentSemanticKind::Reaction),
     );
     let mut graph = ComputationGraph::builder("late-origins")
-        .component(source_spec.clone(), factory(&source_spec, false))
-        .component(reaction_spec.clone(), factory(&reaction_spec, false))
-        .service(service("opaque", None))
+        .fixture_component(source_spec.clone(), factory(&source_spec, false))
+        .fixture_component(reaction_spec.clone(), factory(&reaction_spec, false))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002dc")
+                .expect("fixture UUID"),
+            None,
+        ))
         .build()
         .expect("graph");
     let inspector = graph.inspector();
@@ -1263,11 +1399,8 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
             kind_count(&inspector.topology(), GraphEntityKind::Plugin),
             0
         );
-        let mut source = ComputationTopologySource::new(
-            component("topology"),
-            stream("topology"),
-            inspector.clone(),
-        );
+        let mut source =
+            ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
         source.start().await.expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
@@ -1276,9 +1409,9 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
         let plugin_id = GraphEntityId::Plugin(identity.clone());
         let family_id = GraphEntityId::PluginFamily(identity.id.clone());
         for (id, count) in [("dynamic-source", 1), ("dynamic-reaction", 2)] {
-            let component_id = component(id);
+            let component_id = named_component(id);
             let generation = control
-                .component_handle(&component_id)
+                .component_handle_by_id(&component_id)
                 .expect("component handle")
                 .generation();
             let mut publications = inspector.subscribe();
@@ -1331,7 +1464,7 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
             );
         }
         assert_eq!(
-            elements[&GraphEntityId::Component(component("opaque")).key()].get_property("pluginId"),
+            elements[&GraphEntityId::Component(component(732)).key()].get_property("pluginId"),
             &ElementValue::Null
         );
 
@@ -1339,7 +1472,7 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
             .preview(
                 control.desired_snapshot().revision,
                 vec![DesiredMutation::RemoveComponents {
-                    selection: GraphSelection::Exact(vec![component("dynamic-source")]),
+                    selection: GraphSelection::Exact(vec![component(1019)]),
                     policy: RemovalPolicy::Reject,
                 }],
             )
@@ -1355,7 +1488,7 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
             .snapshot()
             .desired
             .component_plugins
-            .contains_key(&component("dynamic-source")));
+            .contains_key(&component(1019)));
         assert_eq!(
             inspected_plugin(&inspector.topology(), &identity).dependent_component_count(),
             1
@@ -1368,7 +1501,7 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
 
         let mut desired = control
             .desired_snapshot()
-            .select(GraphSelection::Exact(vec![component("dynamic-reaction")]))
+            .select(GraphSelection::Exact(vec![component(1020)]))
             .expect("reaction description");
         let replacement = desired.components.pop().expect("reaction");
         let preview = control
@@ -1388,7 +1521,7 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
         assert!(!topology.nodes.contains_key(&plugin_id));
         assert!(!topology.nodes.contains_key(&family_id));
         assert_eq!(topology.dependents(&plugin_id).count(), 0);
-        let entity_id = GraphEntityId::Component(component("dynamic-reaction"));
+        let entity_id = GraphEntityId::Component(component(1020));
         let GraphEntity::Component(node) = &topology.nodes[&entity_id] else {
             panic!("replacement");
         };
@@ -1420,18 +1553,43 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
 
 #[tokio::test]
 async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration() {
-    let mut custom = runtime_specification("custom-factory", "source", None);
+    let mut custom = runtime_specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000429")
+            .expect("fixture UUID"),
+        "source",
+        None,
+    );
     custom.implementation =
         ImplementationIdentity::try_new("custom/runtime", "1").expect("implementation");
-    let mut missing = runtime_specification("missing-kind", "source", None);
+    let mut missing = runtime_specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000042a")
+            .expect("fixture UUID"),
+        "source",
+        None,
+    );
     missing.configuration.remove("kind");
-    let mut unknown = runtime_specification("unknown-kind", "private-kind-marker", None);
-    let mut non_string = runtime_specification("non-string-kind", "source", None);
+    let mut unknown = runtime_specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000042b")
+            .expect("fixture UUID"),
+        "private-kind-marker",
+        None,
+    );
+    let mut non_string = runtime_specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000042c")
+            .expect("fixture UUID"),
+        "source",
+        None,
+    );
     non_string.configuration.insert(
         Arc::from("kind"),
         ConfigurationValue::Literal(serde_json::json!({"source": "private-kind-marker"})),
     );
-    let mut reference = runtime_specification("referenced-kind", "source", None);
+    let mut reference = runtime_specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000042d")
+            .expect("fixture UUID"),
+        "source",
+        None,
+    );
     reference.configuration.insert(
         Arc::from("kind"),
         ConfigurationValue::Reference {
@@ -1440,9 +1598,19 @@ async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration()
             secret: true,
         },
     );
-    let mut future_implementation = runtime_specification("future-implementation", "source", None);
+    let mut future_implementation = runtime_specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000042e")
+            .expect("fixture UUID"),
+        "source",
+        None,
+    );
     future_implementation.implementation.version = Arc::from("2");
-    let mut future_schema = runtime_specification("future-schema", "source", None);
+    let mut future_schema = runtime_specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000042f")
+            .expect("fixture UUID"),
+        "source",
+        None,
+    );
     future_schema.configuration_version = 2;
     unknown.configuration.insert(
         Arc::from("pluginId"),
@@ -1453,7 +1621,11 @@ async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration()
         ConfigurationValue::Literal(serde_json::json!("99")),
     );
     let mut builder = ComputationGraph::builder("unknown-semantics")
-        .service(service("source", None))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            None,
+        ))
         .declare_resource(ResourceSpecification {
             id: resource("kind-resolver"),
             role: ResourceRole::SecretStore,
@@ -1470,9 +1642,24 @@ async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration()
         )
         .expect("provide resolver");
     for spec in [
-        runtime_specification("private-source-wrapper", "source", None),
-        runtime_specification("private-query-wrapper", "query", None),
-        runtime_specification("private-reaction-wrapper", "reaction", None),
+        runtime_specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000430")
+                .expect("fixture UUID"),
+            "source",
+            None,
+        ),
+        runtime_specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000431")
+                .expect("fixture UUID"),
+            "query",
+            None,
+        ),
+        runtime_specification(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000432")
+                .expect("fixture UUID"),
+            "reaction",
+            None,
+        ),
         custom,
         missing,
         unknown,
@@ -1481,7 +1668,7 @@ async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration()
         future_implementation,
         future_schema,
     ] {
-        builder = builder.component(spec.clone(), factory(&spec, false));
+        builder = builder.fixture_component(spec.clone(), factory(&spec, false));
     }
     let graph = builder.build().expect("graph");
     let topology = graph.inspector().topology();
@@ -1493,11 +1680,8 @@ async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration()
         }
     }
     assert_eq!(kind_count(&topology, GraphEntityKind::Plugin), 0);
-    let mut source = ComputationTopologySource::new(
-        component("topology"),
-        stream("topology"),
-        graph.inspector(),
-    );
+    let mut source =
+        ComputationTopologySource::new(component(733), stream("topology"), graph.inspector());
     source.start().await.expect("start topology source");
     let mut elements = BTreeMap::new();
     apply(&mut elements, &drain(&mut source).await);
@@ -1527,12 +1711,12 @@ async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration()
 fn observed_component_provider_dependencies_are_explicit_even_without_a_factory() {
     let graph = pipeline().build().expect("graph");
     let mut inspection = graph.inspector().snapshot().as_ref().clone();
-    let source = GraphEntityId::Component(component("source"));
+    let source = GraphEntityId::Component(component(77));
     let store = GraphEntityId::Resource(resource("store"));
     assert_eq!(inspection.topology().dependencies(&source).count(), 0);
     Arc::make_mut(&mut inspection.desired)
         .component_resources
-        .insert(component("source"), BTreeSet::from([resource("store")]));
+        .insert(component(77), BTreeSet::from([resource("store")]));
     let topology = inspection.topology();
     assert_eq!(topology.dependencies(&source).count(), 1);
     assert!(topology.links.contains(&GraphEntityLink {
@@ -1563,28 +1747,47 @@ fn observed_component_provider_dependencies_are_explicit_even_without_a_factory(
 #[test]
 fn native_semantic_kinds_follow_declared_execution_roles() {
     let mut builder = ComputationGraph::builder("native-kinds")
-        .source(Box::new(FiniteSource::new("source", vec![])))
-        .transformer(Box::new(NativeTransform::new("transformer", |_| {
-            Ok(vec![])
-        })))
-        .transformer(Box::new(
-            NativeTransform::new("query", |_| Ok(vec![]))
-                .with_semantic_kind(ComponentSemanticKind::Query)
-                .with_output_progress(OutputProgress::Origin),
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![],
+        )))
+        .fixture_transformer(Box::new(NativeTransform::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001af")
+                .expect("fixture UUID"),
+            |_| Ok(vec![]),
+        )))
+        .fixture_transformer(Box::new(
+            NativeTransform::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+                |_| Ok(vec![]),
+            )
+            .with_semantic_kind(ComponentSemanticKind::Query)
+            .with_output_progress(OutputProgress::Origin),
         ))
-        .sink(Box::new(CollectSink::new(
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             Received::default(),
         )))
-        .service(service("service", None));
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b0")
+                .expect("fixture UUID"),
+            None,
+        ));
     for (producer, consumer) in
         [("source", "transformer"), ("transformer", "query"), ("query", "sink")]
     {
         builder = builder
-            .bind_stream(endpoint(producer, "out"), stream(producer))
+            .bind_stream(
+                endpoint(&named_component(producer), "out"),
+                stream(producer),
+            )
             .connect(
-                edge(producer, consumer),
+                edge(&named_component(producer), &named_component(consumer)),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             );
     }
@@ -1614,7 +1817,7 @@ fn native_semantic_kinds_follow_declared_execution_roles() {
         ),
     ] {
         let GraphEntity::Component(node) =
-            &topology.nodes[&GraphEntityId::Component(component(id))]
+            &topology.nodes[&GraphEntityId::Component(named_component(id))]
         else {
             panic!("component");
         };
@@ -1628,8 +1831,7 @@ fn native_semantic_kinds_follow_declared_execution_roles() {
         assert!(node.plugin_identity().is_none());
     }
 
-    let GraphEntity::Component(query) =
-        &topology.nodes[&GraphEntityId::Component(component("query"))]
+    let GraphEntity::Component(query) = &topology.nodes[&GraphEntityId::Component(component(46))]
     else {
         panic!("query");
     };
@@ -1644,6 +1846,7 @@ fn native_semantic_kinds_follow_declared_execution_roles() {
         dependencies: Default::default(),
     };
     let desired = DesiredComponent {
+        name: drasi_lib::ComponentName::try_new("query").expect("fixture component name"),
         descriptor: specification.descriptor.clone(),
         role: specification.role,
         completion: None,
@@ -1664,9 +1867,14 @@ fn native_semantic_kinds_follow_declared_execution_roles() {
 
 #[test]
 fn output_progress_must_be_valid_for_the_component_role() {
-    let source = FiniteSource::new("source", vec![]).with_output_progress(OutputProgress::Relay);
+    let source = FiniteSource::new(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        vec![],
+    )
+    .with_output_progress(OutputProgress::Relay);
     let error = match ComputationGraph::builder("invalid-progress")
-        .source(Box::new(source))
+        .fixture_source(Box::new(source))
         .build()
     {
         Ok(_) => panic!("a source cannot relay input progress"),
@@ -1675,10 +1883,14 @@ fn output_progress_must_be_valid_for_the_component_role() {
     assert!(error.to_string().contains("invalid output progress"));
 
     for progress in [OutputProgress::Origin, OutputProgress::Relay] {
-        let mut component = service("service", None);
+        let mut component = service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b0")
+                .expect("fixture UUID"),
+            None,
+        );
         component.descriptor = component.descriptor.clone().with_output_progress(progress);
         let error = match ComputationGraph::builder("invalid-progress")
-            .service(component)
+            .fixture_service(component)
             .build()
         {
             Ok(_) => panic!("a service has no outputs"),
@@ -1698,7 +1910,10 @@ async fn attached_provider_observations_are_queryable_without_invented_provenanc
     let provider: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
     provider
         .set(
-            "source",
+            &drasi_core_types::StorePartition::component(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+            ),
             "private-provider-key",
             b"private-provider-value".to_vec(),
         )
@@ -1710,21 +1925,23 @@ async fn attached_provider_observations_are_queryable_without_invented_provenanc
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.expect("deployment");
-        let mut source = ComputationTopologySource::new(
-            component("topology"),
-            stream("topology"),
-            inspector.clone(),
-        );
+        let mut source =
+            ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
         source.start().await.expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
         let generation = control
-            .component_handle(&component("source"))
+            .component_handle_by_id(&component(77))
             .expect("component handle")
             .generation();
-        let attached_id = resource(&format!("attached/736f75726365/{}/state", generation.0));
+        let owner = component(77)
+            .as_str()
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let attached_id = resource(&format!("attached/{owner}/{}/state", generation.0));
         let mut publications = inspector.subscribe();
-        GraphResourceObserver::new(control.clone(), component("source"), generation)
+        GraphResourceObserver::new(control.clone(), component(77), generation)
             .observe(vec![ComponentResource::StateStore(provider.clone())])
             .await
             .expect("report actual provider");
@@ -1733,7 +1950,7 @@ async fn attached_provider_observations_are_queryable_without_invented_provenanc
             publications.wait_for(|view| {
                 view.desired
                     .component_resources
-                    .get(&component("source"))
+                    .get(&component(77))
                     .is_some_and(|resources| resources.contains(&attached_id))
             }),
         )
@@ -1742,7 +1959,7 @@ async fn attached_provider_observations_are_queryable_without_invented_provenanc
         .expect("provider publication")
         .clone();
         let topology = publication.topology();
-        let source_id = GraphEntityId::Component(component("source"));
+        let source_id = GraphEntityId::Component(component(77));
         let resource_id = GraphEntityId::Resource(attached_id.clone());
         let GraphEntity::Resource(attached) = &topology.nodes[&resource_id] else {
             panic!("attached provider");
@@ -1792,7 +2009,13 @@ async fn attached_provider_observations_are_queryable_without_invented_provenanc
     graph.dispose().await.expect("dispose");
     assert_eq!(
         provider
-            .get("source", "private-provider-key")
+            .get(
+                &drasi_core_types::StorePartition::component(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID")
+                ),
+                "private-provider-key"
+            )
             .await
             .expect("borrowed state"),
         Some(b"private-provider-value".to_vec())
@@ -1802,10 +2025,26 @@ async fn attached_provider_observations_are_queryable_without_invented_provenanc
 #[tokio::test]
 async fn internal_subscription_adjacency_is_not_a_native_pipe() {
     let mut graph = pipeline()
-        .service(service("a:b", None))
-        .service(service("c", None))
-        .service(service("a", None))
-        .service(service("b:c", None))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003fd")
+                .expect("fixture UUID"),
+            None,
+        ))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001a8")
+                .expect("fixture UUID"),
+            None,
+        ))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                .expect("fixture UUID"),
+            None,
+        ))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003fe")
+                .expect("fixture UUID"),
+            None,
+        ))
         .build()
         .expect("graph");
     let inspector = graph.inspector();
@@ -1814,7 +2053,7 @@ async fn internal_subscription_adjacency_is_not_a_native_pipe() {
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.expect("deployment");
         let connections =
-            vec![(component("a:b"), component("c")), (component("a"), component("b:c"))];
+            vec![(component(1021), component(424)), (component(457), component(1022))];
         control
             .set_control_connections(connections.clone())
             .await
@@ -1842,13 +2081,15 @@ async fn internal_subscription_adjacency_is_not_a_native_pipe() {
             );
         }
         assert_eq!(kind_count(&topology, GraphEntityKind::Pipe), 1);
-        let native_pipe = GraphEntityId::Pipe(edge("source", "sink"));
+        let native_pipe = GraphEntityId::Pipe(edge(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+        ));
         assert!(topology.nodes.contains_key(&native_pipe));
-        let mut source = ComputationTopologySource::new(
-            component("topology"),
-            stream("topology"),
-            inspector.clone(),
-        );
+        let mut source =
+            ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
         source.start().await.expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
@@ -1937,11 +2178,15 @@ async fn internal_subscription_adjacency_is_not_a_native_pipe() {
 #[tokio::test]
 async fn native_provider_nodes_keep_real_ownership_realization_and_dependencies() {
     let identity = plugin("service-plugin", "1");
-    let mut spec = specification("service", Some(identity.clone()));
+    let mut spec = specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b0")
+            .expect("fixture UUID"),
+        Some(identity.clone()),
+    );
     spec.dependencies
         .insert(Arc::from("indexes"), vec![resource("source")]);
     let mut graph = pipeline()
-        .component(spec.clone(), factory(&spec, false))
+        .fixture_component(spec.clone(), factory(&spec, false))
         .declare_resource(ResourceSpecification {
             id: resource("source"),
             role: ResourceRole::IndexBackend,
@@ -1991,7 +2236,7 @@ async fn native_provider_nodes_keep_real_ownership_realization_and_dependencies(
                 ResourceRealization::Created
             );
         }
-        let component_id = GraphEntityId::Component(component("service"));
+        let component_id = GraphEntityId::Component(component(432));
         let GraphEntity::Component(service) = &topology.nodes[&component_id] else {
             panic!("service");
         };
@@ -2004,7 +2249,7 @@ async fn native_provider_nodes_keep_real_ownership_realization_and_dependencies(
         let mut inspection = inspector.snapshot().as_ref().clone();
         Arc::make_mut(&mut inspection.desired)
             .component_resources
-            .insert(component("service"), BTreeSet::from([resource("source")]));
+            .insert(component(432), BTreeSet::from([resource("source")]));
         assert_eq!(
             inspection.topology().dependencies(&component_id).count(),
             2,
@@ -2015,19 +2260,40 @@ async fn native_provider_nodes_keep_real_ownership_realization_and_dependencies(
             to: GraphEntityId::Resource(resource("source")),
             kind: GraphEntityLinkKind::UsesResource,
         }));
-        let pipe = inspected_pipe(&topology, &edge("source", "sink"));
+        let pipe = inspected_pipe(
+            &topology,
+            &edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
+        );
         assert_eq!(pipe.binding(), BindingState::Bound);
         assert_eq!(pipe.availability(), DataAvailability::Idle);
         assert_eq!(
             pipe.generation(),
-            Some(control.observed().relationships[&edge("source", "sink")].generation)
+            Some(
+                control.observed().relationships[&edge(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID")
+                )]
+                    .generation
+            )
         );
         assert_eq!(
             pipe.resources,
             BTreeMap::from([(resource("store"), ResourceRole::StateStore)])
         );
         assert!(topology.links.contains(&GraphEntityLink {
-            from: GraphEntityId::Pipe(edge("source", "sink")),
+            from: GraphEntityId::Pipe(edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID")
+            )),
             to: GraphEntityId::Resource(resource("store")),
             kind: GraphEntityLinkKind::UsesResource,
         }));
@@ -2050,13 +2316,29 @@ async fn native_provider_nodes_keep_real_ownership_realization_and_dependencies(
 async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
     let first_version = plugin("shared-plugin", "1");
     let other_version = plugin("shared-plugin", "2");
-    let first = specification("first", Some(first_version.clone()));
-    let other = specification("other", Some(other_version.clone()));
+    let first = specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c3")
+            .expect("fixture UUID"),
+        Some(first_version.clone()),
+    );
+    let other = specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000029a")
+            .expect("fixture UUID"),
+        Some(other_version.clone()),
+    );
     let mut graph = ComputationGraph::builder("plugins")
-        .component(first.clone(), factory(&first, false))
-        .service(service("second", Some(first_version.clone())))
-        .component(other.clone(), factory(&other, false))
-        .service(service("opaque", None))
+        .fixture_component(first.clone(), factory(&first, false))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000300")
+                .expect("fixture UUID"),
+            Some(first_version.clone()),
+        ))
+        .fixture_component(other.clone(), factory(&other, false))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002dc")
+                .expect("fixture UUID"),
+            None,
+        ))
         .build()
         .expect("graph");
     let inspector = graph.inspector();
@@ -2084,7 +2366,7 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
         );
         assert_eq!(
             family.dependent_components,
-            BTreeSet::from([component("first"), component("second"), component("other"),])
+            BTreeSet::from([component(451), component(768), component(666),])
         );
         assert_eq!(family.version_count(), 2);
         assert_eq!(family.dependent_component_count(), 3);
@@ -2101,15 +2383,12 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
         }
         assert_eq!(
             topology
-                .dependencies(&GraphEntityId::Component(component("opaque")))
+                .dependencies(&GraphEntityId::Component(component(732)))
                 .count(),
             0
         );
-        let mut source = ComputationTopologySource::new(
-            component("topology"),
-            stream("topology"),
-            inspector.clone(),
-        );
+        let mut source =
+            ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
         source.start().await.expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
@@ -2142,7 +2421,7 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
                 .preview(
                     control.desired_snapshot().revision,
                     vec![DesiredMutation::RemoveComponents {
-                        selection: GraphSelection::Exact(vec![component(id)]),
+                        selection: GraphSelection::Exact(vec![named_component(id)]),
                         policy: RemovalPolicy::Reject,
                     }],
                 )
@@ -2201,7 +2480,7 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
             .preview(
                 control.desired_snapshot().revision,
                 vec![DesiredMutation::RemoveComponents {
-                    selection: GraphSelection::Exact(vec![component("other")]),
+                    selection: GraphSelection::Exact(vec![component(666)]),
                     policy: RemovalPolicy::Reject,
                 }],
             )
@@ -2227,7 +2506,7 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
         )));
         assert!(topology
             .nodes
-            .contains_key(&GraphEntityId::Component(component("opaque"))));
+            .contains_key(&GraphEntityId::Component(component(732))));
         source.stop().await.expect("stop topology source");
         control.cancel();
     });
@@ -2240,16 +2519,33 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_compone
     let second_version = plugin("postgres", "1.3.0");
     let unrelated = plugin("postgres-extra", "1.2.0");
     let left = ComponentBatch::builder()
-        .service(service("left-source", Some(first_version.clone())))
-        .service(service("next-version", Some(second_version.clone())))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003ff")
+                .expect("fixture UUID"),
+            Some(first_version.clone()),
+        ))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000400")
+                .expect("fixture UUID"),
+            Some(second_version.clone()),
+        ))
         .build()
         .expect("left graph");
     let right = ComponentBatch::builder()
-        .service(service("right-source", Some(second_version.clone())))
-        .service(service("unrelated", Some(unrelated)))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002e6")
+                .expect("fixture UUID"),
+            Some(second_version.clone()),
+        ))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000369")
+                .expect("fixture UUID"),
+            Some(unrelated),
+        ))
         .build()
         .expect("right graph");
     let instance = drasi_lib::DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -2273,12 +2569,12 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_compone
         .expect("inventory");
     let control = instance.computation_control().unwrap();
     let root = ComputationScope::root(control.desired_snapshot().id.clone());
-    let right_component = root.entity(GraphEntityId::Component(component("right-source")));
+    let right_component = root.entity(GraphEntityId::Component(component(742)));
     assert_eq!(
         inventory.plugin_family_dependents("postgres"),
         BTreeSet::from([
-            root.entity(GraphEntityId::Component(component("left-source"))),
-            root.entity(GraphEntityId::Component(component("next-version"))),
+            root.entity(GraphEntityId::Component(component(1023))),
+            root.entity(GraphEntityId::Component(component(1024))),
             right_component.clone(),
         ])
     );
@@ -2303,25 +2599,20 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_compone
     );
     let family_id = GraphEntityId::PluginFamily(Arc::from("postgres"));
     assert_eq!(inventory.dependents(&root.entity(family_id)).count(), 2);
-    let preview = control
-        .preview(
-            control.desired_snapshot().revision,
-            vec![DesiredMutation::RemoveComponents {
-                selection: GraphSelection::Exact(vec![
-                    component("left-source"),
-                    component("next-version"),
-                ]),
-                policy: RemovalPolicy::Reject,
-            }],
+    let mut desired = instance.desired_configuration().unwrap();
+    desired.desired.topology.components.retain(|node| {
+        node.descriptor.id() != &component(1023) && node.descriptor.id() != &component(1024)
+    });
+    instance
+        .apply_desired_state(
+            desired.revision,
+            "remove-left-plugin-version",
+            desired.desired,
         )
         .await
         .unwrap();
-    control
-        .reconcile(preview, TopologyBindings::default())
-        .await
-        .unwrap()
-        .ensure_committed()
-        .expect("desired topology committed");
+    let status = instance.reconcile_desired_state().await.unwrap();
+    assert!(status.applied && status.error.is_none(), "{status:?}");
     let current = instance
         .inspect_computation_inventory()
         .await
@@ -2343,7 +2634,12 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_compone
 fn pipe_observations_preserve_generations_and_original_failure_references() {
     let graph = pipeline().build().expect("graph");
     let mut inspection = graph.inspector().snapshot().as_ref().clone();
-    let definition = edge("source", "sink");
+    let definition = edge(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
+    );
     let cause = Arc::new(GraphError::Topology {
         reason: "local failure only".into(),
     });
@@ -2393,7 +2689,12 @@ fn pipe_observations_preserve_generations_and_original_failure_references() {
 async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
     let mut graph = pipeline().build().expect("graph");
     let inspector = graph.inspector();
-    let definition = edge("source", "sink");
+    let definition = edge(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
+    );
     let pipe_id = GraphEntityId::Pipe(definition.clone());
     assert_eq!(
         inspected_pipe(&inspector.topology(), &definition).binding(),
@@ -2403,11 +2704,8 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.expect("deploy");
-        let mut source = ComputationTopologySource::new(
-            component("topology"),
-            stream("topology"),
-            inspector.clone(),
-        );
+        let mut source =
+            ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
         source.start().await.expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
@@ -2466,7 +2764,7 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
         assert_eq!(topology.dependencies(&pipe_id).count(), 2);
         assert!(topology.dependencies(&pipe_id).any(|link| {
             link.kind == GraphEntityLinkKind::DependsOnData
-                && link.to == GraphEntityId::Component(component("source"))
+                && link.to == GraphEntityId::Component(component(77))
         }));
         let changes = drain(&mut source).await;
         assert!(changes.iter().any(|change| matches!(
@@ -2484,7 +2782,7 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
             .preview(
                 control.desired_snapshot().revision,
                 vec![DesiredMutation::RemoveComponents {
-                    selection: GraphSelection::Exact(vec![component("source")]),
+                    selection: GraphSelection::Exact(vec![component(77)]),
                     policy: RemovalPolicy::Orphan,
                 }],
             )
@@ -2498,7 +2796,7 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
             .expect("desired topology committed");
         let topology = inspector.topology();
         assert!(topology.nodes.contains_key(&pipe_id));
-        let producer = GraphEntityId::Component(component("source"));
+        let producer = GraphEntityId::Component(component(77));
         assert!(!topology.nodes.contains_key(&producer));
         assert!(topology.links.contains(&GraphEntityLink {
             from: producer,
@@ -2511,7 +2809,7 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
         assert_eq!(label_count(&elements, "OUTPUT_FROM_PIPE"), 1);
         assert_eq!(
             elements[&pipe_id.key()].get_property("fromComponent"),
-            &ElementValue::String(Arc::from("source"))
+            &ElementValue::String(Arc::from(component(77).as_str()))
         );
         source.stop().await.expect("stop topology source");
         control.cancel();
@@ -2537,7 +2835,11 @@ impl ConfigurationResolver for SecretResolver {
 
 #[tokio::test]
 async fn graph_as_data_exposes_provenance_but_not_configuration_secrets_or_failures() {
-    let mut spec = specification("failing", Some(plugin("declared-plugin", "5")));
+    let mut spec = specification(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000359")
+            .expect("fixture UUID"),
+        Some(plugin("declared-plugin", "5")),
+    );
     spec.configuration.insert(
         Arc::from("configuration-field-marker"),
         ConfigurationValue::Literal(serde_json::json!("configuration-value-marker")),
@@ -2551,8 +2853,12 @@ async fn graph_as_data_exposes_provenance_but_not_configuration_secrets_or_failu
         },
     );
     let mut graph = ComputationGraph::builder("redacted")
-        .component(spec.clone(), factory(&spec, true))
-        .service(service("opaque", None))
+        .fixture_component(spec.clone(), factory(&spec, true))
+        .fixture_service(service(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002dc")
+                .expect("fixture UUID"),
+            None,
+        ))
         .declare_resource(ResourceSpecification {
             id: resource("secrets"),
             role: ResourceRole::SecretStore,
@@ -2576,7 +2882,7 @@ async fn graph_as_data_exposes_provenance_but_not_configuration_secrets_or_failu
     let (result, ()) = tokio::join!(run, async {
         control.deployment_report().await.expect("deploy");
         let topology = inspector.topology();
-        let component_id = GraphEntityId::Component(component("failing"));
+        let component_id = GraphEntityId::Component(component(857));
         let GraphEntity::Component(failed_component) = &topology.nodes[&component_id] else {
             panic!("component");
         };
@@ -2595,11 +2901,8 @@ async fn graph_as_data_exposes_provenance_but_not_configuration_secrets_or_failu
             to: GraphEntityId::Resource(resource("secrets")),
             kind: GraphEntityLinkKind::UsesResource,
         }));
-        let mut source = ComputationTopologySource::new(
-            component("topology"),
-            stream("topology"),
-            inspector.clone(),
-        );
+        let mut source =
+            ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
         source.start().await.expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);

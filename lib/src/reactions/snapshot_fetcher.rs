@@ -57,5 +57,8 @@ pub trait SnapshotFetcher: Send + Sync {
     ///
     /// - `FetchError::NotRunning` if the query is not running or not found
     /// - `FetchError::TimedOut` if the query's bootstrap hasn't completed in time
-    async fn fetch_snapshot(&self, query_id: &str) -> Result<SnapshotStream, FetchError>;
+    async fn fetch_snapshot(
+        &self,
+        query_id: &crate::ComponentId,
+    ) -> Result<SnapshotStream, FetchError>;
 }

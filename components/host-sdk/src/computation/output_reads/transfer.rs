@@ -279,6 +279,7 @@ impl super::Context {
         if !self.fence.is_current(generation) {
             return Err(OutputReadError::Retired);
         }
+        self.fence.track(&operation);
         let bytes = tokio::select! {
             biased;
             _ = changed.changed() => return Err(OutputReadError::Retired),

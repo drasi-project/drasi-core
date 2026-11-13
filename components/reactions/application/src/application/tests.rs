@@ -20,9 +20,9 @@ use drasi_lib::{
 };
 use std::time::Duration;
 
-fn query_result(query: &str, sequence: u64) -> QueryResult {
+fn query_result(query: drasi_lib::ComponentId, sequence: u64) -> QueryResult {
     QueryResult::new(
-        query.into(),
+        query,
         sequence,
         chrono::Utc::now(),
         vec![ResultDiff::Add {
@@ -35,11 +35,26 @@ fn query_result(query: &str, sequence: u64) -> QueryResult {
 
 #[tokio::test]
 async fn forwarded_profiling_records_reaction_work_without_changing_payload() {
-    let (reaction, handle) = ApplicationReaction::new("profiled", vec!["query".into()]);
+    let (reaction, handle) = ApplicationReaction::new(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001a1")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_lib::ComponentName::try_new("query").expect("fixture component name"),
+        )],
+    );
     let (updates, _events) = mpsc::channel(16);
     reaction
-        .initialize(ReactionRuntimeContext::new(
-            "instance", "profiled", None, updates, None,
+        .bind_runtime_context(ReactionRuntimeContext::new(
+            "instance",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001a1")
+                .expect("fixture UUID"),
+            vec![
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            ],
+            None,
+            updates,
+            None,
         ))
         .await;
     let mut receiver = handle.take_receiver().await.unwrap();
@@ -56,7 +71,11 @@ async fn forwarded_profiling_records_reaction_work_without_changing_payload() {
     .into_iter()
     .enumerate()
     {
-        let mut input = query_result("query", index as u64 + 1);
+        let mut input = query_result(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
+            index as u64 + 1,
+        );
         input.profiling = profiling;
         let before_enqueue = timestamp_ns();
         reaction.enqueue_query_result(input.clone()).await.unwrap();
@@ -88,12 +107,23 @@ async fn forwarded_profiling_records_reaction_work_without_changing_payload() {
 
 #[tokio::test]
 async fn completion_timestamp_includes_application_channel_backpressure() {
-    let (reaction, handle) = ApplicationReaction::new("backpressured", vec!["query".into()]);
+    let (reaction, handle) = ApplicationReaction::new(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001a2")
+            .expect("fixture UUID"),
+        vec![drasi_lib::config::ComponentReference::by_name(
+            drasi_lib::ComponentName::try_new("query").expect("fixture component name"),
+        )],
+    );
     let (updates, _events) = mpsc::channel(16);
     reaction
-        .initialize(ReactionRuntimeContext::new(
+        .bind_runtime_context(ReactionRuntimeContext::new(
             "instance",
-            "backpressured",
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001a2")
+                .expect("fixture UUID"),
+            vec![
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                    .expect("fixture UUID"),
+            ],
             None,
             updates,
             None,
@@ -104,18 +134,30 @@ async fn completion_timestamp_includes_application_channel_backpressure() {
     for _ in 0..capacity {
         reaction
             .app_tx
-            .try_send(query_result("prefill", 0))
+            .try_send(query_result(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001a3")
+                    .expect("fixture UUID"),
+                0,
+            ))
             .unwrap();
     }
     reaction.start().await.unwrap();
-    let mut input = query_result("query", 1);
+    let mut input = query_result(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+            .expect("fixture UUID"),
+        1,
+    );
     input.profiling = Some(ProfilingMetadata::default());
     reaction.enqueue_query_result(input).await.unwrap();
     tokio::task::yield_now().await;
     tokio::time::sleep(Duration::from_millis(2)).await;
     let released = timestamp_ns();
     for _ in 0..capacity {
-        assert_eq!(receiver.recv().await.unwrap().query_id, "prefill");
+        assert_eq!(
+            receiver.recv().await.unwrap().query_id,
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-0000000001a3")
+                .expect("fixture UUID")
+        );
     }
     let result = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
         .await

@@ -36,17 +36,19 @@ fn load_factory(
 pub(super) fn connect(
     mut batch: ComponentBatchBuilder,
     directory: &Path,
-    query_id: &str,
+    query_name: &str,
+    query_id: ComponentId,
     http_port: u16,
     sse_port: u16,
 ) -> anyhow::Result<ComponentBatchBuilder> {
-    for (package, implementation, id, configuration) in [
+    for (package, implementation, name, id, configuration) in [
         (
             "drasi_computation_source_http",
             "drasi.network/http-source",
             "inventory",
+            component_id(758),
             serde_json::json!({
-                "stream":"inventory/out", "sourceId":"inventory",
+                "stream":"inventory/out",
                 "host":"127.0.0.1", "port":http_port,
                 "ingressCapacity":32, "maxMessageBytes":65536
             }),
@@ -55,19 +57,23 @@ pub(super) fn connect(
             "drasi_computation_sink_sse",
             "drasi.network/sse-sink",
             "notifications",
+            component_id(765),
             serde_json::json!({
-                "outputs":{query_id:{"component":query_id,"port":"out"}},
+                "outputs":{query_name:{"component":query_id,"port":"out"}},
                 "host":"127.0.0.1", "port":sse_port, "ssePath":"/events",
                 "broadcastCapacity":32
             }),
         ),
     ] {
         let factory = load_factory(directory, package, implementation)?;
-        let specification = factory.specification(ComponentId::try_new(id)?, configuration)?;
-        batch = batch.component(specification, factory);
+        let specification = factory.specification(id, configuration)?;
+        batch = batch.component(ComponentName::try_new(name)?, specification, factory);
     }
     Ok(batch.connect(
-        EdgeDefinition::new(endpoint(query_id, "out")?, endpoint("notifications", "in")?),
+        EdgeDefinition::new(
+            endpoint(query_id, "out")?,
+            endpoint(component_id(765), "in")?,
+        ),
         Box::new(BoundedPipeConfig { capacity: 8 }),
     ))
 }
@@ -83,24 +89,40 @@ pub(super) async fn add_webhook(
         "drasi_computation_sink_http",
         "drasi.network/http-sink",
     )?;
-    let specification = factory.specification(
-        ComponentId::try_new("webhook")?,
-        serde_json::json!({
-            "outputs":{"low-stock":{"component":"low-stock","port":"out"}},
-            "url":url,
-            "timeoutMs":5000, "maxRetries":0, "failurePolicy":"strict"
-        }),
-    )?;
-    let addition = ComponentBatch::builder()
-        .component(specification, factory)
-        .connect(
-            EdgeDefinition::new(endpoint("low-stock", "out")?, endpoint("webhook", "in")?),
-            Box::new(BoundedPipeConfig { capacity: 8 }),
-        )
-        .build()?
-        .auto_start(false);
-    core.add_components(addition).await?.ensure_committed()?;
-    let component = core.computation_component("webhook")?;
+    let query_id = core
+        .component_by_name(&ComponentName::try_new("low-stock")?)?
+        .id()
+        .clone();
+    let url = url.to_owned();
+    let destination = url.clone();
+    let receipt = core
+        .create_components(move |ids| {
+            let webhook_id = ids.allocate()?;
+            let specification = factory
+                .specification(
+                    webhook_id.clone(),
+                    serde_json::json!({
+                        "outputs":{"low-stock":{"component":query_id,"port":"out"}},
+                        "url":destination,
+                        "timeoutMs":5000, "maxRetries":0, "failurePolicy":"strict"
+                    }),
+                )
+                .map_err(|source| GraphError::Validation {
+                    component: webhook_id.clone(),
+                    source,
+                })?;
+            Ok(ComponentBatch::builder()
+                .component(ComponentName::try_new("webhook")?, specification, factory)
+                .connect(
+                    EdgeDefinition::new(endpoint(query_id, "out")?, endpoint(webhook_id, "in")?),
+                    Box::new(BoundedPipeConfig { capacity: 8 }),
+                )
+                .build()?
+                .auto_start(false))
+        })
+        .await?;
+    let component =
+        cli::accepted_component(core, &receipt, &ComponentName::try_new("webhook")?).await?;
     tokio::time::timeout(Duration::from_secs(10), component.start())
         .await
         .context("wait for webhook readiness")??;

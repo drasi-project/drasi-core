@@ -104,8 +104,18 @@ async fn graph_mode(
                 }))),
             ),
         )?
-        .component(source, source_factory)
-        .component(sink, sink_factory)
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            source,
+            source_factory,
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
+                .expect("fixture component name"),
+            sink,
+            sink_factory,
+        )
         .bind_stream(endpoint("source", "out"), stream("changes"));
     if tracked {
         builder = builder
@@ -177,19 +187,27 @@ async fn graph_mode(
         outputs.push(receiver);
         let capture = format!("{name}-capture");
         builder = builder
-            .transformer(Box::new(query))
-            .sink(Box::new(Capture {
-                descriptor: ComponentDescriptor::try_new(
-                    id(&capture),
-                    vec![PortDescriptor::new(
-                        PortId::try_new("in")?,
-                        PortDirection::Input,
-                        QueryChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                sender,
-            }))
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                    .expect("fixture component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                    .expect("fixture component name"),
+                Box::new(Capture {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(&capture),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("in")?,
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    sender,
+                }),
+            )
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -270,7 +288,10 @@ async fn positional_live(dynamic: bool, gtid: bool) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(30), graph.core.start()).await??;
         let schema = graph
             .core
-            .get_source_schema("source")
+            .get_source_schema_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )
             .await?
             .context("positional catalog schema")?;
         assert_eq!(
@@ -465,7 +486,10 @@ async fn positional_checkpoint_catalog_fence(dynamic: bool) -> Result<()> {
         Arc::new(Semaphore::new(64)),
     )
     .await?;
-    let key = SourceProgressKey::Source("source".into());
+    let key = SourceProgressKey::Source(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+    );
     let mut checkpoints = Vec::new();
     let proof = async {
         graph.core.start().await?;
@@ -766,7 +790,10 @@ async fn manual_keys(dynamic: bool, coordinated: bool) -> Result<()> {
         }
         let schema = graph
             .core
-            .get_source_schema("source")
+            .get_source_schema_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )
             .await?
             .context("captured catalog")?;
         assert_eq!(schema.nodes[0].properties.len(), 3);
@@ -833,7 +860,10 @@ async fn database_wide(dynamic: bool) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(30), graph.core.start()).await??;
         let before = graph
             .core
-            .get_source_schema("source")
+            .get_source_schema_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )
             .await?
             .context("startup catalog")?;
         assert!(!before.nodes.iter().any(|node| node.label == "fresh"));
@@ -854,7 +884,10 @@ async fn database_wide(dynamic: bool) -> Result<()> {
             .await?;
         let schema = graph
             .core
-            .get_source_schema("source")
+            .get_source_schema_by_name(
+                &drasi_core_types::ComponentName::try_new("source")
+                    .expect("fixture component name"),
+            )
             .await?
             .context("live catalog")?;
         let node = schema

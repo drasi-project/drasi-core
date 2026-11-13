@@ -27,6 +27,8 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+const SOURCE_ID: &str = "5c3e49cc-32f8-5b75-888d-30b75b572221";
+
 fn begin() -> Vec<u8> {
     let mut bytes = vec![b'B'];
     bytes.extend(100u64.to_be_bytes());
@@ -81,7 +83,7 @@ fn transactions(limits: SourceTransactionLimits) -> Transactions {
         decoder: strict(),
         pending: None,
         keys: BTreeMap::from([(("public".into(), "person".into()), vec!["id".into()])]),
-        source: ComponentId::try_new("source").unwrap(),
+        source: ComponentId::try_new(SOURCE_ID).unwrap(),
         stream: StreamId::try_new("stream").unwrap(),
         limits,
         binding: [1; 32],
@@ -287,8 +289,11 @@ fn transaction_keys_preserve_tuple_boundaries_and_namespace() {
 fn native_checkpoint_rejects_missing_damaged_or_rebound_positions() {
     use drasi_core_types::interface::SourceCheckpoint;
 
-    let source = ComponentId::try_new("source").unwrap();
-    let key = SourceProgressKey::Source("source".into());
+    let source = ComponentId::try_new(SOURCE_ID).unwrap();
+    let key = SourceProgressKey::Source(
+        drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+            .expect("fixture UUID"),
+    );
     let mut snapshot = SourceProgressSnapshot::default();
     assert_eq!(checkpoint(&snapshot, &source, [1; 32]).unwrap(), None);
     let position = serde_json::to_vec(&Position {
@@ -391,7 +396,7 @@ fn native_configuration_rejects_malformed_connection_and_limits_before_start() {
 #[test]
 fn managed_handover_requires_a_completed_owner_cursor_and_exact_slot_prefix() -> Result<()> {
     use drasi_core_types::interface::SourceCheckpoint;
-    let source = ComponentId::try_new("source")?;
+    let source = ComponentId::try_new(SOURCE_ID)?;
     let config: PostgresTransactionConfig = serde_json::from_value(serde_json::json!({
         "connection": {"database": "database", "user": "user", "slot_name": "owned"},
         "start_lsn": "0/0",
@@ -410,7 +415,10 @@ fn managed_handover_requires_a_completed_owner_cursor_and_exact_slot_prefix() ->
         Some(format!("owned_{}';", "a".repeat(32))),
     ] {
         progress.checkpoints.insert(
-            SourceProgressKey::Source("source".into()),
+            SourceProgressKey::Source(
+                drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                    .expect("fixture UUID"),
+            ),
             SourceCheckpoint::new(
                 100,
                 Some(
@@ -429,7 +437,10 @@ fn managed_handover_requires_a_completed_owner_cursor_and_exact_slot_prefix() ->
 
     let slot = format!("owned_{}", "a".repeat(32));
     progress.checkpoints.insert(
-        SourceProgressKey::Source("source".into()),
+        SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID"),
+        ),
         SourceCheckpoint::new(
             100,
             Some(
@@ -480,7 +491,10 @@ async fn ordinary_rows_preserve_partial_replay_and_confirm_only_complete_transac
     let first = GraphChangeCodec::source_metadata(&output[0].envelope)?.context("row metadata")?;
     let first_position = first.source_position.context("row position")?;
     progress.checkpoints.insert(
-        SourceProgressKey::Source("source".into()),
+        SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID"),
+        ),
         SourceCheckpoint::new(
             first.sequence.context("sequence")?,
             Some(first_position.clone().into()),
@@ -501,7 +515,10 @@ async fn ordinary_rows_preserve_partial_replay_and_confirm_only_complete_transac
         GraphChangeCodec::source_metadata(&replay[0].envelope)?.context("replayed row metadata")?;
     assert_eq!(second.sequence, Some(2));
     progress.checkpoints.insert(
-        SourceProgressKey::Source("source".into()),
+        SourceProgressKey::Source(
+            drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
+                .expect("fixture UUID"),
+        ),
         SourceCheckpoint::new(
             2,
             Some(second.source_position.context("row position")?.into()),

@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::{
@@ -16,6 +20,19 @@ use async_trait::async_trait;
 use computation_support::{component, descriptor, endpoint, stream};
 use drasi_core::interface::{FailureMode, StorageDurability};
 use drasi_lib::computation::v1::*;
+
+fn named_component(name: &str) -> ComponentId {
+    fixture_support::component_id(match name {
+        "source" => 77,
+        "sink" => 101,
+        "left-source" => 3,
+        "left" => 743,
+        "right-source" => 5,
+        "right" => 465,
+        "monitor" => 438,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
 
 struct Source {
     descriptor: ComponentDescriptor,
@@ -92,13 +109,16 @@ fn request(
     guarantee: RecoveryGuarantee,
 ) -> RecoveryRequirement {
     RecoveryRequirement {
-        consumer: component(consumer),
+        consumer: named_component(consumer),
         scope,
         guarantees: BTreeSet::from([guarantee]),
     }
 }
 
-fn source(id: &str, contract: ComponentRecovery) -> Box<dyn EnvelopeSource> {
+fn source(
+    id: &drasi_core_types::ComponentId,
+    contract: ComponentRecovery,
+) -> Box<dyn EnvelopeSource> {
     Box::new(Source {
         descriptor: descriptor(id, &[], &["out"]),
         contract,
@@ -107,7 +127,7 @@ fn source(id: &str, contract: ComponentRecovery) -> Box<dyn EnvelopeSource> {
     })
 }
 
-fn sink(id: &str, inputs: &[&str]) -> Box<dyn EnvelopeSink> {
+fn sink(id: &drasi_core_types::ComponentId, inputs: &[&str]) -> Box<dyn EnvelopeSink> {
     Box::new(Sink {
         descriptor: descriptor(id, inputs, &[]),
         completion: SinkCompletion::Handled,
@@ -120,8 +140,8 @@ fn memory_source() -> ComponentRecovery {
 
 fn retained(
     builder: ComputationGraphBuilder,
-    producer: &str,
-    consumer: &str,
+    producer: &drasi_core_types::ComponentId,
+    consumer: &drasi_core_types::ComponentId,
     port: &str,
 ) -> GraphResult<ComputationGraphBuilder> {
     retained_policy(
@@ -136,8 +156,8 @@ fn retained(
 
 fn retained_policy(
     builder: ComputationGraphBuilder,
-    producer: &str,
-    consumer: &str,
+    producer: &drasi_core_types::ComponentId,
+    consumer: &drasi_core_types::ComponentId,
     port: &str,
     policy: RetentionPolicy,
     gaps: ReplayGapPolicy,
@@ -176,22 +196,65 @@ fn retained_policy(
 fn simple() -> GraphResult<ComputationGraphBuilder> {
     retained(
         ComputationGraph::builder("recovery-contracts")
-            .source(source("source", memory_source()))
-            .sink(sink("sink", &["in"]))
-            .bind_stream(endpoint("source", "out"), stream("source")),
-        "source",
-        "sink",
+            .fixture_source(source(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                memory_source(),
+            ))
+            .fixture_sink(sink(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+            ))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            ),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
         "in",
     )
 }
 
 fn independent(builder: ComputationGraphBuilder) -> ComputationGraphBuilder {
     builder
-        .source(source("independent", ComponentRecovery::default()))
-        .sink(sink("observer", &["in"]))
-        .bind_stream(endpoint("independent", "out"), stream("independent"))
+        .fixture_source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b4")
+                .expect("fixture UUID"),
+            ComponentRecovery::default(),
+        ))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b5")
+                .expect("fixture UUID"),
+            &["in"],
+        ))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b4")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("independent"),
+        )
         .connect(
-            EdgeDefinition::new(endpoint("independent", "out"), endpoint("observer", "in")),
+            EdgeDefinition::new(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b4")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b5")
+                        .expect("fixture UUID"),
+                    "in",
+                ),
+            ),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
 }
@@ -213,7 +276,7 @@ fn memory_replay_and_process_restart_are_different_requirements() -> GraphResult
     let report = graph.recovery_report(&durable)?;
     assert!(!report.satisfied());
     assert!(report.issues.iter().any(|issue| {
-        issue.participant == RecoveryParticipant::Component(component("source"))
+        issue.participant == RecoveryParticipant::Component(component(77))
             && matches!(
                 issue.reason,
                 RecoveryIncompatibility::StorageSurvival { .. }
@@ -229,11 +292,23 @@ fn memory_replay_and_process_restart_are_different_requirements() -> GraphResult
 #[test]
 fn an_unrelated_lossy_monitor_does_not_weaken_the_required_consumer() -> GraphResult<()> {
     let graph = simple()?
-        .sink(sink("monitor", &["in"]))
+        .fixture_sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b6")
+                .expect("fixture UUID"),
+            &["in"],
+        ))
         .connect(
             EdgeDefinition {
-                from: endpoint("source", "out"),
-                to: endpoint("monitor", "in"),
+                from: endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                to: endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b6")
+                        .expect("fixture UUID"),
+                    "in",
+                ),
             },
             Box::new(BroadcastPipeConfig {
                 capacity: 2,
@@ -247,7 +322,7 @@ fn an_unrelated_lossy_monitor_does_not_weaken_the_required_consumer() -> GraphRe
         RecoveryGuarantee::Replay,
     ))?;
     assert!(reliable.satisfied());
-    assert!(!reliable.participants.contains(&component("monitor")));
+    assert!(!reliable.participants.contains(&component(438)));
     let monitor = graph.recovery_report(&request(
         "monitor",
         RecoveryScope::MemoryLifetime,
@@ -264,16 +339,52 @@ fn an_unrelated_lossy_monitor_does_not_weaken_the_required_consumer() -> GraphRe
 fn fan_in_includes_every_contributing_producer() -> GraphResult<()> {
     let builder = retained(
         ComputationGraph::builder("fan-in")
-            .source(source("known", memory_source()))
-            .source(source("unknown", ComponentRecovery::default()))
-            .sink(sink("sink", &["a", "b"]))
-            .bind_stream(endpoint("known", "out"), stream("known"))
-            .bind_stream(endpoint("unknown", "out"), stream("unknown")),
-        "known",
-        "sink",
+            .fixture_source(source(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b7")
+                    .expect("fixture UUID"),
+                memory_source(),
+            ))
+            .fixture_source(source(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b8")
+                    .expect("fixture UUID"),
+                ComponentRecovery::default(),
+            ))
+            .fixture_sink(sink(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["a", "b"],
+            ))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b7")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("known"),
+            )
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b8")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("unknown"),
+            ),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b7")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
         "a",
     )?;
-    let graph = retained(builder, "unknown", "sink", "b")?.build()?;
+    let graph = retained(
+        builder,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b8")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
+        "b",
+    )?
+    .build()?;
     let report = graph.recovery_report(&request(
         "sink",
         RecoveryScope::MemoryLifetime,
@@ -281,10 +392,10 @@ fn fan_in_includes_every_contributing_producer() -> GraphResult<()> {
     ))?;
     assert_eq!(
         report.participants,
-        BTreeSet::from([component("known"), component("unknown"), component("sink"),])
+        BTreeSet::from([component(439), component(440), component(101),])
     );
     assert!(report.issues.iter().any(|issue| {
-        issue.participant == RecoveryParticipant::Component(component("unknown"))
+        issue.participant == RecoveryParticipant::Component(component(440))
             && issue.reason == RecoveryIncompatibility::UnknownAdmission
     }));
     Ok(())
@@ -324,31 +435,46 @@ fn source_acceptance_is_not_processing_or_external_effect_completion() -> GraphR
 fn host_subscriptions_and_missing_dependencies_are_not_omitted() -> GraphResult<()> {
     let graph = simple()?.build()?;
     let mut desired = graph.snapshot().select(GraphSelection::All)?;
-    desired
-        .subscriptions
-        .push((component("missing"), component("sink")));
+    desired.subscriptions.push((component(738), component(101)));
     desired.validate_structure()?;
     let restored = DesiredTopology::from_json(&desired.to_json()?)?;
     assert!(restored
         .subscriptions
-        .contains(&(component("missing"), component("sink"))));
+        .contains(&(component(738), component(101))));
     let mut desired = graph.snapshot().select(GraphSelection::All)?;
-    desired
-        .subscriptions
-        .push((component("source"), component("sink")));
+    desired.subscriptions.push((component(77), component(101)));
     desired.recovery_requirements.push(request(
         "sink",
         RecoveryScope::MemoryLifetime,
         RecoveryGuarantee::Replay,
     ));
     let mut bindings = TopologyBindings::default();
+    let binding_for = |name: &str| {
+        let component = desired
+            .components
+            .iter()
+            .find(|component| component.descriptor.id() == &named_component(name))
+            .expect("fixture component");
+        let ComponentConstruction::External { binding } = &component.construction else {
+            panic!("fixture external binding")
+        };
+        binding.clone()
+    };
     bindings.components.insert(
-        "source".into(),
-        ConstructedComponent::source(source("source", memory_source())),
+        binding_for("source"),
+        ConstructedComponent::source(source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            memory_source(),
+        )),
     );
     bindings.components.insert(
-        "sink".into(),
-        ConstructedComponent::sink(sink("sink", &["in"])),
+        binding_for("sink"),
+        ConstructedComponent::sink(sink(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
+            &["in"],
+        )),
     );
     let resource = desired.resources[0].id.clone();
     bindings.resources.insert(
@@ -393,11 +519,30 @@ fn lossy_retention_and_gap_skipping_cannot_satisfy_replay() -> GraphResult<()> {
     for gaps in [ReplayGapPolicy::Strict, ReplayGapPolicy::SkipWithNotification] {
         let graph = retained_policy(
             ComputationGraph::builder("lossy-recovery")
-                .source(source("source", memory_source()))
-                .sink(sink("sink", &["in"]))
-                .bind_stream(endpoint("source", "out"), stream("source")),
-            "source",
-            "sink",
+                .fixture_source(source(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    memory_source(),
+                ))
+                .fixture_sink(sink(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                    &["in"],
+                ))
+                .bind_stream(
+                    endpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                        "out",
+                    ),
+                    stream("source"),
+                ),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "in",
             RetentionPolicy::PruneOldest,
             gaps,
@@ -420,14 +565,32 @@ fn lossy_retention_and_gap_skipping_cannot_satisfy_replay() -> GraphResult<()> {
 fn a_retained_pipe_does_not_upgrade_an_acceptance_only_sink() -> GraphResult<()> {
     let result = retained(
         ComputationGraph::builder("acceptance-only")
-            .source(source("source", memory_source()))
-            .sink(Box::new(Sink {
-                descriptor: descriptor("sink", &["in"], &[]),
+            .fixture_source(source(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                memory_source(),
+            ))
+            .fixture_sink(Box::new(Sink {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                        .expect("fixture UUID"),
+                    &["in"],
+                    &[],
+                ),
                 completion: SinkCompletion::Accepted,
             }))
-            .bind_stream(endpoint("source", "out"), stream("source")),
-        "source",
-        "sink",
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            ),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
         "in",
     )?
     .build();
@@ -471,7 +634,7 @@ async fn live_changes() {
             .expect("preview assertion-only change");
         assert_eq!(
             preview.paused(),
-            &BTreeSet::from([component("source"), component("sink")])
+            &BTreeSet::from([component(77), component(101)])
         );
         let reconciled = control
             .reconcile(preview, TopologyBindings::default())
@@ -488,7 +651,7 @@ async fn live_changes() {
 
         assert!(matches!(
             control
-                .set_subscriptions(vec![(component("source"), component("sink"))])
+                .set_subscriptions(vec![(component(77), component(101))])
                 .await,
             Err(GraphError::Recovery(_))
         ));
@@ -517,7 +680,7 @@ async fn live_changes() {
             .expect("original contract")
             .satisfied());
         assert_eq!(
-            control.observed().components[&component("sink")].lifecycle,
+            control.observed().components[&component(101)].lifecycle,
             ComponentLifecycle::Running
         );
         desired.recovery_requirements.clear();
@@ -541,19 +704,47 @@ async fn overlapping_assertions_pause_their_whole_closure_regardless_of_order() 
     for order in [["left", "right"], ["right", "left"]] {
         let mut builder = independent(
             ComputationGraph::builder("overlapping-recovery")
-                .source(source("source", memory_source()))
-                .sink(sink("left", &["in"]))
-                .sink(sink("right", &["in"]))
-                .bind_stream(endpoint("source", "out"), stream("source")),
+                .fixture_source(source(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    memory_source(),
+                ))
+                .fixture_sink(sink(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000002e7")
+                        .expect("fixture UUID"),
+                    &["in"],
+                ))
+                .fixture_sink(sink(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001d1")
+                        .expect("fixture UUID"),
+                    &["in"],
+                ))
+                .bind_stream(
+                    endpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                        "out",
+                    ),
+                    stream("source"),
+                ),
         );
         for consumer in order {
-            builder = retained(builder, "source", consumer, "in")
-                .expect("retained branch")
-                .require_recovery(request(
-                    consumer,
-                    RecoveryScope::MemoryLifetime,
-                    RecoveryGuarantee::Replay,
-                ));
+            let consumer_id = named_component(consumer);
+            builder = retained(
+                builder,
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &consumer_id,
+                "in",
+            )
+            .expect("retained branch")
+            .require_recovery(request(
+                consumer,
+                RecoveryScope::MemoryLifetime,
+                RecoveryGuarantee::Replay,
+            ));
         }
         let mut graph = builder.build().expect("graph");
         let run = graph.start().expect("controller");
@@ -566,13 +757,19 @@ async fn overlapping_assertions_pause_their_whole_closure_regardless_of_order() 
             let preview = control
                 .preview(
                     control.desired_snapshot().revision,
-                    vec![DesiredMutation::Restart(GraphSelection::Exact(vec![component("right")]))],
+                    vec![DesiredMutation::Restart(GraphSelection::Exact(vec![named_component(
+                        "right",
+                    )]))],
                 )
                 .await
                 .expect("restart preview");
             assert_eq!(
                 preview.paused(),
-                &BTreeSet::from([component("source"), component("left"), component("right")]),
+                &BTreeSet::from([
+                    named_component("source"),
+                    named_component("left"),
+                    named_component("right")
+                ]),
             );
             control.cancel();
         });
@@ -584,13 +781,15 @@ async fn overlapping_assertions_pause_their_whole_closure_regardless_of_order() 
 async fn adding_an_assertion_does_not_pause_an_independent_asserted_path() {
     let mut builder = ComputationGraph::builder("independent-assertions");
     for (producer, consumer) in [("left-source", "left"), ("right-source", "right")] {
+        let producer_id = named_component(producer);
+        let consumer_id = named_component(consumer);
         builder = retained(
             builder
-                .source(source(producer, memory_source()))
-                .sink(sink(consumer, &["in"]))
-                .bind_stream(endpoint(producer, "out"), stream(producer)),
-            producer,
-            consumer,
+                .fixture_source(source(&producer_id, memory_source()))
+                .fixture_sink(sink(&consumer_id, &["in"]))
+                .bind_stream(endpoint(&producer_id, "out"), stream(producer)),
+            &producer_id,
+            &consumer_id,
             "in",
         )
         .expect("retained branch");
@@ -625,7 +824,7 @@ async fn adding_an_assertion_does_not_pause_an_independent_asserted_path() {
             .expect("assertion preview");
         assert_eq!(
             preview.paused(),
-            &BTreeSet::from([component("right-source"), component("right")]),
+            &BTreeSet::from([named_component("right-source"), named_component("right")]),
         );
         control.cancel();
     });
@@ -649,7 +848,6 @@ async fn live_assertion_changes_multi_thread() {
 struct SourceFactory {
     descriptor: FactoryDescriptor,
     calls: Arc<Calls>,
-    supported: bool,
 }
 
 struct Timer;
@@ -696,20 +894,53 @@ impl Transformer for WakefulTransformer {
 fn a_timer_cannot_hide_behind_a_stateless_declaration() -> GraphResult<()> {
     let builder = retained(
         ComputationGraph::builder("wakeful")
-            .source(source("source", memory_source()))
-            .transformer(Box::new(WakefulTransformer(descriptor(
-                "timer",
+            .fixture_source(source(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                memory_source(),
+            ))
+            .fixture_transformer(Box::new(WakefulTransformer(descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b9")
+                    .expect("fixture UUID"),
                 &["in"],
                 &["out"],
             ))))
-            .sink(sink("sink", &["in"]))
-            .bind_stream(endpoint("source", "out"), stream("source"))
-            .bind_stream(endpoint("timer", "out"), stream("timer")),
-        "source",
-        "timer",
+            .fixture_sink(sink(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+            ))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            )
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b9")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("timer"),
+            ),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b9")
+            .expect("fixture UUID"),
         "in",
     )?;
-    let graph = retained(builder, "timer", "sink", "in")?.build()?;
+    let graph = retained(
+        builder,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001b9")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
+        "in",
+    )?
+    .build()?;
     let report = graph.recovery_report(&request(
         "sink",
         RecoveryScope::MemoryLifetime,
@@ -736,9 +967,24 @@ async fn instance_batches() {
             RetentionPolicy::Backpressure,
         ))));
         let batch = ComponentBatch::builder()
-            .source(source("source", memory_source()))
-            .sink(sink("sink", &["in"]))
-            .bind_stream(endpoint("source", "out"), stream("source"))
+            .fixture_source(source(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                memory_source(),
+            ))
+            .fixture_sink(sink(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+            ))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            )
             .declare_resource(ResourceSpecification {
                 id: resource.clone(),
                 role: ResourceRole::StateStore,
@@ -752,7 +998,22 @@ async fn instance_batches() {
             )
             .expect("resource")
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("sink", "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000065",
+                        )
+                        .expect("fixture UUID"),
+                        "in",
+                    ),
+                ),
                 Box::new(RetainedPipeConfig {
                     resource,
                     capacity,
@@ -767,6 +1028,7 @@ async fn instance_batches() {
         let (builder, later) = if initial {
             (
                 drasi_lib::DrasiLib::builder()
+                    .with_allow_external_component_ids(true)
                     .with_query_factory(
                         drasi_lib::computation::v1::FactoryRegistry::standard()
                             .get(
@@ -784,18 +1046,20 @@ async fn instance_batches() {
             )
         } else {
             (
-                drasi_lib::DrasiLib::builder().with_query_factory(
-                    drasi_lib::computation::v1::FactoryRegistry::standard()
-                        .get(
-                            &drasi_lib::computation::v1::ImplementationIdentity::try_new(
-                                "drasi/continuous-query",
-                                "1",
+                drasi_lib::DrasiLib::builder()
+                    .with_allow_external_component_ids(true)
+                    .with_query_factory(
+                        drasi_lib::computation::v1::FactoryRegistry::standard()
+                            .get(
+                                &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                    "drasi/continuous-query",
+                                    "1",
+                                )
+                                .expect("reference query identity"),
                             )
-                            .expect("reference query identity"),
-                        )
-                        .expect("reference query factory")
-                        .clone(),
-                ),
+                            .expect("reference query factory")
+                            .clone(),
+                    ),
                 Some(batch),
             )
         };
@@ -804,9 +1068,7 @@ async fn instance_batches() {
             drasi
                 .add_components(batch)
                 .await
-                .expect("ordinary addition")
-                .ensure_committed()
-                .expect("desired topology committed");
+                .expect("ordinary addition");
         }
         drasi.start().await.expect("start");
         let control = drasi.computation_control().expect("single controller");
@@ -845,13 +1107,36 @@ impl ComponentFactory for SourceFactory {
     fn validate(&self, _: &ComponentSpecification) -> anyhow::Result<()> {
         Ok(())
     }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current.descriptor == proposed.descriptor
+                && current.implementation == proposed.implementation
+                && current.dependencies == proposed.dependencies,
+            "the stateless recovery probe cannot change identity, implementation or resources"
+        );
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
     async fn create(
         &self,
         context: ConstructionContext,
     ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        let supported = context
+            .configuration()
+            .get("supported")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                ComponentCreationError::terminal(anyhow::anyhow!("missing supported setting"))
+            })?;
         Ok(ConstructedComponent::source(Box::new(Source {
             descriptor: context.specification.descriptor.clone(),
-            contract: if self.supported {
+            contract: if supported {
                 memory_source()
             } else {
                 ComponentRecovery::default()
@@ -870,12 +1155,20 @@ fn deferred_source(
         ImplementationIdentity::try_new("test/recovery-source", "1").expect("implementation");
     (
         ComponentSpecification {
-            descriptor: descriptor("source", &[], &["out"]),
+            descriptor: descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &[],
+                &["out"],
+            ),
             role: ComponentRole::Source,
             completion: None,
             implementation: implementation.clone(),
             configuration_version: 1,
-            configuration: BTreeMap::new(),
+            configuration: BTreeMap::from([(
+                Arc::from("supported"),
+                ConfigurationValue::Literal(supported.into()),
+            )]),
             dependencies: BTreeMap::new(),
         },
         Arc::new(SourceFactory {
@@ -883,11 +1176,21 @@ fn deferred_source(
                 implementation,
                 role: ComponentRole::Source,
                 configuration_version: 1,
-                configuration: ConfigurationSchema::default(),
+                configuration: ConfigurationSchema {
+                    fields: BTreeMap::from([(
+                        Arc::from("supported"),
+                        ConfigurationField {
+                            value_type: ConfigurationType::Boolean,
+                            required: true,
+                            secret: false,
+                            constraint: None,
+                        },
+                    )]),
+                    allow_additional: false,
+                },
                 dependencies: BTreeMap::new(),
             },
             calls,
-            supported,
         }),
     )
 }
@@ -904,12 +1207,29 @@ async fn deferred_activation() {
         let mut graph = retained(
             independent(
                 ComputationGraph::builder("deferred-recovery")
-                    .component(specification, factory)
-                    .sink(sink("sink", &["in"]))
-                    .bind_stream(endpoint("source", "out"), stream("source")),
+                    .component(fixture_support::component_name(), specification, factory)
+                    .fixture_sink(sink(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000065",
+                        )
+                        .expect("fixture UUID"),
+                        &["in"],
+                    ))
+                    .bind_stream(
+                        endpoint(
+                            &drasi_core_types::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            "out",
+                        ),
+                        stream("source"),
+                    ),
             ),
-            "source",
-            "sink",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "in",
         )
         .expect("builder")
@@ -941,7 +1261,7 @@ async fn deferred_activation() {
                 supported
             );
             assert_eq!(
-                control.observed().components[&component("independent")].lifecycle,
+                control.observed().components[&component(436)].lifecycle,
                 ComponentLifecycle::Running
             );
             control.cancel();
@@ -974,16 +1294,34 @@ async fn activation_cannot_change_a_validated_contract_before_processing() {
     );
     let mut graph = retained(
         ComputationGraph::builder("changing-contract")
-            .source(Box::new(Source {
-                descriptor: descriptor("source", &[], &["out"]),
+            .fixture_source(Box::new(Source {
+                descriptor: descriptor(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    &[],
+                    &["out"],
+                ),
                 contract: memory_source(),
                 calls: calls.clone(),
                 activate_as: Some(ComponentRecovery::default()),
             }))
-            .sink(sink("sink", &["in"]))
-            .bind_stream(endpoint("source", "out"), stream("source")),
-        "source",
-        "sink",
+            .fixture_sink(sink(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+                &["in"],
+            ))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            ),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+            .expect("fixture UUID"),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+            .expect("fixture UUID"),
         "in",
     )
     .expect("builder")
@@ -994,7 +1332,7 @@ async fn activation_cannot_change_a_validated_contract_before_processing() {
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         let report = control.startup_report().await.expect("startup");
-        let StartOutcome::StartFailed(failure) = &report.components[&component("source")] else {
+        let StartOutcome::StartFailed(failure) = &report.components[&component(77)] else {
             panic!("changed contract must fail activation");
         };
         let GraphError::Recovery(error) = failure.cause.as_ref() else {
@@ -1018,10 +1356,31 @@ async fn replacement_checks_actual_contract_before_resuming_existing_consumers()
         RecoveryScope::MemoryLifetime,
         RecoveryGuarantee::Replay,
     );
-    let mut graph = independent(simple().expect("builder"))
-        .require_recovery(requirement.clone())
-        .build()
-        .expect("graph");
+    let calls = Arc::new(Calls::default());
+    let (specification, factory) = deferred_source(true, calls.clone());
+    let initial = ComputationGraph::builder("recovery-contracts")
+        .component(
+            ComponentName::try_new("source").unwrap(),
+            specification,
+            factory,
+        )
+        .fixture_sink(sink(&named_component("sink"), &["in"]))
+        .bind_stream(
+            endpoint(&named_component("source"), "out"),
+            stream("source"),
+        );
+    let mut graph = independent(
+        retained(
+            initial,
+            &named_component("source"),
+            &named_component("sink"),
+            "in",
+        )
+        .expect("builder"),
+    )
+    .require_recovery(requirement.clone())
+    .build()
+    .expect("graph");
     let run = graph.start().expect("controller");
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
@@ -1030,12 +1389,11 @@ async fn replacement_checks_actual_contract_before_resuming_existing_consumers()
             .desired_snapshot()
             .select(GraphSelection::All)
             .expect("desired");
-        let calls = Arc::new(Calls::default());
-        let (specification, factory) = deferred_source(false, calls.clone());
+        let (specification, _) = deferred_source(false, calls.clone());
         desired
             .components
             .iter_mut()
-            .find(|node| node.descriptor.id() == &component("source"))
+            .find(|node| node.descriptor.id() == &component(77))
             .expect("source")
             .construction = ComponentConstruction::Factory(specification);
         let preview = control
@@ -1045,10 +1403,8 @@ async fn replacement_checks_actual_contract_before_resuming_existing_consumers()
             )
             .await
             .expect("preview");
-        let mut bindings = TopologyBindings::default();
-        bindings.factories.register(factory).expect("factory");
         let report = control
-            .reconcile(preview, bindings)
+            .reconcile(preview, TopologyBindings::default())
             .await
             .expect("committed failed definition");
         assert!(report.committed);
@@ -1057,15 +1413,16 @@ async fn replacement_checks_actual_contract_before_resuming_existing_consumers()
             .failures
             .iter()
             .any(|failure| matches!(failure.cause.as_ref(), GraphError::Recovery(_))));
-        assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
-        assert_eq!(calls.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.starts.load(Ordering::SeqCst), 1);
+        assert!(calls.reads.load(Ordering::SeqCst) <= 1);
+        assert!(!control.observed().components[&named_component("source")].started);
         assert!(!control
             .recovery_report(requirement)
             .await
             .expect("failure inspection")
             .satisfied());
         assert_eq!(
-            control.observed().components[&component("independent")].lifecycle,
+            control.observed().components[&component(436)].lifecycle,
             ComponentLifecycle::Running
         );
         control.cancel();

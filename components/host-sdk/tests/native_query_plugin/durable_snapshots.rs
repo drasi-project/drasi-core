@@ -56,6 +56,7 @@ async fn indexed_snapshot_exit_child() -> Result<()> {
     let path =
         PathBuf::from(std::env::var_os(SNAPSHOT_ROOT).context("snapshot child needs a directory")?);
     let mut query = create(&path, TEXT, 1)?;
+    query.initialize().await?;
     query.start().await?;
     let changes: Vec<_> = (0..ROWS)
         .map(|id| SourceChange::Insert {
@@ -130,6 +131,7 @@ async fn persistent_snapshots() -> Result<()> {
         String::from_utf8_lossy(&child.stderr)
     );
     let mut query = create(directory.path(), TEXT, 2)?;
+    query.initialize().await?;
     assert!(reader(&query)?.snapshot().await.is_err());
     query.start().await?;
     let initial = reader(&query)?.snapshot().await?;
@@ -184,6 +186,7 @@ async fn persistent_snapshots() -> Result<()> {
     assert!(old_reader.snapshot().await.is_err());
     drop(query);
     let mut query = create(directory.path(), TEXT, 3)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.continue_transform().await?.is_empty());
     let reopened = reader(&query)?.snapshot().await?;
@@ -208,6 +211,7 @@ async fn missing_or_corrupt_live_rows_cannot_become_an_empty_snapshot() -> Resul
     for missing in [true, false] {
         let directory = tempfile::tempdir()?;
         let mut query = create(directory.path(), TEXT, 1)?;
+        query.initialize().await?;
         query.start().await?;
         let output = query
             .transform(input(
@@ -231,9 +235,10 @@ async fn missing_or_corrupt_live_rows_cannot_become_an_empty_snapshot() -> Resul
         drop(query);
         let owner = ComputationTransaction::try_new(
             provider(directory.path())?
-                .create_indexes(GRAPH, COMPONENT)
+                .create_indexes(GRAPH, &component_id()?)
                 .await?,
         )?;
+        let query_id = component_id()?;
         owner
             .run(async {
                 owner
@@ -241,7 +246,7 @@ async fn missing_or_corrupt_live_rows_cannot_become_an_empty_snapshot() -> Resul
                     .live_results_writer()
                     .expect("atomic live results")
                     .apply_mutations(
-                        COMPONENT,
+                        &query_id,
                         &[RowMutation {
                             row_signature: signature,
                             data: if missing {
@@ -258,6 +263,7 @@ async fn missing_or_corrupt_live_rows_cannot_become_an_empty_snapshot() -> Resul
         owner.shutdown().await?;
         drop(owner);
         let mut query = create(directory.path(), TEXT, 2)?;
+        query.initialize().await?;
         assert!(
             query.start().await.is_err(),
             "damaged projection must not be published"
@@ -273,6 +279,7 @@ async fn failed_mutation_hides_snapshot_until_committed_rows_are_restored() -> R
     let directory = tempfile::tempdir()?;
     let text = "MATCH (n:Item) RETURN n.id AS id, abs(n.value) AS value";
     let mut query = create(directory.path(), text, 1)?;
+    query.initialize().await?;
     query.start().await?;
     let output = query
         .transform(input(
@@ -297,6 +304,7 @@ async fn failed_mutation_hides_snapshot_until_committed_rows_are_restored() -> R
     query.stop().await?;
     drop(query);
     let mut query = create(directory.path(), text, 2)?;
+    query.initialize().await?;
     query.start().await?;
     let restored = reader(&query)?.snapshot().await?;
     assert_eq!(restored.cursor(), initial.cursor());

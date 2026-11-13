@@ -164,6 +164,9 @@ impl Database {
 fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("positive limit")
 }
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
 fn limits(count: usize) -> SourceTransactionLimits {
     SourceTransactionLimits {
         max_changes: size(count),
@@ -177,13 +180,7 @@ fn lsn(value: &str) -> u64 {
         | u64::from_str_radix(low, 16).expect("low LSN")
 }
 fn progress() -> Arc<QuerySourceProgress> {
-    Arc::new(
-        QuerySourceProgress::new(
-            "native-postgres",
-            ComponentId::try_new("query").expect("query"),
-        )
-        .expect("progress"),
-    )
+    Arc::new(QuerySourceProgress::new("native-postgres", component_id(46)).expect("progress"))
 }
 async fn query(
     path: &Path,
@@ -208,7 +205,7 @@ async fn query_with_recovery(
     ContinuousQueryTransformer::new_configured(
         ContinuousQueryDefinition {
             graph_id: progress.graph_id().into(),
-            id: ComponentId::try_new("query")?,
+            id: component_id(46),
             query: "MATCH (n:person) RETURN n.id AS id, n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("results")?,
@@ -233,7 +230,7 @@ fn source(
     progress: Arc<QuerySourceProgress>,
 ) -> Result<PostgresTransactionSource> {
     PostgresTransactionSource::new(
-        ComponentId::try_new("source")?,
+        component_id(77),
         StreamId::try_new("changes")?,
         config,
         progress,
@@ -273,10 +270,11 @@ fn rows(query: &ContinuousQueryTransformer) -> Vec<serde_json::Value> {
     rows
 }
 fn committed(progress: &QuerySourceProgress) -> u64 {
-    progress.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence
+    progress.snapshot().checkpoints[&SourceProgressKey::Source(component_id(77).clone())].sequence
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_whole_commits_hide_intermediate_rows_and_handle_key_changes() -> Result<()> {
     let database = Database::new().await?;
     let path = tempfile::tempdir()?;
@@ -340,6 +338,7 @@ async fn postgres_whole_commits_hide_intermediate_rows_and_handle_key_changes() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_rejected_group_is_not_acknowledged_and_higher_limit_replays_it_whole(
 ) -> Result<()> {
     let database = Database::new().await?;
@@ -412,6 +411,7 @@ async fn postgres_rejected_group_is_not_acknowledged_and_higher_limit_replays_it
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_heartbeats_survive_backpressure_and_same_source_restart_replays_uncommitted_work(
 ) -> Result<()> {
     let database = Database::new().await?;
@@ -478,6 +478,7 @@ async fn postgres_heartbeats_survive_backpressure_and_same_source_restart_replay
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_tls_requirement_and_unavailable_cursor_fail_before_publication() -> Result<()> {
     let database = Database::new().await?;
     let path = tempfile::tempdir()?;
@@ -543,11 +544,8 @@ async fn postgres_tls_requirement_and_unavailable_cursor_fail_before_publication
     database.shutdown().await
 }
 
-fn endpoint(id: &str, port: &str) -> Endpoint {
-    Endpoint::new(
-        ComponentId::try_new(id).expect("component"),
-        PortId::try_new(port).expect("port"),
-    )
+fn endpoint(id: &ComponentId, port: &str) -> Endpoint {
+    Endpoint::new(id.clone(), PortId::try_new(port).expect("port"))
 }
 
 struct Settings(serde_json::Value);
@@ -565,6 +563,7 @@ impl ConfigurationResolver for Settings {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual_graph_pipes(
 ) -> Result<()> {
     for (factory_created, coordinated_snapshot) in
@@ -575,7 +574,7 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
         let progress = progress();
         let (source, bootstrap) = if coordinated_snapshot {
             let (source, bootstrap) = PostgresTransactionSource::coordinated(
-                ComponentId::try_new("source")?,
+                component_id(77),
                 StreamId::try_new("changes")?,
                 database.config.clone(),
                 progress.clone(),
@@ -589,19 +588,27 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
             query = query.with_bootstrap(bootstrap.clone());
         }
         let (sink, mut received) = drasi_reaction_application::NativeApplicationReaction::channel(
-            "sink",
+            component_id(101).clone(),
             QueryChangeCodec::schema().descriptor().clone(),
             size(1),
         )?;
         let graph = ComputationGraph::builder("native-postgres")
-            .transformer(Box::new(query))
-            .sink(Box::new(sink));
+            .transformer(
+                drasi_lib::computation::v1::ComponentName::try_new("query")
+                    .expect("query component name"),
+                Box::new(query),
+            )
+            .sink(
+                drasi_lib::computation::v1::ComponentName::try_new("sink")
+                    .expect("sink component name"),
+                Box::new(sink),
+            );
         let graph = if factory_created {
             let factory = Arc::new(PostgresTransactionSourceFactory::default());
             let resource = ResourceId::try_new("progress")?;
             let settings = ResourceId::try_new("settings")?;
             let mut specification = ComponentSpecification {
-                descriptor: PostgresTransactionSource::describe(ComponentId::try_new("source")?)?,
+                descriptor: PostgresTransactionSource::describe(component_id(77))?,
                 role: ComponentRole::Source,
                 completion: None,
                 implementation: factory.descriptor().implementation.clone(),
@@ -628,7 +635,7 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
             let mut invalid = specification.clone();
             let schema = GraphChangeCodec::schema();
             invalid.descriptor = ComponentDescriptor::try_new(
-                ComponentId::try_new("source")?,
+                component_id(77),
                 vec![PortDescriptor::new(
                     PortId::try_new("out")?,
                     PortDirection::Output,
@@ -694,19 +701,64 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
                         Arc::new(QuerySourceProgressResource(progress.clone())),
                     ),
                 )?
-                .component(specification, factory)
+                .component(
+                    drasi_lib::computation::v1::ComponentName::try_new("source")
+                        .expect("source component name"),
+                    specification,
+                    factory,
+                )
         } else {
-            graph.source(Box::new(source))
+            graph.source(
+                drasi_lib::computation::v1::ComponentName::try_new("source")
+                    .expect("source component name"),
+                Box::new(source),
+            )
         };
         let mut graph = graph
-            .bind_stream(endpoint("source", "out"), StreamId::try_new("changes")?)
-            .bind_stream(endpoint("query", "out"), StreamId::try_new("results")?)
+            .bind_stream(
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                StreamId::try_new("changes")?,
+            )
+            .bind_stream(
+                endpoint(
+                    &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                StreamId::try_new("results")?,
+            )
             .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                            .expect("fixture UUID"),
+                        "in",
+                    ),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+                EdgeDefinition::new(
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                            .expect("fixture UUID"),
+                        "out",
+                    ),
+                    endpoint(
+                        &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                            .expect("fixture UUID"),
+                        "in",
+                    ),
+                ),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()?;
@@ -745,6 +797,7 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_process_exit_helper() -> Result<()> {
     let Ok(mode) = std::env::var("DRASI_PG_TRANSACTION_CRASH") else {
         return Ok(());
@@ -767,6 +820,7 @@ async fn postgres_process_exit_helper() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn postgres_abrupt_process_exit_before_and_after_query_commit_recovers_without_partial_rows(
 ) -> Result<()> {
     for point in ["before", "after"] {

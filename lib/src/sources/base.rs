@@ -45,6 +45,7 @@ use crate::identity::IdentityProvider;
 use crate::profiling;
 use crate::sources::PositionComparator;
 use crate::state_store::StateStoreProvider;
+use crate::{ComponentId, StorageScope};
 use bytes::Bytes;
 use drasi_core::models::SourceChange;
 
@@ -59,8 +60,8 @@ use drasi_core::models::SourceChange;
 /// use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 /// use drasi_lib::{BootstrapProvider, channels::DispatchMode};
 ///
-/// fn build_base(my_provider: impl BootstrapProvider + 'static) -> anyhow::Result<SourceBase> {
-/// let params = SourceBaseParams::new("my-source")
+/// fn build_base(id: drasi_lib::ComponentId, my_provider: impl BootstrapProvider + 'static) -> anyhow::Result<SourceBase> {
+/// let params = SourceBaseParams::new(id)
 ///     .with_dispatch_mode(DispatchMode::Channel)
 ///     .with_dispatch_buffer_capacity(2000)
 ///     .with_bootstrap_provider(my_provider);
@@ -71,7 +72,7 @@ use drasi_core::models::SourceChange;
 /// ```
 pub struct SourceBaseParams {
     /// Unique identifier for the source
-    pub id: String,
+    pub id: ComponentId,
     /// Dispatch mode (Broadcast or Channel) - defaults to Channel
     pub dispatch_mode: Option<DispatchMode>,
     /// Dispatch buffer capacity - defaults to 1000
@@ -110,9 +111,9 @@ impl std::fmt::Debug for SourceBaseParams {
 
 impl SourceBaseParams {
     /// Create new params with just an ID, using defaults for everything else
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             state_store: None,
@@ -164,7 +165,7 @@ impl SourceBaseParams {
 /// Base implementation for common source functionality
 pub struct SourceBase {
     /// Source identifier
-    pub id: String,
+    pub id: ComponentId,
     /// Dispatch mode setting
     dispatch_mode: DispatchMode,
     /// Dispatch buffer capacity
@@ -213,7 +214,7 @@ pub struct SourceBase {
     /// to advance its upstream cursor. Initial value is `u64::MAX`
     /// ("no position confirmed yet"). Only populated when
     /// `request_position_handle == true`.
-    position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
+    position_handles: Arc<RwLock<HashMap<ComponentId, Arc<AtomicU64>>>>,
     wal_subscriptions_complete: Arc<AtomicBool>,
     wal_pruning_stop: tokio::sync::watch::Sender<bool>,
     /// Monotonically increasing counter for assigning event sequences.
@@ -357,7 +358,7 @@ impl SourceBase {
             dispatch_mode,
             dispatch_buffer_capacity,
             auto_start: params.auto_start,
-            status_handle: ComponentStatusHandle::new(&params.id),
+            status_handle: ComponentStatusHandle::new(params.id.clone()),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
             resource_report_lock: Arc::new(Mutex::new(())),
@@ -440,7 +441,7 @@ impl SourceBase {
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
     /// - `state_store`: Optional persistent state storage
     /// - `resource_observer`: Optional reporting of the actual selected providers
-    pub async fn initialize(&self, context: SourceRuntimeContext) {
+    pub async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
@@ -540,13 +541,13 @@ impl SourceBase {
     /// one atomic. If a handle already exists for `query_id` (re-subscribe after
     /// transient disconnect), the existing handle is returned to preserve any
     /// position the query had previously reported.
-    pub async fn create_position_handle(&self, query_id: &str) -> Arc<AtomicU64> {
+    pub async fn create_position_handle(&self, query_id: &ComponentId) -> Arc<AtomicU64> {
         let mut handles = self.position_handles.write().await;
         if let Some(existing) = handles.get(query_id) {
             return existing.clone();
         }
         let handle = Arc::new(AtomicU64::new(u64::MAX));
-        handles.insert(query_id.to_string(), handle.clone());
+        handles.insert(query_id.clone(), handle.clone());
         handle
     }
 
@@ -555,7 +556,7 @@ impl SourceBase {
     /// Called from explicit cleanup paths (`stop_query`/`delete_query` will be
     /// wired in a follow-up issue). Until then, `cleanup_stale_handles()`
     /// (invoked inside `compute_confirmed_position`) catches dropped subscribers.
-    pub async fn remove_position_handle(&self, query_id: &str) {
+    pub async fn remove_position_handle(&self, query_id: &ComponentId) {
         let mut handles = self.position_handles.write().await;
         handles.remove(query_id);
     }
@@ -631,7 +632,10 @@ impl SourceBase {
             .filter(|sequence| *sequence != u64::MAX)
             .min();
         match confirmed {
-            Some(sequence) if sequence > 0 => wal.prune_up_to(&self.id, sequence).await,
+            Some(sequence) if sequence > 0 => {
+                wal.prune_up_to(&StorageScope::default(), &self.id, sequence)
+                    .await
+            }
             _ => Ok(0),
         }
     }
@@ -859,7 +863,7 @@ impl SourceBase {
     }
 
     /// Get the source ID
-    pub fn get_id(&self) -> &str {
+    pub fn get_id(&self) -> &ComponentId {
         &self.id
     }
 
@@ -1193,14 +1197,19 @@ impl SourceBase {
         let mut dispatchers = self.dispatchers.write().await;
 
         // Capture committed history while live dispatch is blocked.
-        let head = wal.head_sequence(&self.id).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read WAL head for source '{}': {e}", self.id)
-        })?;
+        let head = wal
+            .head_sequence(&StorageScope::default(), &self.id)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to read WAL head for source '{}': {e}", self.id)
+            })?;
         if resume_seq > head {
             return Err(crate::wal::WalError::PositionUnavailable {
                 source_id: self.id.clone(),
                 requested: resume_seq,
-                oldest_available: wal.oldest_sequence(&self.id).await?,
+                oldest_available: wal
+                    .oldest_sequence(&StorageScope::default(), &self.id)
+                    .await?,
             }
             .into());
         }
@@ -1234,7 +1243,14 @@ impl SourceBase {
         // Filter to only include events up to the captured head to avoid
         // duplicates with live events that were appended during setup.
         let replay_events = if resume_seq < head {
-            match wal.read_from(&self.id, resume_seq.saturating_add(1)).await {
+            match wal
+                .read_from(
+                    &StorageScope::default(),
+                    &self.id,
+                    resume_seq.saturating_add(1),
+                )
+                .await
+            {
                 Ok(events) => events
                     .into_iter()
                     .filter(|(seq, _)| *seq <= head)
@@ -1327,16 +1343,22 @@ impl SourceBase {
                 settings.query_id, source_type, self.id
             );
 
-            // Create bootstrap context
+            let instance_id = self
+                .context
+                .read()
+                .await
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("source runtime context must be bound before bootstrap")
+                })?
+                .instance_id
+                .clone();
             let context = if bootstrap_properties.is_empty() {
-                BootstrapContext::new_minimal(
-                    self.id.clone(), // server_id
-                    self.id.clone(), // source_id
-                )
+                BootstrapContext::new_minimal(instance_id, self.id.clone())
             } else {
                 BootstrapContext::with_properties(
-                    self.id.clone(), // server_id
-                    self.id.clone(), // source_id
+                    instance_id,
+                    self.id.clone(),
                     bootstrap_properties,
                 )
             };
@@ -1845,19 +1867,22 @@ impl SourceBase {
 
     /// Clear the source's state store partition.
     ///
-    /// This is called during deprovision to remove all persisted state
-    /// associated with this source. Sources that override `deprovision()`
+    /// This is called during explicit permanent removal to delete persisted state
+    /// associated with this source. Sources that override `delete_owned_resources()`
     /// can call this to clean up their state store.
-    pub async fn deprovision_common(&self) -> Result<()> {
+    pub async fn delete_owned_resources_common(&self) -> Result<()> {
         info!("Deprovisioning source '{}'", self.id);
         if let Some(store) = self.state_store().await {
-            let count = store.clear_store(&self.id).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to clear state store for source '{}': {}",
-                    self.id,
-                    e
-                )
-            })?;
+            let count = store
+                .clear_store(&crate::StorePartition::component(self.id.clone()))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to clear state store for source '{}': {}",
+                        self.id,
+                        e
+                    )
+                })?;
             info!(
                 "Cleared {} keys from state store for source '{}'",
                 count, self.id
@@ -1911,7 +1936,11 @@ mod tests {
             }
         }
 
-        let base = SourceBase::new(SourceBaseParams::new("join-test")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000238")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let dropped = Arc::new(AtomicBool::new(false));
         let probe = DropProbe {
             base: base.clone_shared(),
@@ -1936,7 +1965,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_abort_and_join_retains_unfinished_task() {
-        let base = SourceBase::new(SourceBaseParams::new("cancelled-join")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000239")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let (release, wait) = std::sync::mpsc::channel();
         let (started, ready) = tokio::sync::oneshot::channel();
         crate::context::workers::spawn_owned_blocking_worker(&base.task_handle, move || {
@@ -1964,7 +1997,11 @@ mod tests {
 
     #[tokio::test]
     async fn abort_and_join_task_preserves_panic() {
-        let base = SourceBase::new(SourceBaseParams::new("panic-test")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000023a")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let task = tokio::spawn(async { panic!("task panic") });
         while !task.is_finished() {
             tokio::task::yield_now().await;
@@ -1984,8 +2021,15 @@ mod tests {
 
     #[test]
     fn test_params_new_defaults() {
-        let params = SourceBaseParams::new("test-source");
-        assert_eq!(params.id, "test-source");
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        );
+        assert_eq!(
+            params.id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert!(params.dispatch_mode.is_none());
         assert!(params.dispatch_buffer_capacity.is_none());
         assert!(params.bootstrap_provider.is_none());
@@ -1994,30 +2038,49 @@ mod tests {
 
     #[test]
     fn test_params_with_dispatch_mode() {
-        let params = SourceBaseParams::new("s1").with_dispatch_mode(DispatchMode::Broadcast);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Broadcast);
         assert_eq!(params.dispatch_mode, Some(DispatchMode::Broadcast));
     }
 
     #[test]
     fn test_params_with_dispatch_buffer_capacity() {
-        let params = SourceBaseParams::new("s1").with_dispatch_buffer_capacity(50000);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_buffer_capacity(50000);
         assert_eq!(params.dispatch_buffer_capacity, Some(50000));
     }
 
     #[test]
     fn test_params_with_auto_start_false() {
-        let params = SourceBaseParams::new("s1").with_auto_start(false);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+        )
+        .with_auto_start(false);
         assert!(!params.auto_start);
     }
 
     #[test]
     fn test_params_builder_chaining() {
-        let params = SourceBaseParams::new("chained")
-            .with_dispatch_mode(DispatchMode::Broadcast)
-            .with_dispatch_buffer_capacity(2000)
-            .with_auto_start(false);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000023b")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Broadcast)
+        .with_dispatch_buffer_capacity(2000)
+        .with_auto_start(false);
 
-        assert_eq!(params.id, "chained");
+        assert_eq!(
+            params.id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000023b")
+                .expect("fixture UUID")
+        );
         assert_eq!(params.dispatch_mode, Some(DispatchMode::Broadcast));
         assert_eq!(params.dispatch_buffer_capacity, Some(2000));
         assert!(!params.auto_start);
@@ -2029,17 +2092,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_defaults() {
-        let params = SourceBaseParams::new("my-source");
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID"),
+        );
         let base = SourceBase::new(params).unwrap();
 
-        assert_eq!(base.id, "my-source");
+        assert_eq!(
+            base.id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000030")
+                .expect("fixture UUID")
+        );
         assert!(base.auto_start);
         assert_eq!(base.get_status().await, ComponentStatus::Stopped);
     }
 
     #[tokio::test]
     async fn test_bootstrap_boundary_first_publish_wins() {
-        let base = SourceBase::new(SourceBaseParams::new("boundary-src")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000023c")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
 
         assert!(base.try_bootstrap_boundary().is_none());
 
@@ -2055,7 +2129,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_bootstrap_boundary_resolves_on_publish() {
-        let base = SourceBase::new(SourceBaseParams::new("boundary-wait")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000023d")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let waiter = base.clone_shared();
 
         let handle = tokio::spawn(async move { waiter.wait_for_bootstrap_boundary().await });
@@ -2070,7 +2148,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_bootstrap_boundary_returns_immediately_if_set() {
-        let base = SourceBase::new(SourceBaseParams::new("boundary-set")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000023e")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         base.publish_bootstrap_boundary(Bytes::from_static(b"pos"));
         assert_eq!(
             base.wait_for_bootstrap_boundary().await,
@@ -2080,7 +2162,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_reset_bootstrap_boundary_allows_new_publish() {
-        let base = SourceBase::new(SourceBaseParams::new("boundary-reset")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000023f")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         base.publish_bootstrap_boundary(Bytes::from_static(b"old"));
         base.reset_bootstrap_boundary();
         assert!(base.try_bootstrap_boundary().is_none());
@@ -2093,29 +2179,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_id() {
-        let base = SourceBase::new(SourceBaseParams::new("id-check")).unwrap();
-        assert_eq!(base.get_id(), "id-check");
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000240")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        assert_eq!(
+            base.get_id(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000240")
+                .expect("fixture UUID")
+        );
     }
 
     #[tokio::test]
     async fn test_get_auto_start() {
-        let base_default = SourceBase::new(SourceBaseParams::new("a")).unwrap();
+        let base_default = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001c9")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         assert!(base_default.get_auto_start());
 
-        let base_false =
-            SourceBase::new(SourceBaseParams::new("b").with_auto_start(false)).unwrap();
+        let base_false = SourceBase::new(
+            SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001ca")
+                    .expect("fixture UUID"),
+            )
+            .with_auto_start(false),
+        )
+        .unwrap();
         assert!(!base_false.get_auto_start());
     }
 
     #[tokio::test]
     async fn test_get_status_initial() {
-        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         assert_eq!(base.get_status().await, ComponentStatus::Stopped);
     }
 
     #[tokio::test]
     async fn test_set_status() {
-        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
 
         base.set_status(ComponentStatus::Running, None).await;
         assert_eq!(base.get_status().await, ComponentStatus::Running);
@@ -2127,7 +2239,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_handle_returns_handle() {
-        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000007e")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let handle = base.status_handle();
 
         // The handle should reflect the same status as the base
@@ -2149,16 +2265,19 @@ mod tests {
     use async_trait::async_trait;
 
     fn make_settings(
-        query_id: &str,
+        query_id: drasi_core_types::ComponentId,
         enable_bootstrap: bool,
         resume_from: Option<bytes::Bytes>,
         request_position_handle: bool,
     ) -> crate::config::SourceSubscriptionSettings {
         use std::collections::HashSet;
         crate::config::SourceSubscriptionSettings {
-            source_id: "test-src".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000241",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap,
-            query_id: query_id.to_string(),
+            query_id,
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from,
@@ -2184,7 +2303,7 @@ mod tests {
         }
     }
 
-    fn make_base_with_bootstrap(id: &str) -> SourceBase {
+    fn make_base_with_bootstrap(id: drasi_core_types::ComponentId) -> SourceBase {
         let mut params = SourceBaseParams::new(id);
         params.bootstrap_provider = Some(Box::new(NoopProvider));
         SourceBase::new(params).unwrap()
@@ -2219,11 +2338,23 @@ mod tests {
     /// resumes at exactly the snapshot boundary (no overlap, no gap).
     #[tokio::test]
     async fn test_initial_bootstrap_publishes_boundary_to_cdc() {
-        let mut params = SourceBaseParams::new("agnostic-handover");
+        let mut params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000242")
+                .expect("fixture UUID"),
+        );
         params.bootstrap_provider = Some(Box::new(PositionProvider {
             position: bytes::Bytes::from_static(b"boundary-xyz"),
         }));
         let base = SourceBase::new(params).unwrap();
+        let (update_tx, _updates) = tokio::sync::mpsc::channel(16);
+        base.bind_runtime_context(SourceRuntimeContext::new(
+            "bootstrap-boundary-test",
+            base.id.clone(),
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
 
         // A CDC-start task awaits the boundary, exactly like a real source.
         let cdc = base.clone_shared();
@@ -2231,7 +2362,16 @@ mod tests {
 
         // Initial subscription: enable bootstrap, no resume_from.
         let _resp = base
-            .subscribe_with_bootstrap(&make_settings("q1", true, None, true), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    true,
+                    None,
+                    true,
+                ),
+                "test",
+            )
             .await
             .unwrap();
 
@@ -2251,7 +2391,10 @@ mod tests {
     /// publish a bootstrap boundary — that path uses `resume_from` directly.
     #[tokio::test]
     async fn test_resume_subscription_does_not_publish_boundary() {
-        let mut params = SourceBaseParams::new("agnostic-resume");
+        let mut params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000243")
+                .expect("fixture UUID"),
+        );
         params.bootstrap_provider = Some(Box::new(PositionProvider {
             position: bytes::Bytes::from_static(b"boundary-xyz"),
         }));
@@ -2259,7 +2402,16 @@ mod tests {
 
         let resume = bytes::Bytes::from_static(b"resume-pos");
         let _resp = base
-            .subscribe_with_bootstrap(&make_settings("q1", true, Some(resume), true), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    true,
+                    Some(resume),
+                    true,
+                ),
+                "test",
+            )
             .await
             .unwrap();
 
@@ -2273,17 +2425,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_position_handle_initializes_to_u64_max() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-init")).unwrap();
-        let handle = base.create_position_handle("q1").await;
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000244")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let handle = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
         assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[tokio::test]
     async fn test_create_position_handle_idempotent_for_same_query() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-idem")).unwrap();
-        let h1 = base.create_position_handle("q1").await;
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000245")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let h1 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
         h1.store(123, Ordering::Relaxed);
-        let h2 = base.create_position_handle("q1").await;
+        let h2 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
         // Same Arc — preserves the previously reported position.
         assert!(Arc::ptr_eq(&h1, &h2));
         assert_eq!(h2.load(Ordering::Relaxed), 123);
@@ -2291,42 +2466,100 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_position_handle_drops_entry() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-rm")).unwrap();
-        let handle = base.create_position_handle("q1").await;
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000246")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let handle = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
         handle.store(42, Ordering::Relaxed);
         assert_eq!(base.compute_confirmed_position().await, Some(42));
-        base.remove_position_handle("q1").await;
+        base.remove_position_handle(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        )
+        .await;
         assert_eq!(base.compute_confirmed_position().await, None);
     }
 
     #[tokio::test]
     async fn test_remove_position_handle_noop_when_absent() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-rm-absent")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000247")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         // Must not panic.
-        base.remove_position_handle("never-registered").await;
+        base.remove_position_handle(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000248")
+                .expect("fixture UUID"),
+        )
+        .await;
         assert_eq!(base.compute_confirmed_position().await, None);
     }
 
     #[tokio::test]
     async fn test_compute_confirmed_position_returns_none_when_empty() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-empty")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000249")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         assert_eq!(base.compute_confirmed_position().await, None);
     }
 
     #[tokio::test]
     async fn test_compute_confirmed_position_returns_none_when_all_max() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-all-max")).unwrap();
-        let _h1 = base.create_position_handle("q1").await;
-        let _h2 = base.create_position_handle("q2").await;
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000024a")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let _h1 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
+        let _h2 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+            )
+            .await;
         assert_eq!(base.compute_confirmed_position().await, None);
     }
 
     #[tokio::test]
     async fn test_compute_confirmed_position_filters_max_returns_min() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-min")).unwrap();
-        let h1 = base.create_position_handle("q1").await;
-        let _h2 = base.create_position_handle("q2").await; // stays u64::MAX
-        let h3 = base.create_position_handle("q3").await;
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000024b")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let h1 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
+        let _h2 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+            )
+            .await; // stays u64::MAX
+        let h3 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000008d")
+                    .expect("fixture UUID"),
+            )
+            .await;
         h1.store(100, Ordering::Relaxed);
         h3.store(50, Ordering::Relaxed);
         assert_eq!(base.compute_confirmed_position().await, Some(50));
@@ -2334,18 +2567,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_confirmed_position_single_real_value() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-single")).unwrap();
-        let h1 = base.create_position_handle("q1").await;
-        let _h2 = base.create_position_handle("q2").await;
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000024c")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let h1 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
+        let _h2 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+            )
+            .await;
         h1.store(7, Ordering::Relaxed);
         assert_eq!(base.compute_confirmed_position().await, Some(7));
     }
 
     #[tokio::test]
     async fn test_cleanup_stale_handles_drops_orphaned_arc() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-stale")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000024d")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         {
-            let handle = base.create_position_handle("q1").await;
+            let handle = base
+                .create_position_handle(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                )
+                .await;
             handle.store(99, Ordering::Relaxed);
             // handle (the external clone) drops here.
         }
@@ -2355,8 +2611,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_stale_handles_keeps_held_arc() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-held")).unwrap();
-        let handle = base.create_position_handle("q1").await;
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000024e")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let handle = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
         handle.store(11, Ordering::Relaxed);
         base.cleanup_stale_handles().await;
         // External clone still alive, entry retained.
@@ -2367,9 +2632,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_with_request_position_handle_returns_handle() {
-        let base = SourceBase::new(SourceBaseParams::new("sub-handle")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000024f")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", false, None, true), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    false,
+                    None,
+                    true,
+                ),
+                "test",
+            )
             .await
             .unwrap();
         let handle = response.position_handle.expect("expected handle");
@@ -2380,9 +2658,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_without_request_position_handle_returns_none() {
-        let base = SourceBase::new(SourceBaseParams::new("sub-no-handle")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000250")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", false, None, false), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    false,
+                    None,
+                    false,
+                ),
+                "test",
+            )
             .await
             .unwrap();
         assert!(response.position_handle.is_none());
@@ -2394,9 +2685,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_returned_handle_shared_with_internal() {
-        let base = SourceBase::new(SourceBaseParams::new("sub-shared")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000251")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", false, None, true), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    false,
+                    None,
+                    true,
+                ),
+                "test",
+            )
             .await
             .unwrap();
         let handle = response.position_handle.unwrap();
@@ -2406,10 +2710,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_with_resume_from_skips_bootstrap() {
-        let base = make_base_with_bootstrap("sub-resume");
+        let base = make_base_with_bootstrap(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000040e")
+                .expect("fixture UUID"),
+        );
         let position = bytes::Bytes::copy_from_slice(&100u64.to_le_bytes());
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", true, Some(position), false), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    true,
+                    Some(position),
+                    false,
+                ),
+                "test",
+            )
             .await
             .unwrap();
         assert!(
@@ -2420,10 +2736,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_resume_without_bootstrap_still_none() {
-        let base = make_base_with_bootstrap("sub-resume-no-bs");
+        let base = make_base_with_bootstrap(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000040f")
+                .expect("fixture UUID"),
+        );
         let position = bytes::Bytes::copy_from_slice(&100u64.to_le_bytes());
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", false, Some(position), false), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    false,
+                    Some(position),
+                    false,
+                ),
+                "test",
+            )
             .await
             .unwrap();
         assert!(response.bootstrap_receiver.is_none());
@@ -2431,9 +2759,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_no_resume_with_bootstrap_returns_receiver() {
-        let base = make_base_with_bootstrap("sub-bs");
+        let base = make_base_with_bootstrap(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000410")
+                .expect("fixture UUID"),
+        );
+        let (update_tx, _updates) = tokio::sync::mpsc::channel(16);
+        base.bind_runtime_context(SourceRuntimeContext::new(
+            "bootstrap-subscription-test",
+            base.id.clone(),
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", true, None, false), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    true,
+                    None,
+                    false,
+                ),
+                "test",
+            )
             .await
             .unwrap();
         assert!(
@@ -2444,9 +2793,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_no_resume_no_bootstrap_returns_none() {
-        let base = make_base_with_bootstrap("sub-neither");
+        let base = make_base_with_bootstrap(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000411")
+                .expect("fixture UUID"),
+        );
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", false, None, false), "test")
+            .subscribe_with_bootstrap(
+                &make_settings(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                        .expect("fixture UUID"),
+                    false,
+                    None,
+                    false,
+                ),
+                "test",
+            )
             .await
             .unwrap();
         assert!(response.bootstrap_receiver.is_none());
@@ -2462,7 +2823,7 @@ mod tests {
         let change = drasi_core::models::SourceChange::Insert {
             element: drasi_core::models::Element::Node {
                 metadata: drasi_core::models::ElementMetadata {
-                    reference: drasi_core::models::ElementReference::new(source_id, "n1"),
+                    reference: drasi_core::models::ElementReference::new("test-source", "n1"),
                     labels: Arc::from([Arc::from("Label")]),
                     effective_from: 0,
                 },
@@ -2470,7 +2831,7 @@ mod tests {
             },
         };
         let mut draft = SourceEventWrapper::new(
-            source_id.to_string(),
+            source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
             base.next_sequence(),
@@ -2481,7 +2842,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_events_batch_empty_returns_ok() {
-        let base = SourceBase::new(SourceBaseParams::new("batch-empty")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000252")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         let result = base.dispatch_events_batch(Vec::new()).await;
         assert!(result.is_ok());
     }
@@ -2490,7 +2855,11 @@ mod tests {
     async fn supplied_sequence_is_preserved_and_advances_allocator() {
         for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
             let base = SourceBase::new(
-                SourceBaseParams::new("supplied-sequence").with_dispatch_mode(mode),
+                SourceBaseParams::new(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000253")
+                        .expect("fixture UUID"),
+                )
+                .with_dispatch_mode(mode),
             )
             .unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
@@ -2527,9 +2896,14 @@ mod tests {
     #[tokio::test]
     async fn batch_preserves_supplied_sequences_and_generated_sequence_floor() {
         for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
-            let base =
-                SourceBase::new(SourceBaseParams::new("supplied-batch").with_dispatch_mode(mode))
-                    .unwrap();
+            let base = SourceBase::new(
+                SourceBaseParams::new(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000254")
+                        .expect("fixture UUID"),
+                )
+                .with_dispatch_mode(mode),
+            )
+            .unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
             let mut first = make_event(&base, Some(b"first"));
             first.sequence = 100;
@@ -2552,7 +2926,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_events_batch_preserves_allocated_sequences() {
-        let params = SourceBaseParams::new("batch-seq").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000255")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         // Create a receiver so events are actually captured
@@ -2606,8 +2984,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_preserves_timestamp_ties_and_queue_sequence_order() {
         for batch_dispatch in [false, true] {
-            let params =
-                SourceBaseParams::new("timestamp-ties").with_dispatch_mode(DispatchMode::Channel);
+            let params = SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000256")
+                    .expect("fixture UUID"),
+            )
+            .with_dispatch_mode(DispatchMode::Channel);
             let base = SourceBase::new(params).unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
             let timestamp = chrono::Utc::now();
@@ -2642,7 +3023,7 @@ mod tests {
 
             let queue = crate::queries::priority_queue::QueryEventQueue::new(
                 events.len(),
-                ["timestamp-ties"],
+                [base.get_id().clone()],
             )
             .unwrap();
             for event in events.into_iter().rev() {
@@ -2671,8 +3052,11 @@ mod tests {
         const TRIALS: usize = 20;
 
         for trial in 0..TRIALS {
-            let params =
-                SourceBaseParams::new("concurrent-src").with_dispatch_mode(DispatchMode::Channel);
+            let params = SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000257")
+                    .expect("fixture UUID"),
+            )
+            .with_dispatch_mode(DispatchMode::Channel);
             let base = SourceBase::new(params).unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
 
@@ -2767,7 +3151,10 @@ mod tests {
                         },
                     };
                     SourceEventWrapper::new(
-                        "concurrent-batch-src".to_string(),
+                        drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-000000000258",
+                        )
+                        .expect("fixture UUID"),
                         SourceEvent::Change(change),
                         chrono::Utc::now(),
                         base.next_sequence(),
@@ -2777,8 +3164,11 @@ mod tests {
         };
 
         for trial in 0..TRIALS {
-            let params = SourceBaseParams::new("concurrent-batch-src")
-                .with_dispatch_mode(DispatchMode::Channel);
+            let params = SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000258")
+                    .expect("fixture UUID"),
+            )
+            .with_dispatch_mode(DispatchMode::Channel);
             let base = SourceBase::new(params).unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
 
@@ -2827,8 +3217,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_events_batch_multi_dispatcher_fanout() {
-        let params =
-            SourceBaseParams::new("batch-fanout").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000259")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         // Create two receivers (two dispatchers in channel mode)
@@ -2852,8 +3245,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_events_batch_oversized_position_still_dispatches() {
-        let params =
-            SourceBaseParams::new("batch-oversize").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000025a")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let mut rx = base.create_streaming_receiver().await.unwrap();
 
@@ -2878,7 +3274,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_position_filter_suppresses_events_before_resume() {
-        let params = SourceBaseParams::new("pos-filter").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000025b")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -2912,7 +3312,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_position_filter_delivers_events_past_resume() {
-        let params = SourceBaseParams::new("pos-filter2").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000025c")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -2941,7 +3345,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_position_filter_advances_high_water_mark() {
-        let params = SourceBaseParams::new("pos-hwm").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000025d")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -2998,7 +3406,11 @@ mod tests {
     async fn test_position_filter_equal_position_is_suppressed() {
         // resume_from is the LAST committed position, so an event at exactly
         // that position has already been processed — it should be suppressed.
-        let params = SourceBaseParams::new("pos-equal").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000025e")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -3026,7 +3438,11 @@ mod tests {
     async fn test_position_filter_no_comparator_delivers_all() {
         // Without a position comparator set, all events should be delivered
         // even if there's a resume position entry.
-        let params = SourceBaseParams::new("no-cmp").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000025f")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         // Deliberately NOT setting a position comparator
 
@@ -3054,7 +3470,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_position_filter_batch_mode() {
-        let params = SourceBaseParams::new("pos-batch").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000260")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -3114,7 +3534,11 @@ mod tests {
     #[tokio::test]
     async fn test_position_filter_events_without_position_delivered() {
         // Events with no source_position cannot be filtered — they pass through.
-        let params = SourceBaseParams::new("pos-none").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000261")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -3142,7 +3566,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_position_map_populated_on_dispatch() {
-        let params = SourceBaseParams::new("spm-1").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000262")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -3160,7 +3588,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_position_map_not_populated_without_position() {
-        let params = SourceBaseParams::new("spm-none").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000263")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -3172,12 +3604,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_confirmed_source_position_basic() {
-        let params = SourceBaseParams::new("cssp-1").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000264")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         // Create position handle and set confirmed sequence
-        let handle = base.create_position_handle("q1").await;
+        let handle = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
 
         // Dispatch 3 events with known LSNs
         for lsn in [100u64, 200, 300] {
@@ -3197,26 +3638,53 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_confirmed_source_position_returns_none_when_no_handles() {
-        let base = SourceBase::new(SourceBaseParams::new("cssp-none")).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000265")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
         assert!(base.compute_confirmed_source_position().await.is_none());
     }
 
     #[tokio::test]
     async fn test_compute_confirmed_source_position_returns_none_when_all_max() {
-        let base = SourceBase::new(SourceBaseParams::new("cssp-max")).unwrap();
-        let _h = base.create_position_handle("q1").await;
+        let base = SourceBase::new(SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000266")
+                .expect("fixture UUID"),
+        ))
+        .unwrap();
+        let _h = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
         // h stays at u64::MAX
         assert!(base.compute_confirmed_source_position().await.is_none());
     }
 
     #[tokio::test]
     async fn test_compute_confirmed_source_position_min_of_two_queries() {
-        let params = SourceBaseParams::new("cssp-2q").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000267")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
-        let h1 = base.create_position_handle("q1").await;
-        let h2 = base.create_position_handle("q2").await;
+        let h1 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+            )
+            .await;
+        let h2 = base
+            .create_position_handle(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+            )
+            .await;
 
         // Dispatch 3 events
         for lsn in [100u64, 200, 300] {
@@ -3238,7 +3706,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_position_map() {
-        let params = SourceBaseParams::new("prune-1").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000268")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -3259,7 +3731,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_position_map_all() {
-        let params = SourceBaseParams::new("prune-all").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000269")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -3276,12 +3752,22 @@ mod tests {
     async fn test_position_handle_not_seeded_by_base() {
         use crate::config::SourceSubscriptionSettings;
 
-        let params = SourceBaseParams::new("ph-init").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000244")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         let settings = SourceSubscriptionSettings {
-            query_id: "q1".to_string(),
-            source_id: "ph-init".to_string(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000244",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap: false,
             resume_from: Some(Bytes::from_static(&[0x00, 0x01])),
             resume_sequence: None,
@@ -3305,12 +3791,22 @@ mod tests {
     async fn test_position_handle_stays_max_on_fresh_bootstrap() {
         use crate::config::SourceSubscriptionSettings;
 
-        let params = SourceBaseParams::new("ph-no-ls").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000026a")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         let settings = SourceSubscriptionSettings {
-            query_id: "q1".to_string(),
-            source_id: "ph-no-ls".to_string(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000002b",
+            )
+            .expect("fixture UUID"),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000026a",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap: true,
             resume_from: None,
             resume_sequence: None,
@@ -3330,7 +3826,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_dispatch_populates_sequence_position_map() {
-        let params = SourceBaseParams::new("spm-batch").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000026b")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -3355,7 +3855,11 @@ mod tests {
         // then subscriber B joins and the source rewinds the stream.
         // Subscriber A should NOT see replayed events thanks to the
         // persistent high-water mark.
-        let params = SourceBaseParams::new("rewind").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000026c")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -3447,7 +3951,11 @@ mod tests {
     async fn test_high_water_mark_set_for_new_subscriber_without_resume() {
         // A subscriber without initial resume_from should get a high-water
         // mark after its first event, protecting it from future rewinds.
-        let params = SourceBaseParams::new("hwm-new").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000026d")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -3489,7 +3997,11 @@ mod tests {
         // dispatcher index; if they survive, a new subscriber that lands on a
         // reused index inherits a stale high-water mark and either re-sees
         // already-committed rows or has new rows incorrectly suppressed.
-        let params = SourceBaseParams::new("clear-hwm").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000026e")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -3537,14 +4049,14 @@ mod tests {
     // =========================================================================
 
     fn resume_seq_settings(
-        source_id: &str,
-        query_id: &str,
+        source_id: drasi_core_types::ComponentId,
+        query_id: drasi_core_types::ComponentId,
         resume_sequence: Option<u64>,
     ) -> crate::config::SourceSubscriptionSettings {
         crate::config::SourceSubscriptionSettings {
-            source_id: source_id.to_string(),
+            source_id,
             enable_bootstrap: false,
-            query_id: query_id.to_string(),
+            query_id,
             nodes: Default::default(),
             relations: Default::default(),
             resume_from: None,
@@ -3558,12 +4070,25 @@ mod tests {
     /// so freshly stamped events are not wrongly dropped on replay.
     #[tokio::test]
     async fn test_resume_sequence_raises_counter_on_subscribe() {
-        let params = SourceBaseParams::new("resume-seq").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000026f")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
-        base.subscribe_with_bootstrap(&resume_seq_settings("resume-seq", "q1", Some(500)), "test")
-            .await
-            .unwrap();
+        base.subscribe_with_bootstrap(
+            &resume_seq_settings(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000026f")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                Some(500),
+            ),
+            "test",
+        )
+        .await
+        .unwrap();
 
         // Next dispatched event is stamped with the floor N+1 = 501, not 1.
         base.dispatch_event(make_event(&base, Some(&[0xAB])))
@@ -3585,21 +4110,52 @@ mod tests {
     /// checkpoint must never lower the counter, and the highest floor wins.
     #[tokio::test]
     async fn test_resume_sequence_floor_never_lowers_and_takes_max() {
-        let params = SourceBaseParams::new("resume-max").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000270")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         // First query resumes at 500 → floor 501.
-        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q1", Some(500)), "test")
-            .await
-            .unwrap();
+        base.subscribe_with_bootstrap(
+            &resume_seq_settings(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000270")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                Some(500),
+            ),
+            "test",
+        )
+        .await
+        .unwrap();
         // Second query resumes lower (100) → must not lower the counter.
-        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q2", Some(100)), "test")
-            .await
-            .unwrap();
+        base.subscribe_with_bootstrap(
+            &resume_seq_settings(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000270")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002c")
+                    .expect("fixture UUID"),
+                Some(100),
+            ),
+            "test",
+        )
+        .await
+        .unwrap();
         // Third query resumes higher (800) → floor raised to 801.
-        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q3", Some(800)), "test")
-            .await
-            .unwrap();
+        base.subscribe_with_bootstrap(
+            &resume_seq_settings(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000270")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000008d")
+                    .expect("fixture UUID"),
+                Some(800),
+            ),
+            "test",
+        )
+        .await
+        .unwrap();
 
         base.dispatch_event(make_event(&base, Some(&[0xAB])))
             .await
@@ -3617,12 +4173,25 @@ mod tests {
     /// starts at 1 — no double-advance.
     #[tokio::test]
     async fn test_no_resume_sequence_leaves_counter_at_default() {
-        let params = SourceBaseParams::new("resume-none").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000271")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
-        base.subscribe_with_bootstrap(&resume_seq_settings("resume-none", "q1", None), "test")
-            .await
-            .unwrap();
+        base.subscribe_with_bootstrap(
+            &resume_seq_settings(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000271")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                None,
+            ),
+            "test",
+        )
+        .await
+        .unwrap();
 
         base.dispatch_event(make_event(&base, Some(&[0xAB])))
             .await
@@ -3640,7 +4209,11 @@ mod tests {
     /// resume floor and reintroduce a restart-monotonicity regression.
     #[tokio::test]
     async fn test_set_next_sequence_never_lowers() {
-        let params = SourceBaseParams::new("set-seq-max").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000272")
+                .expect("fixture UUID"),
+        )
+        .with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -3668,12 +4241,22 @@ mod tests {
     async fn test_floor_mechanisms_compose_regardless_of_order() {
         // Order A: WAL-head restore first (300), then a higher resume floor (600).
         let base_a = SourceBase::new(
-            SourceBaseParams::new("order-a").with_dispatch_mode(DispatchMode::Channel),
+            SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000273")
+                    .expect("fixture UUID"),
+            )
+            .with_dispatch_mode(DispatchMode::Channel),
         )
         .unwrap();
         let _rx_a = base_a.create_streaming_receiver().await.unwrap();
         base_a.set_next_sequence(300); // floor 301
-        base_a.raise_sequence_floor(&resume_seq_settings("order-a", "q", Some(599))); // floor 600
+        base_a.raise_sequence_floor(&resume_seq_settings(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000273")
+                .expect("fixture UUID"),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            Some(599),
+        )); // floor 600
         base_a
             .dispatch_event(make_event(&base_a, Some(&[0x01])))
             .await
@@ -3685,11 +4268,21 @@ mod tests {
 
         // Order B: resume floor first (600), then a lower WAL-head restore (300).
         let base_b = SourceBase::new(
-            SourceBaseParams::new("order-b").with_dispatch_mode(DispatchMode::Channel),
+            SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000274")
+                    .expect("fixture UUID"),
+            )
+            .with_dispatch_mode(DispatchMode::Channel),
         )
         .unwrap();
         let _rx_b = base_b.create_streaming_receiver().await.unwrap();
-        base_b.raise_sequence_floor(&resume_seq_settings("order-b", "q", Some(599))); // floor 600
+        base_b.raise_sequence_floor(&resume_seq_settings(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000274")
+                .expect("fixture UUID"),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000081")
+                .expect("fixture UUID"),
+            Some(599),
+        )); // floor 600
         base_b.set_next_sequence(300); // floor 301 — must be ignored
         base_b
             .dispatch_event(make_event(&base_b, Some(&[0x01])))
@@ -3712,21 +4305,24 @@ mod tests {
         impl crate::wal::WalProvider for EmptyWal {
             async fn register(
                 &self,
-                _source_id: &str,
+                _scope: &drasi_core_types::StorageScope,
+                _source_id: &drasi_core_types::ComponentId,
                 _config: crate::wal::WriteAheadLogConfig,
             ) -> Result<(), crate::wal::WalError> {
                 Ok(())
             }
             async fn append(
                 &self,
-                _source_id: &str,
+                _scope: &drasi_core_types::StorageScope,
+                _source_id: &drasi_core_types::ComponentId,
                 _event: &drasi_core::models::SourceChange,
             ) -> Result<u64, crate::wal::WalError> {
                 Ok(0)
             }
             async fn read_from(
                 &self,
-                _source_id: &str,
+                _scope: &drasi_core_types::StorageScope,
+                _source_id: &drasi_core_types::ComponentId,
                 _sequence: u64,
             ) -> Result<Vec<(u64, drasi_core::models::SourceChange)>, crate::wal::WalError>
             {
@@ -3734,36 +4330,60 @@ mod tests {
             }
             async fn prune_up_to(
                 &self,
-                _source_id: &str,
+                _scope: &drasi_core_types::StorageScope,
+                _source_id: &drasi_core_types::ComponentId,
                 _sequence: u64,
             ) -> Result<u64, crate::wal::WalError> {
                 Ok(0)
             }
-            async fn head_sequence(&self, _source_id: &str) -> Result<u64, crate::wal::WalError> {
+            async fn head_sequence(
+                &self,
+                _scope: &drasi_core_types::StorageScope,
+                _source_id: &drasi_core_types::ComponentId,
+            ) -> Result<u64, crate::wal::WalError> {
                 Ok(700)
             }
             async fn oldest_sequence(
                 &self,
-                _source_id: &str,
+                _scope: &drasi_core_types::StorageScope,
+                _source_id: &drasi_core_types::ComponentId,
             ) -> Result<Option<u64>, crate::wal::WalError> {
                 Ok(None)
             }
-            async fn event_count(&self, _source_id: &str) -> Result<u64, crate::wal::WalError> {
+            async fn event_count(
+                &self,
+                _scope: &drasi_core_types::StorageScope,
+                _source_id: &drasi_core_types::ComponentId,
+            ) -> Result<u64, crate::wal::WalError> {
                 Ok(0)
             }
-            async fn delete_wal(&self, _source_id: &str) -> Result<(), crate::wal::WalError> {
+            async fn delete_wal(
+                &self,
+                _scope: &drasi_core_types::StorageScope,
+                _source_id: &drasi_core_types::ComponentId,
+            ) -> Result<(), crate::wal::WalError> {
                 Ok(())
             }
         }
 
         let base = SourceBase::new(
-            SourceBaseParams::new("replay-floor").with_dispatch_mode(DispatchMode::Channel),
+            SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000275")
+                    .expect("fixture UUID"),
+            )
+            .with_dispatch_mode(DispatchMode::Channel),
         )
         .unwrap();
         let wal = EmptyWal;
 
         base.subscribe_with_replay(
-            &resume_seq_settings("replay-floor", "q1", Some(700)),
+            &resume_seq_settings(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000275")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                Some(700),
+            ),
             &wal,
             700,
             "test",
@@ -3788,19 +4408,28 @@ mod tests {
     /// runtime suites; this test independently checks the assigned sequence.
     #[tokio::test]
     async fn test_filled_sequences_survive_dedup_after_restart() {
-        let source_id = "dedup-restart";
         // Query checkpointed sequence 500 before restart.
         let checkpoint: u64 = 500;
 
         let base = SourceBase::new(
-            SourceBaseParams::new(source_id).with_dispatch_mode(DispatchMode::Channel),
+            SourceBaseParams::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000412")
+                    .expect("fixture UUID"),
+            )
+            .with_dispatch_mode(DispatchMode::Channel),
         )
         .unwrap();
         let mut rx = base.create_streaming_receiver().await.unwrap();
 
         // Resume: the query hands its checkpoint back, raising the counter floor.
         base.subscribe_with_bootstrap(
-            &resume_seq_settings(source_id, "q1", Some(checkpoint)),
+            &resume_seq_settings(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000412")
+                    .expect("fixture UUID"),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                    .expect("fixture UUID"),
+                Some(checkpoint),
+            ),
             "test",
         )
         .await

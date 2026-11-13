@@ -42,7 +42,7 @@ use crate::types::ReplicationState;
 
 pub struct ReplicationStream {
     config: MySqlSourceConfig,
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     base: SourceBase,
     decoder: MySqlDecoder,
     pending_changes: Option<Vec<SourceChange>>,
@@ -52,7 +52,7 @@ pub struct ReplicationStream {
     current_gtid: Option<String>,
     current_event_timestamp: u64,
     shutdown: watch::Receiver<bool>,
-    subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
+    subscriber_resume_positions: StdArc<RwLock<HashMap<drasi_lib::ComponentId, ReplicationState>>>,
 }
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
@@ -76,12 +76,14 @@ struct ResolvedStartPosition {
 impl ReplicationStream {
     pub fn new(
         config: MySqlSourceConfig,
-        source_id: String,
+        source_id: drasi_lib::ComponentId,
         base: SourceBase,
         shutdown: watch::Receiver<bool>,
-        subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
+        subscriber_resume_positions: StdArc<
+            RwLock<HashMap<drasi_lib::ComponentId, ReplicationState>>,
+        >,
     ) -> Self {
-        let decoder = MySqlDecoder::new(source_id.clone(), &config.table_keys);
+        let decoder = MySqlDecoder::new(source_id.as_str(), &config.table_keys);
         Self {
             config,
             source_id,
@@ -716,11 +718,11 @@ mod tests {
     use std::sync::Arc as TestArc;
     use std::time::Duration;
 
-    fn insert_change(source_id: &str, id: &str) -> SourceChange {
+    fn insert_change(source_namespace: &str, id: &str) -> SourceChange {
         SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(source_id, id),
+                    reference: ElementReference::new(source_namespace, id),
                     labels: TestArc::from(vec![TestArc::from("Row")]),
                     effective_from: 0,
                 },
@@ -729,7 +731,7 @@ mod tests {
         }
     }
 
-    fn test_stream(source_id: &str) -> ReplicationStream {
+    fn test_stream(source_id: drasi_core::ComponentId) -> ReplicationStream {
         // ReplicationStream::new does not open a DB connection — only run() does —
         // so we can exercise the dispatch helpers directly without MySQL.
         let config = MySqlSourceConfig {
@@ -745,10 +747,10 @@ mod tests {
             server_id: 1,
             heartbeat_interval_seconds: 30,
         };
-        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let base = SourceBase::new(SourceBaseParams::new(source_id.clone())).unwrap();
         let mut stream = ReplicationStream::new(
             config,
-            source_id.to_string(),
+            source_id,
             base,
             watch::channel(false).1,
             StdArc::new(RwLock::new(HashMap::new())),
@@ -766,7 +768,10 @@ mod tests {
     #[tokio::test]
     async fn push_change_stamps_sequence_and_preserves_position() {
         let source_id = "mysql-seq-source";
-        let mut stream = test_stream(source_id);
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003be")
+                .expect("fixture UUID"),
+        );
         let mut rx = stream.base.test_subscribe().await;
 
         let count = 3u64;
@@ -798,7 +803,10 @@ mod tests {
     #[tokio::test]
     async fn flush_transaction_stamps_unique_sequences() {
         let source_id = "mysql-txn-source";
-        let mut stream = test_stream(source_id);
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003bf")
+                .expect("fixture UUID"),
+        );
         stream
             .base
             .set_position_comparator(crate::types::MySqlPositionComparator)
@@ -857,20 +865,22 @@ mod tests {
         );
     }
 
-    fn transaction_changes(source_id: &str) -> Vec<SourceChange> {
-        let SourceChange::Insert { element: second } = insert_change(source_id, "row-2") else {
+    fn transaction_changes(source_namespace: &str) -> Vec<SourceChange> {
+        let SourceChange::Insert { element: second } = insert_change(source_namespace, "row-2")
+        else {
             unreachable!();
         };
-        let SourceChange::Insert { element: third } = insert_change(source_id, "row-3") else {
+        let SourceChange::Insert { element: third } = insert_change(source_namespace, "row-3")
+        else {
             unreachable!();
         };
         vec![
-            insert_change(source_id, "row-1"),
+            insert_change(source_namespace, "row-1"),
             SourceChange::update(second),
             SourceChange::Delete {
                 metadata: third.get_metadata().clone(),
             },
-            insert_change(source_id, "row-4"),
+            insert_change(source_namespace, "row-4"),
         ]
     }
 
@@ -884,7 +894,7 @@ mod tests {
             EventFlags::empty(),
         );
         stream.remember_transaction_start(&begin).unwrap();
-        for (index, change) in transaction_changes(&stream.source_id)
+        for (index, change) in transaction_changes("mysql-transaction-source")
             .into_iter()
             .enumerate()
         {
@@ -908,20 +918,20 @@ mod tests {
 
     async fn subscribe_at(
         stream: &ReplicationStream,
-        query_id: &str,
+        query_id: drasi_core::ComponentId,
         position: &ReplicationState,
     ) -> SubscriptionResponse {
         stream
             .subscriber_resume_positions
             .write()
             .await
-            .insert(query_id.to_string(), position.clone());
+            .insert(query_id.clone(), position.clone());
         stream
             .base
             .subscribe_with_bootstrap(
                 &SourceSubscriptionSettings {
                     source_id: stream.source_id.clone(),
-                    query_id: query_id.to_string(),
+                    query_id,
                     enable_bootstrap: false,
                     nodes: Default::default(),
                     relations: Default::default(),
@@ -937,7 +947,10 @@ mod tests {
 
     #[tokio::test]
     async fn transaction_replay_delivers_only_remaining_rows_to_each_subscriber() {
-        let mut original = test_stream("mysql-rows");
+        let mut original = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000038a")
+                .expect("fixture UUID"),
+        );
         original
             .base
             .set_position_comparator(MySqlPositionComparator)
@@ -959,15 +972,36 @@ mod tests {
         let first = crate::types::decode_position(&positions[0]).unwrap();
         let middle = crate::types::decode_position(&positions[1]).unwrap();
         let boundary = ReplicationState::new("mysql-bin.000001", 300, None, 0);
-        let mut replay = test_stream("mysql-rows");
+        let mut replay = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000038a")
+                .expect("fixture UUID"),
+        );
         replay
             .base
             .set_position_comparator(MySqlPositionComparator)
             .await;
         replay.current_gtid = original.current_gtid.clone();
-        let mut first_sub = subscribe_at(&replay, "after-first", &first).await;
-        let mut middle_sub = subscribe_at(&replay, "after-middle", &middle).await;
-        let mut complete_sub = subscribe_at(&replay, "snapshot", &boundary).await;
+        let mut first_sub = subscribe_at(
+            &replay,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000038b")
+                .expect("fixture UUID"),
+            &first,
+        )
+        .await;
+        let mut middle_sub = subscribe_at(
+            &replay,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000038c")
+                .expect("fixture UUID"),
+            &middle,
+        )
+        .await;
+        let mut complete_sub = subscribe_at(
+            &replay,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000001bf")
+                .expect("fixture UUID"),
+            &boundary,
+        )
+        .await;
 
         assert_eq!(
             replay.determine_start_position().await.unwrap(),
@@ -1009,12 +1043,15 @@ mod tests {
 
     #[tokio::test]
     async fn unusable_subscriber_position_never_falls_back_to_from_end() {
-        let stream = test_stream("mysql-invalid-boundary");
-        stream
-            .subscriber_resume_positions
-            .write()
-            .await
-            .insert("query".into(), ReplicationState::new("", 0, None, 0));
+        let stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000038d")
+                .expect("fixture UUID"),
+        );
+        stream.subscriber_resume_positions.write().await.insert(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000002e")
+                .expect("fixture UUID"),
+            ReplicationState::new("", 0, None, 0),
+        );
         assert!(stream
             .determine_start_position()
             .await
@@ -1030,7 +1067,10 @@ mod tests {
                 None,
                 Some("00000000-0000-0000-0000-000000000001:1-7".to_string()),
             ] {
-                let mut stream = test_stream("mysql-final");
+                let mut stream = test_stream(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000038e")
+                        .expect("fixture UUID"),
+                );
                 stream
                     .base
                     .set_position_comparator(MySqlPositionComparator)
@@ -1078,12 +1118,25 @@ mod tests {
                         assert_eq!(bytes, &boundary.to_position_bytes());
                         assert_eq!(state.row_offset(), None);
                         assert_eq!(state.transaction_start_position(), None);
-                        let mut replay = test_stream("mysql-final");
+                        let mut replay = test_stream(
+                            drasi_core::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000038e",
+                            )
+                            .expect("fixture UUID"),
+                        );
                         replay
                             .base
                             .set_position_comparator(MySqlPositionComparator)
                             .await;
-                        let mut subscription = subscribe_at(&replay, "completed", &state).await;
+                        let mut subscription = subscribe_at(
+                            &replay,
+                            drasi_core::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000038f",
+                            )
+                            .expect("fixture UUID"),
+                            &state,
+                        )
+                        .await;
                         assert_eq!(
                             replay.determine_start_position().await.unwrap(),
                             match &gtid {
@@ -1113,7 +1166,10 @@ mod tests {
 
     #[tokio::test]
     async fn binlog_suffix_rollover_preserves_resume_order_and_delivery() {
-        let mut stream = test_stream("mysql-suffix-rollover");
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000390")
+                .expect("fixture UUID"),
+        );
         stream
             .base
             .set_position_comparator(MySqlPositionComparator)
@@ -1124,8 +1180,20 @@ mod tests {
         let newer = ReplicationState::new("mysql-bin.1000000", 200, None, 0)
             .with_transaction_row(4, 1)
             .unwrap();
-        let mut older_sub = subscribe_at(&stream, "older", &older).await;
-        let mut newer_sub = subscribe_at(&stream, "newer", &newer).await;
+        let mut older_sub = subscribe_at(
+            &stream,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000391")
+                .expect("fixture UUID"),
+            &older,
+        )
+        .await;
+        let mut newer_sub = subscribe_at(
+            &stream,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000392")
+                .expect("fixture UUID"),
+            &newer,
+        )
+        .await;
         assert_eq!(
             stream.determine_start_position().await.unwrap(),
             StartPosition::FromPosition {
@@ -1178,7 +1246,10 @@ mod tests {
 
     #[tokio::test]
     async fn row_positions_follow_the_new_binlog_file_after_rotation() {
-        let mut stream = test_stream("mysql-rotation");
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000393")
+                .expect("fixture UUID"),
+        );
         stream
             .base
             .set_position_comparator(MySqlPositionComparator)
@@ -1221,7 +1292,10 @@ mod tests {
 
     #[tokio::test]
     async fn mismatched_transaction_file_is_rejected() {
-        let mut stream = test_stream("mysql-mismatched-file");
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000394")
+                .expect("fixture UUID"),
+        );
         stream.transaction_start = Some(BinlogCursor {
             file: "mysql-bin.000001".to_string(),
             position: 4,
@@ -1246,7 +1320,10 @@ mod tests {
     async fn completed_final_row_still_requires_a_valid_transaction_cursor() {
         for count in [1, 4] {
             for start in [0, 3, 200, 201] {
-                let mut stream = test_stream("mysql-invalid-final-cursor");
+                let mut stream = test_stream(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000395")
+                        .expect("fixture UUID"),
+                );
                 let mut receiver = stream.base.test_subscribe().await;
                 stream.transaction_start = Some(BinlogCursor {
                     file: stream.current_binlog_file.clone(),
@@ -1294,7 +1371,10 @@ mod tests {
 
     #[test]
     fn transaction_start_requires_filename_and_valid_native_offset() {
-        let mut stream = test_stream("mysql-invalid-start");
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000396")
+                .expect("fixture UUID"),
+        );
         let header =
             BinlogEventHeader::new(100, EventType::QUERY_EVENT, 1, 23, 27, EventFlags::empty());
         stream.current_binlog_file.clear();
@@ -1326,7 +1406,10 @@ mod tests {
 
     #[tokio::test]
     async fn gtid_and_anonymous_boundaries_replace_stale_cursor_but_begin_preserves_it() {
-        let mut stream = test_stream("mysql-gtid");
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000397")
+                .expect("fixture UUID"),
+        );
         for anonymous in [false, true] {
             let header =
                 BinlogEventHeader::new(100, EventType::GTID_EVENT, 1, 23, 123, EventFlags::empty());
@@ -1368,7 +1451,10 @@ mod tests {
 
     #[tokio::test]
     async fn rotation_and_new_gtid_reject_pending_rows_without_discarding_them() {
-        let mut stream = test_stream("mysql-boundary");
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000398")
+                .expect("fixture UUID"),
+        );
         let begin =
             BinlogEventHeader::new(100, EventType::QUERY_EVENT, 1, 23, 27, EventFlags::empty());
         stream.remember_transaction_start(&begin).unwrap();
@@ -1410,7 +1496,10 @@ mod tests {
 
     #[tokio::test]
     async fn empty_transaction_ends_without_a_replay_cursor_or_dispatch() {
-        let mut stream = test_stream("mysql-empty");
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000399")
+                .expect("fixture UUID"),
+        );
         let mut receiver = stream.base.test_subscribe().await;
         for query in ["COMMIT", "ROLLBACK"] {
             stream.ensure_transaction_buffer();
@@ -1439,7 +1528,10 @@ mod tests {
 
     #[tokio::test]
     async fn rollback_delivers_logged_nontransactional_rows_with_individual_positions() {
-        let mut stream = test_stream("mysql-rollback");
+        let mut stream = test_stream(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000039a")
+                .expect("fixture UUID"),
+        );
         stream
             .base
             .set_position_comparator(MySqlPositionComparator)

@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{watch, RwLock};
 
 pub struct OracleSource {
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     config: OracleSourceConfig,
     base: SourceBase,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
@@ -44,13 +44,13 @@ pub struct OracleSource {
     /// Per-subscriber resume positions from checkpoint recovery.
     /// Populated during subscribe() when a query provides resume_from bytes.
     /// The LogMiner poll loop uses the minimum SCN as its start point.
-    subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
+    subscriber_resume_scns: Arc<RwLock<HashMap<drasi_lib::ComponentId, Scn>>>,
 }
 
 impl OracleSource {
-    pub fn new(id: impl Into<String>, config: OracleSourceConfig) -> Result<Self> {
-        let source_id = id.into();
-        let params = SourceBaseParams::new(&source_id);
+    pub fn new(id: drasi_lib::ComponentId, config: OracleSourceConfig) -> Result<Self> {
+        let source_id = id.clone();
+        let params = SourceBaseParams::new(source_id.clone());
 
         Ok(Self {
             source_id,
@@ -62,14 +62,14 @@ impl OracleSource {
         })
     }
 
-    pub fn builder(id: impl Into<String>) -> OracleSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> OracleSourceBuilder {
         OracleSourceBuilder::new(id)
     }
 }
 
 #[async_trait]
 impl Source for OracleSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -268,8 +268,8 @@ impl Source for OracleSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         // Oracle SCNs are 8-byte big-endian u64 — byte-lexicographic comparison is correct.
         self.base
             .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
@@ -280,7 +280,7 @@ impl Source for OracleSource {
         self.base.set_bootstrap_provider(provider).await;
     }
 
-    async fn remove_position_handle(&self, query_id: &str) {
+    async fn remove_position_handle(&self, query_id: &drasi_lib::ComponentId) {
         // Remove the per-subscriber resume SCN so the LogMiner poll loop no longer
         // pins its start position on behalf of this query.
         self.subscriber_resume_scns.write().await.remove(query_id);
@@ -289,7 +289,7 @@ impl Source for OracleSource {
 }
 
 pub struct OracleSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     config: OracleSourceConfig,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -298,9 +298,9 @@ pub struct OracleSourceBuilder {
 }
 
 impl OracleSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             config: OracleSourceConfig::default(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -407,7 +407,7 @@ impl OracleSourceBuilder {
         }
         self.config.validate()?;
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -443,12 +443,15 @@ mod tests {
 
     #[test]
     fn test_builder_basic() {
-        let source = OracleSource::builder("oracle-source")
-            .with_user("system")
-            .with_password("secret")
-            .with_table("HR.EMPLOYEES")
-            .build()
-            .unwrap();
+        let source = OracleSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                .expect("fixture UUID"),
+        )
+        .with_user("system")
+        .with_password("secret")
+        .with_table("HR.EMPLOYEES")
+        .build()
+        .unwrap();
 
         assert_eq!(source.type_name(), "oracle");
         assert_eq!(source.config.database, "FREEPDB1");

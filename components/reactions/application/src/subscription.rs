@@ -64,7 +64,7 @@ pub struct SubscriptionOptions {
     /// Stored capacity hint; currently does not resize the fixed application channel.
     pub buffer_size: usize,
     /// Stored query IDs; currently not applied by subscription receive methods.
-    pub query_filter: Vec<String>,
+    pub query_filter: Vec<drasi_lib::ComponentId>,
     /// Maximum time to wait for results before returning None
     pub timeout: Option<Duration>,
     /// Batch size for receiving multiple results at once
@@ -131,16 +131,21 @@ impl SubscriptionOptions {
     ///
     /// # Examples
     ///
+    /// Resolve already-admitted queries by name and store their immutable IDs;
+    /// allocating new UUIDs would not select those queries.
+    ///
     /// ```
+    /// use drasi_lib::{ComponentName, DrasiLib};
     /// use drasi_reaction_application::subscription::SubscriptionOptions;
     ///
-    /// let options = SubscriptionOptions::default()
-    ///     .with_query_filter(vec![
-    ///         "users".to_string(),
-    ///         "orders".to_string()
-    ///     ]);
+    /// fn options_for_queries(drasi: &DrasiLib) -> anyhow::Result<SubscriptionOptions> {
+    ///     let users_id = drasi.component_by_name(&ComponentName::try_new("users")?)?.id().clone();
+    ///     let orders_id = drasi.component_by_name(&ComponentName::try_new("orders")?)?.id().clone();
+    ///     Ok(SubscriptionOptions::default()
+    ///         .with_query_filter(vec![users_id, orders_id]))
+    /// }
     /// ```
-    pub fn with_query_filter(mut self, queries: Vec<String>) -> Self {
+    pub fn with_query_filter(mut self, queries: Vec<drasi_lib::ComponentId>) -> Self {
         self.query_filter = queries;
         self
     }
@@ -215,7 +220,7 @@ impl SubscriptionOptions {
 /// ```ignore
 /// let (reaction, handle) =
 ///     drasi_reaction_application::ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default()
@@ -232,7 +237,7 @@ impl SubscriptionOptions {
 /// ```ignore
 /// let (reaction, handle) =
 ///     drasi_reaction_application::ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default().with_batch_size(50)
@@ -255,7 +260,7 @@ impl SubscriptionOptions {
 ///
 /// let (reaction, handle) =
 ///     drasi_reaction_application::ApplicationReaction::new("results", vec!["users".into()]);
-/// core.add_reaction(reaction).await?;
+/// core.add_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction).await?;
 ///
 /// let mut subscription = handle.subscribe_with_options(
 ///     SubscriptionOptions::default()

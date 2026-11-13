@@ -19,7 +19,6 @@ mod query_joins_tests {
     use crate::sources::convert_json_to_element_value;
     use crate::sources::tests::{create_test_mock_source, TestMockSource};
     use crate::test_helpers::managers::{QueryManager, SourceManager};
-    use crate::test_helpers::wait_for_component_status;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
@@ -40,14 +39,15 @@ mod query_joins_tests {
     }
 
     fn create_query_config_with_joins(
-        id: &str,
+        id: drasi_core_types::ComponentName,
         query: &str,
-        sources: Vec<String>,
+        sources: Vec<crate::ComponentName>,
         joins: Vec<QueryJoinConfig>,
     ) -> QueryConfig {
         use crate::config::QueryInputConfig;
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id,
             query: query.to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
@@ -56,7 +56,7 @@ mod query_joins_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id),
                     pipeline: vec![],
                     port: None,
                 })
@@ -126,7 +126,7 @@ mod query_joins_tests {
     async fn add_source(
         source_manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl crate::sources::Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl crate::sources::Source + 'static>,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
     }
@@ -166,9 +166,9 @@ mod query_joins_tests {
         );
 
         let query_config = create_query_config_with_joins(
-            "vehicle-driver-query",
+            drasi_core_types::ComponentName::try_new("vehicle-driver-query").expect("fixture component name"),
             "MATCH (d:Driver)-[:VEHICLE_TO_DRIVER]->(v:Vehicle) WHERE v.status = 'available' RETURN d.name as driver, v.licensePlate as plate",
-            vec!["vehicles".to_string(), "drivers".to_string()],
+            vec![drasi_core_types::ComponentName::try_new("vehicles").expect("fixture component name"), drasi_core_types::ComponentName::try_new("drivers").expect("fixture component name")],
             vec![join_config],
         );
 
@@ -179,13 +179,17 @@ mod query_joins_tests {
         // Start the query - it will subscribe directly to sources
         let mut event_rx = graph.subscribe().unwrap();
         query_manager
-            .start_query("vehicle-driver-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("vehicle-driver-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "vehicle-driver-query",
+            &graph,
+            &crate::ComponentName::try_new("vehicle-driver-query").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
@@ -193,11 +197,17 @@ mod query_joins_tests {
 
         // Get mock source instances
         let vehicles_mock = source_manager
-            .get_source_instance("vehicles")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("vehicles")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("vehicles source should exist");
         let drivers_mock = source_manager
-            .get_source_instance("drivers")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("drivers")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("drivers source should exist");
 
@@ -251,7 +261,10 @@ mod query_joins_tests {
         let status = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let s = query_manager
-                    .get_query_status("vehicle-driver-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("vehicle-driver-query")
+                            .expect("fixture component name"),
+                    )
                     .await;
                 if s.is_ok() {
                     return s;
@@ -291,9 +304,9 @@ mod query_joins_tests {
         );
 
         let query_config = create_query_config_with_joins(
-            "order-restaurant-query",
+            drasi_core_types::ComponentName::try_new("order-restaurant-query").expect("fixture component name"),
             "MATCH (o:Order)-[:ORDER_TO_RESTAURANT]->(r:Restaurant) RETURN o.orderId as orderId, r.name as restaurant",
-            vec!["orders".to_string(), "restaurants".to_string()],
+            vec![drasi_core_types::ComponentName::try_new("orders").expect("fixture component name"), drasi_core_types::ComponentName::try_new("restaurants").expect("fixture component name")],
             vec![join_config],
         );
 
@@ -302,13 +315,18 @@ mod query_joins_tests {
             .unwrap();
         let mut event_rx = graph.subscribe().unwrap();
         query_manager
-            .start_query("order-restaurant-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("order-restaurant-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "order-restaurant-query",
+            &graph,
+            &crate::ComponentName::try_new("order-restaurant-query")
+                .expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
@@ -316,11 +334,17 @@ mod query_joins_tests {
 
         // Get mock source instances
         let restaurants_mock = source_manager
-            .get_source_instance("restaurants")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("restaurants")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("restaurants source");
         let orders_mock = source_manager
-            .get_source_instance("orders")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("orders")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("orders source");
         let restaurants_source = restaurants_mock
@@ -368,7 +392,10 @@ mod query_joins_tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if query_manager
-                    .get_query_status("order-restaurant-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("order-restaurant-query")
+                            .expect("fixture component name"),
+                    )
                     .await
                     .is_ok()
                 {
@@ -402,7 +429,10 @@ mod query_joins_tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if query_manager
-                    .get_query_status("order-restaurant-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("order-restaurant-query")
+                            .expect("fixture component name"),
+                    )
                     .await
                     .is_ok()
                 {
@@ -428,7 +458,10 @@ mod query_joins_tests {
         let status = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let s = query_manager
-                    .get_query_status("order-restaurant-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("order-restaurant-query")
+                            .expect("fixture component name"),
+                    )
                     .await;
                 if s.is_ok() {
                     return s;
@@ -478,9 +511,9 @@ mod query_joins_tests {
         );
 
         let query_config = create_query_config_with_joins(
-            "full-order-query",
+            drasi_core_types::ComponentName::try_new("full-order-query").expect("fixture component name"),
             "MATCH (o:Order)-[:ORDER_TO_RESTAURANT]->(r:Restaurant), (o)-[:ORDER_TO_DRIVER]->(d:Driver) RETURN o.orderId, r.name, d.name",
-            vec!["orders".to_string(), "drivers".to_string(), "restaurants".to_string()],
+            vec![drasi_core_types::ComponentName::try_new("orders").expect("fixture component name"), drasi_core_types::ComponentName::try_new("drivers").expect("fixture component name"), drasi_core_types::ComponentName::try_new("restaurants").expect("fixture component name")],
             vec![restaurant_join, driver_join],
         );
 
@@ -489,13 +522,17 @@ mod query_joins_tests {
             .unwrap();
         let mut event_rx = graph.subscribe().unwrap();
         query_manager
-            .start_query("full-order-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("full-order-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "full-order-query",
+            &graph,
+            &crate::ComponentName::try_new("full-order-query").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
@@ -503,15 +540,24 @@ mod query_joins_tests {
 
         // Get mock source instances
         let orders_mock = source_manager
-            .get_source_instance("orders")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("orders")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("orders source");
         let drivers_mock = source_manager
-            .get_source_instance("drivers")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("drivers")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("drivers source");
         let restaurants_mock = source_manager
-            .get_source_instance("restaurants")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("restaurants")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("restaurants source");
         let orders_source = orders_mock
@@ -571,7 +617,10 @@ mod query_joins_tests {
         let status = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let s = query_manager
-                    .get_query_status("full-order-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("full-order-query")
+                            .expect("fixture component name"),
+                    )
                     .await;
                 if s.is_ok() {
                     return s;
@@ -607,9 +656,15 @@ mod query_joins_tests {
         );
 
         let query_config = create_query_config_with_joins(
-            "non-matching-query",
+            drasi_core_types::ComponentName::try_new("non-matching-query")
+                .expect("fixture component name"),
             "MATCH (a:NodeA)-[:TEST_JOIN]->(b:NodeB) RETURN a, b",
-            vec!["source1".to_string(), "source2".to_string()],
+            vec![
+                drasi_core_types::ComponentName::try_new("source1")
+                    .expect("fixture component name"),
+                drasi_core_types::ComponentName::try_new("source2")
+                    .expect("fixture component name"),
+            ],
             vec![join_config],
         );
 
@@ -618,13 +673,17 @@ mod query_joins_tests {
             .unwrap();
         let mut event_rx = graph.subscribe().unwrap();
         query_manager
-            .start_query("non-matching-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("non-matching-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "non-matching-query",
+            &graph,
+            &crate::ComponentName::try_new("non-matching-query").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
@@ -632,11 +691,17 @@ mod query_joins_tests {
 
         // Get mock source instances
         let source1_mock = source_manager
-            .get_source_instance("source1")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("source1")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("source1");
         let source2_mock = source_manager
-            .get_source_instance("source2")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("source2")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("source2");
         let source1_source = source1_mock
@@ -675,7 +740,10 @@ mod query_joins_tests {
         let status = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let s = query_manager
-                    .get_query_status("non-matching-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("non-matching-query")
+                            .expect("fixture component name"),
+                    )
                     .await;
                 if s.is_ok() {
                     return s;
@@ -708,9 +776,15 @@ mod query_joins_tests {
         );
 
         let query_config = create_query_config_with_joins(
-            "null-property-query",
+            drasi_core_types::ComponentName::try_new("null-property-query")
+                .expect("fixture component name"),
             "MATCH (a:NodeA)-[:NULL_TEST_JOIN]->(b:NodeB) RETURN a, b",
-            vec!["source1".to_string(), "source2".to_string()],
+            vec![
+                drasi_core_types::ComponentName::try_new("source1")
+                    .expect("fixture component name"),
+                drasi_core_types::ComponentName::try_new("source2")
+                    .expect("fixture component name"),
+            ],
             vec![join_config],
         );
 
@@ -719,13 +793,17 @@ mod query_joins_tests {
             .unwrap();
         let mut event_rx = graph.subscribe().unwrap();
         query_manager
-            .start_query("null-property-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("null-property-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "null-property-query",
+            &graph,
+            &crate::ComponentName::try_new("null-property-query").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
@@ -733,11 +811,17 @@ mod query_joins_tests {
 
         // Get mock source instances
         let source1_mock = source_manager
-            .get_source_instance("source1")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("source1")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("source1");
         let source2_mock = source_manager
-            .get_source_instance("source2")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("source2")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("source2");
         let source1_source = source1_mock
@@ -776,7 +860,10 @@ mod query_joins_tests {
         let status = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let s = query_manager
-                    .get_query_status("null-property-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("null-property-query")
+                            .expect("fixture component name"),
+                    )
                     .await;
                 if s.is_ok() {
                     return s;
@@ -813,9 +900,15 @@ mod query_joins_tests {
         );
 
         let query_config = create_query_config_with_joins(
-            "product-category-query",
+            drasi_core_types::ComponentName::try_new("product-category-query")
+                .expect("fixture component name"),
             "MATCH (p:Product)-[:PRODUCT_CATEGORY]->(c:Category) RETURN p.name, c.name",
-            vec!["products".to_string(), "categories".to_string()],
+            vec![
+                drasi_core_types::ComponentName::try_new("products")
+                    .expect("fixture component name"),
+                drasi_core_types::ComponentName::try_new("categories")
+                    .expect("fixture component name"),
+            ],
             vec![join_config],
         );
 
@@ -824,13 +917,18 @@ mod query_joins_tests {
             .unwrap();
         let mut event_rx = graph.subscribe().unwrap();
         query_manager
-            .start_query("product-category-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("product-category-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "product-category-query",
+            &graph,
+            &crate::ComponentName::try_new("product-category-query")
+                .expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
@@ -838,11 +936,17 @@ mod query_joins_tests {
 
         // Get mock source instances
         let products_mock = source_manager
-            .get_source_instance("products")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("products")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("products");
         let categories_mock = source_manager
-            .get_source_instance("categories")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("categories")
+                    .expect("fixture component name"),
+            )
             .await
             .expect("categories");
         let products_source = products_mock
@@ -887,7 +991,10 @@ mod query_joins_tests {
         let status = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let s = query_manager
-                    .get_query_status("product-category-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("product-category-query")
+                            .expect("fixture component name"),
+                    )
                     .await;
                 if s.is_ok() {
                     return s;
@@ -925,9 +1032,13 @@ mod query_joins_tests {
         );
 
         let query_config = create_query_config_with_joins(
-            "user-posts-query",
+            drasi_core_types::ComponentName::try_new("user-posts-query")
+                .expect("fixture component name"),
             "MATCH (p:Post)-[:AUTHORED_BY]->(u:User) RETURN p.title, u.name",
-            vec!["users".to_string(), "posts".to_string()],
+            vec![
+                drasi_core_types::ComponentName::try_new("users").expect("fixture component name"),
+                drasi_core_types::ComponentName::try_new("posts").expect("fixture component name"),
+            ],
             vec![join_config],
         );
 
@@ -936,13 +1047,17 @@ mod query_joins_tests {
             .unwrap();
         let mut event_rx = graph.subscribe().unwrap();
         query_manager
-            .start_query("user-posts-query".to_string())
+            .start_query_by_name(
+                &drasi_core_types::ComponentName::try_new("user-posts-query")
+                    .expect("fixture component name"),
+            )
             .await
             .unwrap();
 
-        wait_for_component_status(
+        crate::test_helpers::wait_for_component_status_by_name(
             &mut event_rx,
-            "user-posts-query",
+            &graph,
+            &crate::ComponentName::try_new("user-posts-query").expect("fixture component name"),
             ComponentStatus::Running,
             Duration::from_secs(5),
         )
@@ -950,11 +1065,15 @@ mod query_joins_tests {
 
         // Get mock source instances AFTER query is started and subscribed
         let users_mock = source_manager
-            .get_source_instance("users")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("users").expect("fixture component name"),
+            )
             .await
             .expect("users");
         let posts_mock = source_manager
-            .get_source_instance("posts")
+            .get_source_instance_by_name(
+                &drasi_core_types::ComponentName::try_new("posts").expect("fixture component name"),
+            )
             .await
             .expect("posts");
         let users_source = users_mock
@@ -997,7 +1116,10 @@ mod query_joins_tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if query_manager
-                    .get_query_status("user-posts-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("user-posts-query")
+                            .expect("fixture component name"),
+                    )
                     .await
                     .is_ok()
                 {
@@ -1029,7 +1151,10 @@ mod query_joins_tests {
         let status = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let s = query_manager
-                    .get_query_status("user-posts-query".to_string())
+                    .get_query_status_by_name(
+                        &drasi_core_types::ComponentName::try_new("user-posts-query")
+                            .expect("fixture component name"),
+                    )
                     .await;
                 if s.is_ok() {
                     return s;

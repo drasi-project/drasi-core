@@ -24,4 +24,6 @@ pub use checkpoint_state::{
     batch_checkpoint_candidates, persist_with_recovery_policy, CheckpointState, FailureAction,
 };
 pub use config::AdaptiveBatchConfig;
-pub use templates::{OperationType, QueryConfig, TemplateRouting, TemplateSpec};
+pub use templates::{
+    input_alias, input_aliases, OperationType, QueryConfig, TemplateRouting, TemplateSpec,
+};

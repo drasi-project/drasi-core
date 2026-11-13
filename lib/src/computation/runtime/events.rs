@@ -60,7 +60,7 @@ impl Events {
         })
     }
 
-    pub(super) fn component(&self, id: &str) -> Vec<ComponentEvent> {
+    pub(super) fn component(&self, id: &ComponentId) -> Vec<ComponentEvent> {
         self.history
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -76,7 +76,7 @@ impl Events {
 
     pub(super) fn subscribe(
         &self,
-        id: &str,
+        id: &ComponentId,
     ) -> (
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
@@ -198,7 +198,7 @@ impl PublicationObserver for Events {
             let status = observed_status(observed, ComponentStatus::Added);
             let emit = |status, message| {
                 self.record(ComponentEvent {
-                    component_id: id.to_string(),
+                    component_id: id.clone(),
                     component_type: kind.clone(),
                     status,
                     timestamp: current.timestamp,
@@ -212,6 +212,15 @@ impl PublicationObserver for Events {
                     ComponentStatus::Reconfiguring,
                     Some(format!("Reconfiguring {kind:?}")),
                 );
+            }
+            if let Some(node) = current.desired.component_by_id(id) {
+                if previous
+                    .desired
+                    .component_by_id(id)
+                    .is_some_and(|previous| previous.name != node.name)
+                {
+                    emit(status, Some(format!("Renamed {kind:?} to '{}'", node.name)));
+                }
             }
             let old_status = old.map(|old| observed_status(old, ComponentStatus::Added));
             // Requesting a first start changes intent before the lifecycle
@@ -242,7 +251,7 @@ impl PublicationObserver for Events {
         for id in removed {
             if let Some(kind) = previous_kinds.values.get(id) {
                 self.record(ComponentEvent {
-                    component_id: id.to_string(),
+                    component_id: id.clone(),
                     component_type: kind.clone(),
                     status: ComponentStatus::Removed,
                     timestamp: current.timestamp,
@@ -251,7 +260,7 @@ impl PublicationObserver for Events {
                 self.history
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .remove_component(id.as_str());
+                    .remove_component(id);
             }
         }
     }
@@ -282,17 +291,20 @@ mod publication_tests {
     }
 
     fn id(index: usize) -> ComponentId {
-        ComponentId::try_new(format!("component-{index:05}")).unwrap()
+        crate::test_helpers::component_id(index as u128 + 1)
     }
 
     fn graph(count: usize) -> ComputationGraph {
         let mut builder = ComputationGraph::builder("event-publication");
         for index in 0..count {
-            builder = builder.service(Box::new(Service(
-                ComponentDescriptor::try_new(id(index), vec![])
-                    .unwrap()
-                    .with_semantic_kind(ComponentSemanticKind::Source),
-            )));
+            builder = builder.service(
+                crate::config::ComponentName::try_new(format!("source-{index}")).unwrap(),
+                Box::new(Service(
+                    ComponentDescriptor::try_new(id(index), vec![])
+                        .unwrap()
+                        .with_semantic_kind(ComponentSemanticKind::Source),
+                )),
+            );
         }
         builder.build().unwrap()
     }
@@ -400,8 +412,8 @@ mod publication_tests {
         events.publish(&previous, &current);
         let (old_kinds, next_kinds) = events.publication_kinds(&previous, &current);
         assert!(Arc::ptr_eq(&old_kinds, &next_kinds));
-        assert_eq!(events.component(id(2048).as_str()).len(), 1);
-        assert!(events.component(id(0).as_str()).is_empty());
+        assert_eq!(events.component(&id(2048)).len(), 1);
+        assert!(events.component(&id(0)).is_empty());
         assert!(changed_components(&current, &current).0.is_empty());
 
         let mut edited = current.clone();
@@ -436,10 +448,10 @@ mod publication_tests {
         ];
         for (id, status) in expected {
             let event = stream.try_recv().unwrap();
-            assert_eq!(event.component_id, id.as_str());
+            assert_eq!(event.component_id, id.clone());
             assert_eq!(event.status, status);
         }
         assert!(stream.try_recv().is_err());
-        assert!(events.component(id(0).as_str()).is_empty());
+        assert!(events.component(&id(0)).is_empty());
     }
 }

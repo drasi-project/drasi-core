@@ -37,20 +37,15 @@ use tokio_stream::StreamExt;
 /// Reads initial table snapshots for bootstrapping continuous queries.
 pub struct MsSqlBootstrapProvider {
     config: MsSqlSourceConfig,
-    source_id: String,
 }
 
 impl MsSqlBootstrapProvider {
     /// Create a new MS SQL bootstrap provider
     ///
     /// # Arguments
-    /// * `source_id` - Identifier for the source
     /// * `config` - MS SQL configuration
-    pub fn new(source_id: impl Into<String>, config: MsSqlSourceConfig) -> Self {
-        Self {
-            config,
-            source_id: source_id.into(),
-        }
+    pub fn new(config: MsSqlSourceConfig) -> Self {
+        Self { config }
     }
 
     /// Create a builder for the bootstrap provider
@@ -75,7 +70,8 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
         );
 
         // Create bootstrap handler
-        let mut handler = MsSqlBootstrapHandler::new(self.config.clone(), self.source_id.clone());
+        let mut handler =
+            MsSqlBootstrapHandler::new(self.config.clone(), context.source_id.clone());
 
         // Store query_id before moving request
         let query_id = request.query_id.clone();
@@ -95,7 +91,6 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
 /// Builder for MS SQL bootstrap provider
 pub struct MsSqlBootstrapProviderBuilder {
     config: MsSqlSourceConfig,
-    source_id: String,
 }
 
 impl MsSqlBootstrapProviderBuilder {
@@ -103,14 +98,7 @@ impl MsSqlBootstrapProviderBuilder {
     pub fn new() -> Self {
         Self {
             config: MsSqlSourceConfig::default(),
-            source_id: "mssql-bootstrap".to_string(),
         }
-    }
-
-    /// Set the source ID
-    pub fn with_source_id(mut self, id: impl Into<String>) -> Self {
-        self.source_id = id.into();
-        self
     }
 
     /// Set the MS SQL server hostname
@@ -158,7 +146,7 @@ impl MsSqlBootstrapProviderBuilder {
             return Err(anyhow::anyhow!("Database user is required"));
         }
 
-        Ok(MsSqlBootstrapProvider::new(self.source_id, self.config))
+        Ok(MsSqlBootstrapProvider::new(self.config))
     }
 }
 
@@ -171,12 +159,12 @@ impl Default for MsSqlBootstrapProviderBuilder {
 /// Handles bootstrap operations for MS SQL source
 struct MsSqlBootstrapHandler {
     config: MsSqlSourceConfig,
-    source_id: String,
+    source_id: drasi_lib::ComponentId,
     pk_cache: PrimaryKeyCache,
 }
 
 impl MsSqlBootstrapHandler {
-    fn new(config: MsSqlSourceConfig, source_id: String) -> Self {
+    fn new(config: MsSqlSourceConfig, source_id: drasi_lib::ComponentId) -> Self {
         Self {
             config,
             source_id,
@@ -410,7 +398,7 @@ impl MsSqlBootstrapHandler {
         Ok(SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
-                    reference: ElementReference::new(&self.source_id, &element_id),
+                    reference: ElementReference::new(self.source_id.as_str(), &element_id),
                     labels: Arc::from([Arc::from(label)]),
                     effective_from,
                 },
@@ -434,7 +422,6 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(provider.source_id, "mssql-bootstrap");
         assert_eq!(provider.config.host, "localhost");
     }
 

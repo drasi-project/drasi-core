@@ -120,7 +120,7 @@ pub(super) fn source(path: &Path, rest_port: u16) -> Result<ComponentAddition> {
         shutdown_timeout_ms: NonZeroU64::new(5000).expect("positive deadline"),
     };
     let specification = factory.specification(
-        ComponentId::try_new("sqlite")?,
+        ComponentId::try_new("a112a85e-ae22-5dd7-a624-6080d73fbb5e")?,
         json!({
             "stream": "sqlite/out",
             "settings": settings,
@@ -128,6 +128,7 @@ pub(super) fn source(path: &Path, rest_port: u16) -> Result<ComponentAddition> {
         }),
     )?;
     Ok(ComponentAddition::from_specification(
+        ComponentName::try_new("sqlite")?,
         specification,
         factory,
     ))

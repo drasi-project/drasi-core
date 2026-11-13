@@ -244,7 +244,7 @@ struct StepElements<'a> {
 impl StepElements<'_> {
     fn reference(&self, reference: &ElementReference) -> ElementReference {
         ElementReference::new(
-            &format!("{}elements/{}", self.prefix, encode(&reference.source_id)),
+            &format!("{}elements/{}", self.prefix, encode(&reference.namespace)),
             &reference.element_id,
         )
     }
@@ -271,7 +271,7 @@ impl StepElements<'_> {
 
     fn decode_reference(&self, reference: &mut ElementReference) -> Result<(), IndexError> {
         let encoded = reference
-            .source_id
+            .namespace
             .strip_prefix(&format!("{}elements/", self.prefix))
             .ok_or(IndexError::CorruptedData)?;
         if !encoded.is_ascii() || encoded.len() % 2 != 0 {
@@ -282,7 +282,7 @@ impl StepElements<'_> {
             .map(|offset| u8::from_str_radix(&encoded[offset..offset + 2], 16))
             .collect::<Result<Vec<_>, _>>()
             .map_err(IndexError::other)?;
-        reference.source_id = String::from_utf8(bytes).map_err(IndexError::other)?.into();
+        reference.namespace = String::from_utf8(bytes).map_err(IndexError::other)?.into();
         Ok(())
     }
 
@@ -383,8 +383,8 @@ mod tests {
     #[tokio::test]
     async fn values_and_elements_are_isolated_by_step_and_storage_kind() {
         let index = InMemoryElementIndex::new();
-        let first_id = ComponentId::try_new("first").unwrap();
-        let second_id = ComponentId::try_new("second").unwrap();
+        let first_id = crate::test_helpers::component_id(451);
+        let second_id = crate::test_helpers::component_id(768);
         let first = TransactionContext::new(
             &first_id,
             &index,
@@ -444,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn relation_endpoints_and_source_names_roundtrip_without_cross_step_aliases() {
         let index = InMemoryElementIndex::new();
-        let step = ComponentId::try_new("relations").unwrap();
+        let step = crate::test_helpers::component_id(769);
         let context = TransactionContext::new(
             &step,
             &index,
@@ -504,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn empty_keys_and_unsupported_index_operations_fail_without_erasing_state() {
         let index = InMemoryElementIndex::new();
-        let step = ComponentId::try_new("step").unwrap();
+        let step = crate::test_helpers::component_id(770);
         let context =
             TransactionContext::new(&step, &index, StreamId::try_new("step/out").unwrap(), 1);
         context
@@ -542,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn join_reconfiguration_error_fences_the_transaction_even_when_ignored() {
         let index = InMemoryElementIndex::new();
-        let step = ComponentId::try_new("step").unwrap();
+        let step = crate::test_helpers::component_id(770);
         let context =
             TransactionContext::new(&step, &index, StreamId::try_new("step/out").unwrap(), 1);
         assert!(context.validate().is_ok());
@@ -559,7 +559,7 @@ mod tests {
         use drasi_core::models::SourceChange;
 
         let index = InMemoryElementIndex::new();
-        let step = ComponentId::try_new("step").unwrap();
+        let step = crate::test_helpers::component_id(770);
         let stream = StreamId::try_new("transaction/step/out").unwrap();
         let context = TransactionContext::new(&step, &index, stream, 41);
         let source = |ordering| {
@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn corrupt_or_foreign_element_namespaces_are_not_exposed_as_valid_step_state() {
         let index = InMemoryElementIndex::new();
-        let step = ComponentId::try_new("step").unwrap();
+        let step = crate::test_helpers::component_id(770);
         let context =
             TransactionContext::new(&step, &index, StreamId::try_new("step/out").unwrap(), 1);
         for suffix in ["z0", "0", "ff"] {
@@ -633,7 +633,7 @@ mod tests {
         use drasi_core::models::SourceChange;
 
         let index = InMemoryElementIndex::new();
-        let step = ComponentId::try_new("step").unwrap();
+        let step = crate::test_helpers::component_id(770);
         let stream = StreamId::try_new("transaction/step/out").unwrap();
         let context = TransactionContext::new(&step, &index, stream.clone(), 41);
         let timestamp = chrono::DateTime::from_timestamp_millis(1_000).unwrap();
@@ -663,7 +663,7 @@ mod tests {
                 ),
         );
         let annotation = ContextEntry::try_new(
-            ComponentId::try_new("source").unwrap(),
+            crate::test_helpers::component_id(77),
             "trace",
             ContextValue::String("retained".into()),
         )

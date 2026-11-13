@@ -20,6 +20,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::test_helpers::creation::{BuilderFixtures, CoreFixtures};
     use std::time::Duration;
 
     use tokio::sync::broadcast;
@@ -59,7 +60,7 @@ mod tests {
     /// Returns the collected events in order. Panics on timeout.
     async fn collect_events_until(
         event_rx: &mut broadcast::Receiver<ComponentEvent>,
-        component_id: &str,
+        component_id: drasi_core_types::ComponentId,
         stop_predicate: impl Fn(&[ComponentEvent]) -> bool,
         timeout: Duration,
     ) -> Vec<ComponentEvent> {
@@ -101,7 +102,7 @@ mod tests {
     /// Assert that a collected event sequence matches the expected statuses and messages.
     fn assert_event_sequence(
         events: &[ComponentEvent],
-        component_id: &str,
+        component_id: drasi_core_types::ComponentId,
         component_type: ComponentType,
         expected: &[(ComponentStatus, &str)],
     ) {
@@ -154,29 +155,38 @@ mod tests {
         let core = create_test_core().await;
         let mut event_rx = core.subscribe_all_component_events();
 
-        let source = TestMockSource::with_auto_start("test-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("test-src", false);
+        let source_id = core
+            .add_source_fixture_with_handle(source)
+            .await
+            .unwrap()
+            .id()
+            .clone();
 
         // Collect the "added" event
         let events = collect_events_until(
             &mut event_rx,
-            "test-src",
+            source_id.clone(),
             |evts| evts.len() == 1,
             EVENT_TIMEOUT,
         )
         .await;
         assert_event_sequence(
             &events,
-            "test-src",
+            source_id.clone(),
             ComponentType::Source,
             &[(ComponentStatus::Added, "added")],
         );
 
         // Start
-        core.start_source("test-src").await.unwrap();
+        core.start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("test-src").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-src",
+            source_id.clone(),
             |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
             EVENT_TIMEOUT,
         )
@@ -191,10 +201,14 @@ mod tests {
         );
 
         // Stop
-        core.stop_source("test-src").await.unwrap();
+        core.stop_source_by_name(
+            &drasi_core_types::ComponentName::try_new("test-src").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-src",
+            source_id.clone(),
             |evts| {
                 evts.iter().any(|e| {
                     e.status == ComponentStatus::Stopped
@@ -214,10 +228,15 @@ mod tests {
         );
 
         // Remove
-        core.remove_source("test-src", false).await.unwrap();
+        core.remove_source_by_name(
+            &drasi_core_types::ComponentName::try_new("test-src").expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-src",
+            source_id.clone(),
             |evts| {
                 evts.iter()
                     .any(|e| e.message.as_deref().is_some_and(|m| m.contains("removed")))
@@ -227,10 +246,11 @@ mod tests {
         .await;
         assert_event_sequence(
             &events,
-            "test-src",
+            source_id,
             ComponentType::Source,
             &[(ComponentStatus::Removed, "removed")],
         );
+        core.shutdown().await.unwrap();
     }
 
     // ========================================================================
@@ -240,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_full_lifecycle_events() {
         // Queries depend on sources, so add a source first.
-        let source = TestMockSource::with_auto_start("q-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("q-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -255,52 +275,78 @@ mod tests {
                     .clone(),
             )
             .with_id("query-lifecycle-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
 
+        let source_id = core
+            .component_by_name(
+                &drasi_core_types::ComponentName::try_new("q-src").expect("fixture component name"),
+            )
+            .unwrap()
+            .id()
+            .clone();
         let mut event_rx = core.subscribe_all_component_events();
 
-        let query_config = Query::cypher("test-query")
-            .query("MATCH (n) RETURN n")
-            .from_input("q-src")
-            .auto_start(false)
-            .build();
+        let query_config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("q-src").expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
 
-        core.add_query(query_config).await.unwrap();
+        let query_id = core
+            .add_query_with_handle(query_config)
+            .await
+            .unwrap()
+            .id()
+            .clone();
 
         // Collect the "added" event
         let events = collect_events_until(
             &mut event_rx,
-            "test-query",
+            query_id.clone(),
             |evts| evts.len() == 1,
             EVENT_TIMEOUT,
         )
         .await;
         assert_event_sequence(
             &events,
-            "test-query",
+            query_id.clone(),
             ComponentType::Query,
             &[(ComponentStatus::Added, "added")],
         );
 
         // Start the source first (queries need running sources for bootstrap)
-        core.start_source("q-src").await.unwrap();
+        core.start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("q-src").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         // Drain source events
         let _ = collect_events_until(
             &mut event_rx,
-            "q-src",
+            source_id,
             |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
             EVENT_TIMEOUT,
         )
         .await;
 
         // Start query
-        core.start_query("test-query").await.unwrap();
+        core.start_query_by_name(
+            &drasi_core_types::ComponentName::try_new("test-query")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-query",
+            query_id.clone(),
             |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
             EVENT_TIMEOUT,
         )
@@ -315,10 +361,15 @@ mod tests {
         );
 
         // Stop query
-        core.stop_query("test-query").await.unwrap();
+        core.stop_query_by_name(
+            &drasi_core_types::ComponentName::try_new("test-query")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-query",
+            query_id.clone(),
             |evts| {
                 evts.iter().any(|e| {
                     e.status == ComponentStatus::Stopped
@@ -334,10 +385,15 @@ mod tests {
         );
 
         // Remove query
-        core.remove_query("test-query").await.unwrap();
+        core.remove_query_by_name(
+            &drasi_core_types::ComponentName::try_new("test-query")
+                .expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-query",
+            query_id.clone(),
             |evts| {
                 evts.iter()
                     .any(|e| e.message.as_deref().is_some_and(|m| m.contains("removed")))
@@ -347,10 +403,11 @@ mod tests {
         .await;
         assert_event_sequence(
             &events,
-            "test-query",
+            query_id,
             ComponentType::Query,
             &[(ComponentStatus::Removed, "removed")],
         );
+        core.shutdown().await.unwrap();
     }
 
     // ========================================================================
@@ -360,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_full_lifecycle_events() {
         // Reactions depend on queries, which depend on sources.
-        let source = TestMockSource::with_auto_start("r-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("r-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -375,13 +432,20 @@ mod tests {
                     .clone(),
             )
             .with_id("reaction-lifecycle-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
-                Query::cypher("r-query")
-                    .query("MATCH (n) RETURN n")
-                    .from_input("r-src")
-                    .auto_start(false)
-                    .build(),
+                Query::cypher(
+                    drasi_core_types::ComponentName::try_new("r-query")
+                        .expect("fixture component name"),
+                )
+                .query("MATCH (n) RETURN n")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("r-src")
+                        .expect("fixture component name"),
+                )
+                .auto_start(false)
+                .build()
+                .unwrap(),
             )
             .build()
             .await
@@ -389,36 +453,54 @@ mod tests {
 
         let mut event_rx = core.subscribe_all_component_events();
 
-        let reaction = TestMockReaction::with_auto_start(
-            "test-rxn".to_string(),
-            vec!["r-query".to_string()],
+        let reaction = TestMockReaction::fixture(
+            drasi_core_types::ComponentName::try_new("test-rxn").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("r-query")
+                .expect("fixture component name")],
             false,
         );
-        core.add_reaction(reaction).await.unwrap();
+        let reaction_id = core
+            .add_reaction_fixture_with_handle(reaction)
+            .await
+            .unwrap()
+            .id()
+            .clone();
 
         // Collect the "added" event
         let events = collect_events_until(
             &mut event_rx,
-            "test-rxn",
+            reaction_id.clone(),
             |evts| evts.len() == 1,
             EVENT_TIMEOUT,
         )
         .await;
         assert_event_sequence(
             &events,
-            "test-rxn",
+            reaction_id.clone(),
             ComponentType::Reaction,
             &[(ComponentStatus::Added, "added")],
         );
 
-        core.start_source("r-src").await.unwrap();
-        core.start_query("r-query").await.unwrap();
+        core.start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("r-src").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
+        core.start_query_by_name(
+            &drasi_core_types::ComponentName::try_new("r-query").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
 
         // Start reaction
-        core.start_reaction("test-rxn").await.unwrap();
+        core.start_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("test-rxn").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-rxn",
+            reaction_id.clone(),
             |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
             EVENT_TIMEOUT,
         )
@@ -433,10 +515,14 @@ mod tests {
         );
 
         // Stop reaction
-        core.stop_reaction("test-rxn").await.unwrap();
+        core.stop_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("test-rxn").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-rxn",
+            reaction_id.clone(),
             |evts| {
                 evts.iter().any(|e| {
                     e.status == ComponentStatus::Stopped
@@ -456,10 +542,15 @@ mod tests {
         );
 
         // Remove reaction
-        core.remove_reaction("test-rxn", false).await.unwrap();
+        core.remove_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("test-rxn").expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
         let events = collect_events_until(
             &mut event_rx,
-            "test-rxn",
+            reaction_id.clone(),
             |evts| {
                 evts.iter()
                     .any(|e| e.message.as_deref().is_some_and(|m| m.contains("removed")))
@@ -469,10 +560,11 @@ mod tests {
         .await;
         assert_event_sequence(
             &events,
-            "test-rxn",
+            reaction_id,
             ComponentType::Reaction,
             &[(ComponentStatus::Removed, "removed")],
         );
+        core.shutdown().await.unwrap();
     }
 
     // ========================================================================
@@ -487,11 +579,16 @@ mod tests {
         // --- Add all components ---
 
         // Add source
-        let source = TestMockSource::with_auto_start("mc-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("mc-src", false);
+        let source_id = core
+            .add_source_fixture_with_handle(source)
+            .await
+            .unwrap()
+            .id()
+            .clone();
         let src_added = collect_events_until(
             &mut event_rx,
-            "mc-src",
+            source_id.clone(),
             |evts| evts.len() == 1,
             EVENT_TIMEOUT,
         )
@@ -500,15 +597,25 @@ mod tests {
         assert_eq!(src_added[0].status, ComponentStatus::Added);
 
         // Add query (depends on source)
-        let query_config = Query::cypher("mc-query")
-            .query("MATCH (n) RETURN n")
-            .from_input("mc-src")
-            .auto_start(false)
-            .build();
-        core.add_query(query_config).await.unwrap();
+        let query_config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("mc-query").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("mc-src").expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
+        let query_id = core
+            .add_query_with_handle(query_config)
+            .await
+            .unwrap()
+            .id()
+            .clone();
         let qry_added = collect_events_until(
             &mut event_rx,
-            "mc-query",
+            query_id.clone(),
             |evts| evts.len() == 1,
             EVENT_TIMEOUT,
         )
@@ -517,15 +624,21 @@ mod tests {
         assert_eq!(qry_added[0].status, ComponentStatus::Added);
 
         // Add reaction (depends on query)
-        let reaction = TestMockReaction::with_auto_start(
-            "mc-rxn".to_string(),
-            vec!["mc-query".to_string()],
+        let reaction = TestMockReaction::fixture(
+            drasi_core_types::ComponentName::try_new("mc-rxn").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("mc-query")
+                .expect("fixture component name")],
             false,
         );
-        core.add_reaction(reaction).await.unwrap();
+        let reaction_id = core
+            .add_reaction_fixture_with_handle(reaction)
+            .await
+            .unwrap()
+            .id()
+            .clone();
         let rxn_added = collect_events_until(
             &mut event_rx,
-            "mc-rxn",
+            reaction_id.clone(),
             |evts| evts.len() == 1,
             EVENT_TIMEOUT,
         )
@@ -535,28 +648,40 @@ mod tests {
 
         // --- Start in dependency order: source → query → reaction ---
 
-        core.start_source("mc-src").await.unwrap();
+        core.start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-src").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let _ = collect_events_until(
             &mut event_rx,
-            "mc-src",
+            source_id.clone(),
             |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
             EVENT_TIMEOUT,
         )
         .await;
 
-        core.start_query("mc-query").await.unwrap();
+        core.start_query_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-query").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let _ = collect_events_until(
             &mut event_rx,
-            "mc-query",
+            query_id.clone(),
             |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
             EVENT_TIMEOUT,
         )
         .await;
 
-        core.start_reaction("mc-rxn").await.unwrap();
+        core.start_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-rxn").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let _ = collect_events_until(
             &mut event_rx,
-            "mc-rxn",
+            reaction_id.clone(),
             |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
             EVENT_TIMEOUT,
         )
@@ -564,10 +689,14 @@ mod tests {
 
         // --- Stop in reverse order: reaction → query → source ---
 
-        core.stop_reaction("mc-rxn").await.unwrap();
+        core.stop_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-rxn").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let rxn_stop = collect_events_until(
             &mut event_rx,
-            "mc-rxn",
+            reaction_id.clone(),
             |evts| {
                 evts.iter().any(|e| {
                     e.status == ComponentStatus::Stopped
@@ -581,10 +710,14 @@ mod tests {
             .iter()
             .any(|e| e.status == ComponentStatus::Stopping));
 
-        core.stop_query("mc-query").await.unwrap();
+        core.stop_query_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-query").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let qry_stop = collect_events_until(
             &mut event_rx,
-            "mc-query",
+            query_id.clone(),
             |evts| {
                 evts.iter().any(|e| {
                     e.status == ComponentStatus::Stopped
@@ -596,10 +729,14 @@ mod tests {
         .await;
         assert!(qry_stop.last().unwrap().status == ComponentStatus::Stopped);
 
-        core.stop_source("mc-src").await.unwrap();
+        core.stop_source_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-src").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let src_stop = collect_events_until(
             &mut event_rx,
-            "mc-src",
+            source_id.clone(),
             |evts| {
                 evts.iter().any(|e| {
                     e.status == ComponentStatus::Stopped
@@ -615,10 +752,15 @@ mod tests {
 
         // --- Remove in reverse dependency order: reaction → query → source ---
 
-        core.remove_reaction("mc-rxn", false).await.unwrap();
+        core.remove_reaction_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-rxn").expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
         let rxn_removed = collect_events_until(
             &mut event_rx,
-            "mc-rxn",
+            reaction_id,
             |evts| {
                 evts.iter()
                     .any(|e| e.message.as_deref().is_some_and(|m| m.contains("removed")))
@@ -634,10 +776,14 @@ mod tests {
             .unwrap()
             .contains("removed"));
 
-        core.remove_query("mc-query").await.unwrap();
+        core.remove_query_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-query").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let qry_removed = collect_events_until(
             &mut event_rx,
-            "mc-query",
+            query_id,
             |evts| {
                 evts.iter()
                     .any(|e| e.message.as_deref().is_some_and(|m| m.contains("removed")))
@@ -653,10 +799,15 @@ mod tests {
             .unwrap()
             .contains("removed"));
 
-        core.remove_source("mc-src", false).await.unwrap();
+        core.remove_source_by_name(
+            &drasi_core_types::ComponentName::try_new("mc-src").expect("fixture component name"),
+            false,
+        )
+        .await
+        .unwrap();
         let src_removed = collect_events_until(
             &mut event_rx,
-            "mc-src",
+            source_id,
             |evts| {
                 evts.iter()
                     .any(|e| e.message.as_deref().is_some_and(|m| m.contains("removed")))
@@ -671,6 +822,7 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("removed"));
+        core.shutdown().await.unwrap();
     }
 
     // ========================================================================
@@ -680,17 +832,17 @@ mod tests {
     #[tokio::test]
     async fn test_add_duplicate_source_fails() {
         let core = create_test_core().await;
-        let s1 = TestMockSource::with_auto_start("dup-src".to_string(), false).unwrap();
-        core.add_source(s1).await.unwrap();
+        let s1 = TestMockSource::fixture("dup-src", false);
+        core.add_source_fixture(s1).await.unwrap();
 
-        let s2 = TestMockSource::with_auto_start("dup-src".to_string(), false).unwrap();
-        let result = core.add_source(s2).await;
+        let s2 = TestMockSource::fixture("dup-src", false);
+        let result = core.add_source_fixture(s2).await;
         assert!(result.is_err(), "Adding duplicate source should fail");
     }
 
     #[tokio::test]
     async fn test_add_duplicate_query_fails() {
-        let source = TestMockSource::with_auto_start("dup-q-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("dup-q-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -705,23 +857,33 @@ mod tests {
                     .clone(),
             )
             .with_id("dup-query-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
 
-        let config = Query::cypher("dup-q")
-            .query("MATCH (n) RETURN n")
-            .from_input("dup-q-src")
-            .auto_start(false)
-            .build();
+        let config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("dup-q").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("dup-q-src").expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
         core.add_query(config.clone()).await.unwrap();
 
-        let config2 = Query::cypher("dup-q")
-            .query("MATCH (n) RETURN n")
-            .from_input("dup-q-src")
-            .auto_start(false)
-            .build();
+        let config2 = Query::cypher(
+            drasi_core_types::ComponentName::try_new("dup-q").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("dup-q-src").expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
         let result = core.add_query(config2).await;
         assert!(result.is_err(), "Adding duplicate query should fail");
     }
@@ -729,45 +891,71 @@ mod tests {
     #[tokio::test]
     async fn test_add_duplicate_reaction_fails() {
         let core = create_test_core().await;
-        let r1 = create_test_mock_reaction("dup-rxn".to_string(), vec![]);
-        core.add_reaction(r1).await.unwrap();
+        let r1 = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("dup-rxn").expect("fixture component name"),
+            vec![],
+        );
+        core.add_reaction_fixture(r1).await.unwrap();
 
-        let r2 = create_test_mock_reaction("dup-rxn".to_string(), vec![]);
-        let result = core.add_reaction(r2).await;
+        let r2 = create_test_mock_reaction(
+            drasi_core_types::ComponentName::try_new("dup-rxn").expect("fixture component name"),
+            vec![],
+        );
+        let result = core.add_reaction_fixture(r2).await;
         assert!(result.is_err(), "Adding duplicate reaction should fail");
     }
 
     #[tokio::test]
     async fn test_start_already_running_source_fails() {
         let core = create_test_core().await;
-        let source = TestMockSource::with_auto_start("run-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("run-src", false);
+        let source_id = core
+            .add_source_fixture_with_handle(source)
+            .await
+            .unwrap()
+            .id()
+            .clone();
 
         let mut event_rx = core.subscribe_all_component_events();
-        core.start_source("run-src").await.unwrap();
+        core.start_source_by_name(
+            &drasi_core_types::ComponentName::try_new("run-src").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let _ = collect_events_until(
             &mut event_rx,
-            "run-src",
+            source_id,
             |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
             EVENT_TIMEOUT,
         )
         .await;
 
-        let result = core.start_source("run-src").await;
+        let result = core
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("run-src")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_err(),
             "Starting an already-running source should fail"
         );
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_stop_already_stopped_source_fails() {
         let core = create_test_core().await;
-        let source = TestMockSource::with_auto_start("stop-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("stop-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
         // Source is in Stopped state; stopping again should fail
-        let result = core.stop_source("stop-src").await;
+        let result = core
+            .stop_source_by_name(
+                &drasi_core_types::ComponentName::try_new("stop-src")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_err(),
             "Stopping an already-stopped source should fail"
@@ -776,7 +964,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_source_with_dependent_query_fails() {
-        let source = TestMockSource::with_auto_start("dep-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("dep-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -791,20 +979,31 @@ mod tests {
                     .clone(),
             )
             .with_id("dep-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
 
-        let config = Query::cypher("dep-query")
-            .query("MATCH (n) RETURN n")
-            .from_input("dep-src")
-            .auto_start(false)
-            .build();
+        let config = Query::cypher(
+            drasi_core_types::ComponentName::try_new("dep-query").expect("fixture component name"),
+        )
+        .query("MATCH (n) RETURN n")
+        .from_input_by_name(
+            drasi_core_types::ComponentName::try_new("dep-src").expect("fixture component name"),
+        )
+        .auto_start(false)
+        .build()
+        .unwrap();
         core.add_query(config).await.unwrap();
 
         // Source has a dependent query — removal should fail
-        let result = core.remove_source("dep-src", false).await;
+        let result = core
+            .remove_source_by_name(
+                &drasi_core_types::ComponentName::try_new("dep-src")
+                    .expect("fixture component name"),
+                false,
+            )
+            .await;
         assert!(
             result.is_err(),
             "Removing a source with dependent queries should fail"
@@ -813,7 +1012,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_query_with_dependent_reaction_fails() {
-        let source = TestMockSource::with_auto_start("dep2-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("dep2-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -828,27 +1027,40 @@ mod tests {
                     .clone(),
             )
             .with_id("dep2-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
-                Query::cypher("dep2-query")
-                    .query("MATCH (n) RETURN n")
-                    .from_input("dep2-src")
-                    .auto_start(false)
-                    .build(),
+                Query::cypher(
+                    drasi_core_types::ComponentName::try_new("dep2-query")
+                        .expect("fixture component name"),
+                )
+                .query("MATCH (n) RETURN n")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("dep2-src")
+                        .expect("fixture component name"),
+                )
+                .auto_start(false)
+                .build()
+                .unwrap(),
             )
             .build()
             .await
             .unwrap();
 
-        let reaction = TestMockReaction::with_auto_start(
-            "dep2-rxn".to_string(),
-            vec!["dep2-query".to_string()],
+        let reaction = TestMockReaction::fixture(
+            drasi_core_types::ComponentName::try_new("dep2-rxn").expect("fixture component name"),
+            vec![drasi_core_types::ComponentName::try_new("dep2-query")
+                .expect("fixture component name")],
             false,
         );
-        core.add_reaction(reaction).await.unwrap();
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         // Query has a dependent reaction — removal should fail
-        let result = core.remove_query("dep2-query").await;
+        let result = core
+            .remove_query_by_name(
+                &drasi_core_types::ComponentName::try_new("dep2-query")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(
             result.is_err(),
             "Removing a query with dependent reactions should fail"
@@ -858,14 +1070,24 @@ mod tests {
     #[tokio::test]
     async fn test_start_nonexistent_source_fails() {
         let core = create_test_core().await;
-        let result = core.start_source("no-such-source").await;
+        let result = core
+            .start_source_by_name(
+                &drasi_core_types::ComponentName::try_new("no-such-source")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_err(), "Starting a nonexistent source should fail");
     }
 
     #[tokio::test]
     async fn test_stop_nonexistent_source_fails() {
         let core = create_test_core().await;
-        let result = core.stop_source("no-such-source").await;
+        let result = core
+            .stop_source_by_name(
+                &drasi_core_types::ComponentName::try_new("no-such-source")
+                    .expect("fixture component name"),
+            )
+            .await;
         assert!(result.is_err(), "Stopping a nonexistent source should fail");
     }
 
@@ -877,17 +1099,33 @@ mod tests {
         let mut rx1 = core.subscribe_all_component_events();
         let mut rx2 = core.subscribe_all_component_events();
 
-        let source = TestMockSource::with_auto_start("sub-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("sub-src", false);
+        let source_id = core
+            .add_source_fixture_with_handle(source)
+            .await
+            .unwrap()
+            .id()
+            .clone();
 
         // Both receivers should get the "added" event
-        let events1 =
-            collect_events_until(&mut rx1, "sub-src", |evts| evts.len() == 1, EVENT_TIMEOUT).await;
-        let events2 =
-            collect_events_until(&mut rx2, "sub-src", |evts| evts.len() == 1, EVENT_TIMEOUT).await;
+        let events1 = collect_events_until(
+            &mut rx1,
+            source_id.clone(),
+            |evts| evts.len() == 1,
+            EVENT_TIMEOUT,
+        )
+        .await;
+        let events2 = collect_events_until(
+            &mut rx2,
+            source_id.clone(),
+            |evts| evts.len() == 1,
+            EVENT_TIMEOUT,
+        )
+        .await;
 
-        assert_eq!(events1[0].component_id, "sub-src");
-        assert_eq!(events2[0].component_id, "sub-src");
+        assert_eq!(events1[0].component_id, source_id);
+        assert_eq!(events2[0].component_id, source_id);
         assert_eq!(events1[0].status, events2[0].status);
+        core.shutdown().await.unwrap();
     }
 }

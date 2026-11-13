@@ -66,7 +66,7 @@ impl MatchPathSolution {
                 match value {
                     Some(value) => {
                         let elem_ref = value.get_reference();
-                        elem_ref.source_id.hash(&mut hasher);
+                        elem_ref.namespace.hash(&mut hasher);
                         elem_ref.element_id.hash(&mut hasher);
                     }
                     None => 0.hash(&mut hasher),

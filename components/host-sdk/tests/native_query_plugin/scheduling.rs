@@ -32,7 +32,7 @@ fn volatile() -> Result<NativeComponentProxy> {
         })
         .context("missing volatile query factory")?;
     factory.create_component(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({"query": TEMPORAL, "volatile": true}),
     )
 }
@@ -75,7 +75,7 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
     };
     let create = |generation| {
         factory()?.create_component_with_processing_publication(
-        ComponentId::try_new(COMPONENT)?,
+        component_id()?,
         json!({
             "query": TEMPORAL,
             "publication": if publication == QueryPublicationMode::Atomic { "atomic" } else { "non_atomic" },
@@ -87,6 +87,7 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
     )
     };
     let mut query = create(1)?;
+    query.initialize().await?;
     query.start().await?;
     let initial = query.transform(scheduled_input(1000, 2000)?).await?;
     query.delivery_completed(&initial).await?;
@@ -102,6 +103,7 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
     drop(query);
 
     let mut query = create(2)?;
+    query.initialize().await?;
     query.start().await?;
     assert!(query.continue_transform().await?.is_empty());
     expired(&query, false).await?;
@@ -117,17 +119,17 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
             .timestamp_millis(),
         2000
     );
-    assert_eq!(
-        QueryChangeCodec::metadata(&due[0].envelope)?
-            .source_id
-            .as_deref(),
-        Some("source")
-    );
+    assert!(matches!(
+        QueryChangeCodec::metadata(&due[0].envelope)?.input_origin,
+        Some(drasi_computation_contracts::QueryInputOrigin::Scheduled(reference))
+            if reference.namespace.as_ref() == "source"
+    ));
     expired(&query, true).await?;
     query.stop().await?;
     drop(query);
 
     let mut query = create(3)?;
+    query.initialize().await?;
     query.start().await?;
     let replay = query.continue_transform().await?;
     assert_eq!(replay.len(), 1);
@@ -153,6 +155,7 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
 
 async fn volatile_due_and_cancellation() -> Result<()> {
     let mut query = volatile()?;
+    query.initialize().await?;
     query.start().await?;
     query.transform(scheduled_input(1000, 2000)?).await?;
     expired(&query, false).await?;
@@ -163,6 +166,7 @@ async fn volatile_due_and_cancellation() -> Result<()> {
     query.stop().await?;
 
     let mut query = volatile()?;
+    query.initialize().await?;
     query.start().await?;
     query.transform(scheduled_input(1000, 2000)?).await?;
     let deleted = query
@@ -185,6 +189,7 @@ async fn volatile_due_and_cancellation() -> Result<()> {
     query.stop().await?;
 
     let mut query = volatile()?;
+    query.initialize().await?;
     query.start().await?;
     let now = u64::try_from(
         std::time::SystemTime::now()
@@ -214,17 +219,17 @@ async fn automatic_graph(indexed: bool) -> Result<()> {
         .find(|factory| factory.metadata().implementation.name.as_ref() == name)
         .cloned()
         .context("missing query factory")?;
-    let query = ComponentId::try_new("query")?;
+    let query = ComponentId::try_new("3b0a9e84-19ac-504c-a6e5-08c3a146b322")?;
     let mut specification = factory.specification(
         query.clone(),
         if indexed {
-            json!({"query": TEMPORAL})
+            json!({"query": TEMPORAL, "stream": "query/out"})
         } else {
-            json!({"query": TEMPORAL, "volatile": true})
+            json!({"query": TEMPORAL, "volatile": true, "stream": "query/out"})
         },
     )?;
-    let source = ComponentId::try_new("source")?;
-    let sink = ComponentId::try_new("sink")?;
+    let source = ComponentId::try_new("7a691d7b-1655-5ab0-9a77-8b816cbc6e13")?;
+    let sink = ComponentId::try_new("0e82e982-d831-5004-b9fe-534f4161c9a6")?;
     let from = Endpoint::new(source.clone(), PortId::try_new("out")?);
     let output = Endpoint::new(query.clone(), PortId::try_new("out")?);
     let directory = tempfile::tempdir()?;
@@ -253,22 +258,35 @@ async fn automatic_graph(indexed: bool) -> Result<()> {
     let received = Arc::new(Mutex::new(Vec::new()));
     let notification = Arc::new(Notify::new());
     let mut graph = builder
-        .source(Box::new(Source {
-            descriptor: ComponentDescriptor::try_new(
-                source,
-                vec![port("out", PortDirection::Output)?],
-            )?,
-            envelope: Some(scheduled_input(1000, 2000)?.envelope),
-        }))
-        .component(specification, factory)
-        .sink(Box::new(Sink {
-            descriptor: ComponentDescriptor::try_new(
-                sink.clone(),
-                vec![port("in", PortDirection::Input)?],
-            )?,
-            received: received.clone(),
-            notification: notification.clone(),
-        }))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(Source {
+                descriptor: ComponentDescriptor::try_new(
+                    source,
+                    vec![port("out", PortDirection::Output)?],
+                )?,
+                envelope: Some(scheduled_input(1000, 2000)?.envelope),
+            }),
+        )
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+                .expect("fixture component name"),
+            specification,
+            factory,
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(Sink {
+                descriptor: ComponentDescriptor::try_new(
+                    sink.clone(),
+                    vec![port("in", PortDirection::Input)?],
+                )?,
+                received: received.clone(),
+                notification: notification.clone(),
+            }),
+        )
         .connect(
             EdgeDefinition::new(from.clone(), Endpoint::new(query, PortId::try_new("in")?)),
             Box::new(BoundedPipeConfig { capacity: 1 }),

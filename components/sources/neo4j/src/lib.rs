@@ -47,7 +47,7 @@ pub struct Neo4jSource {
 }
 
 impl Neo4jSource {
-    pub fn builder(id: impl Into<String>) -> Neo4jSourceBuilder {
+    pub fn builder(id: drasi_lib::ComponentId) -> Neo4jSourceBuilder {
         Neo4jSourceBuilder::new(id)
     }
 
@@ -58,7 +58,7 @@ impl Neo4jSource {
 
 #[async_trait]
 impl Source for Neo4jSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_lib::ComponentId {
         &self.base.id
     }
 
@@ -239,12 +239,12 @@ impl Source for Neo4jSource {
         self
     }
 
-    async fn deprovision(&self) -> Result<()> {
-        self.base.deprovision_common().await
+    async fn delete_owned_resources(&self) -> Result<()> {
+        self.base.delete_owned_resources_common().await
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(
@@ -258,7 +258,7 @@ impl Source for Neo4jSource {
 async fn poll_once(
     base: &SourceBase,
     graph: &Graph,
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     selectors: &[HashMap<String, BoltType>],
     from_cursor: &str,
     start_cursor_mode: &StartCursor,
@@ -295,7 +295,7 @@ async fn poll_once(
                     }
                 }
 
-                match parse_source_change(source_id, &event_map, event_time_ms) {
+                match parse_source_change(source_id.as_str(), &event_map, event_time_ms) {
                     Ok(Some(change)) => {
                         base.dispatch_source_change(change).await?;
                     }
@@ -336,7 +336,7 @@ async fn connect_graph(config: &Neo4jSourceConfig) -> Result<Graph> {
 }
 
 pub struct Neo4jSourceBuilder {
-    id: String,
+    id: drasi_lib::ComponentId,
     uri: String,
     user: String,
     password: String,
@@ -353,9 +353,9 @@ pub struct Neo4jSourceBuilder {
 }
 
 impl Neo4jSourceBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: drasi_lib::ComponentId) -> Self {
         Self {
-            id: id.into(),
+            id: id.clone(),
             uri: "bolt://localhost:7687".to_string(),
             user: "neo4j".to_string(),
             password: String::new(),
@@ -475,7 +475,7 @@ impl Neo4jSourceBuilder {
         };
         config.validate()?;
 
-        let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
+        let mut params = SourceBaseParams::new(self.id.clone()).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
         }
@@ -500,19 +500,26 @@ mod tests {
 
     #[test]
     fn test_builder() {
-        let source = Neo4jSource::builder("neo4j-source")
-            .with_uri("bolt://localhost:7687")
-            .with_user("neo4j")
-            .with_password("password")
-            .with_database("neo4j")
-            .with_labels(vec!["Person".to_string()])
-            .with_rel_types(vec!["ACTED_IN".to_string()])
-            .with_poll_interval(Duration::from_millis(1000))
-            .start_from_now()
-            .build();
+        let source = Neo4jSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000087")
+                .expect("fixture UUID"),
+        )
+        .with_uri("bolt://localhost:7687")
+        .with_user("neo4j")
+        .with_password("password")
+        .with_database("neo4j")
+        .with_labels(vec!["Person".to_string()])
+        .with_rel_types(vec!["ACTED_IN".to_string()])
+        .with_poll_interval(Duration::from_millis(1000))
+        .start_from_now()
+        .build();
 
         assert!(source.is_ok());
-        assert_eq!(source.unwrap().id(), "neo4j-source");
+        assert_eq!(
+            source.unwrap().id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000087")
+                .expect("fixture UUID")
+        );
     }
 }
 

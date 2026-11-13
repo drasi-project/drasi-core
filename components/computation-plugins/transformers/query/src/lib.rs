@@ -5,6 +5,7 @@ mod bootstrap;
 mod durable;
 mod indexed;
 mod output;
+mod update;
 
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -15,15 +16,16 @@ use drasi_computation_contracts::profiling::timestamp_ns;
 use drasi_computation_contracts::ComputationQueryLanguage as QueryLanguage;
 use drasi_computation_contracts::{
     BootstrapCompletion, BootstrapStatus, ChangeEnvelope, ComponentDescriptor, ComponentRole,
-    ComponentSemanticKind, GraphChangeCodec, GraphProducerProgress, ImplementationIdentity,
-    InputBinding, InputEnvelope, OutputCursor, OutputEnvelope, OutputProgress, OutputReaders,
-    PipeRequirements, PortDescriptor, PortDirection, PortId, QueryChangeCodec, QueryDescription,
-    QueryExecutionSettings, ResultNodeProjector, StreamId, WakeupSource,
+    ComponentSemanticKind, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
+    GraphChangeCodec, GraphProducerProgress, ImplementationIdentity, InputBinding, InputEnvelope,
+    OutputCursor, OutputEnvelope, OutputProgress, OutputReaders, PipeRequirements, PortDescriptor,
+    PortDirection, PortId, QueryChangeCodec, QueryDescription, QueryExecutionSettings,
+    ResultNodeProjector, StreamId, WakeupSource,
 };
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, NativeComponent, NativeOutputSnapshots,
-    NativeProcessing, NativeTransformer, PluginDefinition,
+    ApplyUpdateRequest, Capabilities, Component, ConfigSchema, ConfigType, ControlSender,
+    CreateRequest, CreatedComponent, Factory, FactoryMetadata, NativeComponent,
+    NativeOutputSnapshots, NativeProcessing, NativeTransformer, PluginDefinition, UpdateRequest,
 };
 use drasi_core::{
     computation::QueryInputBatch, middleware::MiddlewareTypeRegistry, query::QueryEvaluator,
@@ -83,6 +85,31 @@ impl Default for QueryFactory {
     }
 }
 
+fn query_configuration_schema(
+    fields: impl IntoIterator<Item = (&'static str, ConfigType, bool)>,
+) -> ConfigSchema {
+    let mut schema = ConfigSchema::from_fields(fields);
+    schema
+        .constrain(
+            "inputs",
+            drasi_computation_contracts::ConfigurationConstraint::query_inputs(),
+        )
+        .expect("query schema declares inputs");
+    if schema
+        .fields
+        .get("bootstrap")
+        .is_some_and(|field| field.value_type == ConfigType::Array)
+    {
+        schema
+            .constrain(
+                "bootstrap",
+                drasi_computation_contracts::ConfigurationConstraint::snapshot_inputs(),
+            )
+            .expect("query schema declares snapshot inputs");
+    }
+    schema
+}
+
 impl Factory for QueryFactory {
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
@@ -90,7 +117,7 @@ impl Factory for QueryFactory {
                 .expect("constant implementation"),
             role: ComponentRole::Transformer,
             configuration_version: 1,
-            configuration: ConfigSchema::from_fields([
+            configuration: query_configuration_schema([
                 ("query", ConfigType::String, true),
                 ("volatile", ConfigType::Boolean, true),
                 ("language", ConfigType::String, false),
@@ -126,9 +153,18 @@ impl Factory for QueryFactory {
                 continuations: true,
                 wakeups: true,
                 input_binding_updates: true,
+                update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Recreate],
                 ..Capabilities::default()
             },
         }
+    }
+
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+
+    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+        update::plan(request, &self.middleware, &self.metadata())
     }
 
     fn create(
@@ -185,7 +221,7 @@ impl Factory for IndexedQueryFactory {
         let mut metadata = QueryFactory::new(self.middleware.clone()).metadata();
         metadata.implementation =
             ImplementationIdentity::try_new(INDEXED_IMPLEMENTATION, "1").expect("constant");
-        metadata.configuration = ConfigSchema::from_fields([
+        metadata.configuration = query_configuration_schema([
             ("query", ConfigType::String, true),
             ("volatile", ConfigType::Boolean, false),
             ("publication", ConfigType::String, false),
@@ -212,9 +248,17 @@ impl Factory for IndexedQueryFactory {
         metadata.capabilities.continuations = true;
         metadata.capabilities.startup_continuation = true;
         metadata.capabilities.durable_output = true;
-        metadata.capabilities.deprovision = true;
+        metadata.capabilities.delete_owned_resources = true;
         metadata.capabilities.binds_inputs = false;
         metadata
+    }
+
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+
+    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+        update::plan(request, &self.middleware, &self.metadata())
     }
 
     fn create(&self, _: &CreateRequest, _: ControlSender) -> anyhow::Result<CreatedComponent> {
@@ -258,7 +302,7 @@ impl Factory for ProviderQueryFactory {
         let mut metadata = QueryFactory::new(self.middleware.clone()).metadata();
         metadata.implementation =
             ImplementationIdentity::try_new(PROVIDER_IMPLEMENTATION, "1").expect("constant");
-        metadata.configuration = ConfigSchema::from_fields([
+        metadata.configuration = query_configuration_schema([
             ("query", ConfigType::String, true),
             ("volatile", ConfigType::Boolean, true),
             ("language", ConfigType::String, false),
@@ -273,6 +317,14 @@ impl Factory for ProviderQueryFactory {
         metadata.capabilities.quiescent_bootstrap =
             Some(PortId::try_new("in").expect("constant port"));
         metadata
+    }
+
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+
+    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+        update::plan(request, &self.middleware, &self.metadata())
     }
 
     fn create(
@@ -294,13 +346,10 @@ impl Factory for ProviderQueryFactory {
     }
 }
 
-fn create_query(
+fn query_configuration(
     request: &CreateRequest,
-    metadata: FactoryMetadata,
-    processing: Option<NativeProcessing>,
-    bootstrap: Option<bootstrap::SnapshotBootstrap>,
-    middleware: Arc<MiddlewareTypeRegistry>,
-) -> anyhow::Result<CreatedComponent> {
+    middleware: &MiddlewareTypeRegistry,
+) -> anyhow::Result<(ContinuousQueryDefinition, QueryExecutionSettings)> {
     let query = request.configuration["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("query must be a string"))?;
@@ -329,23 +378,8 @@ fn create_query(
         .collect(),
     ))
     .context("invalid query execution settings")?;
-    execution.validate(Some(&middleware))?;
-    let input_scopes = if !request.inputs.is_empty()
-        && execution
-            .inputs
-            .iter()
-            .any(|input| !input.pipeline.is_empty())
-    {
-        Some(drasi_query_common::query_input_scopes(
-            request.id.as_str(),
-            &execution.inputs,
-            &request.inputs,
-        )?)
-    } else {
-        None
-    };
+    execution.validate(Some(middleware))?;
     let id = request.id.clone();
-    let provider_bootstrap = metadata.capabilities.quiescent_bootstrap.is_some();
     let stream = match request.configuration.get("stream") {
         Some(value) => StreamId::try_new(value.as_str().context("query stream must be a string")?)?,
         None => StreamId::try_new(format!("{id}/out"))?,
@@ -357,7 +391,7 @@ fn create_query(
         .transpose()
         .context("invalid query output retention capacity")?
         .unwrap_or_else(|| NonZeroUsize::new(1).expect("positive default retention"));
-    let definition = Arc::new(ContinuousQueryDefinition {
+    let definition = ContinuousQueryDefinition {
         graph_id: request
             .scope
             .as_ref()
@@ -368,7 +402,39 @@ fn create_query(
         language,
         output_stream: stream.clone(),
         outbox_capacity: capacity,
-    });
+    };
+    Ok((definition, execution))
+}
+
+fn create_query(
+    request: &CreateRequest,
+    metadata: FactoryMetadata,
+    processing: Option<NativeProcessing>,
+    bootstrap: Option<bootstrap::SnapshotBootstrap>,
+    middleware: Arc<MiddlewareTypeRegistry>,
+) -> anyhow::Result<CreatedComponent> {
+    update::validate_creation(request)?;
+    let (definition, execution) = query_configuration(request, &middleware)?;
+    let definition = Arc::new(definition);
+    let id = definition.id.clone();
+    let stream = definition.output_stream.clone();
+    let capacity = definition.outbox_capacity;
+    let language = definition.language;
+    let provider_bootstrap = metadata.capabilities.quiescent_bootstrap.is_some();
+    let input_scopes = if !request.inputs.is_empty()
+        && execution
+            .inputs
+            .iter()
+            .any(|input| !input.pipeline.is_empty())
+    {
+        Some(drasi_query_common::query_input_scopes(
+            &request.id,
+            &execution.inputs,
+            &request.inputs,
+        )?)
+    } else {
+        None
+    };
     let instance = request
         .scope
         .as_ref()
@@ -421,6 +487,7 @@ fn create_query(
         .transpose()?;
     Ok(Component::Transformer(Box::new(QueryTransformer {
         descriptor: metadata.descriptor(id.clone())?,
+        metadata,
         configuration: request.configuration.clone(),
         definition,
         execution: Arc::new(execution),
@@ -464,6 +531,7 @@ async fn evaluator(
 
 struct QueryTransformer {
     descriptor: ComponentDescriptor,
+    metadata: FactoryMetadata,
     configuration: serde_json::Value,
     definition: Arc<ContinuousQueryDefinition>,
     execution: Arc<QueryExecutionSettings>,
@@ -487,6 +555,34 @@ struct QueryTransformer {
 
 #[async_trait]
 impl NativeComponent for QueryTransformer {
+    fn supports_apply_update(&self) -> bool {
+        true
+    }
+
+    async fn apply_update(&mut self, request: &ApplyUpdateRequest) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.started && !self.failed && self.provider_rows.is_none(),
+            "query update requires completed activation and a paused processing boundary"
+        );
+        anyhow::ensure!(
+            request.request.current.id == *self.descriptor.id()
+                && request.request.current.configuration == self.configuration
+                && request.plan
+                    == update::plan(&request.request, &self.middleware, &self.metadata)?
+                && request.plan.mode == ComponentUpdateMode::InPlace
+                && request.plan.data == ComponentUpdateData::Preserve,
+            "retained query update does not match the approved configuration and plan"
+        );
+        let (definition, _) = query_configuration(&request.request.proposed, &self.middleware)?;
+        self.output.increase_retention(definition.outbox_capacity)?;
+        if let Some(durable) = &mut self.durable {
+            durable.set_retention(definition.outbox_capacity);
+        }
+        Arc::make_mut(&mut self.definition).outbox_capacity = definition.outbox_capacity;
+        self.configuration = request.request.proposed.configuration.clone();
+        Ok(())
+    }
+
     fn supports_input_binding_updates(&self) -> bool {
         true
     }
@@ -499,7 +595,7 @@ impl NativeComponent for QueryTransformer {
             .any(|input| !input.pipeline.is_empty())
         {
             Some(drasi_query_common::query_input_scopes(
-                self.definition.id.as_str(),
+                &self.definition.id,
                 &self.execution.inputs,
                 bindings,
             )?)
@@ -541,12 +637,15 @@ impl NativeComponent for QueryTransformer {
         }
     }
 
-    fn supports_deprovision(&self) -> bool {
+    fn supports_delete_owned_resources(&self) -> bool {
         self.durable.is_some()
     }
 
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.started, "query deprovision requires completed stop");
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.started,
+            "query resource deletion requires completed stop"
+        );
         let processing = self
             .processing
             .as_ref()

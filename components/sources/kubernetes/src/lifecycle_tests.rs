@@ -96,6 +96,13 @@ impl MockApi {
     }
 
     fn source_builder(&self) -> KubernetesSourceBuilder {
+        self.source_builder_with_id(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+        )
+    }
+
+    fn source_builder_with_id(&self, id: drasi_core::ComponentId) -> KubernetesSourceBuilder {
         let kubeconfig = json!({
             "apiVersion": "v1",
             "kind": "Config",
@@ -104,7 +111,7 @@ impl MockApi {
             "current-context": "test",
             "users": [{"name": "test", "user": {"token": "test-token"}}]
         });
-        KubernetesSource::builder("test-source")
+        KubernetesSource::builder(id)
             .with_resources(vec![ResourceSpec {
                 api_version: "v1".to_string(),
                 kind: "Pod".to_string(),
@@ -251,9 +258,9 @@ async fn wait_for_error(source: &KubernetesSource) {
 async fn capture_updates(source: &KubernetesSource) -> mpsc::Receiver<ComponentUpdate> {
     let (updates, receiver) = mpsc::channel(32);
     source
-        .initialize(SourceRuntimeContext::new(
+        .bind_runtime_context(SourceRuntimeContext::new(
             "test",
-            source.id(),
+            source.id().clone(),
             None,
             updates,
             None,
@@ -286,7 +293,11 @@ impl Default for TestStateStore {
 
 #[async_trait::async_trait]
 impl StateStoreProvider for TestStateStore {
-    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+    async fn get(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<Option<Vec<u8>>> {
         self.get_started.notify_one();
         if self.block_get.load(Ordering::SeqCst) {
             self.get_release.acquire().await.unwrap().forget();
@@ -299,7 +310,12 @@ impl StateStoreProvider for TestStateStore {
         self.inner.get(store_id, key).await
     }
 
-    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+    async fn set(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<()> {
         if self.fail_set.load(Ordering::SeqCst) {
             return Err(StateStoreError::StorageError(
                 "private-store-endpoint".into(),
@@ -308,43 +324,71 @@ impl StateStoreProvider for TestStateStore {
         self.inner.set(store_id, key, value).await
     }
 
-    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn delete(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<bool> {
         self.inner.delete(store_id, key).await
     }
 
-    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+    async fn contains_key(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        key: &str,
+    ) -> StateStoreResult<bool> {
         self.inner.contains_key(store_id, key).await
     }
 
     async fn get_many(
         &self,
-        store_id: &str,
+        store_id: &drasi_core::interface::StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
         self.inner.get_many(store_id, keys).await
     }
 
-    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()> {
         self.inner.set_many(store_id, entries).await
     }
 
-    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+    async fn delete_many(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+        keys: &[&str],
+    ) -> StateStoreResult<usize> {
         self.inner.delete_many(store_id, keys).await
     }
 
-    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn clear_store(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<usize> {
         self.inner.clear_store(store_id).await
     }
 
-    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+    async fn list_keys(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<Vec<String>> {
         self.inner.list_keys(store_id).await
     }
 
-    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+    async fn store_exists(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<bool> {
         self.inner.store_exists(store_id).await
     }
 
-    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+    async fn key_count(
+        &self,
+        store_id: &drasi_core::interface::StorePartition,
+    ) -> StateStoreResult<usize> {
         self.inner.key_count(store_id).await
     }
 }
@@ -357,7 +401,14 @@ async fn startup_rejects_unreadable_or_malformed_state_without_running() {
         store.fail_get.store(fail_get, Ordering::SeqCst);
         store
             .inner
-            .set("test-source", "seen_uids", b"not JSON".to_vec())
+            .set(
+                &drasi_core::interface::StorePartition::component(
+                    drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                        .expect("fixture UUID"),
+                ),
+                "seen_uids",
+                b"not JSON".to_vec(),
+            )
             .await
             .unwrap();
         let source = api
@@ -617,14 +668,17 @@ async fn stop_reports_checkpoint_failure_and_clears_dispatchers() {
 
 #[tokio::test]
 async fn startup_rejects_invalid_kubeconfig() {
-    let source = KubernetesSource::builder("invalid-config")
-        .with_resources(vec![ResourceSpec {
-            api_version: "v1".to_string(),
-            kind: "Pod".to_string(),
-        }])
-        .with_kubeconfig_content("not a kubeconfig")
-        .build()
-        .unwrap();
+    let source = KubernetesSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000074")
+            .expect("fixture UUID"),
+    )
+    .with_resources(vec![ResourceSpec {
+        api_version: "v1".to_string(),
+        kind: "Pod".to_string(),
+    }])
+    .with_kubeconfig_content("not a kubeconfig")
+    .build()
+    .unwrap();
     source
         .start()
         .await
@@ -643,9 +697,9 @@ async fn startup_rejects_fatal_list_errors_without_running() {
         let source = api.source();
         let (updates, mut receiver) = mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "test",
-                source.id(),
+                source.id().clone(),
                 None,
                 updates,
                 None,
@@ -810,12 +864,19 @@ async fn direct_recovery_after_fatal_watch_preserves_subscription() {
 async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
     use drasi_core::models::SourceChange;
     use drasi_lib::channels::SourceEvent;
-    use drasi_lib::component_graph::wait_for_status;
+    use drasi_lib::component_graph::wait_for_status_by_id;
     use drasi_lib::DrasiLib;
 
     for stop_first in [false, true] {
         let api = MockApi::new().await;
+        let source_id = drasi_lib::config::ComponentId::generate();
+        let source = api
+            .source_builder_with_id(source_id.clone())
+            .with_auto_start(false)
+            .build()
+            .unwrap();
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -828,16 +889,23 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
                     .expect("reference query factory")
                     .clone(),
             )
-            .with_source(api.source_builder().with_auto_start(false).build().unwrap())
+            .with_source(
+                drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+                source,
+            )
             .build()
             .await
             .unwrap();
         core.start().await.unwrap();
-        core.start_source("test-source").await.unwrap();
+        core.start_source_by_name(
+            &drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
         let graph = core.component_graph();
         let runtime = core
             .source_manager()
-            .get_source_instance("test-source")
+            .get_source_instance_by_id(&source_id)
             .await
             .unwrap();
         let source = runtime.as_any().downcast_ref::<KubernetesSource>().unwrap();
@@ -852,7 +920,7 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
             .unwrap()
             .abort_handle();
         api.send_watch_error(403);
-        wait_for_status(
+        wait_for_status_by_id(
             &graph,
             source.id(),
             &[ComponentStatus::Error],
@@ -862,8 +930,8 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
         .unwrap();
 
         if stop_first {
-            core.stop_source(source.id()).await.unwrap();
-            wait_for_status(
+            core.stop_source_by_id(&source_id).await.unwrap();
+            wait_for_status_by_id(
                 &graph,
                 source.id(),
                 &[ComponentStatus::Stopped],
@@ -880,8 +948,8 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
             );
         }
         let expected_watches = *api.state.watch_count.borrow() + 2;
-        core.start_source(source.id()).await.unwrap();
-        wait_for_status(
+        core.start_source_by_id(&source_id).await.unwrap();
+        wait_for_status_by_id(
             &graph,
             source.id(),
             &[ComponentStatus::Running],
@@ -916,8 +984,12 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
             SourceEvent::Change(SourceChange::Insert { element })
                 if element.get_reference().element_id.as_ref() == "pod:managed"
         ));
-        core.stop_source(source.id()).await.unwrap();
-        wait_for_status(
+        core.stop_source_by_name(
+            &drasi_core::ComponentName::try_new("test-source").expect("fixture component name"),
+        )
+        .await
+        .unwrap();
+        wait_for_status_by_id(
             &graph,
             source.id(),
             &[ComponentStatus::Stopped],

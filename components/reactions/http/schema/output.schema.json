@@ -28,6 +28,11 @@
             "description": "Row state **before** the change.\nOmitted for `ADD` and for the first emission of an aggregation group.",
             "nullable": true
           },
+          "inputAlias": {
+            "description": "Presentation/routing alias assigned to this input, never a query identity.",
+            "nullable": true,
+            "type": "string"
+          },
           "metadata": {
             "description": "Source/query metadata carried by the originating `QueryResult`.\nOmitted when empty.",
             "nullable": true
@@ -36,8 +41,18 @@
             "$ref": "#/components/schemas/Operation"
           },
           "queryId": {
-            "description": "The continuous query that produced the change.",
+            "format": "uuid",
             "type": "string"
+          },
+          "queryName": {
+            "allOf": [
+              {
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u0020\\u007f-\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]+$",
+                "type": "string"
+              }
+            ],
+            "nullable": true
           },
           "sequenceId": {
             "description": "Monotonic per-query sequence number identifying this emission.",

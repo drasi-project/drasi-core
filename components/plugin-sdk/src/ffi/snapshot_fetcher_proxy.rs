@@ -48,7 +48,7 @@ impl Drop for FfiSnapshotFetcherProxy {
 impl drasi_lib::SnapshotFetcher for FfiSnapshotFetcherProxy {
     async fn fetch_snapshot(
         &self,
-        query_id: &str,
+        query_id: &drasi_lib::ComponentId,
     ) -> Result<
         drasi_lib::queries::output_state::SnapshotStream,
         drasi_lib::queries::output_state::FetchError,
@@ -56,11 +56,11 @@ impl drasi_lib::SnapshotFetcher for FfiSnapshotFetcherProxy {
         let vtable = unsafe { &*self.vtable };
         let cb = vtable.fetch_snapshot_fn;
         let state = SendMutPtr(vtable.state);
-        let query_id_owned = query_id.to_string();
+        let query_id_owned = query_id.clone();
 
         // Call the host callback on a blocking thread to avoid blocking async workers
         let wrapped = tokio::task::spawn_blocking(move || {
-            let query_id_ffi = FfiStr::from_str(&query_id_owned);
+            let query_id_ffi = FfiStr::from_str(query_id_owned.as_str());
             SendFfiSnapshotIteratorResponse(cb(state.as_ptr(), query_id_ffi))
         })
         .await

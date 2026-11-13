@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use drasi_core::{interface::StorageScope, ComponentId};
 use drasi_core::{
     interface::{FutureElementRef, FutureQueue, IndexError, PushType},
     models::{ElementReference, ElementTimestamp},
@@ -30,10 +31,10 @@ use crate::{
 
 /// Redis key structure (hash-tagged for cluster compatibility):
 ///
-/// fqi:{<query_id>} -> {full future_ref}  (sorted set by due_time)
-/// fqi:{<query_id>}:{position_in_query}:{group_signature} -> {future_ref}  (set)
+/// fqi:{<storage_key>} -> {full future_ref}  (sorted set by due_time)
+/// fqi:{<storage_key>}:{position_in_query}:{group_signature} -> {future_ref}  (set)
 pub struct GarnetFutureQueue {
-    query_id: Arc<str>,
+    storage_key: Arc<str>,
     connection: MultiplexedConnection,
     session_state: Arc<GarnetSessionState>,
 }
@@ -41,25 +42,27 @@ pub struct GarnetFutureQueue {
 impl GarnetFutureQueue {
     /// Create a new GarnetFutureQueue from a shared connection.
     pub fn new(
-        query_id: &str,
+        scope: &StorageScope,
+        component_id: &ComponentId,
         connection: MultiplexedConnection,
         session_state: Arc<GarnetSessionState>,
     ) -> Self {
+        let storage_key: Arc<str> = scope.component_key(component_id).into();
         Self {
-            query_id: Arc::from(query_id),
+            storage_key,
             connection,
             session_state,
         }
     }
 
     fn get_queue_key(&self) -> String {
-        format!("fqi:{{{}}}", self.query_id)
+        format!("fqi:{{{}}}", self.storage_key)
     }
 
     fn get_index_key(&self, position_in_query: usize, group_signature: u64) -> String {
         format!(
             "fqi:{{{}}}:{}:{}",
-            self.query_id, position_in_query, group_signature
+            self.storage_key, position_in_query, group_signature
         )
     }
 }
@@ -395,7 +398,7 @@ impl FutureQueue for GarnetFutureQueue {
             .map_err(IndexError::other)?;
         // Delete secondary index keys
         self.connection
-            .clear(format!("fqi:{{{}}}:*", self.query_id))
+            .clear(format!("fqi:{{{}}}:*", self.storage_key))
             .await
     }
 }

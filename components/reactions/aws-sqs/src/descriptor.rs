@@ -137,16 +137,16 @@ impl ReactionPluginDescriptor for SqsReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         let dto: SqsReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let mut builder = SqsReactionBuilder::new(id)
-            .with_queries(query_ids)
+        let mut builder = SqsReactionBuilder::new(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start)
             .with_queue_url(mapper.resolve_string(&dto.queue_url).await?);
 

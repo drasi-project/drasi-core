@@ -27,6 +27,8 @@ use crate::{
     BridgeError, ErrorCode, IngressCut, IngressDrainStatus, PortableEnvelopeCodec, Profile, Result,
 };
 
+const PRODUCER_NAMESPACE: &str = "54b3e259-f67c-55e3-987d-8aa1b1fd5921";
+
 pub struct Observations {
     pub generation: AtomicU64,
     pub connected_generation: AtomicU64,
@@ -123,8 +125,8 @@ impl Receiver {
                 GraphProducerIdentity::volatile(
                     contract.receiver_instance.clone(),
                     graph_id.into(),
-                    ComponentId::try_new(contract.receiver_endpoint.as_str())?,
-                    StreamId::try_new(contract.receiver_stream.as_str())?,
+                    contract.receiver_endpoint.clone(),
+                    contract.receiver_stream.clone(),
                 )
             })
             .transpose()?;
@@ -290,10 +292,12 @@ impl Receiver {
     }
 
     fn producer(&self) -> ComponentId {
-        ComponentId::try_new(format!(
-            "drasi-bridge-{:x}",
-            Sha256::digest(self.contract.fingerprint())
-        ))
+        let namespace =
+            ComponentId::try_new(PRODUCER_NAMESPACE).expect("constant producer namespace");
+        ComponentId::derive_owned(
+            &namespace,
+            &format!("{:x}", Sha256::digest(self.contract.fingerprint())),
+        )
         .expect("bounded bridge producer fingerprint")
     }
 
@@ -498,7 +502,7 @@ impl Receiver {
         mut envelope: ChangeEnvelope,
         request: &DataRequest,
     ) -> Result<ChangeEnvelope> {
-        if envelope.system().stream().as_str() != self.contract.sender_stream {
+        if envelope.system().stream() != &self.contract.sender_stream {
             return Err(BridgeError::invalid(
                 "incoming envelope does not own the declared sender stream",
             ));
@@ -516,8 +520,7 @@ impl Receiver {
         envelope
             .append_annotation(
                 ContextEntry::try_new(
-                    ComponentId::try_new(self.contract.receiver_endpoint.as_str())
-                        .map_err(|error| BridgeError::invalid(error.to_string()))?,
+                    self.contract.receiver_endpoint.clone(),
                     "drasi.bridge.origin.v1",
                     ContextValue::Bytes(Arc::from(origin)),
                 )
@@ -588,8 +591,7 @@ impl Receiver {
                         BridgeError::new(ErrorCode::Closed, "volatile ingress queue is closed")
                     }
                 })?;
-            let stream = StreamId::try_new(self.contract.receiver_stream.as_str())
-                .map_err(|error| BridgeError::invalid(error.to_string()))?;
+            let stream = self.contract.receiver_stream.clone();
             let mut system = SystemMetadata::new(stream.clone(), request.sequence)
                 .with_ordering(input.system().ordering());
             if let Some(timestamp) = input.system().timestamp() {

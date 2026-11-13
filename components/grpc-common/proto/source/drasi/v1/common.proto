@@ -7,7 +7,7 @@ import "google/protobuf/struct.proto";
 
 // Element reference that uniquely identifies an element
 message ElementReference {
-    string source_id = 1;
+    string namespace = 1; // Data namespace; not a component ID or component name.
     string element_id = 2;
 }
 
@@ -56,7 +56,7 @@ message SourceChange {
         ElementMetadata metadata = 3; // For delete
     }
     google.protobuf.Timestamp timestamp = 4;
-    string source_id = 5;
+    string source_id = 5; // Emitting component UUID, never a component name.
 }
 
 // Query result item
@@ -69,14 +69,14 @@ message QueryResultItem {
 
 // Query result batch
 message QueryResult {
-    string query_id = 1;
+    string query_id = 1; // Query component UUID, never a component name.
     repeated QueryResultItem results = 2;
     google.protobuf.Timestamp timestamp = 3;
 }
 
 // Bootstrap request
 message BootstrapRequest {
-    string query_id = 1;
+    string query_id = 1; // Query component UUID, never a component name.
     repeated string node_labels = 2;
     repeated string relation_labels = 3;
 }

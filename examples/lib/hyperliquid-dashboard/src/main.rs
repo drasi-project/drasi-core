@@ -111,13 +111,13 @@ async fn main() -> Result<()> {
                 )?
                 .query_factory()?,
             )
-            .with_source(source)
+            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
             .with_query(prices)
             .with_query(trades)
             .with_query(funding)
             .with_query(liquidations)
             .with_query(books)
-            .with_reaction(sse)
+            .with_reaction(drasi_lib::Reaction::id(&sse).to_owned(), sse)
             .build()
             .await?,
     );

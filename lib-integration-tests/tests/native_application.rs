@@ -52,15 +52,15 @@ async fn receive_name(
 }
 
 async fn scenario() -> Result<()> {
-    let source_id = ComponentId::try_new("input")?;
-    let query_id = ComponentId::try_new("query")?;
-    let reaction_id = ComponentId::try_new("application")?;
+    let source_id = ComponentId::try_new("82b42b6d-37cb-5958-b375-5c86884cd4df")?;
+    let query_id = ComponentId::try_new("0bdfa1d5-f204-5328-8f48-638ffdd9c875")?;
+    let reaction_id = ComponentId::try_new("945a2ccb-cea7-5d8f-a0cb-428b3aaf0a30")?;
     let source_stream = StreamId::try_new("input/out")?;
     let query_stream = StreamId::try_new("query/out")?;
     let (source, input) = NativeApplicationSource::channel(
         "application-test",
         "native-application-trio",
-        source_id.as_str(),
+        source_id.clone(),
         source_stream.clone(),
         NonZeroUsize::new(4).context("capacity")?,
     )?;
@@ -95,16 +95,28 @@ async fn scenario() -> Result<()> {
     .with_bootstrap(bootstrap);
     let results = query.results();
     let (reaction, mut received) = NativeApplicationReaction::channel(
-        reaction_id.as_str(),
+        reaction_id.clone(),
         QueryChangeCodec::schema().descriptor().clone(),
         NonZeroUsize::new(16).context("application capacity")?,
     )?;
     let reaction_input = reaction.input();
     let query_output = Endpoint::new(query_id.clone(), PortId::try_new("out")?);
     let mut graph = ComputationGraph::builder("native-application-trio")
-        .source(Box::new(source))
-        .transformer(Box::new(query))
-        .sink(Box::new(reaction))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(source),
+        )
+        .transformer(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
+                .expect("fixture component name"),
+            Box::new(query),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(reaction),
+        )
         .bind_stream(output.clone(), source_stream)
         .bind_stream(query_output.clone(), query_stream)
         .connect(
@@ -150,7 +162,7 @@ async fn scenario() -> Result<()> {
                 [json!({"name":"Alice"}), json!({"name":"Bob"})]
             );
 
-            let source = control.component_handle(&source_id)?;
+            let source = control.component_handle_by_id(&source_id)?;
             source.stop().await?;
             input
                 .send_node_update(
@@ -172,7 +184,7 @@ async fn scenario() -> Result<()> {
                 [json!({"name":"Alicia"}), json!({"name":"Bob"})]
             );
 
-            let reaction = control.component_handle(&reaction_id)?;
+            let reaction = control.component_handle_by_id(&reaction_id)?;
             reaction.stop().await?;
             input.send_delete("bob", vec!["Person"]).await?;
             reaction.start().await?;

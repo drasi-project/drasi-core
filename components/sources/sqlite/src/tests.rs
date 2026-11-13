@@ -9,7 +9,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
 fn file_source(directory: &TempDir, rest: bool) -> Result<SqliteSource> {
-    let mut builder = SqliteSource::builder("sqlite-lifecycle").with_path(
+    let mut builder = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000015e")
+            .expect("fixture UUID"),
+    )
+    .with_path(
         directory
             .path()
             .join("data.db")
@@ -29,9 +33,12 @@ fn file_source(directory: &TempDir, rest: bool) -> Result<SqliteSource> {
 async fn database_and_listener_start_failures_retain_typed_causes() -> Result<()> {
     let directory = TempDir::new()?;
     let missing = directory.path().join("missing");
-    let source = SqliteSource::builder("bad-database")
-        .with_path(missing.join("data.db").to_string_lossy().into_owned())
-        .build()?;
+    let source = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000015f")
+            .expect("fixture UUID"),
+    )
+    .with_path(missing.join("data.db").to_string_lossy().into_owned())
+    .build()?;
     let error = source.start().await.unwrap_err();
     assert!(error.is::<rusqlite::Error>());
     assert_eq!(source.status().await, ComponentStatus::Error);
@@ -46,12 +53,15 @@ async fn database_and_listener_start_failures_retain_typed_causes() -> Result<()
 
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = occupied.local_addr()?;
-    let source = SqliteSource::builder("bad-listener")
-        .with_rest_api(RestApiConfig {
-            host: "127.0.0.1".into(),
-            port: address.port(),
-        })
-        .build()?;
+    let source = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000160")
+            .expect("fixture UUID"),
+    )
+    .with_rest_api(RestApiConfig {
+        host: "127.0.0.1".into(),
+        port: address.port(),
+    })
+    .build()?;
     assert!(source.start().await.unwrap_err().is::<std::io::Error>());
     assert_eq!(source.status().await, ComponentStatus::Error);
     assert!(source.database_worker.read().await.is_some());
@@ -69,7 +79,11 @@ async fn database_and_listener_start_failures_retain_typed_causes() -> Result<()
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_start_and_panicked_database_keep_cleanup_required() -> Result<()> {
-    let source = SqliteSource::builder("cancelled-start").build()?;
+    let source = SqliteSource::builder(
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000098")
+            .expect("fixture UUID"),
+    )
+    .build()?;
     let public_sender = source.command_tx.write().await;
     {
         let start = source.start();
@@ -147,7 +161,7 @@ async fn submitted_sqlite_write_finishes_after_cancelled_and_timed_out_stop() ->
     assert_eq!(source.status().await, ComponentStatus::Stopping);
     assert_eq!(
         handle.query("SELECT 1").await.unwrap_err().to_string(),
-        "source 'sqlite-lifecycle' is not running"
+        format!("source '{}' is not running", source.id())
     );
     assert!(source.start().await.unwrap_err().is::<WorkerAlreadyOwned>());
 

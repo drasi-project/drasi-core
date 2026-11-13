@@ -28,5 +28,8 @@ pub fn query_factory() -> Arc<dyn ComponentFactory> {
 }
 
 pub fn query_builder() -> drasi_lib::DrasiLibBuilder {
-    drasi_lib::DrasiLib::builder().with_query_factory(query_factory())
+    // Integration fixtures deliberately assemble preconstructed components with fixed IDs.
+    drasi_lib::DrasiLib::builder()
+        .with_allow_external_component_ids(true)
+        .with_query_factory(query_factory())
 }

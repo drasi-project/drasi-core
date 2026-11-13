@@ -18,8 +18,8 @@ Load `libdrasi_computation_bootstrap_sqlite.dylib` on macOS,
 `drasi_computation_bootstrap_sqlite.dll` on Windows. The native bootstrap
 extension supplies its query-scoped factory. The component-factory list is
 intentionally empty; hosts must validate the bootstrap catalogue as well.
-Use a matching host with bootstrap-only catalogue support; an older host can
-reject the empty processing-factory list even when it understands ABI 1.0.
+Use a matching ABI-2 host with bootstrap-only catalogue support; an empty
+processing-factory list is not an empty bootstrap catalogue.
 
 ## File snapshots
 

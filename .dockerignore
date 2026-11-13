@@ -1,0 +1,10 @@
+# Build artifacts and repository metadata are never part of source image contexts.
+target/
+**/target/
+.git/
+**/.git/
+.github/
+.DS_Store
+**/.DS_Store
+*.log
+**/*.log

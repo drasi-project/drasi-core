@@ -46,7 +46,7 @@ async fn history_reopen() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let make = |generation| {
         factory()?.create_component_with_processing(
-            ComponentId::try_new(COMPONENT)?,
+            component_id()?,
             json!({"query": HISTORY}),
             scope(generation),
             archive_provider(directory.path())?,
@@ -56,6 +56,7 @@ async fn history_reopen() -> Result<()> {
         .map(|value| item(value, value as u64 * 1000))
         .collect();
     let mut query = make(1)?;
+    query.initialize().await?;
     query.start().await?;
     for (index, element) in versions.iter().enumerate() {
         let output = query
@@ -97,6 +98,7 @@ async fn history_reopen() -> Result<()> {
     drop(query);
 
     let mut query = make(2)?;
+    query.initialize().await?;
     query.start().await?;
     assert_eq!(snapshot(&query).await?, expected);
     let output = query
@@ -129,6 +131,7 @@ async fn shared_query_archives_point_and_range_reopen_multi_thread() -> Result<(
 async fn shared_query_archives_require_actual_provider_support() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), HISTORY, 1)?;
+    query.initialize().await?;
     query.start().await?;
     let error = query
         .transform(input(

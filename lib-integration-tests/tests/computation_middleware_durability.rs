@@ -31,7 +31,7 @@ use std::{io::Write, num::NonZeroUsize, process::Stdio, sync::Arc, time::Duratio
 
 fn definition() -> Result<MiddlewareTransformerDefinition> {
     Ok(MiddlewareTransformerDefinition {
-        id: ComponentId::try_new("middleware")?,
+        id: ComponentId::try_new("d889fe2c-fbf9-5298-a756-05cabcc875f4")?,
         output_stream: StreamId::try_new("middleware/out")?,
         middleware: vec![SourceMiddlewareConfig::new(
             "unwind",
@@ -81,8 +81,9 @@ fn source_input(sequence: u64, update: bool, raw_metadata: bool) -> Result<Input
             )?,
         });
     }
+    let source_id = ComponentId::try_new("aa4b0192-1f0f-5bb8-a458-820438ee7bea")?;
     let source = SourceEventWrapper::with_sequence(
-        "source".into(),
+        source_id.clone(),
         SourceEvent::Change(change),
         timestamp,
         sequence,
@@ -92,7 +93,7 @@ fn source_input(sequence: u64, update: bool, raw_metadata: bool) -> Result<Input
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(source),
-            &ComponentId::try_new("source")?,
+            &source_id,
             StreamId::try_new("source/out")?,
             sequence,
             None,
@@ -101,20 +102,26 @@ fn source_input(sequence: u64, update: bool, raw_metadata: bool) -> Result<Input
 }
 
 async fn persistent_query(path: &std::path::Path) -> Result<ContinuousQueryTransformer> {
-    persistent_query_named(path, "query").await
+    persistent_query_named(
+        path,
+        ComponentId::try_new("70a753ff-f396-5582-91b3-1c2f5948550c")?,
+        StreamId::try_new("query/out")?,
+    )
+    .await
 }
 
 async fn persistent_query_named(
     path: &std::path::Path,
-    id: &str,
+    id: ComponentId,
+    output_stream: StreamId,
 ) -> Result<ContinuousQueryTransformer> {
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "middleware-durability".into(),
-            id: ComponentId::try_new(id)?,
+            id,
             query: "MATCH (n:Child) RETURN n.id AS id".into(),
             language: ComputationQueryLanguage::Cypher,
-            output_stream: StreamId::try_new(format!("{id}/out"))?,
+            output_stream,
             outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
         },
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false))),
@@ -320,8 +327,18 @@ async fn middleware_recovery_crash_worker() -> Result<()> {
         8,
     )
     .await?;
-    let mut first = persistent_query_named(&root.join("first"), "first").await?;
-    let mut second = persistent_query_named(&root.join("second"), "second").await?;
+    let mut first = persistent_query_named(
+        &root.join("first"),
+        ComponentId::try_new("00000000-0000-0000-0000-000000000001")?,
+        StreamId::try_new("first/out")?,
+    )
+    .await?;
+    let mut second = persistent_query_named(
+        &root.join("second"),
+        ComponentId::try_new("00000000-0000-0000-0000-000000000002")?,
+        StreamId::try_new("second/out")?,
+    )
+    .await?;
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("limit"));
     codec.register_schema(GraphChangeCodec::schema())?;
 

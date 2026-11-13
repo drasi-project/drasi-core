@@ -5,8 +5,8 @@ use crate::config::IngressConfig;
 use anyhow::{Context, Result};
 use drasi_computation_contracts::workers::spawn_owned_worker;
 use drasi_computation_contracts::{
-    ComponentDescriptor, GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress,
-    OutputEnvelope, PortId,
+    ComponentDescriptor, ComponentId, GraphChangeCodec, GraphProducerIdentity,
+    GraphProducerProgress, OutputEnvelope, PortId,
 };
 use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
 use drasi_core_types::models::SourceChange;
@@ -29,6 +29,7 @@ pub struct AdmissionError {
 }
 pub struct Ingress {
     pub config: IngressConfig,
+    pub source_id: ComponentId,
     pub cancel: CancellationToken,
     sender: Option<mpsc::Sender<OutputEnvelope>>,
     mode: AdmissionMode,
@@ -193,8 +194,9 @@ impl SourceRuntime {
         let mode = match admission {
             Some(service) => {
                 anyhow::ensure!(
-                    service.identity().stream() == &config.stream,
-                    "native source stream does not match its admission channel"
+                    service.identity().stream() == &config.stream
+                        && service.identity().component_id() == descriptor.id(),
+                    "native source identity or stream does not match its admission channel"
                 );
                 AdmissionMode::Durable(service)
             }
@@ -269,6 +271,7 @@ impl SourceRuntime {
         let cancel = CancellationToken::new();
         let ingress = Arc::new(Ingress {
             config: self.config.clone(),
+            source_id: self.descriptor.id().clone(),
             sender,
             cancel: cancel.clone(),
             mode: self.mode.clone(),
@@ -391,24 +394,46 @@ impl SourceRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drasi_computation_contracts::ComponentId;
     use tokio::sync::Notify;
 
+    const SOURCE_ID: &str = "495412a1-7a8f-505f-a9ca-a0da3eeadc36";
+    const OTHER_SOURCE_ID: &str = "9a7efebd-4820-5bea-9eb3-17e12e60b60a";
+
+    fn descriptor() -> Result<ComponentDescriptor> {
+        Ok(ComponentDescriptor::try_new(
+            ComponentId::try_new(SOURCE_ID)?,
+            vec![],
+        )?)
+    }
+
+    fn config() -> Result<IngressConfig> {
+        Ok(IngressConfig {
+            stream: drasi_computation_contracts::StreamId::try_new("test")?,
+            host: "127.0.0.1".into(),
+            port: 0,
+            timeout_ms: 60_000,
+            ingress_capacity: 1024,
+            max_message_bytes: 2 * 1024 * 1024,
+        })
+    }
+
     fn runtime() -> Result<SourceRuntime> {
-        SourceRuntime::new(
-            ComponentDescriptor::try_new(ComponentId::try_new("test")?, vec![])?,
-            IngressConfig {
-                stream: drasi_computation_contracts::StreamId::try_new("test")?,
-                source_id: "facilities-db".into(),
-                host: "127.0.0.1".into(),
-                port: 0,
-                timeout_ms: 60_000,
-                ingress_capacity: 1024,
-                max_message_bytes: 2 * 1024 * 1024,
-            },
+        SourceRuntime::new(descriptor()?, config()?, None, None)
+    }
+
+    #[test]
+    fn source_identity_is_bound_only_from_the_descriptor() -> Result<()> {
+        let runtime = SourceRuntime::new(descriptor()?, config()?, None, None)?;
+        assert_eq!(runtime.descriptor.id(), &ComponentId::try_new(SOURCE_ID)?);
+        let other = ComponentId::try_new(OTHER_SOURCE_ID)?;
+        let runtime = SourceRuntime::new(
+            ComponentDescriptor::try_new(other.clone(), vec![])?,
+            config()?,
             None,
             None,
-        )
+        )?;
+        assert_eq!(runtime.descriptor.id(), &other);
+        Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]

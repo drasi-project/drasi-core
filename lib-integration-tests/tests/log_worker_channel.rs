@@ -43,7 +43,7 @@ struct HighVolumeLogSource {
 }
 
 impl HighVolumeLogSource {
-    fn new(id: &str, log_count: usize) -> anyhow::Result<Self> {
+    fn new(id: drasi_core::ComponentId, log_count: usize) -> anyhow::Result<Self> {
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -54,7 +54,7 @@ impl HighVolumeLogSource {
 
 #[async_trait]
 impl Source for HighVolumeLogSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -70,8 +70,8 @@ impl Source for HighVolumeLogSource {
         self.base.auto_start
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -135,7 +135,7 @@ struct SimpleLogSource {
 }
 
 impl SimpleLogSource {
-    fn new(id: &str) -> anyhow::Result<Self> {
+    fn new(id: drasi_core::ComponentId) -> anyhow::Result<Self> {
         let params = SourceBaseParams::new(id);
         Ok(Self {
             base: SourceBase::new(params)?,
@@ -145,7 +145,7 @@ impl SimpleLogSource {
 
 #[async_trait]
 impl Source for SimpleLogSource {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -161,8 +161,8 @@ impl Source for SimpleLogSource {
         self.base.auto_start
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -217,13 +217,13 @@ impl Source for SimpleLogSource {
 }
 
 /// Wait for a component to reach Running status via event notification.
-async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+async fn wait_for_running(drasi: &DrasiLib, component_id: drasi_core::ComponentId) {
     let mut rx = drasi.subscribe_all_component_events();
     let snapshot = drasi.get_graph().await.expect("graph snapshot");
     if snapshot
         .nodes
         .iter()
-        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
+        .any(|n| n.id.component_id() == Some(&component_id) && n.status == ComponentStatus::Running)
     {
         return;
     }
@@ -254,17 +254,28 @@ async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
 /// Test that logs flow correctly through the bounded channel.
 #[tokio::test]
 async fn test_logs_flow_through_channel() {
-    let source = SimpleLogSource::new("channel-flow-source").expect("Failed to create source");
+    let source = SimpleLogSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e5")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("channel-flow-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs
     let (_history, mut log_receiver) = drasi
-        .subscribe_source_logs("channel-flow-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("channel-flow-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 
@@ -299,18 +310,29 @@ async fn test_logs_flow_through_channel() {
 #[tokio::test]
 async fn test_high_volume_logging() {
     let log_count = 1000;
-    let source =
-        HighVolumeLogSource::new("high-volume-source", log_count).expect("Failed to create source");
+    let source = HighVolumeLogSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000350")
+            .expect("fixture UUID"),
+        log_count,
+    )
+    .expect("Failed to create source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("high-volume-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs
     let (_history, mut log_receiver) = drasi
-        .subscribe_source_logs("high-volume-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("high-volume-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 
@@ -318,7 +340,12 @@ async fn test_high_volume_logging() {
     drasi.start().await.expect("Failed to start DrasiLib");
 
     // Wait for source to reach Running (log emissions complete before this)
-    wait_for_running(&drasi, "high-volume-source").await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000350")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     // Collect logs - we may not get all of them if channel fills up
     // but we should get a good number
@@ -358,7 +385,11 @@ async fn test_high_volume_logging() {
 
     // Verify logs have correct component info
     for log in &received {
-        assert_eq!(log.component_id, "high-volume-source");
+        assert_eq!(
+            log.component_id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000350")
+                .expect("fixture UUID")
+        );
         assert_eq!(log.level, LogLevel::Info);
     }
 
@@ -368,17 +399,28 @@ async fn test_high_volume_logging() {
 /// Test that the log worker works with multi-threaded runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_thread_runtime() {
-    let source = SimpleLogSource::new("multi-thread-source").expect("Failed to create source");
+    let source = SimpleLogSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e6")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("multi-thread-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs
     let (_history, mut log_receiver) = drasi
-        .subscribe_source_logs("multi-thread-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("multi-thread-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 
@@ -410,17 +452,28 @@ async fn test_multi_thread_runtime() {
 /// Test that the log worker works with current-thread runtime.
 #[tokio::test(flavor = "current_thread")]
 async fn test_current_thread_runtime() {
-    let source = SimpleLogSource::new("current-thread-source").expect("Failed to create source");
+    let source = SimpleLogSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e7")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("current-thread-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs
     let (_history, mut log_receiver) = drasi
-        .subscribe_source_logs("current-thread-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("current-thread-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 
@@ -452,12 +505,20 @@ async fn test_current_thread_runtime() {
 /// Test concurrent logging from multiple tasks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_logging_from_multiple_tasks() {
-    let source = SimpleLogSource::new("concurrent-log-source").expect("Failed to create source");
+    let source = SimpleLogSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e8")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
     let instance_id = "concurrent-test-instance";
     let drasi = lib_integration_tests::query_builder()
         .with_id(instance_id)
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("concurrent-log-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
@@ -465,13 +526,28 @@ async fn test_concurrent_logging_from_multiple_tasks() {
     drasi.start().await.expect("Failed to start DrasiLib");
 
     // Wait for source to reach Running
-    wait_for_running(&drasi, "concurrent-log-source").await;
+    wait_for_running(
+        &drasi,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e8")
+            .expect("fixture UUID"),
+    )
+    .await;
 
-    let source_id = "concurrent-log-source";
+    let source_id = drasi
+        .component_by_name(
+            &drasi_core::ComponentName::try_new("concurrent-log-source")
+                .expect("fixture component name"),
+        )
+        .expect("declared source")
+        .id()
+        .clone();
 
     // Subscribe to logs
     let (_history, mut log_receiver) = drasi
-        .subscribe_source_logs(source_id)
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("concurrent-log-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to source logs");
 
@@ -483,13 +559,14 @@ async fn test_concurrent_logging_from_multiple_tasks() {
     let mut handles = Vec::new();
     for task_id in 0..tasks_count {
         let instance_id = instance_id.to_string();
+        let source_id = source_id.clone();
         let counter = log_counter.clone();
 
         handles.push(tokio::spawn(async move {
             let span = tracing::info_span!(
                 "concurrent_task",
                 instance_id = %instance_id,
-                component_id = "concurrent-log-source",
+                component_id = %source_id,
                 component_type = "source"
             );
 
@@ -560,31 +637,51 @@ async fn test_concurrent_logging_from_multiple_tasks() {
 #[tokio::test]
 async fn test_multiple_drasi_instances_logging() {
     // Create two DrasiLib instances with different IDs
-    let source1 = SimpleLogSource::new("instance1-source").expect("Failed to create source1");
-    let source2 = SimpleLogSource::new("instance2-source").expect("Failed to create source2");
+    let source1 = SimpleLogSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000351")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source1");
+    let source2 = SimpleLogSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000352")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source2");
 
     let drasi1 = lib_integration_tests::query_builder()
         .with_id("drasi-instance-1")
-        .with_source(source1)
+        .with_source(
+            drasi_core::ComponentName::try_new("instance1-source").expect("fixture component name"),
+            source1,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib 1");
 
     let drasi2 = lib_integration_tests::query_builder()
         .with_id("drasi-instance-2")
-        .with_source(source2)
+        .with_source(
+            drasi_core::ComponentName::try_new("instance2-source").expect("fixture component name"),
+            source2,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib 2");
 
     // Subscribe to logs from both instances
     let (_h1, mut receiver1) = drasi1
-        .subscribe_source_logs("instance1-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("instance1-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to instance1 logs");
 
     let (_h2, mut receiver2) = drasi2
-        .subscribe_source_logs("instance2-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("instance2-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe to instance2 logs");
 
@@ -625,11 +722,15 @@ async fn test_multiple_drasi_instances_logging() {
 
     // Verify logs are correctly attributed
     assert!(
-        logs1.iter().all(|l| l.component_id == "instance1-source"),
+        logs1.iter().all(|l| l.component_id
+            == drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000351")
+                .expect("fixture UUID")),
         "Instance 1 logs should have correct component_id"
     );
     assert!(
-        logs2.iter().all(|l| l.component_id == "instance2-source"),
+        logs2.iter().all(|l| l.component_id
+            == drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000352")
+                .expect("fixture UUID")),
         "Instance 2 logs should have correct component_id"
     );
 
@@ -641,18 +742,27 @@ async fn test_multiple_drasi_instances_logging() {
 #[tokio::test]
 async fn test_rapid_start_stop_cycles() {
     for i in 0..5 {
-        let source_id = format!("rapid-cycle-source-{i}");
-        let source = SimpleLogSource::new(&source_id).expect("Failed to create source");
+        let source_name = format!("rapid-cycle-source-{i}");
+        let source_id =
+            drasi_core::ComponentId::try_new(format!("00000000-0000-0000-0004-{i:012x}"))
+                .expect("fixture UUID");
+        let source = SimpleLogSource::new(source_id).expect("Failed to create source");
 
         let drasi = lib_integration_tests::query_builder()
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new(source_name.clone())
+                    .expect("fixture component name"),
+                source,
+            )
             .build()
             .await
             .expect("Failed to build DrasiLib");
 
         // Subscribe
         let (_history, mut receiver) = drasi
-            .subscribe_source_logs(&source_id)
+            .subscribe_source_logs_by_name(
+                &drasi_core::ComponentName::try_new(source_name).expect("fixture component name"),
+            )
             .await
             .expect("Failed to subscribe");
 
@@ -676,17 +786,28 @@ async fn test_rapid_start_stop_cycles() {
 /// Test that log level filtering works through the channel.
 #[tokio::test]
 async fn test_log_level_filtering_through_channel() {
-    let source = SimpleLogSource::new("level-filter-source").expect("Failed to create source");
+    let source = SimpleLogSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003e9")
+            .expect("fixture UUID"),
+    )
+    .expect("Failed to create source");
 
     let drasi = lib_integration_tests::query_builder()
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("level-filter-source")
+                .expect("fixture component name"),
+            source,
+        )
         .build()
         .await
         .expect("Failed to build DrasiLib");
 
     // Subscribe to logs before starting to detect log arrival
     let (_, mut log_rx) = drasi
-        .subscribe_source_logs("level-filter-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("level-filter-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe");
 
@@ -699,7 +820,10 @@ async fn test_log_level_filtering_through_channel() {
 
     // Get log history
     let (history, _) = drasi
-        .subscribe_source_logs("level-filter-source")
+        .subscribe_source_logs_by_name(
+            &drasi_core::ComponentName::try_new("level-filter-source")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Failed to subscribe");
 

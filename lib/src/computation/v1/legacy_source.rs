@@ -49,6 +49,8 @@ pub struct LegacySourceResource {
     source: Arc<dyn Source>,
     owned: bool,
     initialized: AtomicBool,
+    claimed: AtomicBool,
+    disposed: AtomicBool,
     needs_stop: AtomicBool,
 }
 
@@ -58,6 +60,8 @@ impl LegacySourceResource {
             source,
             owned: false,
             initialized: AtomicBool::new(false),
+            claimed: AtomicBool::new(false),
+            disposed: AtomicBool::new(false),
             needs_stop: AtomicBool::new(false),
         }
     }
@@ -69,6 +73,8 @@ impl LegacySourceResource {
             source: source.into(),
             owned: true,
             initialized: AtomicBool::new(false),
+            claimed: AtomicBool::new(false),
+            disposed: AtomicBool::new(false),
             needs_stop: AtomicBool::new(false),
         }
     }
@@ -85,7 +91,12 @@ impl LegacySourceResource {
 #[async_trait]
 impl ResourceCleanup for LegacySourceResource {
     async fn shutdown(&self) -> anyhow::Result<()> {
-        self.stop().await
+        self.stop().await?;
+        if self.owned && !self.disposed.load(Ordering::Acquire) {
+            self.source.dispose().await?;
+            self.disposed.store(true, Ordering::Release);
+        }
+        Ok(())
     }
 }
 
@@ -102,10 +113,10 @@ fn descriptor(id: ComponentId) -> ComponentDescriptor {
     .expect("one valid graph output")
 }
 
-fn settings(source: &dyn Source) -> SourceSubscriptionSettings {
+fn settings(source: &dyn Source, consumer: &ComponentId) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
         source_id: source.id().to_owned(),
-        query_id: format!("computation:{}", uuid::Uuid::new_v4()),
+        query_id: consumer.clone(),
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
@@ -117,8 +128,9 @@ fn settings(source: &dyn Source) -> SourceSubscriptionSettings {
 
 async fn subscribe(
     source: &dyn Source,
+    consumer: &ComponentId,
 ) -> anyhow::Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
-    let response = source.subscribe(settings(source)).await?;
+    let response = source.subscribe(settings(source, consumer)).await?;
     if response.bootstrap_receiver.is_some()
         || response.bootstrap_result_receiver.is_some()
         || response.position_handle.is_some()
@@ -128,14 +140,14 @@ async fn subscribe(
     Ok(response.receiver)
 }
 
-fn observe(source_id: &str, update: ComponentUpdate) -> anyhow::Result<()> {
+fn observe(source_id: &ComponentId, update: ComponentUpdate) -> anyhow::Result<()> {
     match update {
         ComponentUpdate::Status {
             component_id,
             status,
             message,
         } => {
-            if component_id != source_id {
+            if &component_id != source_id {
                 anyhow::bail!("legacy source reported another component's status");
             }
             if status == ComponentStatus::Error {
@@ -151,7 +163,7 @@ fn observe(source_id: &str, update: ComponentUpdate) -> anyhow::Result<()> {
 }
 
 async fn with_observations<T>(
-    source_id: &str,
+    source_id: &ComponentId,
     updates: &mut Option<mpsc::Receiver<ComponentUpdate>>,
     future: impl Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
@@ -159,7 +171,7 @@ async fn with_observations<T>(
 }
 
 async fn drive_observations<T>(
-    source_id: &str,
+    source_id: &ComponentId,
     updates: &mut Option<mpsc::Receiver<ComponentUpdate>>,
     future: impl Future<Output = anyhow::Result<T>>,
     cleanup: bool,
@@ -213,6 +225,7 @@ pub struct LegacySourceAdapter {
     updates: Option<mpsc::Receiver<ComponentUpdate>>,
     sequence: u64,
     schema: Option<SourceSchema>,
+    context: Option<SourceRuntimeContext>,
 }
 
 impl LegacySourceAdapter {
@@ -226,40 +239,30 @@ impl LegacySourceAdapter {
             anyhow::bail!("legacy adapter requires an isolated Channel subscription; Broadcast would hide source-side loss");
         }
         let mut updates = None;
+        let mut context = None;
         if resource.owned {
-            if resource.initialized.swap(true, Ordering::AcqRel) {
-                anyhow::bail!("owned legacy source was already initialized; reconstruct it instead of reinitializing another pipeline");
+            if resource.claimed.swap(true, Ordering::AcqRel) {
+                anyhow::bail!("owned legacy source already has a lifecycle owner");
             }
-            resource.needs_stop.store(true, Ordering::Release);
             let (sender, receiver) = mpsc::channel(64);
             updates = Some(receiver);
-            let context = SourceRuntimeContext::new(
+            context = Some(SourceRuntimeContext::new(
                 format!("computation:{graph_id}"),
-                resource.source.id(),
+                resource.source.id().clone(),
                 None,
                 sender,
                 None,
-            );
-            with_observations(resource.source.id(), &mut updates, async {
-                resource.source.initialize(context).await;
-                Ok(())
-            })
-            .await?;
+            ));
         }
-        let receiver = with_observations(
-            resource.source.id(),
-            &mut updates,
-            subscribe(resource.source.as_ref()),
-        )
-        .await?;
         Ok(Self {
             descriptor: descriptor(id),
             stream,
             schema: resource.source.describe_schema(),
             resource,
-            receiver: Some(receiver),
+            receiver: None,
             updates,
             sequence: 0,
+            context,
         })
     }
 }
@@ -268,6 +271,59 @@ impl LegacySourceAdapter {
 impl ComputationComponent for LegacySourceAdapter {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        if self.resource.owned {
+            anyhow::ensure!(
+                !self.resource.disposed.load(Ordering::Acquire),
+                "legacy source has been disposed"
+            );
+            anyhow::ensure!(
+                !self.resource.initialized.swap(true, Ordering::AcqRel),
+                "failed source initialization requires a new object"
+            );
+            let context = self
+                .context
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("source has no runtime binding"))?;
+            let resource = self.resource.clone();
+            with_observations(resource.source.id(), &mut self.updates, async {
+                resource.source.bind_runtime_context(context).await;
+                resource.source.initialize().await
+            })
+            .await?;
+            self.schema = resource.source.describe_schema();
+        }
+        Ok(())
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        drive_observations(
+            self.resource.source.id(),
+            &mut self.updates,
+            self.resource.shutdown(),
+            true,
+        )
+        .await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        if self.resource.owned {
+            self.resource.source.pause_processing().await?;
+        }
+        Ok(())
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        if self.resource.owned {
+            self.resource.source.resume_processing().await?;
+        }
+        Ok(())
+    }
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.resource.owned,
+            "borrowed source resources belong to their owner"
+        );
+        self.resource.source.delete_owned_resources().await
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
@@ -283,7 +339,7 @@ impl ComputationComponent for LegacySourceAdapter {
                 with_observations(
                     self.resource.source.id(),
                     &mut self.updates,
-                    subscribe(self.resource.source.as_ref()),
+                    subscribe(self.resource.source.as_ref(), self.descriptor.id()),
                 )
                 .await?,
             );
@@ -360,6 +416,7 @@ impl Default for LegacySourceFactory {
                     fields: BTreeMap::from([(
                         Arc::from("stream"),
                         ConfigurationField {
+                            constraint: None,
                             value_type: ConfigurationType::String,
                             required: true,
                             secret: false,

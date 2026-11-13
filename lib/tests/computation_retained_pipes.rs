@@ -14,6 +14,10 @@
 
 #![cfg(test)]
 
+#[path = "support/mod.rs"]
+mod fixture_support;
+use fixture_support::FixtureGraphBuilderExt as _;
+
 mod computation_support;
 
 use std::{num::NonZeroUsize, sync::Arc};
@@ -54,10 +58,24 @@ async fn retained_delivery_drop_or_failure_does_not_acknowledge_and_capacity_bac
     let control = pipe.control();
     let mut receiver = pipe.take_receiver().expect("receiver");
     sender
-        .send(root("source", 1, &[3]))
+        .send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[3],
+        ))
         .await
         .expect("first acceptance");
-    let mut blocked = Box::pin(sender.send(root("source", 2, &[4])));
+    let mut blocked = Box::pin(
+        sender.send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            2,
+            &[4],
+        )),
+    );
     assert!(futures::poll!(&mut blocked).is_pending());
     let first = receiver
         .receive()
@@ -112,7 +130,13 @@ async fn new_binding_generation_closes_old_senders_and_acknowledgements_but_repl
     let old_sender = old.sender();
     let mut old_receiver = old.take_receiver().expect("old receiver");
     old_sender
-        .send(root("source", 1, &[3]))
+        .send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[3],
+        ))
         .await
         .expect("old acceptance");
     let old_delivery = old_receiver
@@ -125,7 +149,13 @@ async fn new_binding_generation_closes_old_senders_and_acknowledgements_but_repl
     let mut new_receiver = new.take_receiver().expect("new receiver");
     assert!(matches!(
         old_sender
-            .send(root("source", 2, &[4]))
+            .send(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                2,
+                &[4]
+            ))
             .await
             .expect_err("old sender closed")
             .error,
@@ -167,7 +197,13 @@ async fn retained_history_gap_requires_explicit_policy_and_never_silent_skip() {
     let sender = strict.sender();
     for sequence in 1..=4 {
         sender
-            .send(root("source", sequence, &[1]))
+            .send(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                sequence,
+                &[1],
+            ))
             .await
             .expect("retained acceptance");
     }
@@ -203,8 +239,25 @@ async fn retained_close_wakes_a_full_capacity_sender_without_claiming_acceptance
     let store = memory(1, RetentionPolicy::Backpressure);
     let pipe = RetainedPipe::new(store.clone(), ReplayGapPolicy::Strict).expect("pipe");
     let sender = pipe.sender();
-    sender.send(root("source", 1, &[1])).await.expect("first");
-    let mut blocked = Box::pin(sender.send(root("source", 2, &[2])));
+    sender
+        .send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        ))
+        .await
+        .expect("first");
+    let mut blocked = Box::pin(
+        sender.send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            2,
+            &[2],
+        )),
+    );
     assert!(futures::poll!(&mut blocked).is_pending());
     pipe.control().close();
     let failure = blocked.await.expect_err("capacity waiter closed");
@@ -235,11 +288,29 @@ async fn graph_negotiates_retained_pipe_resources_and_acknowledges_actual_sink_h
     let provided = Arc::new(RetainedStoreResource(store.clone()));
     let received = Received::default();
     let mut graph = ComputationGraph::builder("retained-graph")
-        .source(Box::new(FiniteSource::new(
-            "source",
-            vec![output(root("source", 1, &[7])), output(root("source", 2, &[8]))],
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![
+                output(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[7],
+                )),
+                output(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    2,
+                    &[8],
+                )),
+            ],
         )))
-        .sink(Box::new(CollectSink::new(
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             received.clone(),
@@ -256,9 +327,21 @@ async fn graph_negotiates_retained_pipe_resources_and_acknowledges_actual_sink_h
             ResourceHandle::new(ResourceRole::StateStore, provided.clone()).with_cleanup(provided),
         )
         .expect("resource instance")
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(RetainedPipeConfig {
                 resource: resource.clone(),
                 capacity: NonZeroUsize::new(1).expect("capacity"),
@@ -297,18 +380,39 @@ async fn graph_negotiates_retained_pipe_resources_and_acknowledges_actual_sink_h
 async fn graph_broadcast_profile_does_not_hide_its_lag_or_claim_backpressure() {
     let received = Received::default();
     let mut graph = ComputationGraph::builder("broadcast-graph")
-        .source(Box::new(FiniteSource::new(
-            "source",
-            vec![output(root("source", 1, &[7]))],
+        .fixture_source(Box::new(FiniteSource::new(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            vec![output(root(
+                &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "source",
+                1,
+                &[7],
+            ))],
         )))
-        .sink(Box::new(CollectSink::new(
+        .fixture_sink(Box::new(CollectSink::new(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                .expect("fixture UUID"),
             "sink",
             &["in"],
             received.clone(),
         )))
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(
+            endpoint(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                "out",
+            ),
+            stream("source"),
+        )
         .connect(
-            edge("source", "sink"),
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
             Box::new(BroadcastPipeConfig {
                 capacity: 2,
                 lag_policy: BroadcastLagPolicy::Report,
@@ -366,16 +470,30 @@ fn retained_graph_preflight_rejects_hidden_resources_shared_exclusive_logs_and_a
             gap_policy: ReplayGapPolicy::Strict,
         };
         let mut builder = ComputationGraph::builder("retained-preflight")
-            .source(Box::new(FiniteSource::new("source", vec![])))
-            .bind_stream(endpoint("source", "out"), stream("source"));
+            .fixture_source(Box::new(FiniteSource::new(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                vec![],
+            )))
+            .bind_stream(
+                endpoint(
+                    &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "out",
+                ),
+                stream("source"),
+            );
         builder = if case == "accepted" {
-            builder.sink(Box::new(AcceptanceOnlySink(descriptor(
-                "sink",
+            builder.fixture_sink(Box::new(AcceptanceOnlySink(descriptor(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
                 &["in"],
                 &[],
             ))))
         } else {
-            builder.sink(Box::new(CollectSink::new(
+            builder.fixture_sink(Box::new(CollectSink::new(
+                drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
                 "sink",
                 &["in"],
                 Received::default(),
@@ -399,15 +517,37 @@ fn retained_graph_preflight_rejects_hidden_resources_shared_exclusive_logs_and_a
                 )
                 .expect("resource");
         }
-        builder = builder.connect(edge("source", "sink"), Box::new(profile.clone()));
+        builder = builder.connect(
+            edge(
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                    .expect("fixture UUID"),
+                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+                    .expect("fixture UUID"),
+            ),
+            Box::new(profile.clone()),
+        );
         if case == "shared" {
             builder = builder
-                .sink(Box::new(CollectSink::new(
+                .fixture_sink(Box::new(CollectSink::new(
+                    drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000029a")
+                        .expect("fixture UUID"),
                     "other",
                     &["in"],
                     Received::default(),
                 )))
-                .connect(edge("source", "other"), Box::new(profile));
+                .connect(
+                    edge(
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000004d",
+                        )
+                        .expect("fixture UUID"),
+                        &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-00000000029a",
+                        )
+                        .expect("fixture UUID"),
+                    ),
+                    Box::new(profile),
+                );
         }
         assert!(builder.build().is_err(), "{case}");
         assert_eq!(
@@ -507,7 +647,15 @@ async fn cancellation_revokes_admitted_sends_and_acks_before_the_store_mutation(
     });
     let pipe = RetainedPipe::new(store.clone(), ReplayGapPolicy::Strict).expect("pipe");
     let sender = pipe.sender();
-    let mut send = Box::pin(sender.send(root("source", 1, &[1])));
+    let mut send = Box::pin(
+        sender.send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            1,
+            &[1],
+        )),
+    );
     tokio::select! { result = &mut send => panic!("paused: {result:?}"), _ = store.entered.notified() => {} }
     pipe.control().cancel();
     store.release.notify_one();
@@ -524,7 +672,13 @@ async fn cancellation_revokes_admitted_sends_and_acks_before_the_store_mutation(
         .expect("no late write")
         .is_none());
     pipe.sender()
-        .send(root("source", 2, &[2]))
+        .send(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            2,
+            &[2],
+        ))
         .await
         .expect("accept");
     let mut receiver = pipe.take_receiver().expect("receiver");
@@ -563,7 +717,7 @@ mod durable {
         computation::{
             ComputationIndexProvider, ComputationIndexes, ComputationResource, TransactionDomain,
         },
-        interface::{IndexError, IndexSet, SessionControl},
+        interface::{CheckpointKey, IndexError, IndexSet, OutputPartition, SessionControl},
     };
     use drasi_index_rocksdb::{
         computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
@@ -595,7 +749,7 @@ mod durable {
             ),
         );
         provider
-            .create_indexes("retained-pipe", "journal")
+            .create_indexes("retained-pipe", &fixture_support::component_id(751))
             .await
             .expect("durable graph resources")
     }
@@ -633,11 +787,23 @@ mod durable {
                 .supported()
                 .contains(&PipeCapability::Replay));
             pipe.sender()
-                .send(root("source", 1, &[7]))
+                .send(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[7],
+                ))
                 .await
                 .expect("durable acceptance");
             pipe.sender()
-                .send(root("source", 2, &[8]))
+                .send(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    2,
+                    &[8],
+                ))
                 .await
                 .expect("second acceptance");
             let mut receiver = pipe.take_receiver().expect("receiver");
@@ -689,11 +855,23 @@ mod durable {
             let store = open_capacity(temp.path(), 2).await;
             let pipe = RetainedPipe::new(store.clone(), ReplayGapPolicy::Strict).expect("pipe");
             pipe.sender()
-                .send(root("source", 1, &[1]))
+                .send(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[1],
+                ))
                 .await
                 .expect("first");
             pipe.sender()
-                .send(root("source", 2, &[2]))
+                .send(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    2,
+                    &[2],
+                ))
                 .await
                 .expect("second");
             drop(pipe);
@@ -704,7 +882,13 @@ mod durable {
             .expect("smaller retained pipe");
         let sender = pipe.sender();
         let mut receiver = pipe.take_receiver().expect("receiver");
-        let third = root("source", 3, &[3]);
+        let third = root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            3,
+            &[3],
+        );
         assert!(matches!(
             store.append(store.generation(), &third).await,
             Err(PipeError::CapacityExhausted)
@@ -828,7 +1012,13 @@ mod durable {
             let pipe = RetainedPipe::new(store.clone(), ReplayGapPolicy::Strict).expect("pipe");
             let failure = pipe
                 .sender()
-                .send(root("source", 1, &[9]))
+                .send(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[9],
+                ))
                 .await
                 .expect_err("commit receipt uncertain");
             assert_eq!(failure.acceptance(), AcceptanceState::Unknown);
@@ -871,7 +1061,13 @@ mod durable {
             );
             let mut pipe = RetainedPipe::new(store.clone(), ReplayGapPolicy::Strict).expect("pipe");
             pipe.sender()
-                .send(root("source", 1, &[9]))
+                .send(root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[9],
+                ))
                 .await
                 .expect("first commit accepted");
             let mut receiver = pipe.take_receiver().expect("receiver");
@@ -1070,7 +1266,7 @@ mod durable {
         }
         async fn stage_checkpoint(
             &self,
-            key: &str,
+            key: &CheckpointKey,
             sequence: u64,
             position: Option<&bytes::Bytes>,
         ) -> Result<(), IndexError> {
@@ -1086,7 +1282,7 @@ mod durable {
         }
         async fn read_checkpoint(
             &self,
-            key: &str,
+            key: &CheckpointKey,
         ) -> Result<Option<drasi_core::interface::SourceCheckpoint>, IndexError> {
             self.reading(Fault::ReadCheckpoint, Fault::PauseReadCheckpoint, 0)
                 .await?;
@@ -1095,7 +1291,10 @@ mod durable {
         async fn read_all_checkpoints(
             &self,
         ) -> Result<
-            std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>,
+            std::collections::HashMap<
+                drasi_core_types::CheckpointKey,
+                drasi_core::interface::SourceCheckpoint,
+            >,
             IndexError,
         > {
             self.checkpoints().read_all_checkpoints().await
@@ -1109,13 +1308,20 @@ mod durable {
         async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
             self.checkpoints().read_config_hash().await
         }
-        async fn stage_result_sequence(&self, key: &str, sequence: u64) -> Result<(), IndexError> {
+        async fn stage_result_sequence(
+            &self,
+            key: &OutputPartition,
+            sequence: u64,
+        ) -> Result<(), IndexError> {
             self.fail(Fault::StageSequence)?;
             self.checkpoints()
                 .stage_result_sequence(key, sequence)
                 .await
         }
-        async fn read_result_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+        async fn read_result_sequence(
+            &self,
+            key: &OutputPartition,
+        ) -> Result<Option<u64>, IndexError> {
             self.reading(Fault::ReadSequence, Fault::PauseReadSequence, 1)
                 .await?;
             self.checkpoints().read_result_sequence(key).await
@@ -1124,12 +1330,17 @@ mod durable {
 
     #[async_trait::async_trait]
     impl drasi_core::interface::OutboxWriter for FaultBackend {
-        async fn append(&self, key: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+        async fn append(
+            &self,
+            key: &OutputPartition,
+            sequence: u64,
+            data: &[u8],
+        ) -> Result<(), IndexError> {
             self.outbox().append(key, sequence, data).await
         }
         async fn read_from(
             &self,
-            key: &str,
+            key: &OutputPartition,
             after: u64,
         ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
             self.reading(Fault::ReadOutbox, Fault::PauseReadOutbox, 2)
@@ -1138,7 +1349,7 @@ mod durable {
         }
         async fn read_page(
             &self,
-            key: &str,
+            key: &OutputPartition,
             after: u64,
             limits: drasi_core::interface::OutboxPageLimits,
         ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
@@ -1146,15 +1357,18 @@ mod durable {
                 .await?;
             self.outbox().read_page(key, after, limits).await
         }
-        async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+        async fn read_latest_sequence(
+            &self,
+            key: &OutputPartition,
+        ) -> Result<Option<u64>, IndexError> {
             self.outbox().read_latest_sequence(key).await
         }
-        async fn clear(&self, key: &str) -> Result<(), IndexError> {
+        async fn clear(&self, key: &OutputPartition) -> Result<(), IndexError> {
             self.outbox().clear(key).await
         }
         async fn append_and_trim(
             &self,
-            key: &str,
+            key: &OutputPartition,
             sequence: u64,
             data: &[u8],
             retain_from: u64,
@@ -1170,10 +1384,18 @@ mod durable {
             }
             Ok(removed)
         }
-        async fn trim_before(&self, key: &str, retain_from: u64) -> Result<usize, IndexError> {
+        async fn trim_before(
+            &self,
+            key: &OutputPartition,
+            retain_from: u64,
+        ) -> Result<usize, IndexError> {
             self.outbox().trim_before(key, retain_from).await
         }
-        async fn trim_to_capacity(&self, key: &str, capacity: usize) -> Result<usize, IndexError> {
+        async fn trim_to_capacity(
+            &self,
+            key: &OutputPartition,
+            capacity: usize,
+        ) -> Result<usize, IndexError> {
             self.outbox().trim_to_capacity(key, capacity).await
         }
     }
@@ -1201,7 +1423,18 @@ mod durable {
             let generation = store.acquire_generation().expect("generation");
             for sequence in 1..=4 {
                 store
-                    .append(generation, &root("source", sequence, &[sequence as u16]))
+                    .append(
+                        generation,
+                        &root(
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            "source",
+                            sequence,
+                            &[sequence as u16],
+                        ),
+                    )
                     .await
                     .expect("append");
             }
@@ -1270,7 +1503,18 @@ mod durable {
                 let value = u16::try_from(position).expect("bounded test sequence");
                 assert_eq!(
                     store
-                        .append(generation, &root("source", position, &[value]))
+                        .append(
+                            generation,
+                            &root(
+                                &drasi_lib::ComponentId::try_new(
+                                    "00000000-0000-0000-0000-00000000004d"
+                                )
+                                .expect("fixture UUID"),
+                                "source",
+                                position,
+                                &[value]
+                            )
+                        )
                         .await
                         .expect("commit"),
                     position
@@ -1310,7 +1554,7 @@ mod durable {
             );
             let persisted = backend
                 .outbox()
-                .read_from("edge", 0)
+                .read_from(&OutputPartition::Journal("edge".into()), 0)
                 .await
                 .expect("disk window");
             assert_eq!(persisted.len(), 32);
@@ -1339,7 +1583,15 @@ mod durable {
             if !reopened {
                 for sequence in 1..=5 {
                     pipe.sender()
-                        .send(root("source", sequence, &[7]))
+                        .send(root(
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            "source",
+                            sequence,
+                            &[7],
+                        ))
                         .await
                         .expect("append");
                 }
@@ -1407,7 +1659,13 @@ mod durable {
                 .expect("store");
                 let generation = store.acquire_generation().expect("generation");
                 backend.arm(fault);
-                let input = root("source", 1, &[7]);
+                let input = root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[7],
+                );
                 let mut operation = Box::pin(store.append(generation, &input));
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     tokio::select! {
@@ -1426,7 +1684,7 @@ mod durable {
                 }
                 assert!(backend
                     .outbox()
-                    .read_from("edge", 0)
+                    .read_from(&OutputPartition::Journal("edge".into()), 0)
                     .await
                     .expect("no input")
                     .is_empty());
@@ -1486,12 +1744,20 @@ mod durable {
                     bytes::Bytes::from_static(b"invalid-envelope")
                 } else {
                     codec()
-                        .encode(&root("source", position, &[7]))
+                        .encode(&root(
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            "source",
+                            position,
+                            &[7],
+                        ))
                         .expect("encode")
                 };
                 backend
                     .outbox()
-                    .append("edge", position, &bytes)
+                    .append(&OutputPartition::Journal("edge".into()), position, &bytes)
                     .await
                     .expect("stage record");
             }
@@ -1508,12 +1774,19 @@ mod durable {
             };
             backend
                 .checkpoints()
-                .stage_result_sequence("edge", head)
+                .stage_result_sequence(&OutputPartition::Journal("edge".into()), head)
                 .await
                 .expect("head");
             backend
                 .checkpoints()
-                .stage_checkpoint("computation-pipe-consumer:edge", progress, None)
+                .stage_checkpoint(
+                    &CheckpointKey::Journal {
+                        journal: OutputPartition::Journal("edge".into()),
+                        key: "computation-pipe-consumer".into(),
+                    },
+                    progress,
+                    None,
+                )
                 .await
                 .expect("progress");
             backend
@@ -1525,7 +1798,7 @@ mod durable {
                 .expect("commit");
             let before = backend
                 .outbox()
-                .read_from("edge", 0)
+                .read_from(&OutputPartition::Journal("edge".into()), 0)
                 .await
                 .expect("persisted records");
             let store = IndexedEnvelopeStore::try_new(
@@ -1547,7 +1820,20 @@ mod durable {
             );
             assert!(
                 matches!(
-                    store.append(generation, &root("source", 4, &[8])).await,
+                    store
+                        .append(
+                            generation,
+                            &root(
+                                &drasi_lib::ComponentId::try_new(
+                                    "00000000-0000-0000-0000-00000000004d"
+                                )
+                                .expect("fixture UUID"),
+                                "source",
+                                4,
+                                &[8]
+                            )
+                        )
+                        .await,
                     Err(PipeError::Backend(_))
                 ),
                 "{case}"
@@ -1562,7 +1848,7 @@ mod durable {
             assert_eq!(
                 backend
                     .outbox()
-                    .read_from("edge", 0)
+                    .read_from(&OutputPartition::Journal("edge".into()), 0)
                     .await
                     .expect("unchanged"),
                 before,
@@ -1571,7 +1857,7 @@ mod durable {
             assert_eq!(
                 backend
                     .checkpoints()
-                    .read_result_sequence("edge")
+                    .read_result_sequence(&OutputPartition::Journal("edge".into()))
                     .await
                     .expect("head"),
                 Some(head)
@@ -1579,7 +1865,10 @@ mod durable {
             assert_eq!(
                 backend
                     .checkpoints()
-                    .read_checkpoint("computation-pipe-consumer:edge")
+                    .read_checkpoint(&CheckpointKey::Journal {
+                        journal: OutputPartition::Journal("edge".into()),
+                        key: "computation-pipe-consumer".into(),
+                    })
                     .await
                     .expect("progress")
                     .expect("saved")
@@ -1608,7 +1897,16 @@ mod durable {
             .fail_rollback
             .store(true, std::sync::atomic::Ordering::Release);
         let error = store
-            .append(generation, &root("source", 1, &[7]))
+            .append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[7],
+                ),
+            )
             .await
             .unwrap_err();
         let PipeError::Backend(error) = error else {
@@ -1654,7 +1952,16 @@ mod durable {
             .unwrap();
             let generation = store.acquire_generation().unwrap();
             store
-                .append(generation, &root("source", 1, &[7]))
+                .append(
+                    generation,
+                    &root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        1,
+                        &[7],
+                    ),
+                )
                 .await
                 .unwrap();
             backend.arm(if append {
@@ -1665,7 +1972,18 @@ mod durable {
             let writing = async {
                 if append {
                     store
-                        .append(generation, &root("source", 2, &[8]))
+                        .append(
+                            generation,
+                            &root(
+                                &drasi_lib::ComponentId::try_new(
+                                    "00000000-0000-0000-0000-00000000004d",
+                                )
+                                .expect("fixture UUID"),
+                                "source",
+                                2,
+                                &[8],
+                            ),
+                        )
                         .await
                         .map(|_| ())
                 } else {
@@ -1687,7 +2005,16 @@ mod durable {
             assert!(store.next(rebound, 1).await.unwrap().is_none());
             store.acknowledge(rebound, 1).await.unwrap();
             store
-                .append(rebound, &root("source", 2, &[8]))
+                .append(
+                    rebound,
+                    &root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        2,
+                        &[8],
+                    ),
+                )
                 .await
                 .unwrap();
             assert_eq!(store.progress(rebound).await.unwrap(), 1);
@@ -1712,9 +2039,18 @@ mod durable {
             let directory = tempfile::tempdir().expect("directory");
             let seed = open(directory.path()).await;
             let generation = seed.acquire_generation().expect("seed generation");
-            seed.append(generation, &root("source", 1, &[7]))
-                .await
-                .expect("committed seed");
+            seed.append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[7],
+                ),
+            )
+            .await
+            .expect("committed seed");
             seed.shutdown().await.expect("seed cleanup");
             drop(seed);
             let backend = fault_backend(directory.path(), true).await;
@@ -1730,7 +2066,18 @@ mod durable {
             backend.arm(fault);
             let result = match operation {
                 "append" => store
-                    .append(generation, &root("source", 2, &[8]))
+                    .append(
+                        generation,
+                        &root(
+                            &drasi_lib::ComponentId::try_new(
+                                "00000000-0000-0000-0000-00000000004d",
+                            )
+                            .expect("fixture UUID"),
+                            "source",
+                            2,
+                            &[8],
+                        ),
+                    )
                     .await
                     .map(|_| ()),
                 "receive" => store.next(generation, 0).await.map(|_| ()),
@@ -1787,7 +2134,16 @@ mod durable {
                 .await
                 .expect("retry handling");
             reopened
-                .append(generation, &root("source", 2, &[8]))
+                .append(
+                    generation,
+                    &root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        2,
+                        &[8],
+                    ),
+                )
                 .await
                 .expect("retry publish");
             reopened.shutdown().await.expect("cleanup");
@@ -1809,7 +2165,13 @@ mod durable {
                 )
                 .expect("store");
                 let generation = store.acquire_generation().expect("generation");
-                let first = root("source", 1, &[7]);
+                let first = root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[7],
+                );
                 if acknowledgement {
                     store.append(generation, &first).await.expect("seed");
                 }
@@ -1923,7 +2285,16 @@ mod durable {
         .expect("store");
         let generation = store.acquire_generation().expect("generation");
         store
-            .append(generation, &root("source", 1, &[7]))
+            .append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    1,
+                    &[7],
+                ),
+            )
             .await
             .expect("seed");
         assert!(store
@@ -1954,16 +2325,22 @@ mod durable {
             .expect("inject persisted boundary");
         backend
             .checkpoints()
-            .stage_result_sequence("edge", u64::MAX)
+            .stage_result_sequence(&OutputPartition::Journal("edge".into()), u64::MAX)
             .await
             .expect("max sequence");
         backend
             .outbox()
             .append_and_trim(
-                "edge",
+                &OutputPartition::Journal("edge".into()),
                 u64::MAX,
                 &codec()
-                    .encode(&root("source", 1, &[7]))
+                    .encode(&root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        1,
+                        &[7],
+                    ))
                     .expect("valid envelope"),
                 u64::MAX,
             )
@@ -1991,7 +2368,16 @@ mod durable {
             .expect("end")
             .is_none());
         assert!(store
-            .append(generation, &root("source", 2, &[8]))
+            .append(
+                generation,
+                &root(
+                    &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                        .expect("fixture UUID"),
+                    "source",
+                    2,
+                    &[8]
+                )
+            )
             .await
             .expect_err("no wrap")
             .to_string()
@@ -2023,7 +2409,18 @@ mod durable {
         .expect("store");
         let generation = store.acquire_generation().expect("generation");
         assert!(matches!(
-            store.append(generation, &root("source", 1, &[7])).await,
+            store
+                .append(
+                    generation,
+                    &root(
+                        &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                            .expect("fixture UUID"),
+                        "source",
+                        1,
+                        &[7]
+                    )
+                )
+                .await,
             Err(PipeError::Backend(_))
         ));
         assert_eq!(store.progress(generation).await.expect("not accepted"), 0);

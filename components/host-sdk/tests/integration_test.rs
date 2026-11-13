@@ -173,7 +173,8 @@ async fn legacy_library_loading_does_not_grant_durable_admission() {
     .unwrap();
     let source = plugin.source_plugins[0]
         .create_source(
-            "unknown-admission",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f0")
+                .expect("fixture UUID"),
             &serde_json::json!({"dataType": {"type": "counter"}}),
             false,
         )
@@ -186,7 +187,7 @@ async fn legacy_library_loading_does_not_grant_durable_admission() {
             .unwrap(),
     ));
     let host = SourcePluginHost::owned(source, services);
-    let id = ComponentId::try_new("unknown-admission").unwrap();
+    let id = ComponentId::try_new("e76e5963-de3d-5b52-9add-ed362f8dc1c5").unwrap();
     let stream = StreamId::try_new("source/out").unwrap();
     let subscription = LegacySourceSubscription::new(
         host,
@@ -196,7 +197,8 @@ async fn legacy_library_loading_does_not_grant_durable_admission() {
         },
         stream.clone(),
         None,
-        "unknown-admission",
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f0")
+            .expect("fixture UUID"),
     )
     .unwrap();
     let from = Endpoint {
@@ -204,7 +206,7 @@ async fn legacy_library_loading_does_not_grant_durable_admission() {
         port: PortId::try_new("out").unwrap(),
     };
     let to = Endpoint {
-        component: ComponentId::try_new("sink").unwrap(),
+        component: ComponentId::try_new("368ca5af-554a-568b-91af-4650bf705300").unwrap(),
         port: PortId::try_new("in").unwrap(),
     };
     let sink = UnstartedSink(
@@ -220,8 +222,16 @@ async fn legacy_library_loading_does_not_grant_durable_admission() {
         .unwrap(),
     );
     let result = ComputationGraph::builder("legacy-admission")
-        .source(Box::new(SourcePluginAdapter::new(id.clone(), subscription)))
-        .sink(Box::new(sink))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(SourcePluginAdapter::new(id.clone(), subscription)),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(sink),
+        )
         .bind_stream(from.clone(), stream)
         .connect(
             EdgeDefinition { from, to },
@@ -260,7 +270,8 @@ async fn state_store_context_ownership_across_actual_plugin_initialization() {
     .unwrap();
     let source = plugin.source_plugins[0]
         .create_source(
-            "store-ownership",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f1")
+                .expect("fixture UUID"),
             &serde_json::json!({"dataType": {"type": "counter"}, "intervalMs": 60000}),
             false,
         )
@@ -275,47 +286,66 @@ async fn state_store_context_ownership_across_actual_plugin_initialization() {
     )
     .unwrap();
     let reaction = reaction_plugin.reaction_plugins[0]
-        .create_reaction("store-reaction", vec![], &serde_json::json!({}), false)
+        .create_reaction(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f2")
+                .expect("fixture UUID"),
+            vec![],
+            &serde_json::json!({}),
+            false,
+        )
         .await
         .unwrap();
     let mut stores = Vec::new();
+    let store = Arc::new(drasi_lib::MemoryStateStoreProvider::new());
+    stores.push(Arc::downgrade(&store));
+    let (updates, _source_receiver) = tokio::sync::mpsc::channel(16);
+    source
+        .bind_runtime_context(drasi_lib::SourceRuntimeContext::new(
+            "store-instance",
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f1")
+                .expect("fixture UUID"),
+            Some(store.clone()),
+            updates,
+            None,
+        ))
+        .await;
+    source.initialize().await.unwrap();
+    let (updates, _reaction_receiver) = tokio::sync::mpsc::channel(16);
+    reaction
+        .bind_runtime_context(drasi_lib::ReactionRuntimeContext {
+            instance_id: "store-instance".into(),
+            reaction_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-0000000000f2",
+            )
+            .expect("fixture UUID"),
+            query_ids: Vec::new(),
+            update_tx: updates.into(),
+            state_store: Some(store),
+            identity_provider: None,
+            snapshot_fetcher: None,
+            resource_observer: None,
+        })
+        .await;
+    reaction.initialize().await.unwrap();
     for _ in 0..2 {
-        let store = Arc::new(drasi_lib::MemoryStateStoreProvider::new());
-        stores.push(Arc::downgrade(&store));
-        let (updates, _receiver) = tokio::sync::mpsc::channel(16);
-        source
-            .initialize(drasi_lib::SourceRuntimeContext::new(
-                "store-instance",
-                "store-ownership",
-                Some(store.clone()),
-                updates,
-                None,
-            ))
-            .await;
         source.start().await.unwrap();
         source.stop().await.unwrap();
-        let (updates, _receiver) = tokio::sync::mpsc::channel(16);
-        reaction
-            .initialize(drasi_lib::ReactionRuntimeContext {
-                instance_id: "store-instance".into(),
-                reaction_id: "store-reaction".into(),
-                update_tx: updates.into(),
-                state_store: Some(store),
-                identity_provider: None,
-                snapshot_fetcher: None,
-                resource_observer: None,
-            })
-            .await;
         reaction.start().await.unwrap();
         reaction.stop().await.unwrap();
+        assert!(
+            stores.iter().all(|store| store.upgrade().is_some()),
+            "ordinary stop must retain the initialized shared store"
+        );
     }
+    source.dispose().await.unwrap();
     drop(source);
     assert!(
         stores.last().unwrap().upgrade().is_some(),
         "the reaction still owns the shared store"
     );
+    reaction.dispose().await.unwrap();
     drop(reaction);
-    if metadata.sdk_version.starts_with("0.17.") {
+    if metadata.sdk_version.starts_with("0.17.") || metadata.sdk_version.starts_with("0.19.") {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while stores.iter().any(|store| store.upgrade().is_some()) {
                 tokio::task::yield_now().await;
@@ -349,6 +379,10 @@ mod test_capture {
         #[allow(dead_code)]
         pub plugin_id: String,
         pub message: String,
+        #[allow(dead_code)]
+        pub instance_id: String,
+        #[allow(dead_code)]
+        pub component_id: String,
     }
 
     #[derive(Debug, Clone)]
@@ -388,6 +422,8 @@ mod test_capture {
                 level: e.level,
                 plugin_id: unsafe { e.plugin_id.to_string() },
                 message: unsafe { e.message.to_string() },
+                instance_id: unsafe { e.instance_id.to_string() },
+                component_id: unsafe { e.component_id.to_string() },
             };
             if let Ok(mut logs) = logs().lock() {
                 logs.push(record);
@@ -629,11 +665,20 @@ async fn test_create_mock_source_instance() {
     });
 
     let source = descriptor
-        .create_source("test-mock-1", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f3")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .expect("Should create mock source instance");
 
-    assert_eq!(source.id(), "test-mock-1");
+    assert_eq!(
+        source.id(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f3")
+            .expect("fixture UUID")
+    );
     assert_eq!(source.type_name(), "mock");
     assert!(!source.auto_start());
 }
@@ -661,7 +706,12 @@ async fn test_mock_source_schema_roundtrip_over_ffi() {
     });
 
     let source = descriptor
-        .create_source("schema-roundtrip", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f4")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .expect("Should create mock source instance");
 
@@ -701,18 +751,35 @@ async fn test_create_log_reaction_instance() {
     let descriptor = &plugin.reaction_plugins[0];
 
     let config = serde_json::json!({});
-    let query_ids = vec!["q1".to_string(), "q2".to_string()];
+    let query_ids = vec![
+        drasi_computation_contracts::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ),
+        drasi_computation_contracts::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q2").expect("fixture component name"),
+        ),
+    ];
 
     let reaction = descriptor
-        .create_reaction("test-log-1", query_ids.clone(), &config, true)
+        .create_reaction(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003d3")
+                .expect("fixture UUID"),
+            query_ids.clone(),
+            &config,
+            true,
+        )
         .await
         .expect("Should create log reaction instance");
 
-    assert_eq!(reaction.id(), "test-log-1");
+    assert_eq!(
+        reaction.id(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000003d3")
+            .expect("fixture UUID")
+    );
     assert_eq!(reaction.type_name(), "log");
     assert!(reaction.auto_start());
 
-    let returned_ids = reaction.query_ids();
+    let returned_ids = reaction.query_inputs();
     assert_eq!(returned_ids, query_ids);
 }
 
@@ -742,7 +809,12 @@ async fn test_mock_source_start_stop_lifecycle() {
     });
 
     let source = plugin.source_plugins[0]
-        .create_source("lifecycle-test", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f5")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .unwrap();
 
@@ -753,6 +825,18 @@ async fn test_mock_source_start_stop_lifecycle() {
         matches!(status, ComponentStatus::Stopped),
         "Initial status should be Stopped, got: {status:?}"
     );
+
+    let (updates, _receiver) = tokio::sync::mpsc::channel(16);
+    source
+        .bind_runtime_context(drasi_lib::SourceRuntimeContext::new(
+            "source-lifecycle",
+            source.id().clone(),
+            None,
+            updates,
+            None,
+        ))
+        .await;
+    source.initialize().await.expect("Source should initialize");
 
     // Start
     source.start().await.expect("Start should succeed");
@@ -769,6 +853,7 @@ async fn test_mock_source_start_stop_lifecycle() {
         matches!(status, ComponentStatus::Stopped),
         "After stop, status should be Stopped, got: {status:?}"
     );
+    source.dispose().await.expect("Source should dispose");
 }
 
 // ============================================================================
@@ -800,21 +885,48 @@ async fn test_create_multiple_source_instances() {
 
     // Create multiple instances from the same descriptor
     let s1 = descriptor
-        .create_source("inst-1", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f6")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .unwrap();
     let s2 = descriptor
-        .create_source("inst-2", &config, true)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f7")
+                .expect("fixture UUID"),
+            &config,
+            true,
+        )
         .await
         .unwrap();
     let s3 = descriptor
-        .create_source("inst-3", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f8")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .unwrap();
 
-    assert_eq!(s1.id(), "inst-1");
-    assert_eq!(s2.id(), "inst-2");
-    assert_eq!(s3.id(), "inst-3");
+    assert_eq!(
+        s1.id(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f6")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        s2.id(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f7")
+            .expect("fixture UUID")
+    );
+    assert_eq!(
+        s3.id(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f8")
+            .expect("fixture UUID")
+    );
 
     assert!(!s1.auto_start());
     assert!(s2.auto_start());
@@ -988,6 +1100,77 @@ fn test_plugin_loader_with_multiple_patterns() {
 // Callback Tests
 // ============================================================================
 
+fn create_global_callback_source(
+    plugin: &drasi_host_sdk::loader::LoadedPlugin,
+    id: &drasi_core_types::ComponentId,
+    config: &serde_json::Value,
+    instance: &str,
+) -> drasi_plugin_sdk::ffi::SourceVtable {
+    use drasi_plugin_sdk::ffi::{FfiPluginRegistration, FfiRuntimeContext, FfiStr, SourceVtable};
+
+    // LoadedPlugin already validated the ABI and pins this actual library.
+    let library = unsafe { libloading::Library::new(&plugin.file_path) }
+        .expect("load the validated mock-source library");
+    let initialize: libloading::Symbol<unsafe extern "C" fn() -> *mut FfiPluginRegistration> =
+        unsafe { library.get(b"drasi_plugin_init") }
+            .expect("resolve the ordinary plugin registration entry point");
+    let registration = unsafe { initialize() };
+    assert!(!registration.is_null(), "ordinary plugin registration");
+    let registration = unsafe { Box::from_raw(registration) };
+    assert_eq!(
+        registration.source_plugin_count, 1,
+        "actual mock-source descriptor"
+    );
+    assert!(!registration.source_plugins.is_null());
+    assert_eq!(registration.reaction_plugin_count, 0);
+    assert_eq!(registration.bootstrap_plugin_count, 0);
+    assert_eq!(registration.identity_provider_plugin_count, 0);
+    assert_eq!(registration.secret_store_plugin_count, 0);
+    let mut descriptors = unsafe {
+        Vec::from_raw_parts(
+            registration.source_plugins,
+            registration.source_plugin_count,
+            registration.source_plugin_count,
+        )
+    };
+    let descriptor = descriptors.pop().expect("mock-source descriptor");
+    let config = serde_json::to_string(config).expect("serialize the mock-source configuration");
+    let created = (descriptor.create_source_fn)(
+        descriptor.state,
+        FfiStr::from_str(id.as_str()),
+        FfiStr::from_str(&config),
+        false,
+    );
+    (descriptor.drop_fn)(descriptor.state);
+    let source = unsafe { created.into_result::<SourceVtable>() }
+        .expect("create real mock-source through ordinary ABI");
+    assert!(!source.is_null(), "ordinary source factory result");
+    let source = unsafe { *Box::from_raw(source) };
+    assert_eq!(
+        unsafe { (source.id_fn)(source.state).to_string() },
+        id.as_str(),
+        "factory must preserve the supplied typed UUID"
+    );
+    let context = FfiRuntimeContext {
+        instance_id: FfiStr::from_str(instance),
+        component_id: FfiStr::from_str(id.as_str()),
+        resolved_query_ids_json: FfiStr::from_str("[]"),
+        state_store: std::ptr::null(),
+        identity_provider: std::ptr::null(),
+        snapshot_fetcher: std::ptr::null(),
+        wal_provider: std::ptr::null(),
+        log_callback: None,
+        log_ctx: std::ptr::null_mut(),
+        lifecycle_callback: None,
+        lifecycle_ctx: std::ptr::null_mut(),
+    };
+    unsafe { (source.bind_runtime_context_fn)(source.state, &context).into_result() }
+        .expect("bind required services without per-instance callbacks");
+    unsafe { (source.initialize_fn)(source.state).into_result() }
+        .expect("initialize the actual source once");
+    source
+}
+
 #[tokio::test]
 #[serial]
 async fn test_log_callback_captures_plugin_logs() {
@@ -1014,18 +1197,23 @@ async fn test_log_callback_captures_plugin_logs() {
         "intervalMs": 60000
     });
 
-    let source = plugin.source_plugins[0]
-        .create_source("log-test", &config, false)
-        .await
-        .unwrap();
+    let source = create_global_callback_source(
+        &plugin,
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000f9")
+            .expect("fixture UUID"),
+        &config,
+        "callback-capture",
+    );
 
     // Starting the source should generate log messages from the plugin
-    source.start().await.expect("Start should succeed");
+    unsafe { (source.start_fn)(source.state).into_result() }.expect("Start should succeed");
 
     // Give plugin a moment to emit logs
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    source.stop().await.expect("Stop should succeed");
+    unsafe { (source.stop_fn)(source.state).into_result() }.expect("Stop should succeed");
+    unsafe { (source.dispose_fn)(source.state).into_result() }.expect("Source should dispose");
+    (source.drop_fn)(source.state);
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -1108,7 +1296,12 @@ async fn test_create_source_with_invalid_config() {
     });
 
     let result = plugin.source_plugins[0]
-        .create_source("bad-config", &bad_config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fa")
+                .expect("fixture UUID"),
+            &bad_config,
+            false,
+        )
         .await;
 
     // The plugin factory may handle this in different ways:
@@ -1149,7 +1342,12 @@ async fn test_mock_source_dispatch_mode() {
     });
 
     let source = plugin.source_plugins[0]
-        .create_source("dispatch-test", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fb")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .unwrap();
 
@@ -1193,7 +1391,14 @@ async fn test_drop_source_instance_does_not_crash() {
     // Create and immediately drop multiple instances
     for i in 0..5 {
         let source = plugin.source_plugins[0]
-            .create_source(&format!("drop-test-{i}"), &config, false)
+            .create_source(
+                &drasi_core_types::ComponentId::try_new(format!(
+                    "00000000-0000-0000-0001-{i:012x}"
+                ))
+                .expect("fixture UUID"),
+                &config,
+                false,
+            )
             .await
             .unwrap();
         drop(source);
@@ -1268,7 +1473,12 @@ async fn test_plugin_logs_routed_to_log_registry() {
     });
 
     let source = plugin.source_plugins[0]
-        .create_source("log-test-source", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fc")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .unwrap();
 
@@ -1279,19 +1489,22 @@ async fn test_plugin_logs_routed_to_log_registry() {
     // Initialize with a real SourceRuntimeContext — this wires per-instance callbacks
     let context = SourceRuntimeContext::new(
         "log-test-instance",
-        "log-test-source",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fc")
+            .expect("fixture UUID"),
         None,
         update_tx,
         None,
     );
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
 
     // Subscribe to logs BEFORE starting (like the API does)
     let registry = get_or_init_global_registry();
     let log_key = ComponentLogKey::new(
         "log-test-instance",
         ComponentType::Source,
-        "log-test-source",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fc")
+            .expect("fixture UUID"),
     );
     let (_history, mut log_rx) = registry.subscribe_by_key(&log_key).await;
 
@@ -1346,7 +1559,12 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     });
 
     let source = plugin.source_plugins[0]
-        .create_source("lifecycle-evt-source", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fd")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .unwrap();
 
@@ -1356,12 +1574,14 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     // Initialize with a real SourceRuntimeContext
     let context = SourceRuntimeContext::new(
         "lifecycle-test-instance",
-        "lifecycle-evt-source",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fd")
+            .expect("fixture UUID"),
         None,
         update_tx,
         None,
     );
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
 
     // Start the source — should emit Starting, Started events through channel
     let _ = source.start().await;
@@ -1399,7 +1619,17 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     // Verify we got events for the right component
     let our_events: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, ComponentUpdate::Status { component_id, .. } if component_id == "lifecycle-evt-source"))
+        .filter(|e| {
+            matches!(
+                e,
+                ComponentUpdate::Status { component_id, .. }
+                    if component_id
+                        == &drasi_core_types::ComponentId::try_new(
+                            "00000000-0000-0000-0000-0000000000fd"
+                        )
+                        .expect("fixture UUID")
+            )
+        })
         .collect();
     assert!(
         !our_events.is_empty(),
@@ -1450,7 +1680,12 @@ async fn test_null_callback_context_does_not_crash() {
     });
 
     let source = plugin.source_plugins[0]
-        .create_source("null-ctx-test", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fe")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .unwrap();
 
@@ -1493,14 +1728,16 @@ async fn test_plugin_logs_reach_host_callback() {
         "intervalMs": 500
     });
 
-    let source = plugin.source_plugins[0]
-        .create_source("level-test", &config, false)
-        .await
-        .unwrap();
+    plugin.set_log_level(drasi_plugin_sdk::ffi::FfiLogLevelFilter::Trace);
+    let source_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000ff")
+        .expect("fixture UUID");
+    let source = create_global_callback_source(&plugin, &source_id, &config, "level-test");
 
-    let _ = source.start().await;
+    unsafe { (source.start_fn)(source.state).into_result() }.expect("Source should start");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let _ = source.stop().await;
+    unsafe { (source.stop_fn)(source.state).into_result() }.expect("Source should stop");
+    unsafe { (source.dispose_fn)(source.state).into_result() }.expect("Source should dispose");
+    (source.drop_fn)(source.state);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let logs = test_capture::logs()
@@ -1509,12 +1746,12 @@ async fn test_plugin_logs_reach_host_callback() {
     // We should have at least the start and stop info logs
     let our_logs: Vec<_> = logs
         .iter()
-        .filter(|l| l.message.contains("level-test"))
+        .filter(|l| l.message.contains(source_id.as_str()))
         .collect();
 
     assert!(
         !our_logs.is_empty(),
-        "Expected captured logs mentioning 'level-test'"
+        "Expected captured logs mentioning the actual source UUID"
     );
 
     // Verify info level is present (mock source emits info during start/stop)
@@ -1524,6 +1761,14 @@ async fn test_plugin_logs_reach_host_callback() {
     assert!(
         has_info,
         "Expected at least one INFO log, got: {our_logs:?}"
+    );
+    assert!(
+        test_capture::lifecycles()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.component_id == source_id.as_str()),
+        "global lifecycle callback must preserve the actual source UUID"
     );
 }
 
@@ -1571,13 +1816,14 @@ async fn test_plugin_drops_records_below_host_level() {
     // Phase 1: Warn level — the mock source's info logs must not cross the FFI.
     plugin.set_log_level(FfiLogLevelFilter::Warn);
 
-    let source = plugin.source_plugins[0]
-        .create_source("filter-test", &config, false)
-        .await
-        .unwrap();
-    let _ = source.start().await;
+    let source_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000100")
+        .expect("fixture UUID");
+    let source = create_global_callback_source(&plugin, &source_id, &config, "filter-test");
+    unsafe { (source.start_fn)(source.state).into_result() }.expect("Warn source should start");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let _ = source.stop().await;
+    unsafe { (source.stop_fn)(source.state).into_result() }.expect("Warn source should stop");
+    unsafe { (source.dispose_fn)(source.state).into_result() }.expect("Warn source should dispose");
+    (source.drop_fn)(source.state);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     {
@@ -1586,7 +1832,9 @@ async fn test_plugin_drops_records_below_host_level() {
             .unwrap_or_else(|e| e.into_inner());
         let leaked: Vec<_> = logs
             .iter()
-            .filter(|l| l.message.contains("filter-test"))
+            .filter(|l| {
+                l.message.contains(source_id.as_str()) || l.component_id == source_id.as_str()
+            })
             .collect();
         assert!(
             leaked.is_empty(),
@@ -1597,13 +1845,15 @@ async fn test_plugin_drops_records_below_host_level() {
     // Phase 2: Trace level — the same source's info logs cross again.
     plugin.set_log_level(FfiLogLevelFilter::Trace);
 
-    let source2 = plugin.source_plugins[0]
-        .create_source("filter-test-open", &config, false)
-        .await
-        .unwrap();
-    let _ = source2.start().await;
+    let source2_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000101")
+        .expect("fixture UUID");
+    let source2 = create_global_callback_source(&plugin, &source2_id, &config, "filter-test-open");
+    unsafe { (source2.start_fn)(source2.state).into_result() }.expect("Trace source should start");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let _ = source2.stop().await;
+    unsafe { (source2.stop_fn)(source2.state).into_result() }.expect("Trace source should stop");
+    unsafe { (source2.dispose_fn)(source2.state).into_result() }
+        .expect("Trace source should dispose");
+    (source2.drop_fn)(source2.state);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let logs = test_capture::logs()
@@ -1611,7 +1861,9 @@ async fn test_plugin_drops_records_below_host_level() {
         .unwrap_or_else(|e| e.into_inner());
     let visible: Vec<_> = logs
         .iter()
-        .filter(|l| l.message.contains("filter-test-open"))
+        .filter(|l| {
+            l.message.contains(source2_id.as_str()) || l.component_id == source2_id.as_str()
+        })
         .collect();
     assert!(
         !visible.is_empty(),
@@ -1622,9 +1874,9 @@ async fn test_plugin_drops_records_below_host_level() {
 #[tokio::test]
 #[serial]
 async fn test_logs_without_initialize_reach_global_callback() {
-    //! When a source is NOT initialized (no per-instance callbacks), logs should
-    //! still reach the global callback. This verifies the tracing bridge's
-    //! global fallback path.
+    //! Keep the historical case name, but do not start an uninitialized object:
+    //! ordinary ABI binding can omit per-instance callbacks while the source
+    //! still initializes successfully. That exercises the real global fallback.
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
         panic!("SKIP: drasi-source-mock not built as cdylib");
@@ -1647,15 +1899,16 @@ async fn test_logs_without_initialize_reach_global_callback() {
         "intervalMs": 500
     });
 
-    let source = plugin.source_plugins[0]
-        .create_source("global-cb-test", &config, false)
-        .await
-        .unwrap();
+    plugin.set_log_level(drasi_plugin_sdk::ffi::FfiLogLevelFilter::Trace);
+    let source_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000102")
+        .expect("fixture UUID");
+    let source = create_global_callback_source(&plugin, &source_id, &config, "global-cb-test");
 
-    // Don't call initialize — no per-instance callbacks
-    let _ = source.start().await;
+    unsafe { (source.start_fn)(source.state).into_result() }.expect("Source should start");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let _ = source.stop().await;
+    unsafe { (source.stop_fn)(source.state).into_result() }.expect("Source should stop");
+    unsafe { (source.dispose_fn)(source.state).into_result() }.expect("Source should dispose");
+    (source.drop_fn)(source.state);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let logs = test_capture::logs()
@@ -1663,12 +1916,26 @@ async fn test_logs_without_initialize_reach_global_callback() {
         .unwrap_or_else(|e| e.into_inner());
     let our_logs: Vec<_> = logs
         .iter()
-        .filter(|l| l.message.contains("global-cb-test"))
+        .filter(|l| l.message.contains(source_id.as_str()))
         .collect();
 
     assert!(
         !our_logs.is_empty(),
-        "Expected logs via global callback for source without initialize()"
+        "Expected logs via global callback without per-instance callbacks"
+    );
+    assert!(
+        our_logs
+            .iter()
+            .any(|entry| entry.component_id.is_empty() && entry.instance_id.is_empty()),
+        "unscoped lifecycle-call logs must use the global callback, not invented instance routing"
+    );
+    assert!(
+        test_capture::lifecycles()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.component_id == source_id.as_str()),
+        "global fallback must preserve actual lifecycle UUID metadata"
     );
 }
 
@@ -1702,7 +1969,12 @@ async fn test_per_instance_logs_include_correct_component_id() {
     });
 
     let source = plugin.source_plugins[0]
-        .create_source("component-id-test", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000103")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .unwrap();
 
@@ -1710,18 +1982,21 @@ async fn test_per_instance_logs_include_correct_component_id() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = SourceRuntimeContext::new(
         "cid-test-instance",
-        "component-id-test",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000103")
+            .expect("fixture UUID"),
         None,
         update_tx,
         None,
     );
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
 
     let registry = get_or_init_global_registry();
     let log_key = ComponentLogKey::new(
         "cid-test-instance",
         ComponentType::Source,
-        "component-id-test",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000103")
+            .expect("fixture UUID"),
     );
     let (_history, mut log_rx) = registry.subscribe_by_key(&log_key).await;
 
@@ -1736,7 +2011,9 @@ async fn test_per_instance_logs_include_correct_component_id() {
         // Verify each log has the correct component key
         let key = log_msg.key();
         assert_eq!(
-            key.component_id, "component-id-test",
+            key.component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000103")
+                .expect("fixture UUID"),
             "Log entry should have component_id 'component-id-test', got '{}'",
             key.component_id
         );
@@ -2144,7 +2421,12 @@ async fn test_source_with_null_identity_provider() {
     let source_descriptor = &plugin.source_plugins[0];
     let config = serde_json::json!({});
     let source = source_descriptor
-        .create_source("null-ip-test", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000104")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .expect("Should create source");
 
@@ -2152,7 +2434,8 @@ async fn test_source_with_null_identity_provider() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
-        source_id: "null-ip-test".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000104")
+            .expect("fixture UUID"),
         update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
@@ -2161,8 +2444,13 @@ async fn test_source_with_null_identity_provider() {
     };
 
     // This should not crash — identity_provider is None
-    source.initialize(context).await;
-    assert_eq!(source.id(), "null-ip-test");
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
+    assert_eq!(
+        source.id(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000104")
+            .expect("fixture UUID")
+    );
 }
 
 /// Test that a source receives a non-null identity_provider through FFI.
@@ -2187,7 +2475,12 @@ async fn test_source_with_identity_provider_injection() {
     let source_descriptor = &plugin.source_plugins[0];
     let config = serde_json::json!({});
     let source = source_descriptor
-        .create_source("ip-inject-test", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000105")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .expect("Should create source");
 
@@ -2201,7 +2494,8 @@ async fn test_source_with_identity_provider_injection() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
-        source_id: "ip-inject-test".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000105")
+            .expect("fixture UUID"),
         update_tx: update_tx.into(),
         state_store: None,
         identity_provider: Some(provider),
@@ -2210,28 +2504,19 @@ async fn test_source_with_identity_provider_injection() {
     };
 
     // This should not crash — identity_provider is passed through FFI
-    source.initialize(context).await;
-    assert_eq!(source.id(), "ip-inject-test");
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
+    assert_eq!(
+        source.id(),
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000105")
+            .expect("fixture UUID")
+    );
 }
 
-/// Resolve a built cdylib by crate name, checking the copied `plugins/` dir first and then
-/// the raw `target/debug/` output (where `cargo build --lib` places it). Returns `None` if
-/// the plugin has not been built.
+/// Resolve a built cdylib in the one override-aware ordinary plugin directory.
 fn find_cdylib(crate_name: &str) -> Option<PathBuf> {
-    let file = plugin_filename(crate_name);
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("Cannot find workspace root from CARGO_MANIFEST_DIR");
-    let candidates = [
-        root.join("target")
-            .join("debug")
-            .join("plugins")
-            .join(&file),
-        root.join("target").join("debug").join(&file),
-    ];
-    candidates.into_iter().find(|p| p.exists())
+    let path = plugin_dir().join(plugin_filename(crate_name));
+    path.is_file().then_some(path)
 }
 
 /// Cross-cdylib regression test for the `FfiIdentityProviderProxy` vtable lifecycle
@@ -2331,7 +2616,12 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
 
     let config = serde_json::json!({});
     let source = mock_plugin.source_plugins[0]
-        .create_source("identity-xcdylib", &config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000106")
+                .expect("fixture UUID"),
+            &config,
+            false,
+        )
         .await
         .expect("Should create mock source");
 
@@ -2339,7 +2629,8 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
-        source_id: "identity-xcdylib".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000106")
+            .expect("fixture UUID"),
         update_tx: update_tx.into(),
         state_store: None,
         identity_provider: Some(provider),
@@ -2348,7 +2639,8 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
     };
 
     // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries.
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
     std::env::remove_var("DRASI_MOCK_IDENTITY_CLONE_STRESS");
 
     // Every clone's get_credentials must have reached the identity cdylib intact.
@@ -2468,7 +2760,13 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
 
     let config = serde_json::json!({});
     let reaction = reaction_plugin.reaction_plugins[0]
-        .create_reaction("identity-xcdylib-reaction", vec![], &config, false)
+        .create_reaction(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000107")
+                .expect("fixture UUID"),
+            vec![],
+            &config,
+            false,
+        )
         .await
         .expect("Should create snapshot-test reaction");
 
@@ -2476,7 +2774,9 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
-        reaction_id: "identity-xcdylib-reaction".to_string(),
+        reaction_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000107")
+            .expect("fixture UUID"),
+        query_ids: Vec::new(),
         update_tx: update_tx.into(),
         state_store: None,
         identity_provider: Some(provider),
@@ -2486,7 +2786,11 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
 
     // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries
     // and exercises the host-side ReactionProxy::initialize ip_ptr reclaim.
-    reaction.initialize(context).await;
+    reaction.bind_runtime_context(context).await;
+    reaction
+        .initialize()
+        .await
+        .expect("reaction initialization");
     std::env::remove_var("DRASI_SNAPSHOT_TEST_IDENTITY_CLONE_STRESS");
 
     // Every clone's get_credentials must have reached the identity cdylib intact.
@@ -2526,10 +2830,18 @@ async fn test_reaction_enqueue_query_result() {
 
     let descriptor = &plugin.reaction_plugins[0];
     let config = serde_json::json!({});
-    let query_ids = vec!["test-query".to_string()];
+    let query_ids = vec![drasi_computation_contracts::ComponentReference::by_name(
+        drasi_core_types::ComponentName::try_new("test-query").expect("fixture component name"),
+    )];
 
     let reaction = descriptor
-        .create_reaction("enqueue-test", query_ids, &config, true)
+        .create_reaction(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000108")
+                .expect("fixture UUID"),
+            query_ids,
+            &config,
+            true,
+        )
         .await
         .expect("Should create log reaction instance");
 
@@ -2538,21 +2850,28 @@ async fn test_reaction_enqueue_query_result() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
-        reaction_id: "enqueue-test".to_string(),
+        reaction_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000108")
+            .expect("fixture UUID"),
+        query_ids: Vec::new(),
         update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
         resource_observer: None,
     };
-    reaction.initialize(context).await;
+    reaction.bind_runtime_context(context).await;
+    reaction
+        .initialize()
+        .await
+        .expect("reaction initialization");
 
     // Start the reaction
     reaction.start().await.expect("Reaction should start");
 
     // Build a QueryResult and enqueue it via the host-managed path
     let query_result = drasi_lib::channels::QueryResult::new(
-        "test-query".to_string(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+            .expect("fixture UUID"),
         0,
         chrono::Utc::now(),
         vec![],
@@ -2591,10 +2910,23 @@ async fn test_reaction_enqueue_multiple_query_results() {
 
     let descriptor = &plugin.reaction_plugins[0];
     let config = serde_json::json!({});
-    let query_ids = vec!["q1".to_string(), "q2".to_string()];
+    let query_ids = vec![
+        drasi_computation_contracts::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q1").expect("fixture component name"),
+        ),
+        drasi_computation_contracts::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("q2").expect("fixture component name"),
+        ),
+    ];
 
     let reaction = descriptor
-        .create_reaction("multi-enqueue-test", query_ids, &config, true)
+        .create_reaction(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000109")
+                .expect("fixture UUID"),
+            query_ids,
+            &config,
+            true,
+        )
         .await
         .expect("Should create log reaction instance");
 
@@ -2602,21 +2934,38 @@ async fn test_reaction_enqueue_multiple_query_results() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
-        reaction_id: "multi-enqueue-test".to_string(),
+        reaction_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000109")
+            .expect("fixture UUID"),
+        query_ids: vec![
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID"),
+        ],
         update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
         resource_observer: None,
     };
-    reaction.initialize(context).await;
+    reaction.bind_runtime_context(context).await;
+    reaction
+        .initialize()
+        .await
+        .expect("reaction initialization");
     reaction.start().await.expect("Reaction should start");
 
     // Enqueue results from different queries
     for i in 0..5 {
-        let query_id = if i % 2 == 0 { "q1" } else { "q2" };
+        let query_id = if i % 2 == 0 {
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID")
+        } else {
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID")
+        };
         let result = drasi_lib::channels::QueryResult::new(
-            query_id.to_string(),
+            query_id.clone(),
             0,
             chrono::Utc::now(),
             vec![],
@@ -2650,10 +2999,18 @@ async fn test_reaction_enqueue_query_result_with_data() {
 
     let descriptor = &plugin.reaction_plugins[0];
     let config = serde_json::json!({});
-    let query_ids = vec!["data-query".to_string()];
+    let query_ids = vec![drasi_computation_contracts::ComponentReference::by_name(
+        drasi_core_types::ComponentName::try_new("data-query").expect("fixture component name"),
+    )];
 
     let reaction = descriptor
-        .create_reaction("data-enqueue-test", query_ids, &config, true)
+        .create_reaction(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000010a")
+                .expect("fixture UUID"),
+            query_ids,
+            &config,
+            true,
+        )
         .await
         .expect("Should create log reaction instance");
 
@@ -2661,14 +3018,20 @@ async fn test_reaction_enqueue_query_result_with_data() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
-        reaction_id: "data-enqueue-test".to_string(),
+        reaction_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000010a")
+            .expect("fixture UUID"),
+        query_ids: Vec::new(),
         update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
         resource_observer: None,
     };
-    reaction.initialize(context).await;
+    reaction.bind_runtime_context(context).await;
+    reaction
+        .initialize()
+        .await
+        .expect("reaction initialization");
     reaction.start().await.expect("Reaction should start");
 
     // Build a QueryResult with actual result diffs and metadata
@@ -2685,7 +3048,10 @@ async fn test_reaction_enqueue_query_result_with_data() {
     };
 
     let query_result = drasi_lib::channels::QueryResult {
-        query_id: "data-query".to_string(),
+        query_name: None,
+        input_alias: None,
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000010b")
+            .expect("fixture UUID"),
         sequence: 0,
         timestamp: chrono::Utc::now(),
         results: vec![result_diff],
@@ -2732,11 +3098,21 @@ async fn test_reaction_start_stop_stress() {
     const ITERATIONS: usize = 25;
     const ENQUEUE_PER_ITER: usize = 8;
     let config = serde_json::json!({});
-    let query_ids = vec!["stress-query".to_string()];
+    let query_ids = vec![drasi_computation_contracts::ComponentReference::by_name(
+        drasi_core_types::ComponentName::try_new("stress-query").expect("fixture component name"),
+    )];
 
     for i in 0..ITERATIONS {
         let reaction = descriptor
-            .create_reaction(&format!("stress-{i}"), query_ids.clone(), &config, true)
+            .create_reaction(
+                &drasi_core_types::ComponentId::try_new(format!(
+                    "00000000-0000-0000-0002-{i:012x}"
+                ))
+                .expect("fixture UUID"),
+                query_ids.clone(),
+                &config,
+                true,
+            )
             .await
             .expect("Should create reaction instance");
 
@@ -2744,19 +3120,31 @@ async fn test_reaction_start_stop_stress() {
             tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
         let context = drasi_lib::ReactionRuntimeContext {
             instance_id: format!("stress-instance-{i}"),
-            reaction_id: format!("stress-{i}"),
+            reaction_id: drasi_core_types::ComponentId::try_new(format!(
+                "00000000-0000-0000-0002-{i:012x}"
+            ))
+            .expect("fixture UUID"),
+            query_ids: vec![drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-00000000010c",
+            )
+            .expect("fixture UUID")],
             update_tx: update_tx.into(),
             state_store: None,
             identity_provider: None,
             snapshot_fetcher: None,
             resource_observer: None,
         };
-        reaction.initialize(context).await;
+        reaction.bind_runtime_context(context).await;
+        reaction
+            .initialize()
+            .await
+            .expect("reaction initialization");
         reaction.start().await.expect("reaction start");
 
         for _ in 0..ENQUEUE_PER_ITER {
             let qr = drasi_lib::channels::QueryResult::new(
-                "stress-query".to_string(),
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000010c")
+                    .expect("fixture UUID"),
                 0,
                 chrono::Utc::now(),
                 vec![],
@@ -2824,7 +3212,12 @@ async fn test_e2e_cdylib_source_query_reaction() {
         "intervalMs": 200
     });
     let source = mock_plugin.source_plugins[0]
-        .create_source("test-source", &source_config, true)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
+            &source_config,
+            true,
+        )
         .await
         .expect("Should create mock source");
 
@@ -2837,8 +3230,12 @@ async fn test_e2e_cdylib_source_query_reaction() {
     });
     let reaction = sse_plugin.reaction_plugins[0]
         .create_reaction(
-            "sse-reaction",
-            vec!["e2e-query".to_string()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000010d")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("e2e-query")
+                    .expect("fixture component name"),
+            )],
             &reaction_config,
             true,
         )
@@ -2860,20 +3257,43 @@ async fn test_e2e_cdylib_source_query_reaction() {
                 .clone(),
         )
         .with_id("e2e-test")
-        .with_source(source)
-        .with_query(
-            drasi_lib::Query::cypher("e2e-query")
-                .query("MATCH (n:Counter) RETURN n.value AS Value")
-                .from_input("test-source")
-                .build(),
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("test-source")
+                .expect("fixture component name"),
+            source,
         )
-        .with_reaction(reaction)
+        .with_query(
+            drasi_lib::Query::cypher(
+                drasi_core_types::ComponentName::try_new("e2e-query")
+                    .expect("fixture component name"),
+            )
+            .query("MATCH (n:Counter) RETURN n.value AS Value")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("test-source")
+                    .expect("fixture component name"),
+            )
+            .build()
+            .expect("e2e query configuration"),
+        )
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("e2e-reaction")
+                .expect("fixture component name"),
+            reaction,
+        )
         .build()
         .await
         .expect("Should build DrasiLib");
 
     // Start all components
     core.start().await.expect("Should start DrasiLib");
+    let query_id = core
+        .get_query_info_by_name(
+            &drasi_core_types::ComponentName::try_new("e2e-query").expect("fixture component name"),
+        )
+        .await
+        .expect("Should resolve the library-assigned e2e query identity")
+        .id;
 
     // Give the SSE server a moment to bind
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -2893,7 +3313,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
             serde_json::from_str(event_str).expect("SSE event should be valid JSON");
         assert_eq!(
             event["queryId"].as_str(),
-            Some("e2e-query"),
+            Some(query_id.as_str()),
             "Event should reference the correct query"
         );
         assert!(
@@ -2908,7 +3328,9 @@ async fn test_e2e_cdylib_source_query_reaction() {
 
     // Also verify query state has accumulated results
     let results = core
-        .get_query_results("e2e-query")
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("e2e-query").expect("fixture component name"),
+        )
         .await
         .expect("Should get query results");
     assert!(!results.is_empty(), "Query should have accumulated results");
@@ -2968,7 +3390,8 @@ async fn test_e2e_multi_source_query_reaction() {
 
     let counter_source = mock_plugin.source_plugins[0]
         .create_source(
-            "counter-source",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000010e")
+                .expect("fixture UUID"),
             &serde_json::json!({
                 "dataType": { "type": "counter" },
                 "intervalMs": 200
@@ -2980,7 +3403,8 @@ async fn test_e2e_multi_source_query_reaction() {
 
     let sensor_source = mock_plugin.source_plugins[0]
         .create_source(
-            "sensor-source",
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000010f")
+                .expect("fixture UUID"),
             &serde_json::json!({
                 "dataType": { "type": "sensorReading", "sensorCount": 3 },
                 "intervalMs": 300
@@ -2995,8 +3419,12 @@ async fn test_e2e_multi_source_query_reaction() {
     // Reaction for query-counters-all
     let sse_all = sse_plugin.reaction_plugins[0]
         .create_reaction(
-            "sse-all",
-            vec!["query-counters-all".to_string()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000110")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query-counters-all")
+                    .expect("fixture component name"),
+            )],
             &serde_json::json!({ "host": "127.0.0.1", "port": 19201u16, "sse_path": "/events" }),
             true,
         )
@@ -3006,8 +3434,12 @@ async fn test_e2e_multi_source_query_reaction() {
     // Two reactions both subscribed to query-counters-high
     let sse_high_a = sse_plugin.reaction_plugins[0]
         .create_reaction(
-            "sse-high-a",
-            vec!["query-counters-high".to_string()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000111")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query-counters-high")
+                    .expect("fixture component name"),
+            )],
             &serde_json::json!({ "host": "127.0.0.1", "port": 19202u16, "sse_path": "/events" }),
             true,
         )
@@ -3016,8 +3448,12 @@ async fn test_e2e_multi_source_query_reaction() {
 
     let sse_high_b = sse_plugin.reaction_plugins[0]
         .create_reaction(
-            "sse-high-b",
-            vec!["query-counters-high".to_string()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000112")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query-counters-high")
+                    .expect("fixture component name"),
+            )],
             &serde_json::json!({ "host": "127.0.0.1", "port": 19203u16, "sse_path": "/events" }),
             true,
         )
@@ -3027,8 +3463,12 @@ async fn test_e2e_multi_source_query_reaction() {
     // Reaction for query-sensors
     let sse_sensors = sse_plugin.reaction_plugins[0]
         .create_reaction(
-            "sse-sensors",
-            vec!["query-sensors".to_string()],
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000113")
+                .expect("fixture UUID"),
+            vec![drasi_computation_contracts::ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("query-sensors")
+                    .expect("fixture component name"),
+            )],
             &serde_json::json!({ "host": "127.0.0.1", "port": 19204u16, "sse_path": "/events" }),
             true,
         )
@@ -3038,37 +3478,89 @@ async fn test_e2e_multi_source_query_reaction() {
     // ── Build DrasiLib ──
     let core = drasi_lib::DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
         .with_id("multi-e2e-test")
-        .with_source(counter_source)
-        .with_source(sensor_source)
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("counter-source")
+                .expect("fixture component name"),
+            counter_source,
+        )
+        .with_source(
+            drasi_core_types::ComponentName::try_new("sensor-source")
+                .expect("fixture component name"),
+            sensor_source,
+        )
         // Two queries from counter-source
         .with_query(
-            drasi_lib::Query::cypher("query-counters-all")
+            drasi_lib::Query::cypher(drasi_core_types::ComponentName::try_new("query-counters-all").expect("fixture component name"))
                 .query("MATCH (n:Counter) RETURN n.value AS Value")
-                .from_input("counter-source")
-                .build(),
+                .from_input_by_name(drasi_core_types::ComponentName::try_new("counter-source").expect("fixture component name"))
+                .build()
+                .expect("all counters query configuration"),
         )
         .with_query(
-            drasi_lib::Query::cypher("query-counters-high")
+            drasi_lib::Query::cypher(drasi_core_types::ComponentName::try_new("query-counters-high").expect("fixture component name"))
                 .query("MATCH (n:Counter) WHERE n.value > 3 RETURN n.value AS Value")
-                .from_input("counter-source")
-                .build(),
+                .from_input_by_name(drasi_core_types::ComponentName::try_new("counter-source").expect("fixture component name"))
+                .build()
+                .expect("high counters query configuration"),
         )
         // One query from sensor-source
         .with_query(
-            drasi_lib::Query::cypher("query-sensors")
+            drasi_lib::Query::cypher(drasi_core_types::ComponentName::try_new("query-sensors").expect("fixture component name"))
                 .query("MATCH (s:SensorReading) RETURN s.sensor_id AS SensorId, s.temperature AS Temperature")
-                .from_input("sensor-source")
-                .build(),
+                .from_input_by_name(drasi_core_types::ComponentName::try_new("sensor-source").expect("fixture component name"))
+                .build()
+                .expect("sensor query configuration"),
         )
-        .with_reaction(sse_all)
-        .with_reaction(sse_high_a)
-        .with_reaction(sse_high_b)
-        .with_reaction(sse_sensors)
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("sse-all").expect("fixture component name"),
+            sse_all,
+        )
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("sse-high-a")
+                .expect("fixture component name"),
+            sse_high_a,
+        )
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("sse-high-b")
+                .expect("fixture component name"),
+            sse_high_b,
+        )
+        .with_reaction(
+            drasi_core_types::ComponentName::try_new("sse-sensors")
+                .expect("fixture component name"),
+            sse_sensors,
+        )
         .build()
         .await
         .expect("Should build DrasiLib");
 
     core.start().await.expect("Should start DrasiLib");
+
+    let all_query_id = core
+        .get_query_info_by_name(
+            &drasi_core_types::ComponentName::try_new("query-counters-all")
+                .expect("fixture component name"),
+        )
+        .await
+        .expect("Should resolve the library-assigned all-counters query identity")
+        .id;
+    let high_query_id = core
+        .get_query_info_by_name(
+            &drasi_core_types::ComponentName::try_new("query-counters-high")
+                .expect("fixture component name"),
+        )
+        .await
+        .expect("Should resolve the library-assigned high-counters query identity")
+        .id;
+    let sensor_query_id = core
+        .get_query_info_by_name(
+            &drasi_core_types::ComponentName::try_new("query-sensors")
+                .expect("fixture component name"),
+        )
+        .await
+        .expect("Should resolve the library-assigned sensor query identity")
+        .id;
 
     // Give SSE servers time to bind
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -3091,7 +3583,7 @@ async fn test_e2e_multi_source_query_reaction() {
     );
     for ev in &all_events {
         let v: serde_json::Value = serde_json::from_str(ev).unwrap();
-        assert_eq!(v["queryId"].as_str(), Some("query-counters-all"));
+        assert_eq!(v["queryId"].as_str(), Some(all_query_id.as_str()));
         assert!(v["results"].is_array());
     }
 
@@ -3106,7 +3598,7 @@ async fn test_e2e_multi_source_query_reaction() {
     );
     for ev in high_a_events.iter().chain(high_b_events.iter()) {
         let v: serde_json::Value = serde_json::from_str(ev).unwrap();
-        assert_eq!(v["queryId"].as_str(), Some("query-counters-high"));
+        assert_eq!(v["queryId"].as_str(), Some(high_query_id.as_str()));
         assert!(v["results"].is_array());
     }
 
@@ -3118,7 +3610,7 @@ async fn test_e2e_multi_source_query_reaction() {
     let mut sensor_updates = 0;
     for ev in &sensor_events {
         let v: serde_json::Value = serde_json::from_str(ev).unwrap();
-        assert_eq!(v["queryId"].as_str(), Some("query-sensors"));
+        assert_eq!(v["queryId"].as_str(), Some(sensor_query_id.as_str()));
         let results = v["results"].as_array().expect("sensor result changes");
         assert!(
             !results.is_empty(),
@@ -3150,15 +3642,24 @@ async fn test_e2e_multi_source_query_reaction() {
 
     // ── Verify query state ──
     let all_results = core
-        .get_query_results("query-counters-all")
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("query-counters-all")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Should get query-counters-all results");
     let high_results = core
-        .get_query_results("query-counters-high")
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("query-counters-high")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Should get query-counters-high results");
     let sensor_results = core
-        .get_query_results("query-sensors")
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("query-sensors")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Should get query-sensors results");
 
@@ -3269,7 +3770,12 @@ async fn test_cdylib_source_dispatches_events() {
         "intervalMs": 200
     });
     let source = plugin.source_plugins[0]
-        .create_source("dispatch-test", &source_config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fb")
+                .expect("fixture UUID"),
+            &source_config,
+            false,
+        )
         .await
         .expect("Should create mock source");
 
@@ -3277,19 +3783,23 @@ async fn test_cdylib_source_dispatches_events() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = drasi_lib::context::SourceRuntimeContext::new(
         "test-instance",
-        "dispatch-test",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fb")
+            .expect("fixture UUID"),
         None,
         event_tx,
         None,
     );
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
 
     source.start().await.expect("Should start source");
 
     let settings = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "dispatch-test".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000fb")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
-        query_id: "test-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+            .expect("fixture UUID"),
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
@@ -3341,7 +3851,12 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
         "intervalMs": 50
     });
     let source = plugin.source_plugins[0]
-        .create_source("stress-test", &source_config, false)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000114")
+                .expect("fixture UUID"),
+            &source_config,
+            false,
+        )
         .await
         .expect("Should create mock source");
 
@@ -3349,12 +3864,14 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = drasi_lib::context::SourceRuntimeContext::new(
         "test-instance",
-        "stress-test",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000114")
+            .expect("fixture UUID"),
         None,
         event_tx,
         None,
     );
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
     source.start().await.expect("Should start source");
 
     // Wait for the source to be emitting events
@@ -3363,9 +3880,15 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
     let iterations = 20;
     for i in 0..iterations {
         let settings = drasi_lib::config::SourceSubscriptionSettings {
-            source_id: "stress-test".to_string(),
+            source_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000114",
+            )
+            .expect("fixture UUID"),
             enable_bootstrap: false,
-            query_id: format!("stress-query-{i}"),
+            query_id: drasi_core_types::ComponentId::try_new(format!(
+                "00000000-0000-0000-0003-{i:012x}"
+            ))
+            .expect("fixture UUID"),
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
@@ -3427,7 +3950,7 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
 
 /// Helper: load mock source cdylib, create + initialize + start a source instance.
 async fn create_started_mock_source(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
 ) -> (
     drasi_host_sdk::loader::LoadedPlugin,
     Box<dyn drasi_lib::Source>,
@@ -3456,12 +3979,13 @@ async fn create_started_mock_source(
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = drasi_lib::context::SourceRuntimeContext::new(
         "test-instance",
-        source_id,
+        source_id.clone(),
         None,
         event_tx,
         None,
     );
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await.expect("source initialization");
     source.start().await.expect("Should start source");
 
     (plugin, source, event_rx)
@@ -3470,7 +3994,11 @@ async fn create_started_mock_source(
 #[tokio::test]
 #[serial]
 async fn test_ffi_repeated_lifecycle_does_not_fill_unread_plugin_status_channels() {
-    let (_plugin, source, mut source_updates) = create_started_mock_source("status-cycles").await;
+    let (_plugin, source, mut source_updates) = create_started_mock_source(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000461")
+            .expect("fixture UUID"),
+    )
+    .await;
     let plugin = load_plugin_from_path(
         &require_plugin("drasi-reaction-log"),
         std::ptr::null_mut(),
@@ -3480,14 +4008,24 @@ async fn test_ffi_repeated_lifecycle_does_not_fill_unread_plugin_status_channels
     )
     .expect("load matching log reaction");
     let reaction = plugin.reaction_plugins[0]
-        .create_reaction("status-reaction", vec![], &serde_json::json!({}), false)
+        .create_reaction(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000115")
+                .expect("fixture UUID"),
+            vec![],
+            &serde_json::json!({}),
+            false,
+        )
         .await
         .expect("create reaction");
     let (update_tx, mut reaction_updates) = tokio::sync::mpsc::channel(16);
     reaction
-        .initialize(drasi_lib::ReactionRuntimeContext {
+        .bind_runtime_context(drasi_lib::ReactionRuntimeContext {
             instance_id: "status-instance".into(),
-            reaction_id: "status-reaction".into(),
+            reaction_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000115",
+            )
+            .expect("fixture UUID"),
+            query_ids: Vec::new(),
             update_tx: update_tx.into(),
             state_store: None,
             identity_provider: None,
@@ -3495,6 +4033,10 @@ async fn test_ffi_repeated_lifecycle_does_not_fill_unread_plugin_status_channels
             resource_observer: None,
         })
         .await;
+    reaction
+        .initialize()
+        .await
+        .expect("reaction initialization");
     for _ in 0..24 {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             source.stop().await.expect("source stop");
@@ -3517,7 +4059,11 @@ async fn test_ffi_supports_replay_returns_true() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
     }
-    let (_plugin, source, _rx) = create_started_mock_source("replay-test").await;
+    let (_plugin, source, _rx) = create_started_mock_source(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000462")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     assert!(
         source.supports_replay(),
@@ -3535,13 +4081,19 @@ async fn test_ffi_subscribe_position_handle() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
     }
-    let (_plugin, source, _rx) = create_started_mock_source("pos-handle-test").await;
+    let (_plugin, source, _rx) = create_started_mock_source(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000116")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     // Subscribe WITH request_position_handle — should get Some
     let settings_with = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "pos-handle-test".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000116")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
-        query_id: "query-with-handle".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000117")
+            .expect("fixture UUID"),
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
@@ -3568,14 +4120,21 @@ async fn test_ffi_subscribe_position_handle() {
     );
 
     // Clean up this subscription
-    source.remove_position_handle("query-with-handle").await;
+    source
+        .remove_position_handle(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000117")
+                .expect("fixture UUID"),
+        )
+        .await;
     drop(sub);
 
     // Subscribe WITHOUT request_position_handle — should get None
     let settings_without = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "pos-handle-test".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000116")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
-        query_id: "query-no-handle".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000118")
+            .expect("fixture UUID"),
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
@@ -3604,14 +4163,20 @@ async fn test_ffi_resume_from_skips_bootstrap() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
     }
-    let (_plugin, source, _rx) = create_started_mock_source("resume-test").await;
+    let (_plugin, source, _rx) = create_started_mock_source(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000119")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     // Subscribe with resume_from set — bootstrap should be skipped
     let resume_bytes = bytes::Bytes::from_static(b"\x00\x00\x00\x01\x00\x00\x00\x42");
     let settings = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "resume-test".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000119")
+            .expect("fixture UUID"),
         enable_bootstrap: true, // would normally trigger bootstrap
-        query_id: "resume-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011a")
+            .expect("fixture UUID"),
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: Some(resume_bytes),
@@ -3639,7 +4204,12 @@ async fn test_ffi_resume_from_skips_bootstrap() {
         "position_handle should be returned even with resume_from (FFI boundary)"
     );
 
-    source.remove_position_handle("resume-query").await;
+    source
+        .remove_position_handle(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011a")
+                .expect("fixture UUID"),
+        )
+        .await;
     drop(sub);
     source.stop().await.expect("Should stop");
 }
@@ -3685,15 +4255,21 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
     }
-    let (_plugin, source, _rx) = create_started_mock_source("bootstrap-test").await;
+    let (_plugin, source, _rx) = create_started_mock_source(
+        &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011b")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     // Set a bootstrap provider through FFI
     let position_bytes = bytes::Bytes::from_static(b"\xDE\xAD\xBE\xEF\x00\x01\x02\x03");
     // Subscribe with bootstrap enabled
     let settings = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "bootstrap-test".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011b")
+            .expect("fixture UUID"),
         enable_bootstrap: true,
-        query_id: "bootstrap-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011c")
+            .expect("fixture UUID"),
         nodes: ["Person".to_string(), "Team".to_string()].into(),
         relations: ["MEMBER_OF".to_string()].into(),
         resume_from: None,
@@ -3740,7 +4316,12 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
         "source_position bytes must round-trip through FFI bootstrap_result_receiver"
     );
 
-    source.remove_position_handle("bootstrap-query").await;
+    source
+        .remove_position_handle(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011c")
+                .expect("fixture UUID"),
+        )
+        .await;
     source.stop().await.expect("Should stop");
 }
 
@@ -3771,7 +4352,12 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
         "intervalMs": 200
     });
     let source1 = plugin1.source_plugins[0]
-        .create_source("ckpt-source", &source_config, true)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011d")
+                .expect("fixture UUID"),
+            &source_config,
+            true,
+        )
         .await
         .expect("Should create mock source");
 
@@ -3791,12 +4377,24 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
                 .clone(),
         )
         .with_id("ckpt-test-1")
-        .with_source(source1)
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("ckpt-source")
+                .expect("fixture component name"),
+            source1,
+        )
         .with_query(
-            drasi_lib::Query::cypher("ckpt-query")
-                .query("MATCH (n:Counter) RETURN n.value AS Value")
-                .from_input("ckpt-source")
-                .build(),
+            drasi_lib::Query::cypher(
+                drasi_core_types::ComponentName::try_new("ckpt-query")
+                    .expect("fixture component name"),
+            )
+            .query("MATCH (n:Counter) RETURN n.value AS Value")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("ckpt-source")
+                    .expect("fixture component name"),
+            )
+            .build()
+            .expect("checkpoint query configuration"),
         )
         .build()
         .await
@@ -3809,7 +4407,10 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
 
     // Verify query has results
     let results = core1
-        .get_query_results("ckpt-query")
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("ckpt-query")
+                .expect("fixture component name"),
+        )
         .await
         .expect("Should get query results");
     assert!(
@@ -3835,7 +4436,12 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
     .expect("Should load mock source plugin again");
 
     let source2 = plugin2.source_plugins[0]
-        .create_source("ckpt-source", &source_config, true)
+        .create_source(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011d")
+                .expect("fixture UUID"),
+            &source_config,
+            true,
+        )
         .await
         .expect("Should create mock source again");
 
@@ -3844,12 +4450,14 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
         tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = drasi_lib::context::SourceRuntimeContext::new(
         "test-2",
-        "ckpt-source",
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011d")
+            .expect("fixture UUID"),
         None,
         event_tx,
         None,
     );
-    source2.initialize(context).await;
+    source2.bind_runtime_context(context).await;
+    source2.initialize().await.expect("source2 initialization");
     source2.start().await.expect("Should start source2");
 
     // Verify the source reports supports_replay through FFI
@@ -3860,9 +4468,11 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
 
     // Subscribe with position_handle request (as the query manager would on restart)
     let settings = drasi_lib::config::SourceSubscriptionSettings {
-        source_id: "ckpt-source".to_string(),
+        source_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011d")
+            .expect("fixture UUID"),
         enable_bootstrap: true,
-        query_id: "ckpt-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011e")
+            .expect("fixture UUID"),
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
@@ -3958,7 +4568,8 @@ async fn load_scriptfile_provider(
 
 fn bootstrap_request() -> drasi_lib::bootstrap::BootstrapRequest {
     drasi_lib::bootstrap::BootstrapRequest {
-        query_id: "cdylib-bootstrap-query".to_string(),
+        query_id: drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000011f")
+            .expect("fixture UUID"),
         node_labels: vec![],
         relation_labels: vec![],
         request_id: "cdylib-bootstrap-request".to_string(),
@@ -3980,7 +4591,8 @@ async fn test_bootstrap_plugin_streams_across_cdylib() {
 
     let ctx = drasi_lib::bootstrap::BootstrapContext::new_minimal(
         "itest-server".to_string(),
-        "scriptfile-src".to_string(),
+        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000120")
+            .expect("fixture UUID"),
     );
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
     let drain = tokio::spawn(async move {
@@ -4026,7 +4638,8 @@ async fn test_bootstrap_plugin_backpressure_across_cdylib() {
     let boot = tokio::spawn(async move {
         let ctx = drasi_lib::bootstrap::BootstrapContext::new_minimal(
             "itest-server".to_string(),
-            "scriptfile-src".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000120")
+                .expect("fixture UUID"),
         );
         provider
             .bootstrap(bootstrap_request(), &ctx, tx, None)

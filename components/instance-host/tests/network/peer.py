@@ -117,7 +117,7 @@ def certificates(root):
 def bridge_frame(stream, lane):
     header = receive(stream, 12)
     length = struct.unpack(">I", header[8:])[0]
-    if (header[:8] != b"DRBG\x00\x01" + bytes([lane, 0])
+    if (header[:8] != b"DRBG\x00\x02" + bytes([lane, 0])
             or not 0 < length <= MAX_FRAME):
         raise ValueError("unexpected bounded bridge frame")
     return header + receive(stream, length)
@@ -168,7 +168,7 @@ def proxy(root, address):
                         hello = bridge_frame(incoming, 2)
                         if connection == 2:
                             invalid = bytearray(hello)
-                            invalid[5] = 2
+                            invalid[5] = 3
                             outgoing.sendall(invalid)
                             try:
                                 reply = outgoing.recv(12)

@@ -41,11 +41,18 @@ mod tests {
             relations: Vec::new(),
         };
 
-        graph.merge_source_schema("source1", &source_schema);
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID"),
+            &source_schema,
+        );
 
         assert!(graph.nodes.contains_key("User"));
         let node = &graph.nodes["User"];
-        assert!(node.sources.contains("source1"));
+        assert!(node.sources.contains(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000001e8")
+                .expect("fixture UUID")
+        ));
         assert_eq!(node.properties.len(), 1);
         assert_eq!(node.properties[0].name, "name");
     }
@@ -76,8 +83,16 @@ mod tests {
             relations: Vec::new(),
         };
 
-        graph.merge_source_schema("s1", &schema1);
-        graph.merge_source_schema("s2", &schema2);
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            &schema1,
+        );
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000282")
+                .expect("fixture UUID"),
+            &schema2,
+        );
 
         let node = &graph.nodes["User"];
         assert_eq!(node.properties.len(), 1);
@@ -99,7 +114,11 @@ mod tests {
             }],
         };
 
-        graph.merge_source_schema("s1", &schema);
+        graph.merge_source_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004e")
+                .expect("fixture UUID"),
+            &schema,
+        );
 
         let rel = &graph.relations["KNOWS"];
         assert_eq!(rel.from, Some("User".to_string()));
@@ -109,25 +128,48 @@ mod tests {
     #[test]
     fn test_mark_queried_nodes() {
         let mut graph = GraphSchema::default();
-        graph.mark_queried_nodes(["User", "Order"].iter().copied(), "q1");
+        graph.mark_queried_nodes(
+            ["User", "Order"].iter().copied(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
 
-        assert!(graph.nodes["User"].queried_by.contains("q1"));
-        assert!(graph.nodes["Order"].queried_by.contains("q1"));
+        assert!(graph.nodes["User"].queried_by.contains(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        ));
+        assert!(graph.nodes["Order"].queried_by.contains(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        ));
     }
 
     #[test]
     fn test_mark_queried_relations() {
         let mut graph = GraphSchema::default();
-        graph.mark_queried_relations(["PLACED"].iter().copied(), "q1");
+        graph.mark_queried_relations(
+            ["PLACED"].iter().copied(),
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID"),
+        );
 
-        assert!(graph.relations["PLACED"].queried_by.contains("q1"));
+        assert!(graph.relations["PLACED"].queried_by.contains(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+                .expect("fixture UUID")
+        ));
     }
 
     #[test]
     fn test_record_source_without_schema() {
         let mut graph = GraphSchema::default();
-        graph.record_source_without_schema("unknown-source");
-        assert!(graph.sources_without_schema.contains("unknown-source"));
+        graph.record_source_without_schema(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000283")
+                .expect("fixture UUID"),
+        );
+        assert!(graph.sources_without_schema.contains(
+            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000283")
+                .expect("fixture UUID")
+        ));
     }
 
     #[test]

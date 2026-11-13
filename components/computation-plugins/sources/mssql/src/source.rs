@@ -67,16 +67,17 @@ pub struct MsSqlSource {
 }
 
 impl MsSqlSource {
+    pub(crate) fn ports() -> Result<Vec<PortDescriptor>> {
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("out")?,
+            PortDirection::Output,
+            GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("out")?,
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(ComponentDescriptor::try_new(id, Self::ports()?)?)
     }
     pub fn new(
         id: ComponentId,
@@ -101,7 +102,7 @@ impl MsSqlSource {
         });
         Ok(Self {
             policy: Arc::new(InputPositionPolicy::new(
-                SourceProgressKey::Source(id.to_string()),
+                SourceProgressKey::Source(id.clone()),
                 Arc::new(CursorComparator),
             )?),
             descriptor: Self::describe(id)?,
@@ -135,7 +136,7 @@ impl MsSqlSource {
             ensure!(state.ready, "SQL Server consumer {id} lost readiness");
             let checkpoint = state
                 .checkpoints
-                .get(&SourceProgressKey::Source(self.descriptor.id().to_string()));
+                .get(&SourceProgressKey::Source(self.descriptor.id().clone()));
             let cursor = checkpoint
                 .map(|cp| {
                     Cursor::decode(
@@ -261,6 +262,10 @@ mod tests {
     };
     use drasi_core_types::interface::SourceCheckpoint;
 
+    const SOURCE_ID: &str = "585da1dd-2d7d-5cec-bcf7-e84ac13a88f8";
+    const CONSUMER_A: &str = "18f30619-401b-516d-805d-3b849c066b31";
+    const CONSUMER_B: &str = "030b9047-5dd4-5f27-8bec-8f5d02ca14a9";
+
     struct Progress(ComponentId);
     impl ConsumerProgressProvider for Progress {
         fn graph_id(&self) -> &str {
@@ -277,7 +282,7 @@ mod tests {
         }
     }
     fn fixture() -> Result<MsSqlSource> {
-        let source = ComponentId::try_new("source")?;
+        let source = ComponentId::try_new(SOURCE_ID)?;
         MsSqlSource::new(
             source.clone(),
             StreamId::try_new("source/out")?,
@@ -285,21 +290,29 @@ mod tests {
                 serde_json::json!({"connection":{"host":"no-network-at-construction","database":"d","user":"u"}}),
             )?,
             ConsumerProgressView::new(Arc::new(Progress(source))),
-            &[ComponentId::try_new("a")?, ComponentId::try_new("b")?],
+            &[
+                ComponentId::try_new(CONSUMER_A)?,
+                ComponentId::try_new(CONSUMER_B)?,
+            ],
         )
     }
     fn snapshot(first: Option<u8>, second: Option<u8>) -> Result<ConsumerProgressSnapshot> {
         let mut consumers = BTreeMap::new();
-        for (name, lsn) in [("a", first), ("b", second)] {
+        for (consumer, lsn, sequence) in [(CONSUMER_A, first, 100), (CONSUMER_B, second, 5)] {
             let mut state = SourceProgressSnapshot {
                 ready: true,
                 ..Default::default()
             };
             if let Some(lsn) = lsn {
                 state.checkpoints.insert(
-                    SourceProgressKey::Source("source".into()),
+                    SourceProgressKey::Source(
+                        drasi_core_types::ComponentId::try_new(
+                            "585da1dd-2d7d-5cec-bcf7-e84ac13a88f8",
+                        )
+                        .expect("fixture UUID"),
+                    ),
                     SourceCheckpoint::new(
-                        if name == "a" { 100 } else { 5 },
+                        sequence,
                         Some(Cursor::boundary([7; 32], [lsn; 10]).encode()?.into()),
                     ),
                 );
@@ -307,7 +320,7 @@ mod tests {
             state
                 .transport_sequences
                 .insert(StreamId::try_new("source/out")?, 1000);
-            consumers.insert(ComponentId::try_new(name)?, Arc::new(state));
+            consumers.insert(ComponentId::try_new(consumer)?, Arc::new(state));
         }
         Ok(ConsumerProgressSnapshot { consumers })
     }
@@ -337,7 +350,9 @@ mod tests {
             [1; 10]
         );
         let mut missing = snapshot(Some(1), Some(1))?;
-        missing.consumers.remove(&ComponentId::try_new("b")?);
+        missing.consumers.remove(&ComponentId::try_new(
+            "030b9047-5dd4-5f27-8bec-8f5d02ca14a9",
+        )?);
         assert!(fixture()?.observe(&missing).is_err());
         for change in [
             "failure",
@@ -349,8 +364,13 @@ mod tests {
             let mut source = fixture()?;
             source.observe(&snapshot(Some(1), Some(1))?)?;
             let mut next = snapshot(Some(2), Some(2))?;
-            let member =
-                Arc::make_mut(next.consumers.get_mut(&ComponentId::try_new("b")?).unwrap());
+            let member = Arc::make_mut(
+                next.consumers
+                    .get_mut(&ComponentId::try_new(
+                        "030b9047-5dd4-5f27-8bec-8f5d02ca14a9",
+                    )?)
+                    .unwrap(),
+            );
             match change {
                 "failure" => member.failure = Some("failed".into()),
                 "reset" => member.reset_generation += 1,

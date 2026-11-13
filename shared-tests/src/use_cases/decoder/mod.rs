@@ -74,7 +74,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline(mw_name1));
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline(mw_name1));
         builder.build().await
     };
 
@@ -130,7 +130,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline(mw_name2));
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline(mw_name2));
         builder.build().await
     };
 
@@ -188,7 +188,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline(mw_name3));
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline(mw_name3));
         builder.build().await
     };
 
@@ -244,7 +244,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline(mw_name4));
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline(mw_name4));
         builder.build().await
     };
 
@@ -301,7 +301,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline(mw_name5));
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline(mw_name5));
         builder.build().await
     };
 
@@ -349,7 +349,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
             None,
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline(mw_name6));
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline(mw_name6));
         builder.build().await
     };
 
@@ -405,7 +405,7 @@ pub async fn decoder(config: &(impl QueryTestConfig + Send)) {
             Some(10),
         );
         builder = builder.with_source_middleware(mw_config);
-        builder = builder.with_source_pipeline("test", &queries::source_pipeline(mw_name7));
+        builder = builder.with_namespace_pipeline("test", &queries::source_pipeline(mw_name7));
         builder.build().await
     };
 

@@ -105,20 +105,20 @@ fn labels(label: &str) -> Arc<[Arc<str>]> {
 }
 
 fn element_metadata(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label: &str,
     effective_from: u64,
 ) -> ElementMetadata {
     ElementMetadata {
-        reference: ElementReference::new(source_id, element_id),
+        reference: ElementReference::new(source_id.as_str(), element_id),
         labels: labels(label),
         effective_from,
     }
 }
 
 fn relation_element(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     relation_id: &str,
     label: &str,
     from_id: &str,
@@ -128,13 +128,13 @@ fn relation_element(
     Element::Relation {
         metadata: element_metadata(source_id, relation_id, label, effective_from),
         properties: ElementPropertyMap::new(),
-        in_node: ElementReference::new(source_id, from_id),
-        out_node: ElementReference::new(source_id, to_id),
+        in_node: ElementReference::new(source_id.as_str(), from_id),
+        out_node: ElementReference::new(source_id.as_str(), to_id),
     }
 }
 
 fn node_element(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     element_id: &str,
     label: &str,
     effective_from: u64,
@@ -172,7 +172,10 @@ fn effective_from(timestamp: i64) -> u64 {
     }
 }
 
-pub fn map_meta_to_coin_changes(source_id: &str, meta: &MetaResponse) -> Result<Vec<SourceChange>> {
+pub fn map_meta_to_coin_changes(
+    source_id: &drasi_lib::ComponentId,
+    meta: &MetaResponse,
+) -> Result<Vec<SourceChange>> {
     let mut changes = Vec::new();
 
     for asset in &meta.universe {
@@ -190,7 +193,7 @@ pub fn map_meta_to_coin_changes(source_id: &str, meta: &MetaResponse) -> Result<
 }
 
 pub fn map_spot_meta_to_nodes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     spot_meta: &SpotMetaResponse,
     existing_coins: &mut HashSet<String>,
 ) -> Result<Vec<SourceChange>> {
@@ -241,7 +244,10 @@ pub fn map_spot_meta_to_nodes(
     Ok(changes)
 }
 
-pub fn map_trade_to_changes(source_id: &str, trade: &Trade) -> Result<Vec<SourceChange>> {
+pub fn map_trade_to_changes(
+    source_id: &drasi_lib::ComponentId,
+    trade: &Trade,
+) -> Result<Vec<SourceChange>> {
     let price = parse_f64(&trade.px, "trade.px")?;
     let size = parse_f64(&trade.sz, "trade.sz")?;
 
@@ -286,7 +292,7 @@ pub fn map_trade_to_changes(source_id: &str, trade: &Trade) -> Result<Vec<Source
 }
 
 pub fn map_liquidation_to_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     liquidation: &Liquidation,
 ) -> Result<Vec<SourceChange>> {
     let price = parse_f64(&liquidation.px, "liquidation.px")?;
@@ -333,7 +339,7 @@ pub fn map_liquidation_to_changes(
 }
 
 pub fn map_mid_prices_to_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     mids: &HashMap<String, String>,
     initialized: &mut InitializedEntities,
     timestamp: i64,
@@ -380,7 +386,7 @@ pub fn map_mid_prices_to_changes(
 }
 
 pub fn map_order_book_to_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     book: &L2Book,
     initialized: &mut InitializedEntities,
 ) -> Result<Vec<SourceChange>> {
@@ -458,7 +464,7 @@ pub fn map_order_book_to_changes(
 }
 
 pub fn map_funding_rate_to_changes(
-    source_id: &str,
+    source_id: &drasi_lib::ComponentId,
     coin: &str,
     ctx: &AssetCtx,
     initialized: &mut InitializedEntities,

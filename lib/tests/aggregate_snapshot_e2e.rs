@@ -153,21 +153,30 @@ fn join(id: &str, keys: &[(&str, &str)]) -> QueryJoinConfig {
 }
 
 fn portfolio_config() -> QueryConfig {
-    Query::cypher(SUMMARY_ID)
-        .query(PORTFOLIO_SUMMARY)
-        .from_input("postgres-stocks")
-        .from_input("price-feed")
-        .with_joins(vec![
-            join(
-                "OWNS_STOCK",
-                &[("portfolio", "symbol"), ("stocks", "symbol")],
-            ),
-            join(
-                "HAS_PRICE",
-                &[("stocks", "symbol"), ("stock_prices", "symbol")],
-            ),
-        ])
-        .build()
+    Query::cypher(
+        drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+            .expect("fixture component name"),
+    )
+    .query(PORTFOLIO_SUMMARY)
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("postgres-stocks")
+            .expect("fixture component name"),
+    )
+    .from_input_by_name(
+        drasi_core_types::ComponentName::try_new("price-feed").expect("fixture component name"),
+    )
+    .with_joins(vec![
+        join(
+            "OWNS_STOCK",
+            &[("portfolio", "symbol"), ("stocks", "symbol")],
+        ),
+        join(
+            "HAS_PRICE",
+            &[("stocks", "symbol"), ("stock_prices", "symbol")],
+        ),
+    ])
+    .build()
+    .expect("valid portfolio query")
 }
 
 fn summary(total_value: f64, total_cost: f64, position_count: i64) -> Value {
@@ -192,7 +201,11 @@ async fn assert_summary_snapshot(
 ) -> Result<u64> {
     let rows = keyed_snapshot(query).await?;
     assert_eq!(
-        core.get_query_results(SUMMARY_ID).await?,
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+                .expect("fixture component name")
+        )
+        .await?,
         vec![expected.clone()],
         "get_query_results must return exactly the current aggregate (keyed snapshot: {rows:?})"
     );
@@ -307,6 +320,7 @@ async fn aggregate_snapshot_trading_bootstrap_updates_deletes_and_rebootstrap() 
         .set_bootstrap_provider(Box::new(BootstrapRows(price_rows)))
         .await;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -320,21 +334,42 @@ async fn aggregate_snapshot_trading_bootstrap_updates_deletes_and_rebootstrap() 
                 .clone(),
         )
         .with_id("aggregate-snapshot-trading")
-        .with_source(postgres)
-        .with_source(prices)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("postgres-stocks")
+                .expect("fixture component name"),
+            postgres,
+        )
+        .with_source(
+            drasi_core_types::ComponentName::try_new("price-feed").expect("fixture component name"),
+            prices,
+        )
         .with_query(portfolio_config())
         .build()
         .await?;
     core.start().await?;
+    timeout(
+        TIMEOUT,
+        core.component_by_name(&drasi_lib::ComponentName::try_new(SUMMARY_ID)?)?
+            .wait_started(),
+    )
+    .await??;
     let query = core
         .query_manager()
-        .get_query_instance(SUMMARY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+                .expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let signature =
         assert_summary_snapshot(&core, query.as_ref(), summary(2000.0, 1800.0, 2)).await?;
     assert_eq!(query.fetch_snapshot().await?.as_of_sequence, 0);
-    let mut subscription = query.subscribe("snapshot-regression".to_string()).await?;
+    let mut subscription = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000376")
+                .expect("fixture UUID"),
+        )
+        .await?;
 
     for (time, price_value, before, after) in [(2, 115, 2000.0, 2050.0), (3, 125, 2050.0, 2150.0)] {
         price_feed
@@ -397,30 +432,58 @@ async fn aggregate_snapshot_trading_bootstrap_updates_deletes_and_rebootstrap() 
         }]
     );
     assert!(keyed_snapshot(query.as_ref()).await?.is_empty());
-    assert!(core.get_query_results(SUMMARY_ID).await?.is_empty());
+    assert!(core
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+                .expect("fixture component name")
+        )
+        .await?
+        .is_empty());
     drop(subscription);
     drop(query);
 
     // Explicitly recreate the in-memory query, first from an empty portfolio,
     // then from a complete snapshot. Stop/start alone is not a reset contract.
-    core.remove_query(SUMMARY_ID).await?;
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+            .expect("fixture component name"),
+    )
+    .await?;
     postgres_rows.write().await.truncate(2);
-    core.add_query(portfolio_config()).await?;
+    let admitted = core.add_query_with_handle(portfolio_config()).await?;
+    timeout(TIMEOUT, admitted.wait_started()).await??;
     let query = core
         .query_manager()
-        .get_query_instance(SUMMARY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+                .expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     assert!(keyed_snapshot(query.as_ref()).await?.is_empty());
-    assert!(core.get_query_results(SUMMARY_ID).await?.is_empty());
+    assert!(core
+        .get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+                .expect("fixture component name")
+        )
+        .await?
+        .is_empty());
     drop(query);
 
-    core.remove_query(SUMMARY_ID).await?;
+    core.remove_query_by_name(
+        &drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+            .expect("fixture component name"),
+    )
+    .await?;
     *postgres_rows.write().await = portfolio_rows();
-    core.add_query(portfolio_config()).await?;
+    let admitted = core.add_query_with_handle(portfolio_config()).await?;
+    timeout(TIMEOUT, admitted.wait_started()).await??;
     let query = core
         .query_manager()
-        .get_query_instance(SUMMARY_ID)
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("portfolio-summary-query")
+                .expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     assert_eq!(
@@ -465,6 +528,7 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
         .set_bootstrap_provider(Box::new(BootstrapRows(Arc::new(RwLock::new(rows)))))
         .await;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -478,23 +542,34 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
                 .clone(),
         )
         .with_id("aggregate-snapshot-floor-comfort")
-        .with_source(source)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("building").expect("fixture component name"),
+            source,
+        )
         .with_query(
-            Query::cypher("comfort")
-                .query(query_text)
-                .from_input("building")
-                .with_joins(vec![join(
-                    "PART_OF_FLOOR",
-                    &[("Room", "floor_id"), ("Floor", "id")],
-                )])
-                .build(),
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("comfort")
+                    .expect("fixture component name"),
+            )
+            .query(query_text)
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("building")
+                    .expect("fixture component name"),
+            )
+            .with_joins(vec![join(
+                "PART_OF_FLOOR",
+                &[("Room", "floor_id"), ("Floor", "id")],
+            )])
+            .build()?,
         )
         .build()
         .await?;
     core.start().await?;
     let query = core
         .query_manager()
-        .get_query_instance("comfort")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("comfort").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let initial = keyed_snapshot(query.as_ref()).await?;
@@ -515,7 +590,12 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
         ),
     ]);
     assert_eq!(initial, expected);
-    let mut subscription = query.subscribe("comfort-regression".to_string()).await?;
+    let mut subscription = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000377")
+                .expect("fixture UUID"),
+        )
+        .await?;
     for (time, floor, room_id, temperature, comfort) in [
         (2, "floor-a", "floor-a-room-1", 82, 50.0),
         (3, "floor-a", "floor-a-room-2", 82, 54.0),
@@ -534,7 +614,12 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
         assert_live_update(&mut subscription, signature, before, after.clone()).await?;
         expected.insert(signature, after);
         assert_eq!(keyed_snapshot(query.as_ref()).await?, expected);
-        let mut actual = core.get_query_results("comfort").await?;
+        let mut actual = core
+            .get_query_results_by_name(
+                &drasi_core_types::ComponentName::try_new("comfort")
+                    .expect("fixture component name"),
+            )
+            .await?;
         actual.sort_by_key(|row| row["FloorId"].as_str().unwrap().to_string());
         assert_eq!(
             actual,
@@ -551,22 +636,30 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
 #[tokio::test]
 async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
     let (source, handle) = MockSource::new("numeric")?;
-    let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
+    let core = DrasiLib::builder().with_allow_external_component_ids(true).with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
         .with_id("numeric-identity")
-        .with_source(source)
-        .with_query(Query::cypher("numeric-summary")
+        .with_source(drasi_core_types::ComponentName::try_new("numeric").expect("fixture component name"), source)
+        .with_query(Query::cypher(drasi_core_types::ComponentName::try_new("numeric-summary").expect("fixture component name"))
             .query("MATCH (p:Position) WITH p.group AS groupKey, sum(p.value) AS totalValue RETURN groupKey, totalValue")
-            .from_input("numeric")
+            .from_input_by_name(drasi_core_types::ComponentName::try_new("numeric").expect("fixture component name"))
             .enable_bootstrap(false)
-            .build())
+            .build()?)
         .build().await?;
     core.start().await?;
     let query = core
         .query_manager()
-        .get_query_instance("numeric-summary")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("numeric-summary")
+                .expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
-    let mut subscription = query.subscribe("numeric-test".into()).await?;
+    let mut subscription = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000378")
+                .expect("fixture UUID"),
+        )
+        .await?;
     handle
         .send(SourceChange::Insert {
             element: node(
@@ -597,7 +690,11 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
         .await?;
     let update = timeout(TIMEOUT, subscription.receiver.recv()).await??;
     assert_eq!(
-        core.get_query_results("numeric-summary").await?,
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("numeric-summary")
+                .expect("fixture component name")
+        )
+        .await?,
         vec![json!({"groupKey": 1.0, "totalValue": 20.0})],
         "numeric representation changes must not retain old aggregate rows",
     );
@@ -624,7 +721,11 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
     )
     .await?;
     assert_eq!(
-        core.get_query_results("numeric-summary").await?,
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("numeric-summary")
+                .expect("fixture component name")
+        )
+        .await?,
         vec![json!({"groupKey": 1, "totalValue": 30.0})]
     );
     core.shutdown().await?;
@@ -635,6 +736,7 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
 async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result<()> {
     let (source, handle) = MockSource::new("terminal")?;
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -648,23 +750,40 @@ async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result
                 .clone(),
         )
         .with_id("terminal-identity")
-        .with_source(source)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("terminal").expect("fixture component name"),
+            source,
+        )
         .with_query(
-            Query::cypher("terminal-summary")
-                .query("MATCH (p:Position) RETURN sum(p.value) AS totalValue")
-                .from_input("terminal")
-                .enable_bootstrap(false)
-                .build(),
+            Query::cypher(
+                drasi_core_types::ComponentName::try_new("terminal-summary")
+                    .expect("fixture component name"),
+            )
+            .query("MATCH (p:Position) RETURN sum(p.value) AS totalValue")
+            .from_input_by_name(
+                drasi_core_types::ComponentName::try_new("terminal")
+                    .expect("fixture component name"),
+            )
+            .enable_bootstrap(false)
+            .build()?,
         )
         .build()
         .await?;
     core.start().await?;
     let query = core
         .query_manager()
-        .get_query_instance("terminal-summary")
+        .get_query_instance_by_name(
+            &drasi_core_types::ComponentName::try_new("terminal-summary")
+                .expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
-    let mut subscription = query.subscribe("terminal-test".into()).await?;
+    let mut subscription = query
+        .subscribe(
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000379")
+                .expect("fixture UUID"),
+        )
+        .await?;
     let zero = node("terminal", "Position", "zero", 1, json!({"value": 0}));
     handle
         .send(SourceChange::Insert {
@@ -678,7 +797,11 @@ async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result
         if after == &json!({"totalValue": 0.0}))
     );
     assert_eq!(
-        core.get_query_results("terminal-summary").await?,
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("terminal-summary")
+                .expect("fixture component name")
+        )
+        .await?,
         vec![json!({"totalValue": 0.0})]
     );
 
@@ -704,7 +827,11 @@ async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result
     assert_eq!(next.sequence, 2);
     assert_eq!(query.fetch_outbox(0).await?.results.len(), 2);
     assert_eq!(
-        core.get_query_results("terminal-summary").await?,
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("terminal-summary")
+                .expect("fixture component name")
+        )
+        .await?,
         vec![json!({"totalValue": 5.0})]
     );
     handle
@@ -722,7 +849,11 @@ async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result
     }] if before == &json!({"totalValue": 5.0}) && after == &json!({"totalValue": 0.0}))
     );
     assert_eq!(
-        core.get_query_results("terminal-summary").await?,
+        core.get_query_results_by_name(
+            &drasi_core_types::ComponentName::try_new("terminal-summary")
+                .expect("fixture component name")
+        )
+        .await?,
         vec![json!({"totalValue": 0.0})]
     );
     core.shutdown().await?;

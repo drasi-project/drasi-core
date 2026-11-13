@@ -25,14 +25,21 @@ mod tests {
     #[test]
     fn test_component_event_source_starting() {
         let event = ComponentEvent {
-            component_id: "source-1".to_string(),
+            component_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000096",
+            )
+            .expect("fixture UUID"),
             component_type: ComponentType::Source,
             status: ComponentStatus::Starting,
             timestamp: chrono::Utc::now(),
             message: Some("Starting source".to_string()),
         };
 
-        assert_eq!(event.component_id, "source-1");
+        assert_eq!(
+            event.component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000096")
+                .expect("fixture UUID")
+        );
         assert!(matches!(event.component_type, ComponentType::Source));
         assert!(matches!(event.status, ComponentStatus::Starting));
         assert_eq!(event.message, Some("Starting source".to_string()));
@@ -60,8 +67,11 @@ mod tests {
     #[test]
     fn test_source_event_control() {
         let control = SourceControl::Subscription {
-            query_id: "query-1".to_string(),
-            query_node_id: "node-1".to_string(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000088",
+            )
+            .expect("fixture UUID"),
+            query_instance_id: "node-1".to_string(),
             node_labels: vec!["Person".to_string()],
             rel_labels: vec!["KNOWS".to_string()],
             operation: ControlOperation::Insert,
@@ -89,13 +99,18 @@ mod tests {
 
         let change = SourceChange::Insert { element };
         let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             SourceEvent::Change(change),
             chrono::Utc::now(),
             1,
         );
 
-        assert_eq!(wrapper.source_id, "test-source");
+        assert_eq!(
+            wrapper.source_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID")
+        );
         assert!(matches!(wrapper.event, SourceEvent::Change(_)));
     }
 
@@ -104,7 +119,12 @@ mod tests {
         use std::collections::HashMap;
 
         let result = QueryResult {
-            query_id: "query-1".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000088",
+            )
+            .expect("fixture UUID"),
             sequence: 0,
             results: vec![],
             metadata: HashMap::new(),
@@ -112,7 +132,11 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
 
-        assert_eq!(result.query_id, "query-1");
+        assert_eq!(
+            result.query_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000088")
+                .expect("fixture UUID")
+        );
         assert!(result.results.is_empty());
         assert!(result.metadata.is_empty());
     }
@@ -124,7 +148,12 @@ mod tests {
         metadata.insert("key".to_string(), serde_json::json!("value"));
 
         let result = QueryResult {
-            query_id: "query-1".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000088",
+            )
+            .expect("fixture UUID"),
             sequence: 0,
             results: vec![],
             metadata: metadata.clone(),
@@ -171,8 +200,11 @@ mod tests {
     #[test]
     fn test_source_control_subscription() {
         let control = SourceControl::Subscription {
-            query_id: "query-1".to_string(),
-            query_node_id: "node-1".to_string(),
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000088",
+            )
+            .expect("fixture UUID"),
+            query_instance_id: "node-1".to_string(),
             node_labels: vec!["Person".to_string()],
             rel_labels: vec!["KNOWS".to_string()],
             operation: ControlOperation::Insert,
@@ -185,7 +217,10 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
 
         let event = ComponentEvent {
-            component_id: "test".to_string(),
+            component_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000051",
+            )
+            .expect("fixture UUID"),
             component_type: ComponentType::Source,
             status: ComponentStatus::Running,
             timestamp: chrono::Utc::now(),
@@ -195,7 +230,11 @@ mod tests {
         tx.send(event).await.unwrap();
         let received = rx.recv().await.unwrap();
 
-        assert_eq!(received.component_id, "test");
+        assert_eq!(
+            received.component_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
+                .expect("fixture UUID")
+        );
         assert!(matches!(received.status, ComponentStatus::Running));
     }
 
@@ -205,7 +244,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
 
         let result = QueryResult {
-            query_id: "query-1".to_string(),
+            query_name: None,
+            input_alias: None,
+            query_id: drasi_core_types::ComponentId::try_new(
+                "00000000-0000-0000-0000-000000000088",
+            )
+            .expect("fixture UUID"),
             sequence: 0,
             results: vec![],
             metadata: HashMap::new(),
@@ -216,7 +260,11 @@ mod tests {
         tx.send(result).await.unwrap();
         let received = rx.recv().await.unwrap();
 
-        assert_eq!(received.query_id, "query-1");
+        assert_eq!(
+            received.query_id,
+            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000088")
+                .expect("fixture UUID")
+        );
         assert!(received.results.is_empty());
     }
 
@@ -239,7 +287,7 @@ mod tests {
 
         for i in 1..=5 {
             let event = ComponentEvent {
-                component_id: format!("component-{i}"),
+                component_id: crate::test_helpers::component_id(i),
                 component_type: ComponentType::Source,
                 status: ComponentStatus::Running,
                 timestamp: chrono::Utc::now(),
@@ -250,7 +298,7 @@ mod tests {
 
         for i in 1..=5 {
             let received = rx.recv().await.unwrap();
-            assert_eq!(received.component_id, format!("component-{i}"));
+            assert_eq!(received.component_id, crate::test_helpers::component_id(i));
         }
     }
 }

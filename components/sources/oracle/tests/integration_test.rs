@@ -145,34 +145,49 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
             .build()
             .context("Failed to build Oracle bootstrap provider")?;
 
-        let source = OracleSource::builder(SOURCE_ID)
-            .with_host(&config.host)
-            .with_port(config.port)
-            .with_service(&config.service)
-            .with_user(&config.user)
-            .with_password(&config.password)
-            .with_table(TABLE_NAME)
-            .with_poll_interval_ms(1_000)
-            .with_start_position(StartPosition::Current)
-            .with_bootstrap_provider(bootstrap_provider)
-            .build()
-            .context("Failed to build Oracle source")?;
+        let source = OracleSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                .expect("fixture UUID"),
+        )
+        .with_host(&config.host)
+        .with_port(config.port)
+        .with_service(&config.service)
+        .with_user(&config.user)
+        .with_password(&config.password)
+        .with_table(TABLE_NAME)
+        .with_poll_interval_ms(1_000)
+        .with_start_position(StartPosition::Current)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()
+        .context("Failed to build Oracle source")?;
 
-        let query = Query::cypher(QUERY_ID)
-            .query(
-                r#"
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .query(
+            r#"
                 MATCH (p:drasi_products)
                 RETURN p.id AS id, p.name AS name, p.price AS price
             "#,
-            )
-            .from_input(SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .build();
+        )
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("oracle-source").expect("fixture component name"),
+        )
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .build()
+        .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("oracle-app-reaction")
-            .with_query(QUERY_ID)
-            .build();
+        let (reaction, handle) = ApplicationReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000045")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .build();
 
         let core = DrasiLib::builder()
             .with_query_factory(
@@ -188,9 +203,17 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
                     .clone(),
             )
             .with_id("oracle-integration-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("oracle-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("oracle-app-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -283,34 +306,49 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
             .build()
             .context("Failed to build Oracle bootstrap provider")?;
 
-        let source = OracleSource::builder(SOURCE_ID)
-            .with_host(&config.host)
-            .with_port(config.port)
-            .with_service(&config.service)
-            .with_user(&config.user)
-            .with_password(&config.password)
-            .with_table(TABLE_NAME)
-            .with_poll_interval_ms(1_000)
-            .with_start_position(StartPosition::Beginning)
-            .with_bootstrap_provider(bootstrap_provider)
-            .build()
-            .context("Failed to build Oracle source")?;
+        let source = OracleSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                .expect("fixture UUID"),
+        )
+        .with_host(&config.host)
+        .with_port(config.port)
+        .with_service(&config.service)
+        .with_user(&config.user)
+        .with_password(&config.password)
+        .with_table(TABLE_NAME)
+        .with_poll_interval_ms(1_000)
+        .with_start_position(StartPosition::Beginning)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()
+        .context("Failed to build Oracle source")?;
 
-        let query = Query::cypher(QUERY_ID)
-            .query(
-                r#"
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .query(
+            r#"
                 MATCH (p:drasi_products)
                 RETURN p.id AS id, p.name AS name, p.price AS price
             "#,
-            )
-            .from_input(SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .build();
+        )
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("oracle-source").expect("fixture component name"),
+        )
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .build()
+        .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("oracle-beginning-reaction")
-            .with_query(QUERY_ID)
-            .build();
+        let (reaction, handle) = ApplicationReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000046")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .build();
 
         let core = DrasiLib::builder()
             .with_query_factory(
@@ -326,9 +364,17 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
                     .clone(),
             )
             .with_id("oracle-beginning-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("oracle-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("oracle-beginning-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -337,7 +383,14 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
 
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            if core.get_source_status(SOURCE_ID).await? == ComponentStatus::Running {
+            if core
+                .get_source_status_by_name(
+                    &drasi_core::ComponentName::try_new("oracle-source")
+                        .expect("fixture component name"),
+                )
+                .await?
+                == ComponentStatus::Running
+            {
                 break;
             }
             if Instant::now() >= deadline {
@@ -409,34 +462,50 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
                 .build()
                 .context("Failed to build bootstrap provider (session 1)")?;
 
-            let source = OracleSource::builder(SOURCE_ID)
-                .with_host(&config.host)
-                .with_port(config.port)
-                .with_service(&config.service)
-                .with_user(&config.user)
-                .with_password(&config.password)
-                .with_table(TABLE_NAME)
-                .with_poll_interval_ms(1_000)
-                .with_start_position(StartPosition::Current)
-                .with_bootstrap_provider(bootstrap_provider)
-                .build()
-                .context("Failed to build source (session 1)")?;
+            let source = OracleSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                    .expect("fixture UUID"),
+            )
+            .with_host(&config.host)
+            .with_port(config.port)
+            .with_service(&config.service)
+            .with_user(&config.user)
+            .with_password(&config.password)
+            .with_table(TABLE_NAME)
+            .with_poll_interval_ms(1_000)
+            .with_start_position(StartPosition::Current)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build source (session 1)")?;
 
-            let query = Query::cypher(QUERY_ID)
-                .query(
-                    r#"
+            let query = Query::cypher(
+                drasi_core::ComponentName::try_new("oracle-products-query")
+                    .expect("fixture component name"),
+            )
+            .query(
+                r#"
                     MATCH (p:drasi_products)
                     RETURN p.id AS id, p.name AS name, p.price AS price
                 "#,
-                )
-                .from_input(SOURCE_ID)
-                .auto_start(true)
-                .enable_bootstrap(true)
-                .build();
+            )
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("oracle-source")
+                    .expect("fixture component name"),
+            )
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build()
+            .expect("valid query configuration");
 
-            let (reaction, handle) = ApplicationReaction::builder("oracle-resume-reaction-1")
-                .with_query(QUERY_ID)
-                .build();
+            let (reaction, handle) = ApplicationReaction::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000047")
+                    .expect("fixture UUID"),
+            )
+            .with_query_by_name(
+                drasi_core::ComponentName::try_new("oracle-products-query")
+                    .expect("fixture component name"),
+            )
+            .build();
 
             let core = DrasiLib::builder()
                 .with_query_factory(
@@ -452,9 +521,17 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
                         .clone(),
                 )
                 .with_id("oracle-resume-test")
-                .with_source(source)
+                .with_source(
+                    drasi_core::ComponentName::try_new("oracle-source")
+                        .expect("fixture component name"),
+                    source,
+                )
                 .with_query(query)
-                .with_reaction(reaction)
+                .with_reaction(
+                    drasi_core::ComponentName::try_new("oracle-resume-reaction-1")
+                        .expect("fixture component name"),
+                    reaction,
+                )
                 .build()
                 .await
                 .context("Failed to build DrasiLib (session 1)")?;
@@ -491,34 +568,50 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
                 .build()
                 .context("Failed to build bootstrap provider (session 2)")?;
 
-            let source = OracleSource::builder(SOURCE_ID)
-                .with_host(&config.host)
-                .with_port(config.port)
-                .with_service(&config.service)
-                .with_user(&config.user)
-                .with_password(&config.password)
-                .with_table(TABLE_NAME)
-                .with_poll_interval_ms(1_000)
-                .with_start_position(StartPosition::Current)
-                .with_bootstrap_provider(bootstrap_provider)
-                .build()
-                .context("Failed to build source (session 2)")?;
+            let source = OracleSource::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                    .expect("fixture UUID"),
+            )
+            .with_host(&config.host)
+            .with_port(config.port)
+            .with_service(&config.service)
+            .with_user(&config.user)
+            .with_password(&config.password)
+            .with_table(TABLE_NAME)
+            .with_poll_interval_ms(1_000)
+            .with_start_position(StartPosition::Current)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build source (session 2)")?;
 
-            let query = Query::cypher(QUERY_ID)
-                .query(
-                    r#"
+            let query = Query::cypher(
+                drasi_core::ComponentName::try_new("oracle-products-query")
+                    .expect("fixture component name"),
+            )
+            .query(
+                r#"
                     MATCH (p:drasi_products)
                     RETURN p.id AS id, p.name AS name, p.price AS price
                 "#,
-                )
-                .from_input(SOURCE_ID)
-                .auto_start(true)
-                .enable_bootstrap(true)
-                .build();
+            )
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("oracle-source")
+                    .expect("fixture component name"),
+            )
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build()
+            .expect("valid query configuration");
 
-            let (reaction, handle) = ApplicationReaction::builder("oracle-resume-reaction-2")
-                .with_query(QUERY_ID)
-                .build();
+            let (reaction, handle) = ApplicationReaction::builder(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000048")
+                    .expect("fixture UUID"),
+            )
+            .with_query_by_name(
+                drasi_core::ComponentName::try_new("oracle-products-query")
+                    .expect("fixture component name"),
+            )
+            .build();
 
             let core = DrasiLib::builder()
                 .with_query_factory(
@@ -534,9 +627,17 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
                         .clone(),
                 )
                 .with_id("oracle-resume-test")
-                .with_source(source)
+                .with_source(
+                    drasi_core::ComponentName::try_new("oracle-source")
+                        .expect("fixture component name"),
+                    source,
+                )
                 .with_query(query)
-                .with_reaction(reaction)
+                .with_reaction(
+                    drasi_core::ComponentName::try_new("oracle-resume-reaction-2")
+                        .expect("fixture component name"),
+                    reaction,
+                )
                 .build()
                 .await
                 .context("Failed to build DrasiLib (session 2)")?;
@@ -621,35 +722,50 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
             .build()
             .context("Failed to build bootstrap provider")?;
 
-        let source = OracleSource::builder(SOURCE_ID)
-            .with_host(&config.host)
-            .with_port(config.port)
-            .with_service(&config.service)
-            .with_user(&config.user)
-            .with_password(&config.password)
-            .with_table(TABLE_NAME)
-            .with_poll_interval_ms(1_000)
-            .with_start_position(StartPosition::Current)
-            .with_bootstrap_provider(bootstrap_provider)
-            .build()
-            .context("Failed to build source")?;
+        let source = OracleSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                .expect("fixture UUID"),
+        )
+        .with_host(&config.host)
+        .with_port(config.port)
+        .with_service(&config.service)
+        .with_user(&config.user)
+        .with_password(&config.password)
+        .with_table(TABLE_NAME)
+        .with_poll_interval_ms(1_000)
+        .with_start_position(StartPosition::Current)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()
+        .context("Failed to build source")?;
 
-        let query = Query::cypher(QUERY_ID)
-            .query(
-                r#"
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .query(
+            r#"
                 MATCH (p:drasi_products)
                 RETURN p.id AS id, p.name AS name, p.price AS price
             "#,
-            )
-            .from_input(SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+        )
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("oracle-source").expect("fixture component name"),
+        )
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+        .build()
+        .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("oracle-cp-reaction")
-            .with_query(QUERY_ID)
-            .build();
+        let (reaction, handle) = ApplicationReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000049")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .build();
 
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
@@ -667,9 +783,17 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
                     .clone(),
             )
             .with_id("oracle-cp-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("oracle-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("oracle-cp-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -690,7 +814,13 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
         let mut bootstrap_done = false;
         for _ in 0..30 {
             sleep(Duration::from_secs(1)).await;
-            if let Ok(results) = core.get_query_results(QUERY_ID).await {
+            if let Ok(results) = core
+                .get_query_results_by_name(
+                    &drasi_core::ComponentName::try_new("oracle-products-query")
+                        .expect("fixture component name"),
+                )
+                .await
+            {
                 for row in &results {
                     if row.get("name").and_then(|v| v.as_str()) == Some("Seed1") {
                         bootstrap_done = true;
@@ -715,16 +845,22 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
         .context("Did not observe CDC insert before restart")?;
 
         // Phase 3: Stop the query, then restart it.
-        core.stop_query(QUERY_ID)
-            .await
-            .context("Failed to stop query")?;
+        core.stop_query_by_name(
+            &drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .await
+        .context("Failed to stop query")?;
 
         // Brief pause to let checkpoint flush
         sleep(Duration::from_millis(500)).await;
 
-        core.start_query(QUERY_ID)
-            .await
-            .context("Failed to restart query")?;
+        core.start_query_by_name(
+            &drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .await
+        .context("Failed to restart query")?;
 
         // Phase 4: Insert after restart — should be observable without re-bootstrap.
         // The original subscription persists across stop/start cycles.
@@ -791,35 +927,50 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
             .build()
             .context("Failed to build bootstrap provider")?;
 
-        let source = OracleSource::builder(SOURCE_ID)
-            .with_host(&config.host)
-            .with_port(config.port)
-            .with_service(&config.service)
-            .with_user(&config.user)
-            .with_password(&config.password)
-            .with_table(TABLE_NAME)
-            .with_poll_interval_ms(1_000)
-            .with_start_position(StartPosition::Current)
-            .with_bootstrap_provider(bootstrap_provider)
-            .build()
-            .context("Failed to build source")?;
+        let source = OracleSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                .expect("fixture UUID"),
+        )
+        .with_host(&config.host)
+        .with_port(config.port)
+        .with_service(&config.service)
+        .with_user(&config.user)
+        .with_password(&config.password)
+        .with_table(TABLE_NAME)
+        .with_poll_interval_ms(1_000)
+        .with_start_position(StartPosition::Current)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()
+        .context("Failed to build source")?;
 
-        let query = Query::cypher(QUERY_ID)
-            .query(
-                r#"
+        let query = Query::cypher(
+            drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .query(
+            r#"
                 MATCH (p:drasi_products)
                 RETURN p.id AS id, p.name AS name, p.price AS price
             "#,
-            )
-            .from_input(SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+        )
+        .from_input_by_name(
+            drasi_core::ComponentName::try_new("oracle-source").expect("fixture component name"),
+        )
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+        .build()
+        .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("oracle-restart-reaction")
-            .with_query(QUERY_ID)
-            .build();
+        let (reaction, handle) = ApplicationReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000004a")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("oracle-products-query")
+                .expect("fixture component name"),
+        )
+        .build();
 
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
@@ -837,9 +988,17 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
                     .clone(),
             )
             .with_id("oracle-restart-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("oracle-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("oracle-restart-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -949,18 +1108,21 @@ async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> R
             .build()
             .context("Failed to build Oracle bootstrap provider")?;
 
-        let source = OracleSource::builder(SOURCE_ID)
-            .with_host(&config.host)
-            .with_port(config.port)
-            .with_service(&config.service)
-            .with_user(&config.user)
-            .with_password(&config.password)
-            .with_table(TABLE_NAME)
-            .with_poll_interval_ms(1_000)
-            .with_start_position(StartPosition::Current)
-            .with_bootstrap_provider(bootstrap_provider)
-            .build()
-            .context("Failed to build Oracle source")?;
+        let source = OracleSource::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                .expect("fixture UUID"),
+        )
+        .with_host(&config.host)
+        .with_port(config.port)
+        .with_service(&config.service)
+        .with_user(&config.user)
+        .with_password(&config.password)
+        .with_table(TABLE_NAME)
+        .with_poll_interval_ms(1_000)
+        .with_start_position(StartPosition::Current)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()
+        .context("Failed to build Oracle source")?;
 
         source
             .start()
@@ -981,9 +1143,11 @@ async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> R
         // Subscribe directly to the source so we observe both the bootstrap
         // snapshot and the CDC stream deterministically.
         let settings = SourceSubscriptionSettings {
-            source_id: SOURCE_ID.to_string(),
+            source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                .expect("fixture UUID"),
             enable_bootstrap: true,
-            query_id: "q-handover".to_string(),
+            query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003a")
+                .expect("fixture UUID"),
             nodes: HashSet::from(["drasi_products".to_string()]),
             relations: HashSet::new(),
             resume_from: None,

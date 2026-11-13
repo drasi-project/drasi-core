@@ -71,7 +71,7 @@ async fn wait_for_source_running(source: &PostgresReplicationSource) {
 
 async fn wait_for_query_results(
     core: &Arc<DrasiLib>,
-    query_id: &str,
+    query_id: &drasi_core::ComponentName,
     predicate: impl Fn(&[serde_json::Value]) -> bool,
 ) -> Result<()> {
     let start = Instant::now();
@@ -79,7 +79,7 @@ async fn wait_for_query_results(
     loop {
         // Try to get results, but don't fail if query isn't running yet
         // (it might still be completing bootstrap)
-        match core.get_query_results(query_id).await {
+        match core.get_query_results_by_name(query_id).await {
             Ok(results) => {
                 if predicate(&results) {
                     return Ok(());
@@ -195,21 +195,34 @@ async fn build_core_custom(
 
     let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
 
-    let source = PostgresReplicationSource::builder("pg-test-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a2")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
-    let query = Query::cypher("test-query")
-        .query(cypher)
-        .from_input("pg-test-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+    )
+    .query(cypher)
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("pg-test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReaction::builder("test-reaction")
-        .with_query("test-query")
-        .build();
+    let (reaction, handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+    )
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -226,9 +239,17 @@ async fn build_core_custom(
                     .clone(),
             )
             .with_id("pg-test-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("pg-test-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("test-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
@@ -256,8 +277,17 @@ async fn test_source_connects_and_starts() -> Result<()> {
     let (core, _handle) = build_core(pg.config(), slot_name).await?;
     core.start().await?;
 
-    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
-    let status = core.get_source_status("pg-test-source").await?;
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| results.is_empty(),
+    )
+    .await?;
+    let status = core
+        .get_source_status_by_name(
+            &drasi_core::ComponentName::try_new("pg-test-source").expect("fixture component name"),
+        )
+        .await?;
     assert_eq!(status, drasi_lib::channels::ComponentStatus::Running);
 
     core.stop().await?;
@@ -287,7 +317,9 @@ async fn test_schema_discovery_reports_columns_end_to_end() -> Result<()> {
     core.start().await?;
 
     let schema = core
-        .get_source_schema("pg-test-source")
+        .get_source_schema_by_name(
+            &drasi_core::ComponentName::try_new("pg-test-source").expect("fixture component name"),
+        )
         .await?
         .expect("postgres source should report schema");
 
@@ -334,11 +366,15 @@ async fn test_insert_detection() -> Result<()> {
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
 
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice".into()))
+        },
+    )
     .await?;
 
     core.stop().await?;
@@ -368,19 +404,27 @@ async fn test_update_detection() -> Result<()> {
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice".into()))
+        },
+    )
     .await?;
 
     update_test_row(&client, TEST_TABLE, 1, "Alice Updated").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice Updated".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice Updated".into()))
+        },
+    )
     .await?;
 
     core.stop().await?;
@@ -427,26 +471,34 @@ async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
     for id in 1..=ROW_COUNT {
         insert_test_row(&client, TEST_TABLE, id, "original").await?;
     }
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .filter(|r| r.get("name") == Some(&"original".into()))
-            .count()
-            == ROW_COUNT as usize
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .filter(|r| r.get("name") == Some(&"original".into()))
+                .count()
+                == ROW_COUNT as usize
+        },
+    )
     .await?;
 
     // Repro #1: ONE multi-row UPDATE statement (single implicit transaction).
     let updated = update_all_rows_name(&client, TEST_TABLE, "bulk_update").await?;
     assert_eq!(updated, ROW_COUNT as u64, "UPDATE should affect all rows");
 
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .filter(|r| r.get("name") == Some(&"bulk_update".into()))
-            .count()
-            == ROW_COUNT as usize
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .filter(|r| r.get("name") == Some(&"bulk_update".into()))
+                .count()
+                == ROW_COUNT as usize
+        },
+    )
     .await
     .context("not all rows propagated after a single multi-row UPDATE statement (issue #599)")?;
 
@@ -461,13 +513,17 @@ async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
     batch.push_str("COMMIT;");
     execute_batch(&client, &batch).await?;
 
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .filter(|r| r.get("name") == Some(&"tx_update".into()))
-            .count()
-            == ROW_COUNT as usize
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .filter(|r| r.get("name") == Some(&"tx_update".into()))
+                .count()
+                == ROW_COUNT as usize
+        },
+    )
     .await
     .context(
         "not all rows propagated after multiple single-row UPDATEs in one transaction (issue #599)",
@@ -485,13 +541,17 @@ async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
     insert_batch.push_str("COMMIT;");
     execute_batch(&client, &insert_batch).await?;
 
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .filter(|r| r.get("name") == Some(&"tx_insert".into()))
-            .count()
-            == ROW_COUNT as usize
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .filter(|r| r.get("name") == Some(&"tx_insert".into()))
+                .count()
+                == ROW_COUNT as usize
+        },
+    )
     .await
     .context("not all rows propagated after a multi-row INSERT in one transaction (issue #599)")?;
 
@@ -504,11 +564,15 @@ async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
     delete_batch.push_str("COMMIT;");
     execute_batch(&client, &delete_batch).await?;
 
-    wait_for_query_results(&core, "test-query", |results| {
-        !results
-            .iter()
-            .any(|r| r.get("name") == Some(&"tx_insert".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            !results
+                .iter()
+                .any(|r| r.get("name") == Some(&"tx_insert".into()))
+        },
+    )
     .await
     .context("not all rows propagated after a multi-row DELETE in one transaction (issue #599)")?;
 
@@ -539,20 +603,28 @@ async fn test_update_without_old_tuple_stays_update() -> Result<()> {
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice".into()))
+        },
+    )
     .await?;
 
     update_test_row(&client, TEST_TABLE, 1, "Alice Updated").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results.len() == 1
-            && results
-                .iter()
-                .any(|row| row.get("name") == Some(&"Alice Updated".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results.len() == 1
+                && results
+                    .iter()
+                    .any(|row| row.get("name") == Some(&"Alice Updated".into()))
+        },
+    )
     .await?;
 
     core.stop().await?;
@@ -582,15 +654,24 @@ async fn test_delete_detection() -> Result<()> {
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice".into()))
+        },
+    )
     .await?;
 
     delete_test_row(&client, TEST_TABLE, 1).await?;
-    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| results.is_empty(),
+    )
+    .await?;
 
     core.stop().await?;
     pg.cleanup().await;
@@ -619,23 +700,36 @@ async fn test_full_crud_cycle() -> Result<()> {
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice".into()))
+        },
+    )
     .await?;
 
     update_test_row(&client, TEST_TABLE, 1, "Alice Updated").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice Updated".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice Updated".into()))
+        },
+    )
     .await?;
 
     delete_test_row(&client, TEST_TABLE, 1).await?;
-    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| results.is_empty(),
+    )
+    .await?;
 
     core.stop().await?;
     pg.cleanup().await;
@@ -676,24 +770,35 @@ async fn test_cdc_autodetected_primary_key_correlates_update_and_delete() -> Res
     core.start().await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results
-            .iter()
-            .any(|row| row.get("name") == Some(&"Alice".into()))
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| {
+            results
+                .iter()
+                .any(|row| row.get("name") == Some(&"Alice".into()))
+        },
+    )
     .await?;
 
     // The UPDATE must mutate the existing node in place: exactly one row with the
     // new name, not a phantom pair of {Alice, Alice Updated}.
     update_test_row(&client, TEST_TABLE, 1, "Alice Updated").await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results.len() == 1 && results[0].get("name") == Some(&"Alice Updated".into())
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| results.len() == 1 && results[0].get("name") == Some(&"Alice Updated".into()),
+    )
     .await?;
 
     // The DELETE must reference the same element id and remove the node.
     delete_test_row(&client, TEST_TABLE, 1).await?;
-    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| results.is_empty(),
+    )
+    .await?;
 
     core.stop().await?;
     pg.cleanup().await;
@@ -738,21 +843,30 @@ async fn test_cdc_autodetected_composite_primary_key_correlates() -> Result<()> 
 
     // INSERT (order_id=1, line_no=5, qty=10) → one row appears.
     insert_composite_row(&client, COMPOSITE_TABLE, 1, 5, 10).await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results.len() == 1 && results[0].get("qty") == Some(&10.into())
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| results.len() == 1 && results[0].get("qty") == Some(&10.into()),
+    )
     .await?;
 
     // UPDATE qty → still exactly one row (same composite element id), new qty.
     update_composite_qty(&client, COMPOSITE_TABLE, 1, 5, 20).await?;
-    wait_for_query_results(&core, "test-query", |results| {
-        results.len() == 1 && results[0].get("qty") == Some(&20.into())
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| results.len() == 1 && results[0].get("qty") == Some(&20.into()),
+    )
     .await?;
 
     // DELETE → row removed via the same composite element id.
     delete_composite_row(&client, COMPOSITE_TABLE, 1, 5).await?;
-    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("test-query").expect("fixture component name"),
+        |results| results.is_empty(),
+    )
+    .await?;
 
     core.stop().await?;
     pg.cleanup().await;
@@ -814,15 +928,25 @@ async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
             key_columns: vec!["id".to_string()],
         }],
     };
-    let source = PostgresReplicationSource::builder("pg-direct-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a3")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+    .build()?;
 
     source.start().await?;
     wait_for_source_running(&source).await;
 
-    let mut settings = subscription_settings("pg-direct-source", "q-handover", None, true);
+    let mut settings = subscription_settings(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a3")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000003a")
+            .expect("fixture UUID"),
+        None,
+        true,
+    );
     settings.enable_bootstrap = true;
     settings.nodes = HashSet::from([TEST_TABLE.to_string()]);
     let response = source.subscribe(settings).await?;
@@ -1009,26 +1133,40 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
 
     let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
 
-    let source = PostgresReplicationSource::builder("pg-decimal-test-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a4")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
-    let query = Query::cypher("decimal-test-query")
-        .query(
-            r#"
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("decimal-test-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (p:products)
             RETURN p.id AS id, p.price AS price, p.quantity AS quantity, p.total AS total
             "#,
-        )
-        .from_input("pg-decimal-test-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("pg-decimal-test-source")
+            .expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, _handle) = ApplicationReaction::builder("decimal-test-reaction")
-        .with_query("decimal-test-query")
-        .build();
+    let (reaction, _handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a5")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("decimal-test-query").expect("fixture component name"),
+    )
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -1045,9 +1183,17 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
                     .clone(),
             )
             .with_id("pg-decimal-test-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("pg-decimal-test-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("decimal-test-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
@@ -1062,81 +1208,89 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
     insert_decimal_test_row(&client, DECIMAL_TABLE, 1, "99.99", "10.5000", "1049.895000").await?;
 
     // Wait for the query results to contain the inserted row
-    wait_for_query_results(&core, "decimal-test-query", |results| {
-        if results.is_empty() {
-            return false;
-        }
-
-        let row = &results[0];
-
-        // Verify that decimal values are numbers, not strings
-        if let Some(price) = row.get("price") {
-            if !price.is_number() {
-                log::error!("price is not a number: {price:?}");
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("decimal-test-query").expect("fixture component name"),
+        |results| {
+            if results.is_empty() {
                 return false;
             }
-            // Use approximate comparison for floating point
-            if let Some(price_val) = price.as_f64() {
-                let expected = 99.99;
-                if (price_val - expected).abs() > 0.0001 {
-                    log::error!("price value is incorrect: expected {expected}, got {price_val}");
+
+            let row = &results[0];
+
+            // Verify that decimal values are numbers, not strings
+            if let Some(price) = row.get("price") {
+                if !price.is_number() {
+                    log::error!("price is not a number: {price:?}");
+                    return false;
+                }
+                // Use approximate comparison for floating point
+                if let Some(price_val) = price.as_f64() {
+                    let expected = 99.99;
+                    if (price_val - expected).abs() > 0.0001 {
+                        log::error!(
+                            "price value is incorrect: expected {expected}, got {price_val}"
+                        );
+                        return false;
+                    }
+                } else {
+                    log::error!("price cannot be converted to f64");
                     return false;
                 }
             } else {
-                log::error!("price cannot be converted to f64");
+                log::error!("price field is missing");
                 return false;
             }
-        } else {
-            log::error!("price field is missing");
-            return false;
-        }
 
-        if let Some(quantity) = row.get("quantity") {
-            if !quantity.is_number() {
-                log::error!("quantity is not a number: {quantity:?}");
-                return false;
-            }
-            // Use approximate comparison for floating point
-            if let Some(quantity_val) = quantity.as_f64() {
-                let expected = 10.5;
-                if (quantity_val - expected).abs() > 0.0001 {
-                    log::error!(
-                        "quantity value is incorrect: expected {expected}, got {quantity_val}"
-                    );
+            if let Some(quantity) = row.get("quantity") {
+                if !quantity.is_number() {
+                    log::error!("quantity is not a number: {quantity:?}");
+                    return false;
+                }
+                // Use approximate comparison for floating point
+                if let Some(quantity_val) = quantity.as_f64() {
+                    let expected = 10.5;
+                    if (quantity_val - expected).abs() > 0.0001 {
+                        log::error!(
+                            "quantity value is incorrect: expected {expected}, got {quantity_val}"
+                        );
+                        return false;
+                    }
+                } else {
+                    log::error!("quantity cannot be converted to f64");
                     return false;
                 }
             } else {
-                log::error!("quantity cannot be converted to f64");
+                log::error!("quantity field is missing");
                 return false;
             }
-        } else {
-            log::error!("quantity field is missing");
-            return false;
-        }
 
-        if let Some(total) = row.get("total") {
-            if !total.is_number() {
-                log::error!("total is not a number: {total:?}");
-                return false;
-            }
-            // Use approximate comparison for floating point
-            if let Some(total_val) = total.as_f64() {
-                let expected = 1049.895000;
-                if (total_val - expected).abs() > 0.0001 {
-                    log::error!("total value is incorrect: expected {expected}, got {total_val}");
+            if let Some(total) = row.get("total") {
+                if !total.is_number() {
+                    log::error!("total is not a number: {total:?}");
+                    return false;
+                }
+                // Use approximate comparison for floating point
+                if let Some(total_val) = total.as_f64() {
+                    let expected = 1049.895000;
+                    if (total_val - expected).abs() > 0.0001 {
+                        log::error!(
+                            "total value is incorrect: expected {expected}, got {total_val}"
+                        );
+                        return false;
+                    }
+                } else {
+                    log::error!("total cannot be converted to f64");
                     return false;
                 }
             } else {
-                log::error!("total cannot be converted to f64");
+                log::error!("total field is missing");
                 return false;
             }
-        } else {
-            log::error!("total field is missing");
-            return false;
-        }
 
-        true
-    })
+            true
+        },
+    )
     .await?;
 
     core.stop().await?;
@@ -1187,25 +1341,38 @@ async fn test_timestamptz_short_offset_serialization() -> Result<()> {
         }],
     };
 
-    let source = PostgresReplicationSource::builder("pg-ts-test-source")
-        .with_config(source_config)
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a6")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .build()?;
 
-    let query = Query::cypher("ts-test-query")
-        .query(
-            r#"
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("ts-test-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (e:events)
             RETURN e.id AS id, e.created_at AS created_at
             "#,
-        )
-        .from_input("pg-ts-test-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("pg-ts-test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, _handle) = ApplicationReaction::builder("ts-test-reaction")
-        .with_query("ts-test-query")
-        .build();
+    let (reaction, _handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a7")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("ts-test-query").expect("fixture component name"),
+    )
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -1222,9 +1389,17 @@ async fn test_timestamptz_short_offset_serialization() -> Result<()> {
                     .clone(),
             )
             .with_id("pg-ts-test-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("pg-ts-test-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("ts-test-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
@@ -1240,34 +1415,40 @@ async fn test_timestamptz_short_offset_serialization() -> Result<()> {
         .with_timezone(&chrono::Utc);
     insert_timestamptz_test_row(&client, TS_TABLE, 1, expected).await?;
 
-    wait_for_query_results(&core, "ts-test-query", move |results| {
-        if results.is_empty() {
-            return false;
-        }
-
-        let row = &results[0];
-        let created_at = match row.get("created_at").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                log::error!("created_at field missing or not a string: {row:?}");
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("ts-test-query").expect("fixture component name"),
+        move |results| {
+            if results.is_empty() {
                 return false;
             }
-        };
 
-        match chrono::DateTime::parse_from_rfc3339(created_at) {
-            Ok(parsed) => {
-                if parsed.with_timezone(&chrono::Utc) != expected {
-                    log::error!("created_at instant mismatch: expected {expected}, got {parsed}");
+            let row = &results[0];
+            let created_at = match row.get("created_at").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => {
+                    log::error!("created_at field missing or not a string: {row:?}");
                     return false;
                 }
-                true
+            };
+
+            match chrono::DateTime::parse_from_rfc3339(created_at) {
+                Ok(parsed) => {
+                    if parsed.with_timezone(&chrono::Utc) != expected {
+                        log::error!(
+                            "created_at instant mismatch: expected {expected}, got {parsed}"
+                        );
+                        return false;
+                    }
+                    true
+                }
+                Err(e) => {
+                    log::error!("created_at is not valid rfc3339 ('{created_at}'): {e}");
+                    false
+                }
             }
-            Err(e) => {
-                log::error!("created_at is not valid rfc3339 ('{created_at}'): {e}");
-                false
-            }
-        }
-    })
+        },
+    )
     .await?;
 
     core.stop().await?;
@@ -1366,26 +1547,39 @@ async fn test_boolean_datatype_bootstrap_and_cdc() -> Result<()> {
 
     let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
 
-    let source = PostgresReplicationSource::builder("pg-bool-test-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a8")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
-    let query = Query::cypher("bool-test-query")
-        .query(
-            r#"
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("bool-test-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (f:flags)
             RETURN f.id AS id, f.active AS active
             "#,
-        )
-        .from_input("pg-bool-test-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("pg-bool-test-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, _handle) = ApplicationReaction::builder("bool-test-reaction")
-        .with_query("bool-test-query")
-        .build();
+    let (reaction, _handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a9")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("bool-test-query").expect("fixture component name"),
+    )
+    .build();
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -1402,9 +1596,17 @@ async fn test_boolean_datatype_bootstrap_and_cdc() -> Result<()> {
                     .clone(),
             )
             .with_id("pg-bool-test-core")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("pg-bool-test-source")
+                    .expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("bool-test-reaction")
+                    .expect("fixture component name"),
+                reaction,
+            )
             .build()
             .await?,
     );
@@ -1412,10 +1614,14 @@ async fn test_boolean_datatype_bootstrap_and_cdc() -> Result<()> {
     core.start().await?;
 
     // --- Bootstrap path: seeded rows must surface with correct boolean values.
-    wait_for_query_results(&core, "bool-test-query", |results| {
-        let map = bool_result_map(results);
-        map.get(&1) == Some(&true) && map.get(&2) == Some(&false)
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("bool-test-query").expect("fixture component name"),
+        |results| {
+            let map = bool_result_map(results);
+            map.get(&1) == Some(&true) && map.get(&2) == Some(&false)
+        },
+    )
     .await
     .context("bootstrap should surface id=1 active=true and id=2 active=false")?;
 
@@ -1423,19 +1629,25 @@ async fn test_boolean_datatype_bootstrap_and_cdc() -> Result<()> {
     // Under the old decoder this row would have surfaced as `true`.
     insert_bool_test_row(&client, BOOL_TABLE, 3, false).await?;
     insert_bool_test_row(&client, BOOL_TABLE, 4, true).await?;
-    wait_for_query_results(&core, "bool-test-query", |results| {
-        let map = bool_result_map(results);
-        map.get(&3) == Some(&false) && map.get(&4) == Some(&true)
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("bool-test-query").expect("fixture component name"),
+        |results| {
+            let map = bool_result_map(results);
+            map.get(&3) == Some(&false) && map.get(&4) == Some(&true)
+        },
+    )
     .await
     .context("CDC insert should surface id=3 active=false and id=4 active=true")?;
 
     // --- CDC UPDATE path: a `true -> false` flip must be observed.
     // Under the old decoder the flip to `false` was never seen (still `true`).
     update_bool_test_row(&client, BOOL_TABLE, 1, false).await?;
-    wait_for_query_results(&core, "bool-test-query", |results| {
-        bool_result_map(results).get(&1) == Some(&false)
-    })
+    wait_for_query_results(
+        &core,
+        &drasi_core::ComponentName::try_new("bool-test-query").expect("fixture component name"),
+        |results| bool_result_map(results).get(&1) == Some(&false),
+    )
     .await
     .context("CDC update should surface the id=1 true->false flip")?;
 
@@ -1472,21 +1684,24 @@ fn build_source(
     config: &postgres_helpers::ReplicationPostgresConfig,
     slot_name: String,
 ) -> Result<PostgresReplicationSource> {
-    PostgresReplicationSource::builder("pg-direct-source")
-        .with_config(build_source_config(config, slot_name))
-        .build()
+    PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a3")
+            .expect("fixture UUID"),
+    )
+    .with_config(build_source_config(config, slot_name))
+    .build()
 }
 
 fn subscription_settings(
-    source_id: &str,
-    query_id: &str,
+    source_id: drasi_core::ComponentId,
+    query_id: drasi_core::ComponentId,
     resume_from: Option<Bytes>,
     request_position_handle: bool,
 ) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: source_id.to_string(),
+        source_id,
         enable_bootstrap: false,
-        query_id: query_id.to_string(),
+        query_id,
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from,
@@ -1531,8 +1746,10 @@ async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -
 
     // Try to resume from LSN 1 — which is definitely before the slot's consistent_point
     let settings = subscription_settings(
-        "pg-direct-source",
-        "q-unavailable",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a3")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000437")
+            .expect("fixture UUID"),
         Some(lsn_to_bytes(1)),
         false,
     );
@@ -1550,7 +1767,11 @@ async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -
             requested,
             earliest_available,
         } => {
-            assert_eq!(source_id, "pg-direct-source");
+            assert_eq!(
+                source_id,
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a3")
+                    .expect("fixture UUID")
+            );
             assert_eq!(requested, &lsn_to_bytes(1));
             assert!(earliest_available.is_some());
         }
@@ -1588,7 +1809,14 @@ async fn test_events_carry_source_position_bytes() -> Result<()> {
     wait_for_source_running(&source).await;
 
     // Subscribe without resume (fresh subscriber)
-    let settings = subscription_settings("pg-direct-source", "q-position-test", None, true);
+    let settings = subscription_settings(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a3")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000438")
+            .expect("fixture UUID"),
+        None,
+        true,
+    );
     let response = source.subscribe(settings).await?;
 
     // Insert a row
@@ -1666,7 +1894,14 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     wait_for_source_running(&source).await;
 
     // Subscribe (first subscriber) to capture the initial LSN
-    let settings = subscription_settings("pg-direct-source", "q-first", None, true);
+    let settings = subscription_settings(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a3")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000439")
+            .expect("fixture UUID"),
+        None,
+        true,
+    );
     let response = source.subscribe(settings).await?;
     let mut rx = response.receiver;
 
@@ -1701,7 +1936,14 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     source.start().await?;
     wait_for_source_running(&source).await;
 
-    let settings = subscription_settings("pg-direct-source", "q-resumed", Some(resume_lsn), true);
+    let settings = subscription_settings(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000a3")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000043a")
+            .expect("fixture UUID"),
+        Some(resume_lsn),
+        true,
+    );
     let response = source.subscribe(settings).await?;
     let mut rx2 = response.receiver;
 
@@ -1851,10 +2093,13 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 
     let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
 
-    let source = PostgresReplicationSource::builder("pg-mq-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000aa")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
     let q1_id = "mq-query1";
     let q2_id = "mq-query2";
@@ -1863,38 +2108,56 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
     std::fs::create_dir_all(&q1_dir)?;
     std::fs::create_dir_all(&q2_dir)?;
 
-    let query1 = Query::cypher(q1_id)
-        .query(
-            r#"
+    let query1 = Query::cypher(
+        drasi_core::ComponentName::try_new("mq-query1").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (u:users)
             RETURN u.id AS id, u.name AS name
             "#,
-        )
-        .from_input("pg-mq-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("pg-mq-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+    .build()?;
 
-    let query2 = Query::cypher(q2_id)
-        .query(
-            r#"
+    let query2 = Query::cypher(
+        drasi_core::ComponentName::try_new("mq-query2").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (u:users)
             RETURN u.id AS id, u.name AS name
             "#,
-        )
-        .from_input("pg-mq-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("pg-mq-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+    .build()?;
 
-    let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
-        .with_query(q1_id)
-        .build();
-    let (reaction2, handle2) = ApplicationReaction::builder("mq-reaction2")
-        .with_query(q2_id)
-        .build();
+    let (reaction1, handle1) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000ab")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("mq-query1").expect("fixture component name"),
+    )
+    .build();
+    let (reaction2, handle2) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000ac")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("mq-query2").expect("fixture component name"),
+    )
+    .build();
 
     let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
@@ -1913,11 +2176,20 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
                     .clone(),
             )
             .with_id("pg-multi-query-test")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("pg-mq-source").expect("fixture component name"),
+                source,
+            )
             .with_query(query1)
             .with_query(query2)
-            .with_reaction(reaction1)
-            .with_reaction(reaction2)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("mq-reaction1").expect("fixture component name"),
+                reaction1,
+            )
+            .with_reaction(
+                drasi_core::ComponentName::try_new("mq-reaction2").expect("fixture component name"),
+                reaction2,
+            )
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await?,
@@ -1946,7 +2218,10 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // --- Phase 2: Stop query2, advance query1 further ---
-    core.stop_query(q2_id).await?;
+    core.stop_query_by_name(
+        &drasi_core::ComponentName::try_new("mq-query2").expect("fixture component name"),
+    )
+    .await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     insert_test_row(&client, TEST_TABLE, 602, "OnlyQ1").await?;
@@ -2117,27 +2392,40 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
     };
     let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
 
-    let source = PostgresReplicationSource::builder("kr-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(bootstrap_provider)
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000ad")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(bootstrap_provider)
+    .build()?;
 
-    let query = Query::cypher(q_id)
-        .query(
-            r#"
+    let query = Query::cypher(
+        drasi_core::ComponentName::try_new("kr-query").expect("fixture component name"),
+    )
+    .query(
+        r#"
             MATCH (u:users)
             RETURN u.id AS id, u.name AS name
             "#,
-        )
-        .from_input("kr-source")
-        .auto_start(true)
-        .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-        .build();
+    )
+    .from_input_by_name(
+        drasi_core::ComponentName::try_new("kr-source").expect("fixture component name"),
+    )
+    .auto_start(true)
+    .enable_bootstrap(true)
+    .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+    .build()
+    .expect("valid query configuration");
 
-    let (reaction, handle) = ApplicationReaction::builder("kr-reaction")
-        .with_query(q_id)
-        .build();
+    let (reaction, handle) = ApplicationReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000ae")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(
+        drasi_core::ComponentName::try_new("kr-query").expect("fixture component name"),
+    )
+    .build();
 
     let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
@@ -2156,9 +2444,15 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
                     .clone(),
             )
             .with_id("pg-stop-restart")
-            .with_source(source)
+            .with_source(
+                drasi_core::ComponentName::try_new("kr-source").expect("fixture component name"),
+                source,
+            )
             .with_query(query)
-            .with_reaction(reaction)
+            .with_reaction(
+                drasi_core::ComponentName::try_new("kr-reaction").expect("fixture component name"),
+                reaction,
+            )
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await?,
@@ -2285,15 +2579,25 @@ async fn test_type_parity_bootstrap_and_cdc() -> Result<()> {
         }],
     };
 
-    let source = PostgresReplicationSource::builder("pg-type-parity-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000af")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+    .build()?;
 
     source.start().await?;
     wait_for_source_running(&source).await;
 
-    let mut settings = subscription_settings("pg-type-parity-source", "q-type-parity", None, true);
+    let mut settings = subscription_settings(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000af")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000043b")
+            .expect("fixture UUID"),
+        None,
+        true,
+    );
     settings.enable_bootstrap = true;
     settings.nodes = HashSet::from([TABLE.to_string()]);
     let response = source.subscribe(settings).await?;
@@ -2561,15 +2865,25 @@ async fn test_toast_unchanged_omitted_on_update() -> Result<()> {
         }],
     };
 
-    let source = PostgresReplicationSource::builder("pg-toast-omit-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b0")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+    .build()?;
 
     source.start().await?;
     wait_for_source_running(&source).await;
 
-    let mut settings = subscription_settings("pg-toast-omit-source", "q-toast-omit", None, true);
+    let mut settings = subscription_settings(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b0")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000043c")
+            .expect("fixture UUID"),
+        None,
+        true,
+    );
     settings.enable_bootstrap = true;
     settings.nodes = HashSet::from([TABLE.to_string()]);
     let response = source.subscribe(settings).await?;
@@ -2709,15 +3023,25 @@ async fn test_domain_over_integer_bootstrap() -> Result<()> {
         }],
     };
 
-    let source = PostgresReplicationSource::builder("pg-domain-int-source")
-        .with_config(source_config)
-        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
-        .build()?;
+    let source = PostgresReplicationSource::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b1")
+            .expect("fixture UUID"),
+    )
+    .with_config(source_config)
+    .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+    .build()?;
 
     source.start().await?;
     wait_for_source_running(&source).await;
 
-    let mut settings = subscription_settings("pg-domain-int-source", "q-domain-int", None, true);
+    let mut settings = subscription_settings(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000b1")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000043d")
+            .expect("fixture UUID"),
+        None,
+        true,
+    );
     settings.enable_bootstrap = true;
     settings.nodes = HashSet::from([TABLE.to_string()]);
     let response = source.subscribe(settings).await?;

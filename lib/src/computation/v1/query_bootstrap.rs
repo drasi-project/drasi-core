@@ -49,7 +49,12 @@ impl BootstrapState for QueryBootstrapState<'_> {
         let Some(checkpoint) = self.0.resources().checkpoint_store() else {
             return Ok(None);
         };
-        let Some(state) = checkpoint.read_checkpoint(BOOTSTRAP_STATE).await? else {
+        let Some(state) = checkpoint
+            .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                BOOTSTRAP_STATE.to_owned(),
+            ))
+            .await?
+        else {
             return Ok(None);
         };
         anyhow::ensure!(
@@ -74,7 +79,11 @@ impl BootstrapState for QueryBootstrapState<'_> {
         self.0
             .resource_transaction(|| async {
                 checkpoint
-                    .stage_checkpoint(BOOTSTRAP_STATE, 1, Some(&state))
+                    .stage_checkpoint(
+                        &drasi_core::interface::CheckpointKey::Metadata(BOOTSTRAP_STATE.to_owned()),
+                        1,
+                        Some(&state),
+                    )
                     .await
             })
             .await?;

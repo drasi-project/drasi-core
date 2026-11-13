@@ -104,8 +104,14 @@ def check_book():
         failures.append(f"unexpected chapter sequence: {chapters}")
     if text.count("**Summary.**") != 18:
         failures.append("each numbered chapter must have one summary")
-    if re.search(r"cargo (?:run|test|doc|build) --locked -p ", text):
-        failures.append("workspace commands must permit first-run lockfile creation")
+    for index, value in enumerate(re.findall(r"^```json\n(.*?)\n```", text, re.M | re.S), 1):
+        try:
+            json.loads(value)
+        except json.JSONDecodeError as error:
+            failures.append(f"invalid JSON example {index}: {error}")
+    for command in re.findall(r"^cargo (?:run|test|doc|build)[^\n]*", text, re.M):
+        if "--locked" not in command:
+            failures.append(f"Cargo commands must use the tracked lockfile: {command}")
     excerpts = [block for block in rust_blocks(text) if block[1] == "excerpt"]
     for block in excerpts:
         if source_excerpt(block[2]) != textwrap.dedent(block[3]).strip():
@@ -165,6 +171,10 @@ def compile_contexts(project):
         "owned-worker": "items",
         "quantity-validator": "items",
         "application-channel": "",
+        "component-selection": "core: &DrasiLib",
+        "component-references": "items",
+        "state-partition": "items",
+        "native-query-host": "items",
     }
     missing = illustrations.keys() - contexts.keys()
     if missing:
@@ -191,6 +201,27 @@ use drasi_source_sqlite::native::SqliteSource;
         else:
             body = f"async fn excerpt({context}) -> anyhow::Result<()> {{\n{code}\nOk(())\n}}"
         modules.append(f"mod {name.replace('-', '_')} {{\nuse super::*;\n{body}\n}}\n")
+    recipes = dict(re.findall(
+        r"<!-- json-example: ([a-z-]+) -->\s*```json\n(.*?)\n```",
+        (BOOK / "README.md").read_text(), re.S,
+    ))
+    for name, kind, config in [
+        ("consumer-progress", "consumerProgress", "ConsumerProgressConfig"),
+        ("composite-bootstrap", "compositeBootstrap", "CompositeBootstrapConfig"),
+    ]:
+        if name not in recipes:
+            raise SystemExit(f"Missing typed JSON example: {name}")
+        literal = json.dumps(recipes[name])
+        modules.append(f"""
+#[test]
+fn {name.replace('-', '_')}_recipe_matches_public_types() -> anyhow::Result<()> {{
+    let mut value: serde_json::Value = serde_json::from_str({literal})?;
+    assert_eq!(value["kind"], "{kind}");
+    value.as_object_mut().context("recipe must be an object")?.remove("kind");
+    let _: drasi_host_sdk::management::{config} = serde_json::from_value(value)?;
+    Ok(())
+}}
+""")
     (project / "src/book_fragments.rs").write_text("\n".join(modules))
     with (project / "src/main.rs").open("a") as source:
         source.write(
@@ -219,7 +250,7 @@ def test_starter(test, network):
                 subprocess.run(["cargo", *arguments], cwd=project, env=environment, check=True)
         if network:
             subprocess.run([
-                "cargo", "build", "--quiet",
+                "cargo", "build", "--locked", "--quiet",
                 "-p", "drasi-computation-source-http",
                 "-p", "drasi-computation-sink-sse",
                 "-p", "drasi-computation-sink-http",

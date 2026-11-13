@@ -146,16 +146,16 @@ impl ReactionPluginDescriptor for FileReactionDescriptor {
 
     async fn create_reaction(
         &self,
-        id: &str,
-        query_ids: Vec<String>,
+        id: &drasi_lib::ComponentId,
+        query_inputs: Vec<drasi_lib::config::ComponentReference>,
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
         let dto: FileReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let mut builder = FileReactionBuilder::new(id)
-            .with_queries(query_ids)
+        let mut builder = FileReactionBuilder::new(id.clone())
+            .with_query_inputs(query_inputs)
             .with_auto_start(auto_start);
 
         if let Some(output_path) = dto.output_path {
@@ -268,11 +268,28 @@ mod tests {
 
         let descriptor = FileReactionDescriptor;
         let result = descriptor
-            .create_reaction("test-id", vec!["my-query".to_string()], &json, true)
+            .create_reaction(
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000001e0")
+                    .expect("fixture UUID"),
+                vec![drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("my-query").expect("fixture component name"),
+                )],
+                &json,
+                true,
+            )
             .await;
         assert!(result.is_ok(), "create_reaction failed: {:?}", result.err());
         let reaction = result.unwrap();
-        assert_eq!(reaction.id(), "test-id");
-        assert_eq!(reaction.query_ids(), vec!["my-query".to_string()]);
+        assert_eq!(
+            reaction.id(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000001e0")
+                .expect("fixture UUID")
+        );
+        assert_eq!(
+            reaction.query_inputs(),
+            vec![drasi_lib::config::ComponentReference::by_name(
+                drasi_core::ComponentName::try_new("my-query").expect("fixture component name")
+            )]
+        );
     }
 }

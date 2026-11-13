@@ -25,7 +25,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::RwLock;
 
-use crate::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use crate::interface::{
+    CheckpointKey, CheckpointStore, IndexError, OutputPartition, SourceCheckpoint,
+};
 
 /// Internal checkpoint state for a single source.
 #[derive(Debug, Clone)]
@@ -39,10 +41,10 @@ struct CheckpointEntry {
 /// Stores per-source checkpoints and an optional config hash in memory.
 /// All operations apply immediately (no transactional staging).
 pub struct InMemoryCheckpointStore {
-    checkpoints: RwLock<HashMap<String, CheckpointEntry>>,
+    checkpoints: RwLock<HashMap<CheckpointKey, CheckpointEntry>>,
     config_hash: RwLock<Option<u64>>,
-    result_sequences: RwLock<HashMap<String, u64>>,
-    output_generations: RwLock<HashMap<String, u64>>,
+    result_sequences: RwLock<HashMap<OutputPartition, u64>>,
+    output_generations: RwLock<HashMap<OutputPartition, u64>>,
 }
 
 impl Default for InMemoryCheckpointStore {
@@ -70,13 +72,13 @@ impl CheckpointStore for InMemoryCheckpointStore {
 
     async fn stage_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
         sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
         let mut data = self.checkpoints.write().await;
         data.insert(
-            source_id.to_string(),
+            source_id.clone(),
             CheckpointEntry {
                 sequence,
                 source_position: source_position.cloned(),
@@ -87,7 +89,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
 
     async fn read_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &CheckpointKey,
     ) -> Result<Option<SourceCheckpoint>, IndexError> {
         let data = self.checkpoints.read().await;
         Ok(data.get(source_id).map(|entry| SourceCheckpoint {
@@ -96,7 +98,9 @@ impl CheckpointStore for InMemoryCheckpointStore {
         }))
     }
 
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
         let data = self.checkpoints.read().await;
         Ok(data
             .iter()
@@ -135,32 +139,50 @@ impl CheckpointStore for InMemoryCheckpointStore {
         Ok(*data)
     }
 
-    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         self.write_result_sequence(query_id, sequence).await
     }
 
-    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn write_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
+        query_id.validate()?;
         let mut data = self.result_sequences.write().await;
-        data.insert(query_id.to_string(), sequence);
+        data.insert(query_id.clone(), sequence);
         Ok(())
     }
 
-    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
         let data = self.result_sequences.read().await;
         Ok(data.get(query_id).copied())
     }
 
     async fn write_output_generation(
         &self,
-        query_id: &str,
+        query_id: &OutputPartition,
         generation: u64,
     ) -> Result<(), IndexError> {
+        query_id.validate()?;
         let mut data = self.output_generations.write().await;
-        data.insert(query_id.to_string(), generation);
+        data.insert(query_id.clone(), generation);
         Ok(())
     }
 
-    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_output_generation(
+        &self,
+        query_id: &OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
+        query_id.validate()?;
         let data = self.output_generations.read().await;
         Ok(data.get(query_id).copied())
     }
@@ -175,36 +197,103 @@ mod tests {
         let store = InMemoryCheckpointStore::new();
 
         // Initially empty
-        assert!(store.read_checkpoint("src-1").await.unwrap().is_none());
+        assert!(store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID")
+            ))
+            .await
+            .unwrap()
+            .is_none());
         assert!(store.read_all_checkpoints().await.unwrap().is_empty());
 
         // Stage with position
         let pos = Bytes::from_static(&[1, 2, 3, 4, 5, 6, 7, 8]);
         store
-            .stage_checkpoint("src-1", 5, Some(&pos))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                        .expect("fixture UUID"),
+                ),
+                5,
+                Some(&pos),
+            )
             .await
             .unwrap();
 
-        let cp = store.read_checkpoint("src-1").await.unwrap().unwrap();
+        let cp = store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 5);
         assert_eq!(cp.source_position.as_ref(), Some(&pos));
 
         // Stage second source — first preserved
         let pos2 = Bytes::from_static(&[9, 10, 11, 12]);
         store
-            .stage_checkpoint("src-2", 6, Some(&pos2))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b4")
+                        .expect("fixture UUID"),
+                ),
+                6,
+                Some(&pos2),
+            )
             .await
             .unwrap();
 
         let all = store.read_all_checkpoints().await.unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(all["src-1"].sequence, 5);
-        assert_eq!(all["src-2"].sequence, 6);
-        assert_eq!(all["src-2"].source_position.as_ref(), Some(&pos2));
+        assert_eq!(
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID")
+            )]
+                .sequence,
+            5
+        );
+        assert_eq!(
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b4")
+                    .expect("fixture UUID")
+            )]
+                .sequence,
+            6
+        );
+        assert_eq!(
+            all[&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b4")
+                    .expect("fixture UUID")
+            )]
+                .source_position
+                .as_ref(),
+            Some(&pos2)
+        );
 
         // Stage with None position
-        store.stage_checkpoint("src-1", 10, None).await.unwrap();
-        let cp = store.read_checkpoint("src-1").await.unwrap().unwrap();
+        store
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                        .expect("fixture UUID"),
+                ),
+                10,
+                None,
+            )
+            .await
+            .unwrap();
+        let cp = store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000031")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 10);
         assert_eq!(cp.source_position, None);
 
@@ -235,10 +324,24 @@ mod tests {
         let store = InMemoryCheckpointStore::new();
         let big_pos = Bytes::from(vec![0xAB; 100]);
         store
-            .stage_checkpoint("src-cosmos", 20, Some(&big_pos))
+            .stage_checkpoint(
+                &drasi_core_types::CheckpointKey::Source(
+                    drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000326")
+                        .expect("fixture UUID"),
+                ),
+                20,
+                Some(&big_pos),
+            )
             .await
             .unwrap();
-        let cp = store.read_checkpoint("src-cosmos").await.unwrap().unwrap();
+        let cp = store
+            .read_checkpoint(&drasi_core_types::CheckpointKey::Source(
+                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000326")
+                    .expect("fixture UUID"),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.source_position.as_ref(), Some(&big_pos));
     }
 }

@@ -363,7 +363,7 @@ impl MiddlewareTransformer {
         super::data::validate_identifier("middleware graph", &options.graph_id)?;
         let mut transformer = Self::new(definition, registry)?;
         let indexes = provider
-            .create_indexes(&options.graph_id, transformer.definition.id.as_str())
+            .create_indexes(&options.graph_id, &transformer.definition.id)
             .await?;
         let store = MiddlewareStore::new(indexes, &transformer.definition, options, scope)?;
         transformer.elements = store.elements();
@@ -727,6 +727,7 @@ impl Default for MiddlewareTransformerFactory {
                         (
                             Arc::from(name),
                             ConfigurationField {
+                                constraint: None,
                                 value_type,
                                 required,
                                 secret: false,
@@ -984,7 +985,7 @@ mod tests {
 
     fn definition() -> MiddlewareTransformerDefinition {
         MiddlewareTransformerDefinition {
-            id: ComponentId::try_new("middleware").expect("id"),
+            id: crate::test_helpers::component_id(731),
             output_stream: StreamId::try_new("middleware/out").expect("stream"),
             middleware: Vec::new(),
             pipeline: Vec::new(),

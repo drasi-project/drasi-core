@@ -6,8 +6,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::{
     computation::{ComputationTransaction, InMemoryComputationProvider},
-    interface::FailureMode,
+    interface::{CheckpointKey, FailureMode},
 };
+use drasi_lib::ComponentName;
 use std::{path::Path, sync::atomic::Ordering};
 
 #[path = "../computation_support/persistent_faults.rs"]
@@ -147,7 +148,7 @@ async fn held_input_survives_restart_and_requires_explicit_loss_acknowledgement(
 fn bindings(journal: uuid::Uuid) -> OutputBindings {
     OutputBindings::try_new([OutputDestination {
         output: port("out"),
-        consumer: component("sink"),
+        consumer: component(101),
         input: port("in"),
         journal,
         subscriber: "sink".into(),
@@ -180,7 +181,7 @@ async fn configuration_changes_and_volatile_producers_are_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let mut merger = durable(directory.path(), definition()).await;
     let identity =
-        GraphProducerIdentity::volatile("test".into(), "test".into(), component("a"), stream("a"))
+        GraphProducerIdentity::volatile("test".into(), "test".into(), component(457), stream("a"))
             .unwrap();
     let mut original = event("a", 1, 10);
     GraphProducerProgress::annotate(&mut original, &identity, 1).unwrap();
@@ -213,29 +214,47 @@ async fn configuration_changes_and_volatile_producers_are_rejected() {
 #[tokio::test]
 async fn durable_output_cannot_connect_to_a_volatile_pipe() {
     let directory = tempfile::tempdir().unwrap();
-    let merger = create(directory.path(), definition()).await;
+    let config = definition();
+    let merge = config.id.clone();
+    let source_a = source_id("a");
+    let source_b = source_id("b");
+    let sink = component(101);
+    let merger = create(directory.path(), config).await;
     let graph = ComputationGraph::builder("merge-test")
-        .source(Box::new(FiniteSource::new("a", vec![])))
-        .source(Box::new(FiniteSource::new("b", vec![])))
-        .transformer(Box::new(merger))
-        .sink(Box::new(CollectSink::new(
-            "sink",
-            &["in"],
-            Received::default(),
-        )))
-        .bind_stream(endpoint("a", "out"), stream("a"))
-        .bind_stream(endpoint("b", "out"), stream("b"))
-        .bind_stream(endpoint("merge", "out"), stream("merge"))
+        .source(
+            ComponentName::try_new("a").expect("source a name"),
+            Box::new(FiniteSource::new(source_a.clone(), vec![])),
+        )
+        .source(
+            ComponentName::try_new("b").expect("source b name"),
+            Box::new(FiniteSource::new(source_b.clone(), vec![])),
+        )
+        .transformer(
+            ComponentName::try_new("merge").expect("merger name"),
+            Box::new(merger),
+        )
+        .sink(
+            ComponentName::try_new("sink").expect("sink name"),
+            Box::new(CollectSink::new(
+                sink.clone(),
+                "sink",
+                &["in"],
+                Received::default(),
+            )),
+        )
+        .bind_stream(endpoint(&source_a, "out"), stream("a"))
+        .bind_stream(endpoint(&source_b, "out"), stream("b"))
+        .bind_stream(endpoint(&merge, "out"), stream("merge"))
         .connect(
-            edge("a", "merge"),
+            edge(&source_a, &merge),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("b", "merge"),
+            edge(&source_b, &merge),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("merge", "sink"),
+            edge(&merge, &sink),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build();
@@ -299,13 +318,13 @@ async fn corrupted_retained_snapshots_fail_closed() {
         drop(merger);
         {
             let indexes = provider(directory.path())
-                .create_indexes("merge-test", "merge")
+                .create_indexes("merge-test", &definition().id)
                 .await
                 .unwrap();
             let owner = ComputationTransaction::try_new(indexes).unwrap();
             let store = owner.resources().checkpoint_store().unwrap();
-            let key = "\0computation:source-time-merge:v1";
-            let record = store.read_checkpoint(key).await.unwrap().unwrap();
+            let key = CheckpointKey::Metadata("\0computation:source-time-merge:v1".to_owned());
+            let record = store.read_checkpoint(&key).await.unwrap().unwrap();
             let mut bytes = record.source_position.unwrap().to_vec();
             let encoded_key = rmp_serde::to_vec(field).unwrap();
             let index = bytes
@@ -320,7 +339,7 @@ async fn corrupted_retained_snapshots_fail_closed() {
             let bytes = Bytes::from(bytes);
             owner
                 .run(async {
-                    store.stage_checkpoint(key, 1, Some(&bytes)).await?;
+                    store.stage_checkpoint(&key, 1, Some(&bytes)).await?;
                     Ok(())
                 })
                 .await
@@ -398,7 +417,7 @@ async fn persistent_qos_receipt_deduplicates_unconfirmed_merger_output_after_reo
     let channel = QosChannel::persistent_with_recovery(
         channel_definition,
         provider(directory.path())
-            .create_indexes("merge-test", "journal")
+            .create_indexes("merge-test", &component(461))
             .await
             .unwrap(),
         codec,
@@ -440,7 +459,7 @@ async fn chained_persistent_producers_reject_gaps_but_accept_consecutive_logical
     let first = producer.on_wakeup().await.unwrap();
     let outputs = collect(&mut producer, first).await;
     let mut config = definition();
-    config.id = component("follower");
+    config.id = component(756);
     config.sources = vec![stream("merge")];
     config.output_stream = stream("follower");
     config.reorder_window_ms = 0;

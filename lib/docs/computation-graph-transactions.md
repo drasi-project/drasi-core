@@ -207,14 +207,15 @@ let registry = Arc::new(TransactionalTransformerRegistry::standard(
     drasi.middleware_registry(),
 ));
 
+let transaction_id = ComponentId::generate();
 let definition = TransactionTransformerDefinition {
     graph_id: "processing".into(),
-    id: ComponentId::try_new("decode-and-parse")?,
+    id: transaction_id.clone(),
     output_stream: StreamId::try_new("decode-and-parse/out")?,
     outbox_capacity: NonZeroUsize::new(128).expect("positive capacity"),
     steps: vec![
         TransactionStepDefinition {
-            id: ComponentId::try_new("decode")?,
+            id: ComponentId::derive_owned(&transaction_id, "decode")?,
             implementation: ImplementationIdentity::try_new("drasi/middleware-transformer", "1")?,
             configuration_version: 1,
             configuration: serde_json::json!({
@@ -232,7 +233,7 @@ let definition = TransactionTransformerDefinition {
             }),
         },
         TransactionStepDefinition {
-            id: ComponentId::try_new("parse")?,
+            id: ComponentId::derive_owned(&transaction_id, "parse")?,
             implementation: ImplementationIdentity::try_new("drasi/middleware-transformer", "1")?,
             configuration_version: 1,
             configuration: serde_json::json!({

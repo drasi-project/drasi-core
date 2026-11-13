@@ -52,7 +52,7 @@ impl ProgressIdentity {
             self.version == VERSION,
             "unsupported consumer progress version"
         );
-        ComponentId::try_new(self.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("graph", &self.graph_id)?;
         anyhow::ensure!(
             !self.consumers.is_empty() && self.consumers.len() <= MAX_PROGRESS_MEMBERS,
             "consumer progress membership limit exceeded"
@@ -313,22 +313,22 @@ mod tests {
     use drasi_computation_contracts::{SourceProgressKey, StreamId, MAX_CONSUMER_PROGRESS_MEMBERS};
     use drasi_core_types::interface::SourceCheckpoint;
 
-    fn id(name: &str) -> ComponentId {
-        ComponentId::try_new(name).unwrap()
+    fn id(value: usize) -> ComponentId {
+        ComponentId::try_new(format!("00000000-0000-4000-8000-{value:012x}")).unwrap()
     }
     fn identity() -> ProgressIdentity {
         ProgressIdentity {
             version: VERSION,
             graph_id: "graph".into(),
-            producer_id: id("producer"),
-            consumers: vec![id("first"), id("second")],
+            producer_id: id(1),
+            consumers: vec![id(2), id(3)],
         }
     }
     fn snapshot() -> ConsumerProgressSnapshot {
         ConsumerProgressSnapshot {
             consumers: BTreeMap::from([
                 (
-                    id("first"),
+                    id(2),
                     Arc::new(SourceProgressSnapshot {
                         ready: true,
                         admitting: true,
@@ -338,7 +338,12 @@ mod tests {
                         reset_generation: u64::MAX,
                         checkpoints: BTreeMap::from([
                             (
-                                SourceProgressKey::Source("source".into()),
+                                SourceProgressKey::Source(
+                                    drasi_core_types::ComponentId::try_new(
+                                        "00000000-0000-0000-0000-00000000004d",
+                                    )
+                                    .expect("fixture UUID"),
+                                ),
                                 SourceCheckpoint::new(0, Some(vec![0, 255, 128].into())),
                             ),
                             (
@@ -353,7 +358,7 @@ mod tests {
                         failure: Some("fenced".into()),
                     }),
                 ),
-                (id("second"), Arc::new(SourceProgressSnapshot::default())),
+                (id(3), Arc::new(SourceProgressSnapshot::default())),
             ]),
         }
     }
@@ -370,12 +375,9 @@ mod tests {
             );
         }
         assert!(!decoded.ready() && !decoded.recovered());
-        assert_eq!(
-            decoded.consumers[&id("first")].failure.as_deref(),
-            Some("fenced")
-        );
-        assert!(!decoded.consumers[&id("second")].persistent);
-        assert!(decoded.consumers[&id("second")].checkpoints.is_empty());
+        assert_eq!(decoded.consumers[&id(2)].failure.as_deref(), Some("fenced"));
+        assert!(!decoded.consumers[&id(3)].persistent);
+        assert!(decoded.consumers[&id(3)].checkpoints.is_empty());
         assert_eq!(encode_snapshot(&decoded, &identity())?, bytes);
         Ok(())
     }
@@ -385,11 +387,9 @@ mod tests {
         assert_eq!(MAX_PROGRESS_MEMBERS, MAX_CONSUMER_PROGRESS_MEMBERS);
         for consumers in [
             vec![],
-            vec![id("first"), id("first")],
-            vec![id("producer")],
-            (0..=MAX_PROGRESS_MEMBERS)
-                .map(|i| id(&format!("consumer-{i}")))
-                .collect(),
+            vec![id(2), id(2)],
+            vec![id(1)],
+            (0..=MAX_PROGRESS_MEMBERS).map(|i| id(10 + i)).collect(),
         ] {
             assert!(ProgressIdentity {
                 consumers,
@@ -410,9 +410,7 @@ mod tests {
         }
         .validate()
         .is_err());
-        let consumers = (0..MAX_PROGRESS_MEMBERS)
-            .map(|i| id(&format!("consumer-{i}")))
-            .collect();
+        let consumers = (0..MAX_PROGRESS_MEMBERS).map(|i| id(10 + i)).collect();
         ProgressIdentity {
             consumers,
             ..identity()
@@ -425,7 +423,7 @@ mod tests {
     fn consumer_progress_wire_rejects_missing_extra_duplicate_and_changed_members(
     ) -> anyhow::Result<()> {
         let bytes = encode_snapshot(&snapshot(), &identity())?;
-        for replacement in ["first", "unknown", "producer"] {
+        for replacement in [2, 4, 1] {
             let mut malformed: Snapshot<'_> = decode(&bytes)?;
             malformed.consumers[1].id = id(replacement);
             assert!(decode_snapshot(&encode(&malformed)?, &identity()).is_err());
@@ -434,7 +432,7 @@ mod tests {
         malformed.consumers.pop();
         assert!(decode_snapshot(&encode(&malformed)?, &identity()).is_err());
         malformed.consumers.push(Member {
-            id: id("second"),
+            id: id(3),
             snapshot: Cow::Borrowed(b"invalid"),
         });
         assert!(decode_snapshot(&encode(&malformed)?, &identity()).is_err());
@@ -442,11 +440,11 @@ mod tests {
         malformed.version += 1;
         assert!(decode_snapshot(&encode(&malformed)?, &identity()).is_err());
         let mut original = snapshot();
-        original.consumers.remove(&id("second"));
+        original.consumers.remove(&id(3));
         assert!(encode_snapshot(&original, &identity()).is_err());
         original
             .consumers
-            .insert(id("other"), Arc::new(SourceProgressSnapshot::default()));
+            .insert(id(4), Arc::new(SourceProgressSnapshot::default()));
         assert!(encode_snapshot(&original, &identity()).is_err());
         assert!(decode_snapshot(&vec![0; MAX_PROGRESS_BYTES + 1], &identity()).is_err());
         Ok(())
@@ -468,7 +466,7 @@ mod tests {
                 .collect(),
         };
         encode_snapshot(&states, &identity())?;
-        Arc::make_mut(states.consumers.get_mut(&id("first")).unwrap())
+        Arc::make_mut(states.consumers.get_mut(&id(2)).unwrap())
             .transport_sequences
             .insert(StreamId::try_new("overflow")?, 1);
         assert!(encode_snapshot(&states, &identity()).is_err());

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use super::output_state::{FetchError, OutboxResponse, SnapshotResponse};
 use crate::{
     channels::{ComponentStatus, QuerySubscriptionResponse},
-    config::QueryConfig,
+    config::AssignedQueryConfig as QueryConfig,
     metrics::QueryOutputMetrics,
 };
 
@@ -50,7 +50,8 @@ pub trait Query: Send + Sync {
     /// Attach a receiver and sample the output head atomically with publication.
     ///
     /// Persistent implementations must hydrate output before sampling the head.
-    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse>;
+    async fn subscribe(&self, reaction_id: crate::ComponentId)
+        -> Result<QuerySubscriptionResponse>;
 
     /// Fetch the live result set and its sequence after bootstrap completes.
     async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError>;
@@ -105,7 +106,10 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        async fn subscribe(&self, _: String) -> Result<QuerySubscriptionResponse> {
+        async fn subscribe(
+            &self,
+            _: drasi_core_types::ComponentId,
+        ) -> Result<QuerySubscriptionResponse> {
             anyhow::bail!("test contract has no subscriptions")
         }
         async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
@@ -122,8 +126,16 @@ mod tests {
 
     #[test]
     fn query_is_volatile_defaults_to_true_when_not_overridden() {
-        assert!(
-            ContractQuery(crate::Query::cypher("contract").query("RETURN 1").build()).is_volatile()
-        );
+        assert!(ContractQuery(
+            crate::Query::cypher(
+                drasi_core_types::ComponentName::try_new("contract")
+                    .expect("fixture component name")
+            )
+            .query("RETURN 1")
+            .build()
+            .unwrap()
+            .with_assigned_id(crate::config::ComponentId::generate())
+        )
+        .is_volatile());
     }
 }

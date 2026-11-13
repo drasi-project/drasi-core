@@ -125,6 +125,15 @@ impl Factory for MsSqlStoredProcFactory {
     }
     fn metadata(&self) -> FactoryMetadata {
         let mut configuration = ConfigSchema::from_fields([("settings", ConfigType::Object, true)]);
+        configuration.constrain(
+            "settings",
+            drasi_computation_contracts::ConfigurationConstraint::try_new(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "outputs": drasi_computation_contracts::ConfigurationConstraint::output_aliases().schema(),
+                },
+            })).expect("constant stored procedure identity schema"),
+        ).expect("settings field");
         configuration
             .fields
             .get_mut("settings")
@@ -136,10 +145,7 @@ impl Factory for MsSqlStoredProcFactory {
             role: ComponentRole::Sink,
             configuration_version: 1,
             configuration,
-            ports: MsSqlStoredProcSink::describe(ComponentId::try_new("mssql").expect("id"))
-                .expect("descriptor")
-                .ports()
-                .to_vec(),
+            ports: MsSqlStoredProcSink::ports().expect("constant port descriptor"),
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,
@@ -175,16 +181,17 @@ pub struct MsSqlStoredProcSink {
     active_connection: Option<MsSqlSourceConfig>,
 }
 impl MsSqlStoredProcSink {
+    pub(crate) fn ports() -> Result<Vec<PortDescriptor>> {
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("in")?,
+            PortDirection::Input,
+            GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("in")?,
-                PortDirection::Input,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(ComponentDescriptor::try_new(id, Self::ports()?)?)
     }
     /// `inputs` are the graph's declared incoming edges; they define the
     /// outputs this sink accepts.
@@ -370,12 +377,15 @@ drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OUTPUT_COMPONENT_ID: &str = "10739661-2175-5f1b-ba4c-65f05af8348c";
+
     fn inputs() -> Vec<InputBinding> {
         use drasi_computation_contracts::{OutputEndpoint, StreamId};
         vec![InputBinding {
             input_port: PortId::try_new("in").expect("port"),
             output: OutputEndpoint::new(
-                ComponentId::try_new("source.q").expect("component"),
+                ComponentId::try_new(OUTPUT_COMPONENT_ID).expect("component"),
                 PortId::try_new("out").expect("port"),
             ),
             stream: StreamId::try_new("q/out").expect("stream"),
@@ -383,13 +393,36 @@ mod tests {
     }
     fn config() -> serde_json::Value {
         serde_json::json!({"connection":{"host":"no-network-at-construction","database":"d","user":"u","password":"p"},
-            "outputs":{"q":{"component":"source.q","port":"out"}},"default_template":{"added":{"template":"EXEC p {{param after.id}}"}}})
+            "outputs":{"q":{"component":OUTPUT_COMPONENT_ID,"port":"out"}},"default_template":{"added":{"template":"EXEC p {{param after.id}}"}}})
+    }
+    #[test]
+    fn factory_metadata_constructs_without_database_io() -> Result<()> {
+        drasi_computation_plugin_sdk::ExportedPlugin::new(plugin()?)?;
+        #[cfg(feature = "dynamic-plugin")]
+        assert!(!drasi_computation_plugin_metadata().is_null());
+        let metadata = MsSqlStoredProcFactory.metadata();
+        assert_eq!(metadata.role, ComponentRole::Sink);
+        assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
+        assert_eq!(metadata.ports, MsSqlStoredProcSink::ports()?);
+        assert_eq!(metadata.ports.len(), 1);
+        assert_eq!(metadata.ports[0].id().as_str(), "in");
+        assert_eq!(metadata.ports[0].direction(), PortDirection::Input);
+        assert_eq!(
+            metadata.ports[0].schema(),
+            GraphChangeCodec::schema().descriptor()
+        );
+        let id = ComponentId::generate();
+        let descriptor = MsSqlStoredProcSink::describe(id.clone())?;
+        assert_eq!(descriptor.id(), &id);
+        assert_eq!(descriptor.ports(), metadata.ports.as_slice());
+        assert!(metadata.configuration.fields["settings"].secret);
+        Ok(())
     }
     #[test]
     fn real_sink_factory_and_configuration_preserve_secrets() -> Result<()> {
         drasi_computation_plugin_sdk::ExportedPlugin::new(plugin()?)?;
         let sink = MsSqlStoredProcSink::new(
-            ComponentId::try_new("sink")?,
+            ComponentId::try_new("df1e84de-e73a-5f3c-a426-cfc15b6d0a93")?,
             serde_json::from_value(config())?,
             &inputs(),
         )?;
@@ -412,12 +445,12 @@ mod tests {
             "deleted": {"template": "EXEC d {{param identity.id}}"}
         });
         let sink = MsSqlStoredProcSink::new(
-            ComponentId::try_new("sink")?,
+            ComponentId::try_new("df1e84de-e73a-5f3c-a426-cfc15b6d0a93")?,
             serde_json::from_value(configuration)?,
             &inputs(),
         )?;
         let metadata = ElementMetadata {
-            reference: ElementReference::new("q", "room-1"),
+            reference: ElementReference::new(OUTPUT_COMPONENT_ID, "room-1"),
             labels: Arc::from([Arc::<str>::from("Room")]),
             effective_from: 1_000,
         };
@@ -460,7 +493,7 @@ mod tests {
         for (field, value) in [
             (
                 "outputs",
-                serde_json::json!({"bad id": {"component": "source.q"}}),
+                serde_json::json!({"bad id": {"component": OUTPUT_COMPONENT_ID}}),
             ),
             ("command_timeout_ms", serde_json::json!(0)),
             ("retry_attempts", serde_json::json!(3)),
@@ -485,12 +518,14 @@ mod tests {
         empty["connection"]["user"] = serde_json::json!("");
         empty["connection"]["password"] = serde_json::json!("");
         let empty: MsSqlStoredProcConfig = serde_json::from_value(empty)?;
-        assert!(
-            MsSqlStoredProcSink::new(ComponentId::try_new("sink")?, empty.clone(), &inputs())
-                .is_err()
-        );
+        assert!(MsSqlStoredProcSink::new(
+            ComponentId::try_new("df1e84de-e73a-5f3c-a426-cfc15b6d0a93")?,
+            empty.clone(),
+            &inputs()
+        )
+        .is_err());
         let mut sink = MsSqlStoredProcSink::new_with_binding(
-            ComponentId::try_new("sink")?,
+            ComponentId::try_new("df1e84de-e73a-5f3c-a426-cfc15b6d0a93")?,
             empty,
             true,
             &inputs(),
@@ -533,7 +568,7 @@ mod tests {
     fn actual_provider_values_override_valid_literals_and_endpoint_is_configured_only() -> Result<()>
     {
         let sink = MsSqlStoredProcSink::new_with_binding(
-            ComponentId::try_new("sink")?,
+            ComponentId::try_new("df1e84de-e73a-5f3c-a426-cfc15b6d0a93")?,
             serde_json::from_value(config())?,
             true,
             &inputs(),
@@ -549,12 +584,13 @@ mod tests {
         assert_eq!(sink.configuration()?, declared);
         let request = CreateRequest {
             inputs: inputs(),
-            id: ComponentId::try_new("sink")?,
+            id: ComponentId::try_new("df1e84de-e73a-5f3c-a426-cfc15b6d0a93")?,
             implementation: MsSqlStoredProcFactory.metadata().implementation,
             configuration_version: 1,
             configuration: serde_json::json!({"settings":config()}),
             scope: None,
             activation_credentials_bound: true,
+            update_directive: None,
         };
         let context = MsSqlStoredProcFactory.activation_credential_context(&request)?;
         assert_eq!(context.hostname, "no-network-at-construction");

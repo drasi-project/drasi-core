@@ -5,11 +5,12 @@ use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
 
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, ContextEntry, ContextValue, GraphChangeCodec, OutputEnvelope, PortId,
-    StreamId,
+    ComponentDescriptor, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
+    ContextEntry, ContextValue, GraphChangeCodec, OutputEnvelope, PortId, StreamId,
 };
 use drasi_computation_plugin_sdk::{
-    ControlMessage, ControlNotification, ControlSender, NativeControlHandler,
+    ApplyUpdateRequest, ControlMessage, ControlNotification, ControlSender, NativeControlHandler,
+    UpdateRequest,
 };
 use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
@@ -17,6 +18,9 @@ use drasi_core_types::models::{
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
+
+#[cfg(test)]
+mod tests;
 
 fn count_default() -> u64 {
     10
@@ -37,7 +41,7 @@ pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::Config
     ]).expect("constant counter configuration")
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {
     stream: StreamId,
@@ -53,6 +57,45 @@ struct Configuration {
     paused: bool,
 }
 
+impl Configuration {
+    fn parse(value: serde_json::Value) -> anyhow::Result<Self> {
+        let configuration: Self = serde_json::from_value(value)?;
+        let last = i128::from(configuration.start)
+            + i128::from(configuration.step) * i128::from(configuration.count.saturating_sub(1));
+        anyhow::ensure!(
+            (i128::from(i64::MIN)..=i128::from(i64::MAX)).contains(&last),
+            "counter range overflows i64"
+        );
+        anyhow::ensure!(
+            std::time::Instant::now()
+                .checked_add(Duration::from_millis(configuration.interval_ms))
+                .is_some(),
+            "counter interval is not representable"
+        );
+        Ok(configuration)
+    }
+}
+
+pub(super) fn plan_update(request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+    anyhow::ensure!(
+        request.current.id == request.proposed.id
+            && request.current.implementation == request.proposed.implementation
+            && request.current.configuration_version == request.proposed.configuration_version,
+        "counter updates cannot change identity, implementation or configuration version"
+    );
+    let mut current = Configuration::parse(request.current.configuration.clone())?;
+    let proposed = Configuration::parse(request.proposed.configuration.clone())?;
+    current.interval_ms = proposed.interval_ms;
+    anyhow::ensure!(
+        current == proposed,
+        "counter live updates support interval_ms only; other changes require a new component"
+    );
+    Ok(ComponentUpdatePlan {
+        mode: ComponentUpdateMode::InPlace,
+        data: ComponentUpdateData::Preserve,
+    })
+}
+
 pub(super) struct Counter {
     descriptor: ComponentDescriptor,
     configuration: Configuration,
@@ -66,19 +109,7 @@ impl Counter {
         descriptor: ComponentDescriptor,
         configuration: serde_json::Value,
     ) -> anyhow::Result<(Self, CounterControl)> {
-        let configuration: Configuration = serde_json::from_value(configuration)?;
-        let last = i128::from(configuration.start)
-            + i128::from(configuration.step) * i128::from(configuration.count.saturating_sub(1));
-        anyhow::ensure!(
-            (i128::from(i64::MIN)..=i128::from(i64::MAX)).contains(&last),
-            "counter range overflows i64"
-        );
-        anyhow::ensure!(
-            std::time::Instant::now()
-                .checked_add(Duration::from_millis(configuration.interval_ms))
-                .is_some(),
-            "counter interval is not representable"
-        );
+        let configuration = Configuration::parse(configuration)?;
         let (sender, paused) = watch::channel(configuration.paused);
         Ok((
             Self {
@@ -99,6 +130,28 @@ impl NativeComponent for Counter {
     }
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::to_value(&self.configuration)?)
+    }
+    fn supports_apply_update(&self) -> bool {
+        true
+    }
+    async fn apply_update(&mut self, update: &ApplyUpdateRequest) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.running,
+            "counter update requires an activated instance"
+        );
+        anyhow::ensure!(
+            self.descriptor.id() == &update.request.current.id
+                && update.plan == plan_update(&update.request)?,
+            "counter update does not match the approved intent"
+        );
+        anyhow::ensure!(
+            self.configuration
+                == Configuration::parse(update.request.current.configuration.clone())?,
+            "counter configuration changed before the update"
+        );
+        let proposed = Configuration::parse(update.request.proposed.configuration.clone())?;
+        self.configuration.interval_ms = proposed.interval_ms;
+        Ok(())
     }
     async fn start(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.running, "counter already started");

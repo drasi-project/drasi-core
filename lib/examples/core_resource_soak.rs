@@ -89,6 +89,10 @@ struct Service {
     handles: Option<Handles>,
 }
 
+fn component_id(value: u128) -> ComponentId {
+    ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
+}
+
 #[async_trait]
 impl ComputationComponent for Service {
     fn descriptor(&self) -> &ComponentDescriptor {
@@ -161,13 +165,14 @@ async fn cycle(path: &Path, stopped: bool, replacement: bool) -> Result<()> {
     let owners = if replacement { 16 } else { 1 };
     let mut builder = ComputationGraph::builder("resource-soak");
     for index in 0..owners {
-        builder = builder.service(Box::new(Service {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new(format!("handles-{index}"))?,
-                vec![],
-            )?,
-            handles: Some(Handles::new(path)?),
-        }));
+        let name = format!("handles-{index}");
+        builder = builder.service(
+            ComponentName::try_new(name.as_str())?,
+            Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(component_id(index as u128 + 1), vec![])?,
+                handles: Some(Handles::new(path)?),
+            }),
+        );
     }
     let mut graph = builder.build()?;
     ensure!(
@@ -188,7 +193,7 @@ async fn cycle(path: &Path, stopped: bool, replacement: bool) -> Result<()> {
             if replacement {
                 for index in 0..64 {
                     let name = format!("handles-{}", index % owners);
-                    let id = ComponentId::try_new(name.as_str())?;
+                    let id = component_id((index % owners) as u128 + 1);
                     let snapshot = control.desired_snapshot();
                     let mut desired = snapshot
                         .select(GraphSelection::Exact(vec![id]))?
@@ -197,8 +202,9 @@ async fn cycle(path: &Path, stopped: bool, replacement: bool) -> Result<()> {
                         .next()
                         .context("replacement service")?;
                     let descriptor = desired.descriptor.clone();
+                    let binding = BindingToken::generate();
                     desired.construction = ComponentConstruction::External {
-                        binding: name.clone(),
+                        binding: binding.clone(),
                     };
                     let preview = control
                         .preview(
@@ -208,7 +214,7 @@ async fn cycle(path: &Path, stopped: bool, replacement: bool) -> Result<()> {
                         .await?;
                     let mut bindings = TopologyBindings::default();
                     bindings.components.insert(
-                        name,
+                        binding,
                         ConstructedComponent::service(Box::new(Service {
                             descriptor,
                             handles: Some(Handles::new(path)?),

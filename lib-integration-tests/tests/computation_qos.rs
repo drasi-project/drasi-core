@@ -87,7 +87,13 @@ async fn received(
 async fn persistent(root: &Path, definition: QosChannelDefinition) -> Result<Arc<QosChannel>> {
     let provider =
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)));
-    let indexes = provider.create_indexes("qos", "channel").await?;
+    let indexes = provider
+        .create_indexes(
+            "qos",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000129")
+                .expect("fixture UUID"),
+        )
+        .await?;
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).expect("codec limit"));
     codec.register_schema(GraphChangeCodec::schema())?;
     let channel = QosChannel::persistent(definition, indexes, codec, "journal").await?;
@@ -129,14 +135,25 @@ async fn persisted_qos_corruption_is_rejected_before_delivery_or_new_acceptance(
             false,
             false,
         )));
-        let indexes = provider.create_indexes("qos", "channel").await?;
+        let indexes = provider
+            .create_indexes(
+                "qos",
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000129")
+                    .expect("fixture UUID"),
+            )
+            .await?;
         let checkpoint = indexes
             .checkpoint_store()
             .expect("checkpoint store")
             .clone();
         let outbox = indexes.outbox_writer().expect("outbox").clone();
+        let journal = drasi_core::interface::OutputPartition::Journal("journal".into());
+        let metadata_key = drasi_core::interface::CheckpointKey::Journal {
+            journal: journal.clone(),
+            key: "qos-state".into(),
+        };
         let saved = checkpoint
-            .read_checkpoint("journal")
+            .read_checkpoint(&metadata_key)
             .await?
             .expect("committed journal");
         let mut metadata: serde_json::Value =
@@ -195,15 +212,15 @@ async fn persisted_qos_corruption_is_rejected_before_delivery_or_new_acceptance(
             .run(async {
                 if let Some((position, record)) = &invalid_record {
                     outbox
-                        .append_and_trim("journal", *position, record, 1)
+                        .append_and_trim(&journal, *position, record, 1)
                         .await?;
                 }
                 if fault == "pruned-required-record" {
-                    outbox.trim_before("journal", 2).await?;
+                    outbox.trim_before(&journal, 2).await?;
                 }
                 checkpoint
                     .stage_checkpoint(
-                        "journal",
+                        &metadata_key,
                         if fault == "record-gap" {
                             4
                         } else {
@@ -684,9 +701,9 @@ impl EnvelopeSink for RecordingSink {
     }
 }
 
-fn descriptor(id: &str, port: &str, direction: PortDirection) -> ComponentDescriptor {
+fn descriptor(id: ComponentId, port: &str, direction: PortDirection) -> ComponentDescriptor {
     ComponentDescriptor::try_new(
-        ComponentId::try_new(id).expect("component"),
+        id,
         vec![PortDescriptor::new(
             PortId::try_new(port).expect("port"),
             direction,
@@ -704,7 +721,10 @@ async fn graph_fanout_appends_once_and_both_consumers_complete_every_event() -> 
     let resource = ResourceId::try_new("journal")?;
     let fast = Arc::new(std::sync::Mutex::new(Vec::new()));
     let slow = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let source = Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?);
+    let source = Endpoint::new(
+        ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?,
+        PortId::try_new("out")?,
+    );
     let mut graph = ComputationGraph::builder("multicast")
         .declare_resource(ResourceSpecification {
             id: resource.clone(),
@@ -713,30 +733,56 @@ async fn graph_fanout_appends_once_and_both_consumers_complete_every_event() -> 
             binding: "journal".into(),
         })?
         .provide_resource(resource.clone(), channel.resource())?
-        .source(Box::new(FiniteSource {
-            descriptor: descriptor("source", "out", PortDirection::Output),
-            sequence: 0,
-        }))
-        .sink(Box::new(RecordingSink {
-            descriptor: descriptor("fast", "in", PortDirection::Input),
-            seen: fast.clone(),
-        }))
-        .sink(Box::new(RecordingSink {
-            descriptor: descriptor("slow", "in", PortDirection::Input),
-            seen: slow.clone(),
-        }))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
+                .expect("fixture component name"),
+            Box::new(FiniteSource {
+                descriptor: descriptor(source.component.clone(), "out", PortDirection::Output),
+                sequence: 0,
+            }),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                .expect("fixture component name"),
+            Box::new(RecordingSink {
+                descriptor: descriptor(
+                    ComponentId::try_new("2783e746-187a-54ac-8532-516e231409df")?,
+                    "in",
+                    PortDirection::Input,
+                ),
+                seen: fast.clone(),
+            }),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-2")
+                .expect("fixture component name"),
+            Box::new(RecordingSink {
+                descriptor: descriptor(
+                    ComponentId::try_new("1e700ebb-3038-57c0-8662-327a13d76cf8")?,
+                    "in",
+                    PortDirection::Input,
+                ),
+                seen: slow.clone(),
+            }),
+        )
         .bind_stream(source.clone(), definition.stream.clone())
         .connect(
             EdgeDefinition::new(
                 source.clone(),
-                Endpoint::new(ComponentId::try_new("fast")?, PortId::try_new("in")?),
+                Endpoint::new(
+                    ComponentId::try_new("2783e746-187a-54ac-8532-516e231409df")?,
+                    PortId::try_new("in")?,
+                ),
             ),
             Box::new(definition.pipe(resource.clone(), "fast")),
         )
         .connect(
             EdgeDefinition::new(
                 source,
-                Endpoint::new(ComponentId::try_new("slow")?, PortId::try_new("in")?),
+                Endpoint::new(
+                    ComponentId::try_new("1e700ebb-3038-57c0-8662-327a13d76cf8")?,
+                    PortId::try_new("in")?,
+                ),
             ),
             Box::new(definition.pipe(resource, "slow")),
         )
@@ -1179,7 +1225,13 @@ async fn uncertain_indexes_after(
 ) -> Result<drasi_core::computation::ComputationIndexes> {
     let provider =
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)));
-    let original = provider.create_indexes("qos", "channel").await?;
+    let original = provider
+        .create_indexes(
+            "qos",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000129")
+                .expect("fixture UUID"),
+        )
+        .await?;
     let control: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(LoseCommitResponse {
         inner: original.indexes().session_control.clone(),
         fail,
@@ -1284,7 +1336,7 @@ fn admission_options() -> Result<AdmissionOptions> {
     Ok(AdmissionOptions {
         construction_scope: "instance".into(),
         graph_id: "qos".into(),
-        component_id: ComponentId::try_new("source")?,
+        component_id: ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?,
         failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
         max_producers: NonZeroUsize::new(2).expect("producer limit"),
         receipts_per_producer: NonZeroUsize::new(2).expect("receipt window"),
@@ -1334,15 +1386,19 @@ async fn producer_admission_atomically_replays_receipts_and_bounds_retired_sessi
     let definition = definition(true, RetentionPolicy::Backpressure, 1);
     let channel = persistent(directory.path(), definition.clone()).await?;
     channel.enable_admission(admission_options()?).await?;
-    let name = ComponentId::try_new("client-a")?;
+    let name = ComponentId::try_new("19dd6b4b-c73b-5351-b502-24cdc3bdb9a6")?;
     let session = channel.register_producer(name.clone()).await?;
     assert_eq!(channel.register_producer(name.clone()).await?, session);
     let second = channel
-        .register_producer(ComponentId::try_new("client-b")?)
+        .register_producer(ComponentId::try_new(
+            "29136482-ad8e-5a85-bffb-688bbc74abfc",
+        )?)
         .await?;
     assert!(matches!(
         channel
-            .register_producer(ComponentId::try_new("client-c")?)
+            .register_producer(ComponentId::try_new(
+                "6fd4bd3c-7753-53db-802b-ada6ba5a1b44"
+            )?)
             .await,
         Err(PipeError::CapacityExhausted)
     ));
@@ -1478,7 +1534,9 @@ async fn cancelled_producer_admission_resolves_input_and_receipt_in_one_commit()
         .await?;
         channel.enable_admission(admission_options()?).await?;
         let session = channel
-            .register_producer(ComponentId::try_new("client")?)
+            .register_producer(ComponentId::try_new(
+                "06d521b5-12a2-5d5b-ad49-34dea0a7d42c",
+            )?)
             .await?;
         let input = event(1)?;
         fail.store(true, Ordering::Release);
@@ -1525,7 +1583,7 @@ async fn lost_producer_registration_and_acceptance_responses_are_recoverable() -
         let channel =
             uncertain_channel(directory.path(), definition.clone(), fail.clone(), None).await?;
         channel.enable_admission(admission_options()?).await?;
-        let producer = ComponentId::try_new("client")?;
+        let producer = ComponentId::try_new("06d521b5-12a2-5d5b-ad49-34dea0a7d42c")?;
         let session = if registration {
             fail.store(true, Ordering::Release);
             assert!(matches!(
@@ -1589,11 +1647,15 @@ async fn admission_metadata_corruption_cannot_fabricate_a_retry_receipt() -> Res
         let channel = persistent(directory.path(), desired.clone()).await?;
         channel.enable_admission(admission_options()?).await?;
         let session = channel
-            .register_producer(ComponentId::try_new("client")?)
+            .register_producer(ComponentId::try_new(
+                "06d521b5-12a2-5d5b-ad49-34dea0a7d42c",
+            )?)
             .await?;
         channel.admit(&session, 1, &event(1)?).await?;
         let second = channel
-            .register_producer(ComponentId::try_new("second")?)
+            .register_producer(ComponentId::try_new(
+                "db09b7ee-8a75-54ae-8d51-7507e6a2533c",
+            )?)
             .await?;
         channel.admit(&second, 1, &event(2)?).await?;
         channel.shutdown().await?;
@@ -1603,25 +1665,40 @@ async fn admission_metadata_corruption_cannot_fabricate_a_retry_receipt() -> Res
             false,
             false,
         )));
-        let indexes = provider.create_indexes("qos", "channel").await?;
+        let indexes = provider
+            .create_indexes(
+                "qos",
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000129")
+                    .expect("fixture UUID"),
+            )
+            .await?;
         let checkpoint = indexes.checkpoint_store().expect("checkpoint").clone();
+        let metadata_key = drasi_core::interface::CheckpointKey::Journal {
+            journal: drasi_core::interface::OutputPartition::Journal("journal".into()),
+            key: "qos-state".into(),
+        };
         let saved = checkpoint
-            .read_checkpoint("journal")
+            .read_checkpoint(&metadata_key)
             .await?
             .expect("metadata");
         let mut metadata: serde_json::Value =
             serde_json::from_slice(saved.source_position.as_ref().expect("saved metadata"))?;
         let admission = &mut metadata["admission"];
+        let client_id = session.producer.as_str();
+        let second_id = second.producer.as_str();
+        assert!(admission["producers"].get(client_id).is_some());
+        assert!(admission["producers"].get(second_id).is_some());
         match fault {
             "version" => admission["version"] = serde_json::json!(2),
             "scope" => admission["options"]["graph_id"] = serde_json::json!("another-graph"),
-            "epoch" => admission["producers"]["client"]["epoch"] = serde_json::json!(0),
-            "sequence-gap" => admission["producers"]["client"]["head"] = serde_json::json!(2),
+            "epoch" => admission["producers"][client_id]["epoch"] = serde_json::json!(0),
+            "sequence-gap" => admission["producers"][client_id]["head"] = serde_json::json!(2),
             "position" => {
-                admission["producers"]["client"]["receipts"]["1"]["position"] = serde_json::json!(0)
+                admission["producers"][client_id]["receipts"]["1"]["position"] =
+                    serde_json::json!(0)
             }
             "missing-receipt" => {
-                admission["producers"]["client"]["receipts"] = serde_json::json!({})
+                admission["producers"][client_id]["receipts"] = serde_json::json!({})
             }
             "bounds" => admission["options"]["max_producers"] = serde_json::json!(1025),
             "durability" => {
@@ -1632,14 +1709,14 @@ async fn admission_metadata_corruption_cannot_fabricate_a_retry_receipt() -> Res
                 admission["identity"]["incarnation"] =
                     serde_json::json!("b747582e-b71a-4281-85cd-9918953316ee")
             }
-            "shared-epoch" => admission["producers"]["second"]["epoch"] = serde_json::json!(1),
+            "shared-epoch" => admission["producers"][second_id]["epoch"] = serde_json::json!(1),
             "shared-position" => {
-                admission["producers"]["second"]["last_position"] = serde_json::json!(1);
-                admission["producers"]["second"]["receipts"]["1"]["position"] =
+                admission["producers"][second_id]["last_position"] = serde_json::json!(1);
+                admission["producers"][second_id]["receipts"]["1"]["position"] =
                     serde_json::json!(1);
             }
             "future-client-head" => {
-                admission["producers"]["client"]["head"] = serde_json::json!(u64::MAX)
+                admission["producers"][client_id]["head"] = serde_json::json!(u64::MAX)
             }
             _ => unreachable!(),
         }
@@ -1648,7 +1725,7 @@ async fn admission_metadata_corruption_cannot_fabricate_a_retry_receipt() -> Res
         transaction
             .run(async {
                 checkpoint
-                    .stage_checkpoint("journal", 2, Some(&bytes))
+                    .stage_checkpoint(&metadata_key, 2, Some(&bytes))
                     .await?;
                 Ok(())
             })
@@ -1670,22 +1747,29 @@ async fn producer_admission_limits_do_not_advance_session_or_journal_progress() 
     let desired = definition(true, RetentionPolicy::Backpressure, 2);
     let channel = persistent(directory.path(), desired.clone()).await?;
     channel.enable_admission(admission_options()?).await?;
-    rejected(
-        channel
-            .register_producer(ComponentId::try_new("x".repeat(257))?)
-            .await
-            .unwrap_err(),
-        AdmissionRejection::IdentifierTooLong,
-    );
+    assert!(ComponentId::try_new("x".repeat(257)).is_err());
+    assert_eq!(channel.progress().await?.accepted, 0);
     let one = channel
-        .register_producer(ComponentId::try_new("one")?)
+        .register_producer(ComponentId::try_new(
+            "d97cb8d3-02b8-5bdf-8142-9ce6385db06e",
+        )?)
         .await?;
     let two = channel
-        .register_producer(ComponentId::try_new("two")?)
+        .register_producer(ComponentId::try_new(
+            "ec5f2cad-af0e-5819-89ee-b867a745394c",
+        )?)
         .await?;
+    assert!(matches!(
+        channel
+            .register_producer(ComponentId::try_new(
+                "06d521b5-12a2-5d5b-ad49-34dea0a7d42c",
+            )?)
+            .await,
+        Err(PipeError::CapacityExhausted)
+    ));
     let mut oversized = event(1)?;
     oversized.append_annotation(ContextEntry::try_new(
-        ComponentId::try_new("client")?,
+        ComponentId::try_new("06d521b5-12a2-5d5b-ad49-34dea0a7d42c")?,
         "large",
         ContextValue::Bytes(Arc::from(vec![0; 1024 * 1024])),
     )?)?;
@@ -1722,7 +1806,9 @@ async fn admission_preserves_lineage_without_confusing_client_and_journal_sequen
     let channel = persistent(directory.path(), desired.clone()).await?;
     channel.enable_admission(admission_options()?).await?;
     let session = channel
-        .register_producer(ComponentId::try_new("client")?)
+        .register_producer(ComponentId::try_new(
+            "06d521b5-12a2-5d5b-ad49-34dea0a7d42c",
+        )?)
         .await?;
     let original = event(37)?;
     let mut input = original.derive(
@@ -1737,7 +1823,7 @@ async fn admission_preserves_lineage_without_confusing_client_and_journal_sequen
         &GraphProducerIdentity::volatile(
             "upstream".into(),
             "graph".into(),
-            ComponentId::try_new("client")?,
+            ComponentId::try_new("06d521b5-12a2-5d5b-ad49-34dea0a7d42c")?,
             StreamId::try_new("client/out")?,
         )?,
         37,
@@ -1805,7 +1891,9 @@ async fn producer_admission_process_fixture() -> Result<()> {
     .await?;
     channel.enable_admission(admission_options()?).await?;
     let session = channel
-        .register_producer(ComponentId::try_new("crash-client")?)
+        .register_producer(ComponentId::try_new(
+            "2ba1799e-32d0-559f-b38a-f336848c3ec4",
+        )?)
         .await?;
     std::fs::write(
         root.join("client-session.json"),
@@ -1903,7 +1991,10 @@ fn admission_builder(
 ) -> Result<ComputationGraphBuilder> {
     let channel = admission.channel();
     let resource = ResourceId::try_new("journal")?;
-    let source = Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?);
+    let source = Endpoint::new(
+        ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?,
+        PortId::try_new("out")?,
+    );
     Ok(ComputationGraph::builder("qos")
         .declare_resource(ResourceSpecification {
             id: resource.clone(),
@@ -1912,18 +2003,38 @@ fn admission_builder(
             binding: "journal".into(),
         })?
         .provide_resource(resource.clone(), channel.resource())?
-        .source(Box::new(JournalIngress {
-            descriptor: descriptor("source", "out", PortDirection::Output),
-            admission: admission.clone(),
-        }))
-        .sink(Box::new(RecordingSink {
-            descriptor: descriptor("fast", "in", PortDirection::Input),
-            seen: fast,
-        }))
-        .sink(Box::new(RecordingSink {
-            descriptor: descriptor("slow", "in", PortDirection::Input),
-            seen: slow,
-        }))
+        .source(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-source-2")
+                .expect("fixture component name"),
+            Box::new(JournalIngress {
+                descriptor: descriptor(source.component.clone(), "out", PortDirection::Output),
+                admission: admission.clone(),
+            }),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-3")
+                .expect("fixture component name"),
+            Box::new(RecordingSink {
+                descriptor: descriptor(
+                    ComponentId::try_new("2783e746-187a-54ac-8532-516e231409df")?,
+                    "in",
+                    PortDirection::Input,
+                ),
+                seen: fast,
+            }),
+        )
+        .sink(
+            drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-4")
+                .expect("fixture component name"),
+            Box::new(RecordingSink {
+                descriptor: descriptor(
+                    ComponentId::try_new("1e700ebb-3038-57c0-8662-327a13d76cf8")?,
+                    "in",
+                    PortDirection::Input,
+                ),
+                seen: slow,
+            }),
+        )
         .bind_stream(source, channel.definition().stream.clone()))
 }
 
@@ -1935,8 +2046,14 @@ fn admission_graph(
 ) -> Result<ComputationGraph> {
     let mut builder = admission_builder(admission, fast, slow)?;
     let resource = ResourceId::try_new("journal")?;
-    let source = Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?);
-    for subscriber in ["fast", "slow"] {
+    let source = Endpoint::new(
+        ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?,
+        PortId::try_new("out")?,
+    );
+    for (subscriber, component) in [
+        ("fast", "2783e746-187a-54ac-8532-516e231409df"),
+        ("slow", "1e700ebb-3038-57c0-8662-327a13d76cf8"),
+    ] {
         let pipe: Box<dyn PipeProvider> = if memory_output {
             Box::new(BoundedPipeConfig { capacity: 2 })
         } else {
@@ -1950,7 +2067,7 @@ fn admission_graph(
         builder = builder.connect(
             EdgeDefinition::new(
                 source.clone(),
-                Endpoint::new(ComponentId::try_new(subscriber)?, PortId::try_new("in")?),
+                Endpoint::new(ComponentId::try_new(component)?, PortId::try_new("in")?),
             ),
             pipe,
         );
@@ -1991,7 +2108,9 @@ async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_st
     options.construction_scope = "qos".into();
     channel.enable_admission(options).await?;
     let session = channel
-        .register_producer(ComponentId::try_new("client")?)
+        .register_producer(ComponentId::try_new(
+            "06d521b5-12a2-5d5b-ad49-34dea0a7d42c",
+        )?)
         .await?;
     let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
     assert!(!admission.is_active()?);
@@ -2003,7 +2122,7 @@ async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_st
     let slow = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut graph = admission_graph(&admission, fast.clone(), slow.clone(), false)?;
     let recovery = graph.recovery_report(&RecoveryRequirement {
-        consumer: ComponentId::try_new("source")?,
+        consumer: ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?,
         scope: RecoveryScope::Failure(drasi_core::interface::FailureMode::ProcessRestart),
         guarantees: std::collections::BTreeSet::from([RecoveryGuarantee::Acceptance]),
     })?;
@@ -2026,8 +2145,8 @@ async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_st
             .unwrap_or_else(|_| panic!("admission inactive: {:?}", control.observed()))?;
         assert!(control
             .set_subscriptions(vec![(
-                ComponentId::try_new("source")?,
-                ComponentId::try_new("fast")?,
+                ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?,
+                ComponentId::try_new("2783e746-187a-54ac-8532-516e231409df")?,
             )])
             .await
             .is_err());
@@ -2098,7 +2217,9 @@ async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_st
         {
             tokio::task::yield_now().await;
         }
-        let selection = GraphSelection::Exact(vec![ComponentId::try_new("source")?]);
+        let selection = GraphSelection::Exact(vec![ComponentId::try_new(
+            "9fca4635-a710-54b7-a61e-fdd13d5d58dd",
+        )?]);
         control
             .stop_components(GraphRevision(1), selection.clone())
             .await?;
@@ -2219,7 +2340,9 @@ async fn graph_admission_mailbox_bounds_cancelled_requests_without_consuming_seq
     options.construction_scope = "qos".into();
     channel.enable_admission(options).await?;
     let session = channel
-        .register_producer(ComponentId::try_new("client")?)
+        .register_producer(ComponentId::try_new(
+            "06d521b5-12a2-5d5b-ad49-34dea0a7d42c",
+        )?)
         .await?;
     let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2307,7 +2430,9 @@ async fn graph_admission_drains_on_stop_and_fences_only_forced_cancellation() ->
             options.construction_scope = "qos".into();
             channel.enable_admission(options).await?;
             let session = channel
-                .register_producer(ComponentId::try_new("client")?)
+                .register_producer(ComponentId::try_new(
+                    "06d521b5-12a2-5d5b-ad49-34dea0a7d42c",
+                )?)
                 .await?;
             let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
             let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2328,7 +2453,10 @@ async fn graph_admission_drains_on_stop_and_fences_only_forced_cancellation() ->
                 let mut active = Box::pin(async {
                     if registration {
                         admission
-                            .register_producer(ComponentId::try_new("next-client").unwrap())
+                            .register_producer(
+                                ComponentId::try_new("91944121-cc20-5cab-ac65-98c15aa18ad1")
+                                    .unwrap(),
+                            )
                             .await
                             .map(|_| ())
                     } else {
@@ -2345,10 +2473,12 @@ async fn graph_admission_drains_on_stop_and_fences_only_forced_cancellation() ->
                 if stop_source {
                     let stop = control.stop_components(
                         GraphRevision(1),
-                        GraphSelection::Exact(vec![ComponentId::try_new("source")?]),
+                        GraphSelection::Exact(vec![ComponentId::try_new(
+                            "9fca4635-a710-54b7-a61e-fdd13d5d58dd",
+                        )?]),
                     );
                     tokio::pin!(stop);
-                    let source = ComponentId::try_new("source")?;
+                    let source = ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?;
                     let mut observed = control.subscribe_observed();
                     tokio::select! {
                         result = &mut stop => panic!("stop cancelled a submitted journal write: {result:?}"),
@@ -2404,7 +2534,7 @@ async fn graph_admission_drains_on_stop_and_fences_only_forced_cancellation() ->
             if registration {
                 let next = ProducerSession {
                     incarnation: session.incarnation,
-                    producer: ComponentId::try_new("next-client")?,
+                    producer: ComponentId::try_new("91944121-cc20-5cab-ac65-98c15aa18ad1")?,
                     epoch: session.epoch + 1,
                 };
                 if !committed {
@@ -2463,12 +2593,18 @@ async fn graph_admission_waits_for_missing_outputs_and_rejects_incompatible_bind
         }
         if fault == "stream" {
             builder = builder.bind_stream(
-                Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?),
+                Endpoint::new(
+                    ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?,
+                    PortId::try_new("out")?,
+                ),
                 StreamId::try_new("wrong")?,
             );
         }
         if fault != "missing" {
-            for subscriber in ["fast", "slow"] {
+            for (subscriber, component) in [
+                ("fast", "2783e746-187a-54ac-8532-516e231409df"),
+                ("slow", "1e700ebb-3038-57c0-8662-327a13d76cf8"),
+            ] {
                 let pipe: Box<dyn PipeProvider> = if fault == "mixed" && subscriber == "slow" {
                     Box::new(BoundedPipeConfig { capacity: 2 })
                 } else {
@@ -2483,8 +2619,11 @@ async fn graph_admission_waits_for_missing_outputs_and_rejects_incompatible_bind
                 };
                 builder = builder.connect(
                     EdgeDefinition::new(
-                        Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?),
-                        Endpoint::new(ComponentId::try_new(subscriber)?, PortId::try_new("in")?),
+                        Endpoint::new(
+                            ComponentId::try_new("9fca4635-a710-54b7-a61e-fdd13d5d58dd")?,
+                            PortId::try_new("out")?,
+                        ),
+                        Endpoint::new(ComponentId::try_new(component)?, PortId::try_new("in")?),
                     ),
                     pipe,
                 );
@@ -2499,7 +2638,9 @@ async fn graph_admission_waits_for_missing_outputs_and_rejects_incompatible_bind
                 assert_ne!(report.summary, OperationSummary::Completed);
                 assert!(!admission.is_active()?);
                 let session = channel
-                    .register_producer(ComponentId::try_new("blocked-client")?)
+                    .register_producer(ComponentId::try_new(
+                        "a6e3b89f-5d62-5ead-8543-c6ce10f32fce",
+                    )?)
                     .await?;
                 assert!(matches!(
                     admission.admit(&session, 1, &event(1)?).await,
@@ -2579,7 +2720,9 @@ async fn graph_admission_reconstruction_replays_obligations_without_accepting_re
     options.construction_scope = "qos".into();
     channel.enable_admission(options).await?;
     let session = channel
-        .register_producer(ComponentId::try_new("client")?)
+        .register_producer(ComponentId::try_new(
+            "06d521b5-12a2-5d5b-ad49-34dea0a7d42c",
+        )?)
         .await?;
     let input = event(1)?;
     {
@@ -2593,7 +2736,9 @@ async fn graph_admission_reconstruction_replays_obligations_without_accepting_re
             let started = control
                 .start_components(
                     GraphRevision(1),
-                    GraphSelection::Exact(vec![ComponentId::try_new("source")?]),
+                    GraphSelection::Exact(vec![ComponentId::try_new(
+                        "9fca4635-a710-54b7-a61e-fdd13d5d58dd",
+                    )?]),
                 )
                 .await?;
             assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");

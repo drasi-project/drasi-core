@@ -53,14 +53,15 @@ async fn start_server(app: Router) -> String {
 }
 
 /// Create a bootstrap context for testing.
-fn test_context(source_id: &str) -> BootstrapContext {
-    BootstrapContext::new_minimal("test-server".to_string(), source_id.to_string())
+fn test_context(source_id: drasi_core::ComponentId) -> BootstrapContext {
+    BootstrapContext::new_minimal("test-server".to_string(), source_id)
 }
 
 /// Create a bootstrap request.
 fn test_request(node_labels: Vec<String>, relation_labels: Vec<String>) -> BootstrapRequest {
     BootstrapRequest {
-        query_id: "test-query".to_string(),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+            .expect("fixture UUID"),
         node_labels,
         relation_labels,
         request_id: "test-request".to_string(),
@@ -127,7 +128,10 @@ async fn test_simple_json_endpoint() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["User".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -227,7 +231,10 @@ async fn test_offset_limit_pagination() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["User".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -324,7 +331,10 @@ async fn test_cursor_pagination_stripe_style() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Customer".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -428,7 +438,10 @@ async fn test_link_header_pagination_github_style() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Repository".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -566,7 +579,10 @@ async fn test_next_url_pagination_salesforce_style() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Account".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -637,7 +653,10 @@ async fn test_bearer_auth() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Secret".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -712,7 +731,10 @@ async fn test_api_key_header_auth() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Product".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -795,7 +817,10 @@ async fn test_basic_auth() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Call".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -895,7 +920,10 @@ async fn test_oauth2_client_credentials() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Data".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -998,7 +1026,10 @@ async fn test_multi_endpoint_bootstrap() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["User".to_string(), "Order".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1071,7 +1102,10 @@ async fn test_retry_on_failure() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Item".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1138,7 +1172,10 @@ async fn test_retries_exhausted_returns_error() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Item".to_string()], vec![]);
 
     let (tx, _rx) = mpsc::channel(100);
@@ -1207,7 +1244,10 @@ async fn test_relations_mapping() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec![], vec!["FOLLOWS".to_string()]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1312,7 +1352,10 @@ async fn test_page_number_pagination() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Item".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1374,7 +1417,10 @@ async fn test_label_filtering() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
 
     // Request only "Animal" labels - should filter out all "Person" nodes
     let request = test_request(vec!["Animal".to_string()], vec![]);
@@ -1436,7 +1482,10 @@ async fn test_descriptor_creates_provider_from_json_config() {
         .await
         .expect("Descriptor should create provider from JSON config");
 
-    let context = test_context("dto-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000384")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["User".to_string()], vec![]);
     let (tx, rx) = mpsc::channel(100);
     let result = provider
@@ -1579,7 +1628,10 @@ async fn test_xml_response_parsing() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("xml-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000385")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["XmlNode".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1659,7 +1711,10 @@ async fn test_yaml_response_parsing() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("yaml-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000151")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["YamlNode".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1742,7 +1797,10 @@ async fn test_type_preservation_in_properties() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("typed-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000386")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["TypedNode".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1830,7 +1888,10 @@ async fn test_explicit_insert_operation() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["User".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1904,7 +1965,10 @@ async fn test_explicit_delete_operation_nodes() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["User".to_string()], vec![]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -1974,7 +2038,10 @@ async fn test_explicit_delete_operation_relations() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("test-source");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec![], vec!["FOLLOWS".to_string()]);
 
     let (tx, rx) = mpsc::channel(100);
@@ -2133,7 +2200,10 @@ async fn test_truncated_response_causes_bootstrap_failure() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("truncation-test");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000387")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Item".to_string()], vec![]);
     let (tx, _rx) = mpsc::channel(100);
 
@@ -2278,7 +2348,10 @@ async fn test_truncation_recovered_by_retry() {
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
-    let context = test_context("retry-test");
+    let context = test_context(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000388")
+            .expect("fixture UUID"),
+    );
     let request = test_request(vec!["Item".to_string()], vec![]);
     let (tx, rx) = mpsc::channel(100);
 

@@ -108,7 +108,6 @@ impl PortableEnvelopeCodec {
             lineage = entry.parent();
         }
         for entry in envelope.annotations().entries() {
-            crate::config::identifier(entry.contributor())?;
             crate::config::identifier(entry.key())?;
             let value = entry.value();
             match value {
@@ -198,7 +197,8 @@ impl PortableEnvelopeCodec {
                     },
                 )
                 .map_err(invalid)?;
-                self.namespace.source(transaction.source_id())?;
+                self.namespace
+                    .validate_namespace(transaction.source_id().as_str())?;
             }
         }
         Ok(())

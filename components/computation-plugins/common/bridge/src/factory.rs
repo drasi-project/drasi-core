@@ -22,13 +22,13 @@ pub struct BridgeFactoryDefinition {
 
 impl BridgeFactoryDefinition {
     pub fn new(source: bool) -> Self {
-        use ConfigurationType::{Object, String};
+        use ConfigurationType::{ComponentId, Object, String};
         let fields = [
             ("link_id", String, true),
             ("sender_instance", String, true),
             ("receiver_instance", String, true),
-            ("sender_endpoint", String, true),
-            ("receiver_endpoint", String, true),
+            ("sender_endpoint", ComponentId, true),
+            ("receiver_endpoint", ComponentId, true),
             ("stream", String, true),
             ("peer_stream", String, true),
             ("delivery", String, true),
@@ -43,6 +43,7 @@ impl BridgeFactoryDefinition {
             (
                 Arc::from(name),
                 ConfigurationField {
+                    constraint: None,
                     value_type,
                     required,
                     secret: false,
@@ -190,7 +191,7 @@ impl BridgeFactoryDefinition {
                 if let Some(resource) = resources.get(id) {
                     let channel = resource.get::<QosChannel>()?;
                     anyhow::ensure!(
-                        channel.definition().stream.as_str() == config.stream,
+                        channel.definition().stream == config.stream,
                         "bridge source journal has another stream"
                     );
                     channel.durability().require(config.failure_scope)?;

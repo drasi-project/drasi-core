@@ -19,6 +19,7 @@ mod index_observation;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use drasi_computation_contracts::QueryInputOrigin;
 use drasi_core::interface::{
     CheckpointStore, CreatedIndexes, ElementIndex, IndexBackendPlugin, IndexError,
     LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SourceCheckpoint,
@@ -73,7 +74,9 @@ const BOOTSTRAP_MARKER_ENV: &str = "DRASI_ATOMICITY_BOOTSTRAP_MARKER";
 const ATTACH_PROVIDER_ENV: &str = "DRASI_ATOMICITY_ATTACH_PROVIDER";
 
 const SOURCE_ID: &str = "people-source";
+const SOURCE_UUID: &str = "00000000-0000-0000-0000-000000000342";
 const QUERY_ID: &str = "people-query";
+const QUERY_UUID: &str = "00000000-0000-0000-0000-000000000344";
 const REACTION_ID: &str = "capturing-reaction";
 const QUERY_TEXT: &str =
     "MATCH (p:Person) RETURN p.personId AS id, p.name AS name, p.active AS active";
@@ -163,14 +166,18 @@ struct FaultInjectingIndexProvider {
 
 #[async_trait]
 impl IndexBackendPlugin for FaultInjectingIndexProvider {
-    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
-        self.create_scoped_indexes(query_id, query_id).await
+    async fn create_indexes(
+        &self,
+        query_id: &drasi_core::ComponentId,
+    ) -> Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(&drasi_core::interface::StorageScope::default(), query_id)
+            .await
     }
 
     async fn create_scoped_indexes(
         &self,
-        storage_scope: &str,
-        query_id: &str,
+        storage_scope: &drasi_core::interface::StorageScope,
+        query_id: &drasi_core::ComponentId,
     ) -> Result<CreatedIndexes, IndexError> {
         let mut created = self
             .inner
@@ -251,7 +258,7 @@ impl CheckpointStore for FailingCheckpointStore {
 
     async fn stage_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &drasi_core::interface::CheckpointKey,
         sequence: u64,
         source_position: Option<&bytes::Bytes>,
     ) -> Result<(), IndexError> {
@@ -265,12 +272,14 @@ impl CheckpointStore for FailingCheckpointStore {
 
     async fn read_checkpoint(
         &self,
-        source_id: &str,
+        source_id: &drasi_core::interface::CheckpointKey,
     ) -> Result<Option<SourceCheckpoint>, IndexError> {
         self.inner.read_checkpoint(source_id).await
     }
 
-    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+    async fn read_all_checkpoints(
+        &self,
+    ) -> Result<HashMap<drasi_core::interface::CheckpointKey, SourceCheckpoint>, IndexError> {
         self.inner.read_all_checkpoints().await
     }
 
@@ -290,24 +299,35 @@ impl CheckpointStore for FailingCheckpointStore {
         self.inner.read_config_hash().await
     }
 
-    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         if self.fault.should_fail(PersistStage::BeforeResultSequence) {
             return Err(injected(PersistStage::BeforeResultSequence));
         }
         self.inner.stage_result_sequence(query_id, sequence).await
     }
 
-    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn write_result_sequence(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
         self.inner.write_result_sequence(query_id, sequence).await
     }
 
-    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_result_sequence(query_id).await
     }
 
     async fn write_output_generation(
         &self,
-        query_id: &str,
+        query_id: &drasi_core::interface::OutputPartition,
         generation: u64,
     ) -> Result<(), IndexError> {
         self.inner
@@ -315,7 +335,10 @@ impl CheckpointStore for FailingCheckpointStore {
             .await
     }
 
-    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_output_generation(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_output_generation(query_id).await
     }
 }
@@ -327,7 +350,12 @@ struct FailingOutboxWriter {
 
 #[async_trait]
 impl OutboxWriter for FailingOutboxWriter {
-    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+    async fn append(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), IndexError> {
         if self.fault.should_fail(PersistStage::BeforeOutboxAppend) {
             return Err(injected(PersistStage::BeforeOutboxAppend));
         }
@@ -336,7 +364,7 @@ impl OutboxWriter for FailingOutboxWriter {
 
     async fn read_from(
         &self,
-        query_id: &str,
+        query_id: &drasi_core::interface::OutputPartition,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.inner.read_from(query_id, after_sequence).await
@@ -344,29 +372,43 @@ impl OutboxWriter for FailingOutboxWriter {
 
     async fn read_page(
         &self,
-        query_id: &str,
+        query_id: &drasi_core::interface::OutputPartition,
         after_sequence: u64,
         limits: drasi_core::interface::OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.inner.read_page(query_id, after_sequence, limits).await
     }
 
-    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+    async fn read_latest_sequence(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+    ) -> Result<Option<u64>, IndexError> {
         self.inner.read_latest_sequence(query_id).await
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+    ) -> Result<(), IndexError> {
         self.inner.clear(query_id).await
     }
 
-    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+    async fn trim_before(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
         if self.fault.should_fail(PersistStage::BeforeOutboxTrim) {
             return Err(injected(PersistStage::BeforeOutboxTrim));
         }
         self.inner.trim_before(query_id, retain_from).await
     }
 
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(
+        &self,
+        query_id: &drasi_core::interface::OutputPartition,
+        capacity: usize,
+    ) -> Result<usize, IndexError> {
         self.inner.trim_to_capacity(query_id, capacity).await
     }
 }
@@ -380,7 +422,7 @@ struct FailingLiveResultsWriter {
 impl LiveResultsWriter for FailingLiveResultsWriter {
     async fn apply_mutations(
         &self,
-        query_id: &str,
+        query_id: &drasi_core::ComponentId,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         if self.fault.should_fail(PersistStage::BeforeLiveResultsApply) {
@@ -389,13 +431,16 @@ impl LiveResultsWriter for FailingLiveResultsWriter {
         self.inner.apply_mutations(query_id, mutations).await
     }
 
-    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+    async fn read_snapshot(
+        &self,
+        query_id: &drasi_core::ComponentId,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         self.inner.read_snapshot(query_id).await
     }
 
     async fn read_page(
         &self,
-        query_id: &str,
+        query_id: &drasi_core::ComponentId,
         after_signature: Option<u64>,
         limits: drasi_core::interface::OutboxPageLimits,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
@@ -404,11 +449,11 @@ impl LiveResultsWriter for FailingLiveResultsWriter {
             .await
     }
 
-    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+    async fn clear(&self, query_id: &drasi_core::ComponentId) -> Result<(), IndexError> {
         self.inner.clear(query_id).await
     }
 
-    async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
+    async fn row_count(&self, query_id: &drasi_core::ComponentId) -> Result<usize, IndexError> {
         self.inner.row_count(query_id).await
     }
 }
@@ -422,8 +467,12 @@ impl CapturingReaction {
     fn new(captured: Arc<RwLock<Vec<u64>>>) -> Self {
         Self {
             base: ReactionBase::new(ReactionBaseParams::new(
-                REACTION_ID,
-                vec![QUERY_ID.to_string()],
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000346")
+                    .expect("fixture UUID"),
+                vec![drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("people-query")
+                        .expect("fixture component name"),
+                )],
             )),
             captured,
         }
@@ -432,7 +481,7 @@ impl CapturingReaction {
 
 #[async_trait]
 impl Reaction for CapturingReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -444,16 +493,16 @@ impl Reaction for CapturingReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -485,7 +534,7 @@ impl Reaction for CapturingReaction {
         self.base.get_status().await
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -498,7 +547,7 @@ impl Reaction for CapturingReaction {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JournalRecord {
     Snapshot {
-        query_id: String,
+        query_id: drasi_core::ComponentId,
         sequence: u64,
         rows: Vec<serde_json::Value>,
     },
@@ -548,8 +597,12 @@ impl DurableRecordingReaction {
     fn new(journal: PathBuf) -> Self {
         Self {
             base: ReactionBase::new(ReactionBaseParams::new(
-                REACTION_ID,
-                vec![QUERY_ID.to_string()],
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000346")
+                    .expect("fixture UUID"),
+                vec![drasi_lib::config::ComponentReference::by_name(
+                    drasi_core::ComponentName::try_new("people-query")
+                        .expect("fixture component name"),
+                )],
             )),
             journal: SideEffectJournal::new(journal),
         }
@@ -558,7 +611,7 @@ impl DurableRecordingReaction {
 
 #[async_trait]
 impl Reaction for DurableRecordingReaction {
-    fn id(&self) -> &str {
+    fn id(&self) -> &drasi_core::ComponentId {
         self.base.get_id()
     }
 
@@ -570,16 +623,16 @@ impl Reaction for DurableRecordingReaction {
         HashMap::new()
     }
 
-    fn query_ids(&self) -> Vec<String> {
-        self.base.get_queries().to_vec()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -632,7 +685,7 @@ impl Reaction for DurableRecordingReaction {
         self.base.get_status().await
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -810,7 +863,7 @@ struct DurableObservation {
     graph_has_person: bool,
     outbox_names: Vec<String>,
     live_names: Vec<String>,
-    outbox_source_ids: Vec<String>,
+    outbox_origins: Vec<QueryInputOrigin>,
 }
 
 fn person_name_from_diff(diff: &ResultDiff) -> Option<String> {
@@ -827,7 +880,11 @@ fn person_name_from_diff(diff: &ResultDiff) -> Option<String> {
 }
 
 async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
-    let created = index_observation::open_query_indexes(rocks, QUERY_ID).await?;
+    let created = index_observation::open_query_indexes(
+        rocks,
+        &drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+    )
+    .await?;
     let store = created
         .checkpoint_store
         .as_ref()
@@ -843,16 +900,25 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
     let source_sequence = source_progress
         .first()
         .map(|(_, checkpoint)| checkpoint.sequence);
-    let result_sequence = store.read_result_sequence(QUERY_ID).await?;
+    let result_sequence = store
+        .read_result_sequence(&drasi_core::interface::OutputPartition::Component(
+            drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+        ))
+        .await?;
     let raw_outbox = created
         .outbox_writer
         .as_ref()
         .context("outbox")?
-        .read_from(QUERY_ID, 0)
+        .read_from(
+            &drasi_core::interface::OutputPartition::Component(
+                drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"),
+            ),
+            0,
+        )
         .await?;
     let outbox_sequences: Vec<u64> = raw_outbox.iter().map(|(seq, _)| *seq).collect();
     let mut outbox_names = Vec::new();
-    let mut outbox_source_ids = Vec::new();
+    let mut outbox_origins = Vec::new();
     let codec = drasi_computation_plugin_sdk::wire::codec(&[QueryChangeCodec::schema()])?;
     let mut output_scope: Option<ResultNodeProjector> = None;
     for (_seq, data) in &raw_outbox {
@@ -867,13 +933,13 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         }
         let result = QueryChangeCodec::to_legacy_result(&envelope)
             .context("project the durable query envelope")?;
-        if let Some(source_id) = result
-            .metadata
-            .get("source_id")
-            .and_then(serde_json::Value::as_str)
-        {
-            outbox_source_ids.push(source_id.to_string());
-        }
+        let metadata = QueryChangeCodec::result_metadata(&envelope)
+            .context("read durable query input origin")?;
+        outbox_origins.push(
+            metadata
+                .input_origin
+                .context("durable query output must retain its input origin")?,
+        );
         for diff in &result.results {
             if let Some(name) = person_name_from_diff(diff) {
                 outbox_names.push(name);
@@ -884,7 +950,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         .live_results_writer
         .as_ref()
         .context("live results")?
-        .read_snapshot(QUERY_ID)
+        .read_snapshot(&drasi_core::ComponentId::try_new(QUERY_UUID).expect("fixture UUID"))
         .await?;
     let live_row_count = live_rows.len();
     let mut live_names = Vec::new();
@@ -915,7 +981,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
     let graph_has_person = created
         .set
         .element_index
-        .get_element(&ElementReference::new(SOURCE_ID, "p1"))
+        .get_element(&ElementReference::new(SOURCE_UUID, "p1"))
         .await?
         .is_some();
     created.set.session_control.rollback()?;
@@ -928,7 +994,7 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         graph_has_person,
         outbox_names,
         live_names,
-        outbox_source_ids,
+        outbox_origins,
     })
 }
 
@@ -955,7 +1021,10 @@ async fn build_core(
             capacity_policy: CapacityPolicy::RejectIncoming,
         }),
     };
-    let (source, handle) = ApplicationSource::new(SOURCE_ID, source_config)?;
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new(SOURCE_UUID).expect("fixture UUID"),
+        source_config,
+    )?;
     if std::env::var(ATTACH_PROVIDER_ENV).ok().as_deref() == Some("1") {
         source
             .set_bootstrap_provider(Box::new(RecordingSourceBootstrap {
@@ -966,17 +1035,26 @@ async fn build_core(
     let wal = Arc::new(RedbWalProvider::new(&opts.wal));
     let mut builder = lib_integration_tests::query_builder()
         .with_id("query-output-atomicity")
-        .with_source(source)
+        .with_source(
+            drasi_core::ComponentName::try_new("people-source").expect("fixture component name"),
+            source,
+        )
         .with_query(
-            Query::cypher(QUERY_ID)
-                .query(opts.query_text)
-                .from_input(SOURCE_ID)
-                .auto_start(true)
-                .enable_bootstrap(std::env::var(BOOTSTRAP_ENV).ok().as_deref() == Some("1"))
-                .with_outbox_capacity(32)
-                .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-                .with_recovery_policy(opts.recovery)
-                .build(),
+            Query::cypher(
+                drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+            )
+            .with_id(drasi_core::ComponentId::try_new(QUERY_UUID)?)
+            .query(opts.query_text)
+            .from_input_by_name(
+                drasi_core::ComponentName::try_new("people-source")
+                    .expect("fixture component name"),
+            )
+            .auto_start(true)
+            .enable_bootstrap(std::env::var(BOOTSTRAP_ENV).ok().as_deref() == Some("1"))
+            .with_outbox_capacity(32)
+            .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+            .with_recovery_policy(opts.recovery)
+            .build()?,
         )
         .with_wal_provider(wal);
 
@@ -993,7 +1071,7 @@ async fn build_core(
         Arc::new(index_observation::ObservedIndexProvider::new(
             provider,
             &paths.rocks,
-            QUERY_ID,
+            drasi_core::ComponentId::try_new(QUERY_UUID)?,
         )),
     );
 
@@ -1001,9 +1079,17 @@ async fn build_core(
         let state_store = Arc::new(RedbStateStoreProvider::new(&paths.state)?);
         builder = builder
             .with_state_store_provider(state_store)
-            .with_reaction(DurableRecordingReaction::new(paths.journal.clone()));
+            .with_reaction(
+                drasi_core::ComponentName::try_new("capturing-reaction")
+                    .expect("fixture component name"),
+                DurableRecordingReaction::new(paths.journal.clone()),
+            );
     } else if opts.include_reaction {
-        builder = builder.with_reaction(CapturingReaction::new(opts.captured));
+        builder = builder.with_reaction(
+            drasi_core::ComponentName::try_new("capturing-reaction")
+                .expect("fixture component name"),
+            CapturingReaction::new(opts.captured),
+        );
     }
 
     Ok((builder.build().await?, handle))
@@ -1017,14 +1103,17 @@ async fn shutdown_and_release(core: DrasiLib, source: ApplicationSourceHandle) -
 }
 
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
+    let component_id = core
+        .component_by_name(&drasi_core::ComponentName::try_new(id)?)?
+        .id()
+        .clone();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let graph = core.get_graph().await.expect("graph snapshot");
-        if graph
-            .nodes
-            .iter()
-            .any(|node| node.id == id && node.status == expected)
-        {
+        if graph.nodes.iter().any(|node| {
+            node.id == drasi_lib::computation::v1::GraphEntityId::Component(component_id.clone())
+                && node.status == expected
+        }) {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -1064,7 +1153,10 @@ async fn wait_for_snapshot_seq(core: &DrasiLib, min_seq: u64) -> Result<u64> {
     loop {
         let query = core
             .query_manager()
-            .get_query_instance(QUERY_ID)
+            .get_query_instance_by_name(
+                &drasi_core::ComponentName::try_new("people-query")
+                    .expect("fixture component name"),
+            )
             .await
             .map_err(anyhow::Error::msg)?;
         let snapshot = query.fetch_snapshot().await?;
@@ -1119,7 +1211,13 @@ async fn wait_for_journal_sequence(path: &Path, expected: u64) -> Result<Vec<Jou
 async fn read_reaction_checkpoint(state: &Path) -> Result<ReactionCheckpoint> {
     let store = RedbStateStoreProvider::new(state)?;
     let bytes = store
-        .get(REACTION_ID, &format!("checkpoint:{QUERY_ID}"))
+        .get(
+            &drasi_core::interface::StorePartition::component(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000346")
+                    .expect("fixture UUID"),
+            ),
+            &format!("checkpoint:{QUERY_UUID}"),
+        )
         .await?
         .context("durable reaction checkpoint is missing")?;
     bincode::deserialize(&bytes).context("deserialize reaction checkpoint")
@@ -1194,7 +1292,12 @@ async fn run_mid_txn_failure(stage: PersistStage) -> Result<()> {
     assert!(durable.graph_has_person, "{stage:?}: graph must contain p1");
     assert_eq!(durable.outbox_names, vec!["Alice"]);
     assert_eq!(durable.live_names, vec!["Alice"]);
-    assert_eq!(durable.outbox_source_ids, vec![SOURCE_ID]);
+    assert_eq!(
+        durable.outbox_origins,
+        vec![QueryInputOrigin::Source(drasi_core::ComponentId::try_new(
+            SOURCE_UUID
+        )?)]
+    );
     paths.cleanup();
     Ok(())
 }
@@ -1367,7 +1470,13 @@ async fn fail_during_process_due_futures_output_persist_rolls_back() -> Result<(
     assert_eq!(durable.result_sequence, Some(1));
     assert_eq!(durable.outbox_sequences, vec![1]);
     assert_eq!(durable.live_row_count, 1);
-    assert_eq!(durable.outbox_source_ids, vec![SOURCE_ID]);
+    assert_eq!(
+        durable.outbox_origins,
+        vec![QueryInputOrigin::Scheduled(ElementReference::new(
+            SOURCE_UUID,
+            "p1"
+        ))]
+    );
     assert_eq!(durable.outbox_names, vec!["Alice"]);
     paths.cleanup();
     Ok(())
@@ -1402,7 +1511,10 @@ async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_ro
 
         let query = core
             .query_manager()
-            .get_query_instance(QUERY_ID)
+            .get_query_instance_by_name(
+                &drasi_core::ComponentName::try_new("people-query")
+                    .expect("fixture component name"),
+            )
             .await
             .map_err(anyhow::Error::msg)?;
         let snapshot = query.fetch_snapshot().await?;
@@ -1588,7 +1700,9 @@ async fn run_recover_phase() -> Result<()> {
     let seq = wait_for_snapshot_seq(&core, 1).await?;
     let query = core
         .query_manager()
-        .get_query_instance(QUERY_ID)
+        .get_query_instance_by_name(
+            &drasi_core::ComponentName::try_new("people-query").expect("fixture component name"),
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     let outbox = query.fetch_outbox(0).await?;

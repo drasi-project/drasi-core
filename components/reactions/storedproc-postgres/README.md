@@ -128,8 +128,12 @@ duplicates, cancellation after SQL writes, exact capacity and sequence limits,
 corruption and actual database `SIGKILL` recovery:
 
 ```sh
-CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-reaction-storedproc-postgres --test delivery -- --test-threads=1
+cargo test --locked -p drasi-reaction-storedproc-postgres --test delivery -- --ignored --test-threads=1
 ```
+
+These container-backed cases are excluded from the default test run and discovered
+automatically by the integration workflow. The HTTP cases that do not need a
+database remain in the default run.
 
 For Podman, point `DOCKER_HOST` at its API socket and set
 `DRASI_TEST_CONTAINER_CLI=podman` so the crash case targets that same engine.

@@ -250,7 +250,7 @@ impl DataverseBootstrapProvider {
     /// Mirrors the platform's `JsonEventMapper.MapData` which converts each
     /// `IChangedItem` into a `SourceElement` with `ChangeOp.INSERT`.
     fn record_to_source_change(
-        source_id: &str,
+        source_id: &drasi_lib::ComponentId,
         entity_name: &str,
         record: &serde_json::Value,
     ) -> Option<SourceChange> {
@@ -287,7 +287,7 @@ impl DataverseBootstrapProvider {
 
         let element_id = format!("{entity_name}:{id}");
         let metadata = ElementMetadata {
-            reference: ElementReference::new(source_id, &element_id),
+            reference: ElementReference::new(source_id.as_str(), &element_id),
             labels: Arc::from(vec![Arc::from(entity_name)]),
             effective_from: chrono::Utc::now().timestamp_millis().max(0) as u64,
         };
@@ -700,6 +700,8 @@ mod tests {
 
     #[test]
     fn test_record_to_source_change_basic() {
+        let source_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+            .expect("fixture UUID");
         let record = serde_json::json!({
             "accountid": "abc-123",
             "name": "Contoso Ltd",
@@ -709,7 +711,7 @@ mod tests {
         });
 
         let change =
-            DataverseBootstrapProvider::record_to_source_change("test-source", "account", &record);
+            DataverseBootstrapProvider::record_to_source_change(&source_id, "account", &record);
 
         assert!(change.is_some());
         match change.unwrap() {
@@ -719,7 +721,7 @@ mod tests {
                     properties,
                 } => {
                     assert_eq!(metadata.reference.element_id.as_ref(), "account:abc-123");
-                    assert_eq!(metadata.reference.source_id.as_ref(), "test-source");
+                    assert_eq!(metadata.reference.namespace.as_ref(), source_id.as_str());
                     assert_eq!(metadata.labels.len(), 1);
                     assert_eq!(metadata.labels[0].as_ref(), "account");
                     // Should have name, revenue, accountid but NOT OData annotations
@@ -743,7 +745,8 @@ mod tests {
         });
 
         let change = DataverseBootstrapProvider::record_to_source_change(
-            "test-source",
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                .expect("fixture UUID"),
             "customentity",
             &record,
         );
@@ -889,9 +892,12 @@ mod tests {
             }
         }
 
-        fn make_request(query_id: &str, labels: Vec<String>) -> BootstrapRequest {
+        fn make_request(
+            query_id: drasi_core::ComponentId,
+            labels: Vec<String>,
+        ) -> BootstrapRequest {
             BootstrapRequest {
-                query_id: query_id.to_string(),
+                query_id,
                 node_labels: labels,
                 relation_labels: Vec::new(),
                 request_id: "req-1".to_string(),
@@ -944,9 +950,16 @@ mod tests {
                 .expect("provider should build");
 
             let (tx, rx) = mpsc::channel(16);
-            let ctx =
-                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
-            let request = make_request("q-1", Vec::new());
+            let ctx = BootstrapContext::new_minimal(
+                "test-server".to_string(),
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+            );
+            let request = make_request(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000032")
+                    .expect("fixture UUID"),
+                Vec::new(),
+            );
 
             let result = provider
                 .bootstrap(request, &ctx, tx, None)
@@ -1012,9 +1025,16 @@ mod tests {
 
             let (tx, rx) = mpsc::channel(8);
             drop(rx);
-            let ctx =
-                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
-            let request = make_request("q-1", Vec::new());
+            let ctx = BootstrapContext::new_minimal(
+                "test-server".to_string(),
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+            );
+            let request = make_request(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000032")
+                    .expect("fixture UUID"),
+                Vec::new(),
+            );
 
             let result = provider.bootstrap(request, &ctx, tx, None).await;
             assert!(
@@ -1047,10 +1067,17 @@ mod tests {
                 .expect("provider should build");
 
             let (tx, rx) = mpsc::channel(8);
-            let ctx =
-                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
+            let ctx = BootstrapContext::new_minimal(
+                "test-server".to_string(),
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+            );
             // Only request `account` — `contact` should be skipped entirely.
-            let request = make_request("q-1", vec!["account".to_string()]);
+            let request = make_request(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000032")
+                    .expect("fixture UUID"),
+                vec!["account".to_string()],
+            );
 
             let result = provider
                 .bootstrap(request, &ctx, tx, None)
@@ -1084,10 +1111,17 @@ mod tests {
                 .expect("provider should build");
 
             let (tx, rx) = mpsc::channel(8);
-            let ctx =
-                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
+            let ctx = BootstrapContext::new_minimal(
+                "test-server".to_string(),
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000001d")
+                    .expect("fixture UUID"),
+            );
             // Request a label that the provider isn't configured for.
-            let request = make_request("q-1", vec!["unrelated".to_string()]);
+            let request = make_request(
+                drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000032")
+                    .expect("fixture UUID"),
+                vec!["unrelated".to_string()],
+            );
 
             let result = provider
                 .bootstrap(request, &ctx, tx, None)

@@ -134,7 +134,7 @@ impl SourceTimeMergeStorage {
             let provider = self.provider.clone();
             let component = self.component.clone();
             state.opening = Some(Box::pin(async move {
-                Ok(provider.create_indexes(&scope, component.as_str()).await?)
+                Ok(provider.create_indexes(&scope, &component).await?)
             }));
         }
         state.settle().await?;
@@ -210,7 +210,7 @@ mod tests {
         async fn create_indexes(
             &self,
             graph: &str,
-            component: &str,
+            component: &drasi_core_types::ComponentId,
         ) -> Result<ComputationIndexes, IndexError> {
             self.opens.fetch_add(1, Ordering::SeqCst);
             self.entered.notify_one();
@@ -233,7 +233,7 @@ mod tests {
             let storage = SourceTimeMergeStorage::new(
                 "instance",
                 "graph",
-                ComponentId::try_new("merge")?,
+                crate::test_helpers::component_id(459),
                 provider.clone(),
             )?;
             let mut opening = Box::pin(storage.open());
@@ -263,7 +263,7 @@ mod tests {
             let storage = SourceTimeMergeStorage::new(
                 "instance",
                 "graph",
-                ComponentId::try_new("merge")?,
+                crate::test_helpers::component_id(459),
                 provider.clone(),
             )?;
             let lease = storage.claim()?;

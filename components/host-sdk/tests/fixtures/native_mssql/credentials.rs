@@ -47,16 +47,18 @@ impl IdentityProvider for Provider {
 async fn public_binding(dynamic: bool) -> Result<()> {
     let native = plugins(dynamic)?;
     let factory = &native[2].factories()[0];
+    let sink_id = ComponentId::try_new("00000000-0000-0000-0000-000000000121")?;
+    let output_id = ComponentId::try_new("00000000-0000-0000-0000-000000000081")?;
     ensure!(
         factory.supports_activation_credentials(),
         "actual MSSQL sink did not export activation credentials"
     );
     let config = json!({"settings":{
         "connection":{"host":"credential-only.invalid","port":1437,"database":"d","user":"","password":""},
-        "outputs":{"q":{"component":"q","port":"out"}},"command_timeout_ms":100,
+        "outputs":{"q":{"component":output_id,"port":"out"}},"command_timeout_ms":100,
     }});
     ensure!(
-        crate::sink_inputs::create(factory, id("sink"), config.clone()).is_err(),
+        crate::sink_inputs::create(factory, sink_id.clone(), config.clone()).is_err(),
         "unbound empty credentials were accepted"
     );
     let provider = Provider {
@@ -66,7 +68,7 @@ async fn public_binding(dynamic: bool) -> Result<()> {
     };
     let mut sink = crate::sink_inputs::create_with_identity(
         factory,
-        id("sink"),
+        sink_id,
         config,
         Arc::new(NativeIdentityResource::new(Arc::new(provider.clone()))),
     )?;
@@ -186,8 +188,11 @@ pub(super) async fn actual_override_and_refresh(dynamic: bool) -> Result<()> {
                 row_signature: 1,
             }],
             drasi_computation_contracts::QueryOutputMetadata {
-                query_id: "q".into(),
-                source_id: None,
+                query_id: drasi_core_types::ComponentId::try_new(
+                    "00000000-0000-0000-0000-000000000081",
+                )
+                .expect("fixture UUID"),
+                input_origin: None,
                 timestamp: chrono::Utc::now(),
                 metadata: Default::default(),
                 profiling: None,

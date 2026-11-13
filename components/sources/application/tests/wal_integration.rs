@@ -46,51 +46,76 @@ struct HeadFailure {
 impl WalProvider for HeadFailure {
     async fn register(
         &self,
-        id: &str,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
         config: drasi_lib::wal::WriteAheadLogConfig,
     ) -> Result<(), drasi_lib::wal::WalError> {
-        self.inner.register(id, config).await
+        self.inner.register(scope, id, config).await
     }
     async fn append(
         &self,
-        id: &str,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
         event: &drasi_core::models::SourceChange,
     ) -> Result<u64, drasi_lib::wal::WalError> {
-        self.inner.append(id, event).await
+        self.inner.append(scope, id, event).await
     }
     async fn read_from(
         &self,
-        id: &str,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
         seq: u64,
     ) -> Result<Vec<(u64, drasi_core::models::SourceChange)>, drasi_lib::wal::WalError> {
-        self.inner.read_from(id, seq).await
+        self.inner.read_from(scope, id, seq).await
     }
-    async fn prune_up_to(&self, id: &str, seq: u64) -> Result<u64, drasi_lib::wal::WalError> {
-        self.inner.prune_up_to(id, seq).await
+    async fn prune_up_to(
+        &self,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
+        seq: u64,
+    ) -> Result<u64, drasi_lib::wal::WalError> {
+        self.inner.prune_up_to(scope, id, seq).await
     }
-    async fn head_sequence(&self, id: &str) -> Result<u64, drasi_lib::wal::WalError> {
+    async fn head_sequence(
+        &self,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
+    ) -> Result<u64, drasi_lib::wal::WalError> {
         if self.fail.load(Ordering::Acquire) {
             return Err(drasi_lib::wal::WalError::StorageError(
                 "injected head read failure".into(),
             ));
         }
-        self.inner.head_sequence(id).await
+        self.inner.head_sequence(scope, id).await
     }
-    async fn oldest_sequence(&self, id: &str) -> Result<Option<u64>, drasi_lib::wal::WalError> {
-        self.inner.oldest_sequence(id).await
+    async fn oldest_sequence(
+        &self,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
+    ) -> Result<Option<u64>, drasi_lib::wal::WalError> {
+        self.inner.oldest_sequence(scope, id).await
     }
-    async fn event_count(&self, id: &str) -> Result<u64, drasi_lib::wal::WalError> {
-        self.inner.event_count(id).await
+    async fn event_count(
+        &self,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
+    ) -> Result<u64, drasi_lib::wal::WalError> {
+        self.inner.event_count(scope, id).await
     }
-    async fn delete_wal(&self, id: &str) -> Result<(), drasi_lib::wal::WalError> {
-        self.inner.delete_wal(id).await
+    async fn delete_wal(
+        &self,
+        scope: &drasi_core::interface::StorageScope,
+        id: &drasi_core::ComponentId,
+    ) -> Result<(), drasi_lib::wal::WalError> {
+        self.inner.delete_wal(scope, id).await
     }
 }
 
 #[tokio::test]
 async fn durable_ingress_rejects_before_wal_start_instead_of_acknowledging_volatile_data() {
     let (_source, handle) = ApplicationSource::new(
-        "not-started",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c1")
+            .expect("fixture UUID"),
         app_config(Some(durability_config(
             true,
             100,
@@ -115,7 +140,8 @@ async fn unreadable_wal_head_fails_start_and_retry_keeps_the_original_source_han
         fail: AtomicBool::new(true),
     });
     let (source, handle) = ApplicationSource::new(
-        "head-failure",
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c2")
+            .expect("fixture UUID"),
         app_config(Some(durability_config(
             true,
             100,
@@ -123,7 +149,13 @@ async fn unreadable_wal_head_fails_start_and_retry_keeps_the_original_source_han
         ))),
     )
     .unwrap();
-    init_source_with_wal(&source, wal.clone(), "head-failure").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c2")
+            .expect("fixture UUID"),
+    )
+    .await;
     let started = source.start().await;
     assert!(
         started.is_err(),
@@ -139,7 +171,12 @@ async fn unreadable_wal_head_fails_start_and_retry_keeps_the_original_source_han
         .is_err());
     wal.fail.store(false, Ordering::Release);
     source.start().await.expect("retry after WAL recovers");
-    let mut receiver = subscribe_fresh(&source, "head-failure").await;
+    let mut receiver = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c2")
+            .expect("fixture UUID"),
+    )
+    .await;
     handle
         .send_node_insert("saved", vec!["Item"], PropertyMapBuilder::new().build())
         .await
@@ -149,7 +186,16 @@ async fn unreadable_wal_head_fails_start_and_retry_keeps_the_original_source_han
         .unwrap()
         .unwrap();
     assert_eq!(event.sequence, 1);
-    assert_eq!(wal.head_sequence("head-failure").await.unwrap(), 1);
+    assert_eq!(
+        wal.head_sequence(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c2")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap(),
+        1
+    );
     source.stop().await.unwrap();
 }
 
@@ -178,13 +224,13 @@ fn app_config(durability: Option<drasi_lib::DurabilityConfig>) -> ApplicationSou
 async fn init_source_with_wal(
     source: &ApplicationSource,
     wal: Arc<dyn WalProvider>,
-    source_id: &str,
+    source_id: drasi_core::ComponentId,
 ) {
     let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
     source
-        .initialize(SourceRuntimeContext {
+        .bind_runtime_context(SourceRuntimeContext {
             instance_id: "test-instance".to_string(),
-            source_id: source_id.to_string(),
+            source_id,
             update_tx: update_tx.into(),
             state_store: None,
             identity_provider: None,
@@ -195,10 +241,13 @@ async fn init_source_with_wal(
 }
 
 /// Helper: create subscription settings (no resume)
-fn fresh_settings(source_id: &str, query_id: &str) -> SourceSubscriptionSettings {
+fn fresh_settings(
+    source_id: drasi_core::ComponentId,
+    query_id: drasi_core::ComponentId,
+) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: source_id.to_string(),
-        query_id: query_id.to_string(),
+        source_id,
+        query_id,
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
@@ -209,10 +258,14 @@ fn fresh_settings(source_id: &str, query_id: &str) -> SourceSubscriptionSettings
 }
 
 /// Helper: create subscription settings with resume position
-fn resume_settings(source_id: &str, query_id: &str, resume_seq: u64) -> SourceSubscriptionSettings {
+fn resume_settings(
+    source_id: drasi_core::ComponentId,
+    query_id: drasi_core::ComponentId,
+    resume_seq: u64,
+) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: source_id.to_string(),
-        query_id: query_id.to_string(),
+        source_id,
+        query_id,
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
@@ -225,10 +278,14 @@ fn resume_settings(source_id: &str, query_id: &str, resume_seq: u64) -> SourceSu
 /// Helper: subscribe with default settings (no resume)
 async fn subscribe_fresh(
     source: &ApplicationSource,
-    source_id: &str,
+    source_id: drasi_core::ComponentId,
 ) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
     let resp = source
-        .subscribe(fresh_settings(source_id, "test-query"))
+        .subscribe(fresh_settings(
+            source_id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000050")
+                .expect("fixture UUID"),
+        ))
         .await
         .unwrap();
     resp.receiver
@@ -237,11 +294,16 @@ async fn subscribe_fresh(
 /// Helper: subscribe with resume_from position
 async fn subscribe_with_resume(
     source: &ApplicationSource,
-    source_id: &str,
+    source_id: drasi_core::ComponentId,
     resume_seq: u64,
 ) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
     let resp = source
-        .subscribe(resume_settings(source_id, "test-query-resume", resume_seq))
+        .subscribe(resume_settings(
+            source_id,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000155")
+                .expect("fixture UUID"),
+            resume_seq,
+        ))
         .await
         .unwrap();
     resp.receiver
@@ -254,17 +316,34 @@ async fn subscribe_with_resume(
 #[tokio::test]
 async fn test_wal_disabled_no_persistence() {
     let config = app_config(None);
-    let (source, _handle) = ApplicationSource::new("disabled-src", config).unwrap();
+    let (source, _handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c3")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "disabled-src").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c3")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     assert!(!source.supports_replay());
 
     // WAL should not be registered
-    let count = wal.event_count("disabled-src").await;
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c3")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert!(
         count.is_err(),
         "WAL should not be registered for disabled source"
@@ -280,16 +359,32 @@ async fn test_wal_enabled_events_persisted() {
         10_000,
         CapacityPolicy::RejectIncoming,
     )));
-    let (source, handle) = ApplicationSource::new("persist-src", config).unwrap();
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c4")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "persist-src").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c4")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
     assert!(source.supports_replay());
 
-    let mut rx = subscribe_fresh(&source, "persist-src").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c4")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     // Send events
     let props = PropertyMapBuilder::new()
@@ -308,7 +403,14 @@ async fn test_wal_enabled_events_persisted() {
     assert!(event.source_position.is_some());
 
     // Verify WAL has the event
-    let count = wal.event_count("persist-src").await.unwrap();
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c4")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(count, 1);
 
     // Send more events
@@ -323,7 +425,14 @@ async fn test_wal_enabled_events_persisted() {
         .unwrap();
     assert_eq!(event2.sequence, 2);
 
-    let count = wal.event_count("persist-src").await.unwrap();
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c4")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(count, 2);
 
     source.stop().await.unwrap();
@@ -337,15 +446,31 @@ async fn test_capacity_exhaustion_reject_incoming() {
         16,
         CapacityPolicy::RejectIncoming,
     )));
-    let (source, handle) = ApplicationSource::new("reject-src", config).unwrap();
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c5")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "reject-src").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c5")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
 
-    let mut rx = subscribe_fresh(&source, "reject-src").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c5")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     // Fill WAL to capacity (max_events=16)
     for i in 1..=16 {
@@ -372,7 +497,14 @@ async fn test_capacity_exhaustion_reject_incoming() {
     );
 
     // WAL should still have only 16 events
-    let count = wal.event_count("reject-src").await.unwrap();
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c5")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(count, 16);
 
     source.stop().await.unwrap();
@@ -385,14 +517,30 @@ async fn test_deprovision_removes_wal() {
         10_000,
         CapacityPolicy::RejectIncoming,
     )));
-    let (source, handle) = ApplicationSource::new("deprov-src", config).unwrap();
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c6")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "deprov-src").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c6")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
-    let mut rx = subscribe_fresh(&source, "deprov-src").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c6")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let props = PropertyMapBuilder::new().with_string("x", "1").build();
     handle
@@ -403,13 +551,26 @@ async fn test_deprovision_removes_wal() {
         .await
         .unwrap();
 
-    let count = wal.event_count("deprov-src").await.unwrap();
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c6")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert!(count > 0);
 
     source.stop().await.unwrap();
-    source.deprovision().await.unwrap();
+    source.delete_owned_resources().await.unwrap();
 
-    let count = wal.event_count("deprov-src").await;
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c6")
+                .expect("fixture UUID"),
+        )
+        .await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");
 }
 
@@ -429,11 +590,27 @@ async fn test_crash_recovery_resumes_sequence() {
             10_000,
             CapacityPolicy::RejectIncoming,
         )));
-        let (source, handle) = ApplicationSource::new("crash-src", config).unwrap();
-        init_source_with_wal(&source, wal.clone(), "crash-src").await;
+        let (source, handle) = ApplicationSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c7")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
+        init_source_with_wal(
+            &source,
+            wal.clone(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c7")
+                .expect("fixture UUID"),
+        )
+        .await;
         source.start().await.unwrap();
 
-        let mut rx = subscribe_fresh(&source, "crash-src").await;
+        let mut rx = subscribe_fresh(
+            &source,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c7")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         for i in 1..=5 {
             let props = PropertyMapBuilder::new().with_integer("i", i).build();
@@ -446,7 +623,14 @@ async fn test_crash_recovery_resumes_sequence() {
                 .unwrap();
         }
 
-        let head = wal.head_sequence("crash-src").await.unwrap();
+        let head = wal
+            .head_sequence(
+                &drasi_core::interface::StorageScope::default(),
+                &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c7")
+                    .expect("fixture UUID"),
+            )
+            .await
+            .unwrap();
         assert_eq!(head, 5);
 
         source.stop().await.unwrap();
@@ -459,11 +643,27 @@ async fn test_crash_recovery_resumes_sequence() {
             10_000,
             CapacityPolicy::RejectIncoming,
         )));
-        let (source, handle) = ApplicationSource::new("crash-src", config).unwrap();
-        init_source_with_wal(&source, wal.clone(), "crash-src").await;
+        let (source, handle) = ApplicationSource::new(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c7")
+                .expect("fixture UUID"),
+            config,
+        )
+        .unwrap();
+        init_source_with_wal(
+            &source,
+            wal.clone(),
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c7")
+                .expect("fixture UUID"),
+        )
+        .await;
         source.start().await.unwrap();
 
-        let mut rx = subscribe_fresh(&source, "crash-src").await;
+        let mut rx = subscribe_fresh(
+            &source,
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c7")
+                .expect("fixture UUID"),
+        )
+        .await;
 
         // New events should start at seq 6
         let props = PropertyMapBuilder::new().with_integer("i", 6).build();
@@ -491,11 +691,27 @@ async fn test_replay_via_subscribe() {
         10_000,
         CapacityPolicy::RejectIncoming,
     )));
-    let (source, handle) = ApplicationSource::new("replay-src", config).unwrap();
-    init_source_with_wal(&source, wal.clone(), "replay-src").await;
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c8")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c8")
+            .expect("fixture UUID"),
+    )
+    .await;
     source.start().await.unwrap();
 
-    let mut rx1 = subscribe_fresh(&source, "replay-src").await;
+    let mut rx1 = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c8")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     // Send 5 events
     for i in 1..=5 {
@@ -510,7 +726,13 @@ async fn test_replay_via_subscribe() {
     }
 
     // Subscribe with resume_from = seq 2 → should replay events 3, 4, 5
-    let mut rx2 = subscribe_with_resume(&source, "replay-src", 2).await;
+    let mut rx2 = subscribe_with_resume(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c8")
+            .expect("fixture UUID"),
+        2,
+    )
+    .await;
 
     for expected_seq in 3..=5 {
         let event = tokio::time::timeout(Duration::from_secs(2), rx2.recv())
@@ -555,11 +777,27 @@ async fn test_concurrent_writes_monotonic_sequences() {
         10_000,
         CapacityPolicy::RejectIncoming,
     )));
-    let (source, handle) = ApplicationSource::new("conc-src", config).unwrap();
-    init_source_with_wal(&source, wal.clone(), "conc-src").await;
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c9")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c9")
+            .expect("fixture UUID"),
+    )
+    .await;
     source.start().await.unwrap();
 
-    let mut rx = subscribe_fresh(&source, "conc-src").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c9")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let total_events: usize = 100;
     let tasks_count = 4;
@@ -593,7 +831,15 @@ async fn test_concurrent_writes_monotonic_sequences() {
         t.await.unwrap();
     }
 
-    let records = wal.read_from("conc-src", 1).await.unwrap();
+    let records = wal
+        .read_from(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c9")
+                .expect("fixture UUID"),
+            1,
+        )
+        .await
+        .unwrap();
     assert_eq!(records.len(), total_events);
     for (index, (wal_sequence, change)) in records.into_iter().enumerate() {
         let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -616,7 +862,14 @@ async fn test_concurrent_writes_monotonic_sequences() {
         );
     }
 
-    let count = wal.event_count("conc-src").await.unwrap();
+    let count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002c9")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert_eq!(count, total_events as u64);
 
     source.stop().await.unwrap();
@@ -644,14 +897,27 @@ async fn test_resume_from_position_end_to_end() {
         10_000,
         CapacityPolicy::RejectIncoming,
     )));
-    let (source, handle) = ApplicationSource::new("e2e-src", config).unwrap();
-    init_source_with_wal(&source, wal.clone(), "e2e-src").await;
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000237")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000237")
+            .expect("fixture UUID"),
+    )
+    .await;
     source.start().await.unwrap();
 
     // Subscribe with position handle (simulates a real query subscriber)
     let settings = SourceSubscriptionSettings {
-        source_id: "e2e-src".to_string(),
-        query_id: "e2e-query".to_string(),
+        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000237")
+            .expect("fixture UUID"),
+        query_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000001fd")
+            .expect("fixture UUID"),
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
@@ -710,7 +976,14 @@ async fn test_resume_from_position_end_to_end() {
     drop(source);
 
     // Verify WAL still has events persisted
-    let wal_count = wal.event_count("e2e-src").await.unwrap();
+    let wal_count = wal
+        .event_count(
+            &drasi_core::interface::StorageScope::default(),
+            &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000237")
+                .expect("fixture UUID"),
+        )
+        .await
+        .unwrap();
     assert!(
         wal_count >= 3,
         "WAL should have at least the unconfirmed events, got {wal_count}"
@@ -722,13 +995,30 @@ async fn test_resume_from_position_end_to_end() {
         10_000,
         CapacityPolicy::RejectIncoming,
     )));
-    let (source2, handle2) = ApplicationSource::new("e2e-src", config2).unwrap();
-    init_source_with_wal(&source2, wal.clone(), "e2e-src").await;
+    let (source2, handle2) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000237")
+            .expect("fixture UUID"),
+        config2,
+    )
+    .unwrap();
+    init_source_with_wal(
+        &source2,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000237")
+            .expect("fixture UUID"),
+    )
+    .await;
     source2.start().await.unwrap();
 
     // Phase 4: Subscribe with resume_from = last_confirmed_seq (checkpoint position)
     // This simulates a query reconnecting after crash and saying "I last confirmed seq 5"
-    let mut rx2 = subscribe_with_resume(&source2, "e2e-src", last_confirmed_seq).await;
+    let mut rx2 = subscribe_with_resume(
+        &source2,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000237")
+            .expect("fixture UUID"),
+        last_confirmed_seq,
+    )
+    .await;
 
     // Should receive replay of events 6, 7, 8 (those after the checkpoint)
     let mut replayed_seqs = vec![];
@@ -783,18 +1073,34 @@ async fn test_resume_from_position_end_to_end() {
 async fn test_sequence_stamped_without_durability() {
     // durability: None → WAL off, so no source-supplied sequence.
     let config = app_config(None);
-    let (source, handle) = ApplicationSource::new("noseq-src", config).unwrap();
+    let (source, handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ca")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal.clone(), "noseq-src").await;
+    init_source_with_wal(
+        &source,
+        wal.clone(),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ca")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     source.start().await.unwrap();
 
     // Durability is off, so the source neither persists nor supports replay.
     assert!(!source.supports_replay());
 
-    let mut rx = subscribe_fresh(&source, "noseq-src").await;
+    let mut rx = subscribe_fresh(
+        &source,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002ca")
+            .expect("fixture UUID"),
+    )
+    .await;
 
     let event_count = 5u64;
     for i in 1..=event_count {
@@ -850,11 +1156,22 @@ async fn test_wal_enabled_fresh_subscribe_still_bootstraps() {
         10_000,
         CapacityPolicy::RejectIncoming,
     )));
-    let (source, _handle) = ApplicationSource::new("bootstrap-src", config).unwrap();
+    let (source, _handle) = ApplicationSource::new(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cb")
+            .expect("fixture UUID"),
+        config,
+    )
+    .unwrap();
 
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
-    init_source_with_wal(&source, wal, "bootstrap-src").await;
+    init_source_with_wal(
+        &source,
+        wal,
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cb")
+            .expect("fixture UUID"),
+    )
+    .await;
     source.start().await.unwrap();
 
     let called = Arc::new(AtomicBool::new(false));
@@ -864,7 +1181,12 @@ async fn test_wal_enabled_fresh_subscribe_still_bootstraps() {
         }))
         .await;
 
-    let mut settings = fresh_settings("bootstrap-src", "bootstrap-query");
+    let mut settings = fresh_settings(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000002cb")
+            .expect("fixture UUID"),
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000011c")
+            .expect("fixture UUID"),
+    );
     settings.enable_bootstrap = true;
     source.subscribe(settings).await.unwrap();
 
