@@ -114,10 +114,16 @@ the alert disappear. You control the input by editing and saving that file.
 
 Install Rust through rustup. Start in the root of the `drasi-core` checkout
 containing this book. The examples use that checkout's APIs, rather than an
-arbitrary crates.io release. If obtaining the source from
-[the repository](https://github.com/drasi-project/drasi-core), select the
-revision that contains this edition and its `stockroom` folder; a different
-branch or a registry package is not a substitute.
+arbitrary crates.io release. To obtain this development edition:
+
+```sh
+git clone --branch agentofreality-parallel-computation-graph-recovery https://github.com/drasi-project/drasi-core.git drasi-core
+cd drasi-core
+```
+
+If you already have this edition locally, use that checkout instead.
+Keep the book and its `stockroom` folder together with the matching library
+revision; a different branch or a registry package is not a substitute.
 
 The book does not install a different library version for you. Build native libraries
 from the same revision as the host application; shared-library interfaces and

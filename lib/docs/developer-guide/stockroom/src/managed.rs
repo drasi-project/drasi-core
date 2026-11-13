@@ -352,11 +352,30 @@ pub(super) async fn run(
 mod tests {
     use super::*;
 
+    async fn expect_product(core: &DrasiLib, quantity: i64) -> anyhow::Result<()> {
+        let name = ComponentName::try_new("low-stock")?;
+        let expected = vec![serde_json::json!({"sku":"bolts", "quantity":quantity})];
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if core.get_query_results_by_name(&name).await? == expected {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn configuration_reopens_without_resubmitting_the_seed() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("inventory.json");
-        tokio::fs::write(&path, "[]").await?;
+        tokio::fs::write(
+            &path,
+            r#"[{"sku":"bolts","quantity":8,"minimum":5,"warehouse":"west"}]"#,
+        )
+        .await?;
         let database = directory.path().join("configuration.redb");
         let key = [19; 32];
         let (core, _health) = open(
@@ -375,9 +394,35 @@ mod tests {
         );
         core.rename_component_by_id(&inventory_id, ComponentName::try_new("warehouse-input")?)
             .await?;
+        expect_product(&core, 8).await?;
         let saved = core.desired_configuration()?;
         core.shutdown().await?;
         drop(core);
+        match open(
+            &path,
+            Arc::new(RedbConfigurationStore::new(&database, key)?),
+            Some(6),
+        )
+        .await
+        {
+            Err(error) => ensure!(
+                error.to_string().contains("preserves the saved query"),
+                "{error:#}"
+            ),
+            Ok((unexpected, _)) => {
+                unexpected.shutdown().await?;
+                anyhow::bail!("an incompatible threshold must not replace the saved definition");
+            }
+        }
+        let (same, _health) = open(
+            &path,
+            Arc::new(RedbConfigurationStore::new(&database, key)?),
+            Some(10),
+        )
+        .await?;
+        ensure!(same.desired_configuration()? == saved);
+        same.shutdown().await?;
+        drop(same);
         let (core, _health) = open(
             &path,
             Arc::new(RedbConfigurationStore::new(&database, key)?),
@@ -385,6 +430,9 @@ mod tests {
         )
         .await?;
         let work = async {
+            expect_product(&core, 8).await?;
+            tokio::fs::write(&path, r#"[{"sku":"bolts","quantity":6,"minimum":5,"warehouse":"west"}]"#).await?;
+            expect_product(&core, 6).await?;
             let reopened = core.desired_configuration()?;
             ensure!(reopened.revision == saved.revision);
             ensure!(reopened.desired == saved.desired);
