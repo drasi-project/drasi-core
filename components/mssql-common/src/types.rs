@@ -68,9 +68,11 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
             }
         }
         ColumnType::Numericn | ColumnType::Decimaln => {
-            if let Ok(Some(d)) = row.try_get::<rust_decimal::Decimal, _>(col_idx) {
-                let f = d.to_string().parse::<f64>().unwrap_or(0.0);
-                Ok(ElementValue::Float(ordered_float::OrderedFloat(f)))
+            if let Some(d) = row.try_get::<tiberius::numeric::Numeric, _>(col_idx)? {
+                Ok(ElementValue::String(Arc::from(decimal_to_string(
+                    d.value(),
+                    d.scale(),
+                ))))
             } else {
                 Ok(ElementValue::Null)
             }
@@ -161,6 +163,21 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
     }
 }
 
+// Format the full SQL Server decimal range without narrowing to rust_decimal or f64.
+// Normalize fractional zeros so numerically equal keys have identical IDs.
+fn decimal_to_string(value: i128, scale: u8) -> String {
+    let scale = usize::from(scale);
+    let mut digits = format!("{:0>width$}", value.unsigned_abs(), width = scale + 1);
+    if scale > 0 {
+        digits.insert(digits.len() - scale, '.');
+        digits.truncate(digits.trim_end_matches('0').trim_end_matches('.').len());
+    }
+    if value < 0 {
+        digits.insert(0, '-');
+    }
+    digits
+}
+
 /// Convert ElementValue to a string representation for element ID generation
 pub fn value_to_string(value: &ElementValue) -> String {
     match value {
@@ -179,6 +196,45 @@ pub fn value_to_string(value: &ElementValue) -> String {
 mod tests {
     use super::*;
     use chrono::{FixedOffset, NaiveDate, TimeZone};
+
+    #[test]
+    fn test_decimal_to_string() {
+        let cases = [
+            (
+                1000000000000000000000000000000,
+                0,
+                "1000000000000000000000000000000",
+            ),
+            (
+                1234567890123456789012345678901,
+                30,
+                "1.234567890123456789012345678901",
+            ),
+            (
+                99999999999999999999999999999999999999,
+                0,
+                "99999999999999999999999999999999999999",
+            ),
+            (
+                -99999999999999999999999999999999999999,
+                0,
+                "-99999999999999999999999999999999999999",
+            ),
+            (1, 38, "0.00000000000000000000000000000000000001"),
+            (-1, 38, "-0.00000000000000000000000000000000000001"),
+            (1234500, 4, "123.45"),
+            (-1234500, 4, "-123.45"),
+            (-123, 4, "-0.0123"),
+            (10000, 4, "1"),
+            (0, 38, "0"),
+            (0, 0, "0"),
+            (12345678901234567, 0, "12345678901234567"),
+            (12345678901234568, 0, "12345678901234568"),
+        ];
+        for (value, scale, expected) in cases {
+            assert_eq!(decimal_to_string(value, scale), expected);
+        }
+    }
 
     #[test]
     fn test_value_to_string() {
