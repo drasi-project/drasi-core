@@ -102,7 +102,7 @@ mod tests {
     use super::*;
     use chrono::{NaiveDate, TimeZone, Utc};
     use drasi_core::models::ElementValue;
-    use drasi_postgres_common::decode_column_value_text;
+    use drasi_postgres_common::decode_text_to_element_value;
     use rust_decimal::Decimal;
     use std::str::FromStr;
     use std::sync::Arc;
@@ -181,35 +181,43 @@ mod tests {
         }
     }
 
+    // Note on Bootstrap ↔ CDC parity:
+    // Production bootstrap (bootstrappers/postgres) and CDC (sources/postgres/stream.rs)
+    // both share the canonical `PostgresValue::to_element_value()` conversion.
+    // True end-to-end parity across production components is validated against a real
+    // PostgreSQL instance in `tests/integration_tests.rs` (`test_type_parity_bootstrap_and_cdc`).
+    // The tests below verify that typed `PostgresValue::to_element_value()` and canonical
+    // text decoding (`decode_text_to_element_value`) produce identical ElementValues.
+
     #[test]
     fn parity_bool_true() {
-        let cdc = PostgresValue::Bool(true).to_element_value();
-        let bootstrap = decode_column_value_text("true", 16).unwrap();
-        assert_eq!(cdc, bootstrap);
+        let typed_ev = PostgresValue::Bool(true).to_element_value();
+        let text_ev = decode_text_to_element_value("true", 16).unwrap();
+        assert_eq!(typed_ev, text_ev);
     }
 
     #[test]
     fn parity_int4() {
-        let cdc = PostgresValue::Int4(100_000).to_element_value();
-        let bootstrap = decode_column_value_text("100000", 23).unwrap();
-        assert_eq!(cdc, bootstrap);
+        let typed_ev = PostgresValue::Int4(100_000).to_element_value();
+        let text_ev = decode_text_to_element_value("100000", 23).unwrap();
+        assert_eq!(typed_ev, text_ev);
     }
 
     #[test]
     fn parity_numeric() {
         let dec = Decimal::from_str_exact("123.45").unwrap();
-        let cdc = PostgresValue::Numeric(dec).to_element_value();
-        let bootstrap = decode_column_value_text("123.45", 1700).unwrap();
-        assert_eq!(cdc, bootstrap);
+        let typed_ev = PostgresValue::Numeric(dec).to_element_value();
+        let text_ev = decode_text_to_element_value("123.45", 1700).unwrap();
+        assert_eq!(typed_ev, text_ev);
     }
 
     #[test]
     fn parity_numeric_whole_number_is_float() {
         let dec = Decimal::from_str("4200").unwrap();
-        let cdc = PostgresValue::Numeric(dec).to_element_value();
-        let bootstrap = decode_column_value_text("4200", 1700).unwrap();
-        assert_eq!(cdc, bootstrap);
-        assert!(matches!(cdc, ElementValue::Float(_)));
+        let typed_ev = PostgresValue::Numeric(dec).to_element_value();
+        let text_ev = decode_text_to_element_value("4200", 1700).unwrap();
+        assert_eq!(typed_ev, text_ev);
+        assert!(matches!(typed_ev, ElementValue::Float(_)));
     }
 
     #[test]
@@ -218,53 +226,53 @@ mod tests {
             .unwrap()
             .and_hms_micro_opt(10, 30, 45, 123456)
             .unwrap();
-        let cdc = PostgresValue::Timestamp(dt).to_element_value();
-        let bootstrap = decode_column_value_text("2024-06-15 10:30:45.123456", 1114).unwrap();
-        assert_eq!(cdc, bootstrap);
-        assert!(matches!(cdc, ElementValue::LocalDateTime(_)));
+        let typed_ev = PostgresValue::Timestamp(dt).to_element_value();
+        let text_ev = decode_text_to_element_value("2024-06-15 10:30:45.123456", 1114).unwrap();
+        assert_eq!(typed_ev, text_ev);
+        assert!(matches!(typed_ev, ElementValue::LocalDateTime(_)));
     }
 
     #[test]
     fn parity_timestamptz_utc() {
         let utc_dt = Utc.with_ymd_and_hms(2024, 6, 15, 10, 30, 45).unwrap();
-        let cdc = PostgresValue::TimestampTz(utc_dt).to_element_value();
-        let bootstrap = decode_column_value_text("2024-06-15T10:30:45+00:00", 1184).unwrap();
-        assert_eq!(cdc, bootstrap);
-        assert!(matches!(cdc, ElementValue::ZonedDateTime(_)));
+        let typed_ev = PostgresValue::TimestampTz(utc_dt).to_element_value();
+        let text_ev = decode_text_to_element_value("2024-06-15T10:30:45+00:00", 1184).unwrap();
+        assert_eq!(typed_ev, text_ev);
+        assert!(matches!(typed_ev, ElementValue::ZonedDateTime(_)));
     }
 
     #[test]
     fn parity_date() {
-        let cdc =
+        let typed_ev =
             PostgresValue::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()).to_element_value();
-        let bootstrap = decode_column_value_text("2024-06-15", 1082).unwrap();
-        assert_eq!(cdc, bootstrap);
+        let text_ev = decode_text_to_element_value("2024-06-15", 1082).unwrap();
+        assert_eq!(typed_ev, text_ev);
     }
 
     #[test]
     fn parity_uuid() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let cdc = PostgresValue::Uuid(uuid).to_element_value();
-        let bootstrap =
-            decode_column_value_text("550e8400-e29b-41d4-a716-446655440000", 2950).unwrap();
-        assert_eq!(cdc, bootstrap);
+        let typed_ev = PostgresValue::Uuid(uuid).to_element_value();
+        let text_ev =
+            decode_text_to_element_value("550e8400-e29b-41d4-a716-446655440000", 2950).unwrap();
+        assert_eq!(typed_ev, text_ev);
     }
 
     #[test]
     fn parity_time() {
         let t = chrono::NaiveTime::from_hms_micro_opt(10, 30, 45, 0).unwrap();
-        let cdc = PostgresValue::Time(t).to_element_value();
-        let bootstrap = decode_column_value_text("10:30:45", 1083).unwrap();
-        assert_eq!(cdc, bootstrap);
+        let typed_ev = PostgresValue::Time(t).to_element_value();
+        let text_ev = decode_text_to_element_value("10:30:45", 1083).unwrap();
+        assert_eq!(typed_ev, text_ev);
     }
 
     #[test]
     fn parity_bytea() {
         let bytes = vec![0xde, 0xad, 0xbe, 0xef];
-        let cdc = PostgresValue::Bytea(bytes).to_element_value();
-        let bootstrap = decode_column_value_text(r"\xdeadbeef", 17).unwrap();
-        assert_eq!(cdc, bootstrap);
-        if let ElementValue::String(s) = cdc {
+        let typed_ev = PostgresValue::Bytea(bytes).to_element_value();
+        let text_ev = decode_text_to_element_value(r"\xdeadbeef", 17).unwrap();
+        assert_eq!(typed_ev, text_ev);
+        if let ElementValue::String(s) = typed_ev {
             assert_eq!(&*s, "3q2+7w=="); // base64 of deadbeef
         } else {
             panic!("expected String");
@@ -273,18 +281,18 @@ mod tests {
 
     #[test]
     fn parity_char_trimmed() {
-        let cdc = PostgresValue::Char("abc".to_string()).to_element_value();
-        let bootstrap = decode_column_value_text("abc     ", 1042).unwrap();
-        assert_eq!(cdc, bootstrap);
-        assert_eq!(cdc, ElementValue::String(Arc::from("abc")));
+        let typed_ev = PostgresValue::Char("abc".to_string()).to_element_value();
+        let text_ev = decode_text_to_element_value("abc     ", 1042).unwrap();
+        assert_eq!(typed_ev, text_ev);
+        assert_eq!(typed_ev, ElementValue::String(Arc::from("abc")));
     }
 
     #[test]
     fn parity_jsonb() {
         let j = serde_json::json!({"k": 1});
-        let cdc = PostgresValue::Jsonb(j).to_element_value();
-        let bootstrap = decode_column_value_text(r#"{"k":1}"#, 3802).unwrap();
-        assert_eq!(cdc, bootstrap);
+        let typed_ev = PostgresValue::Jsonb(j).to_element_value();
+        let text_ev = decode_text_to_element_value(r#"{"k":1}"#, 3802).unwrap();
+        assert_eq!(typed_ev, text_ev);
     }
 
     #[test]

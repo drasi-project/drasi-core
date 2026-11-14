@@ -30,7 +30,7 @@ use super::types::{
 };
 
 // Re-export for callers/tests that previously imported from this module.
-pub use drasi_postgres_common::decode_column_value_text;
+pub use drasi_postgres_common::{decode_column_value_text, decode_text_to_element_value};
 
 #[allow(dead_code)]
 const PGOUTPUT_VERSION: u32 = 1;
@@ -856,11 +856,11 @@ mod tests {
     use drasi_core::models::ElementValue;
     use std::sync::Arc;
 
-    // ── decode_column_value_text: timestamp (OID 1114) ─────────────────
+    // ── decode_text_to_element_value: timestamp (OID 1114) ─────────────
 
     #[test]
     fn decode_timestamp_with_fractional_seconds() {
-        let ev = decode_column_value_text("2024-06-15 10:30:45.123456", 1114).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15 10:30:45.123456", 1114).unwrap();
         let expected = NaiveDate::from_ymd_opt(2024, 6, 15)
             .unwrap()
             .and_hms_micro_opt(10, 30, 45, 123456)
@@ -870,7 +870,7 @@ mod tests {
 
     #[test]
     fn decode_timestamp_without_fractional_seconds() {
-        let ev = decode_column_value_text("2024-06-15 10:30:45", 1114).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15 10:30:45", 1114).unwrap();
         let expected = NaiveDate::from_ymd_opt(2024, 6, 15)
             .unwrap()
             .and_hms_opt(10, 30, 45)
@@ -880,7 +880,7 @@ mod tests {
 
     #[test]
     fn decode_timestamp_with_leading_trailing_whitespace() {
-        let ev = decode_column_value_text("  2024-06-15 10:30:45  ", 1114).unwrap();
+        let ev = decode_text_to_element_value("  2024-06-15 10:30:45  ", 1114).unwrap();
         let expected = NaiveDate::from_ymd_opt(2024, 6, 15)
             .unwrap()
             .and_hms_opt(10, 30, 45)
@@ -888,12 +888,12 @@ mod tests {
         assert_eq!(ev, ElementValue::LocalDateTime(expected));
     }
 
-    // ── decode_column_value_text: timestamptz (OID 1184) ───────────────
+    // ── decode_text_to_element_value: timestamptz (OID 1184) ───────────
 
     #[test]
     fn decode_timestamptz_rfc3339() {
         // Canonical mapping normalizes timestamptz to UTC (matches CDC binary path).
-        let ev = decode_column_value_text("2024-06-15T10:30:45+01:00", 1184).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15T10:30:45+01:00", 1184).unwrap();
         match ev {
             ElementValue::ZonedDateTime(dt) => {
                 assert_eq!(dt.offset().local_minus_utc(), 0);
@@ -993,13 +993,13 @@ mod tests {
         }
     }
 
-    // ── decode_column_value_text: timestamp OID with ambiguous input ───
+    // ── decode_text_to_element_value: timestamp OID with ambiguous input ───
 
     #[test]
     fn decode_timestamptz_oid_with_plain_datetime_string_assumes_utc() {
         // OID 1184 (timestamptz) but the string has no tz info → ZonedDateTime (UTC)
         // This matches the CDC binary path which always produces ZonedDateTime for OID 1184
-        let ev = decode_column_value_text("2024-06-15 10:30:45", 1184).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15 10:30:45", 1184).unwrap();
         match ev {
             ElementValue::ZonedDateTime(dt) => {
                 assert_eq!(dt.offset().local_minus_utc(), 0, "Expected UTC offset");
@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn decode_timestamptz_oid_with_fractional_no_offset_assumes_utc() {
         // OID 1184 with fractional seconds but no offset → ZonedDateTime (UTC)
-        let ev = decode_column_value_text("2024-06-15 10:30:45.123456", 1184).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15 10:30:45.123456", 1184).unwrap();
         match ev {
             ElementValue::ZonedDateTime(dt) => {
                 assert_eq!(dt.offset().local_minus_utc(), 0, "Expected UTC offset");
@@ -1068,7 +1068,7 @@ mod tests {
     fn decode_timestamp_oid_with_rfc3339_string() {
         // OID 1114 (timestamp) with tz info is malformed for this OID,
         // so it must remain String.
-        let ev = decode_column_value_text("2024-06-15T10:30:45+05:00", 1114).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15T10:30:45+05:00", 1114).unwrap();
         assert!(
             matches!(ev, ElementValue::String(_)),
             "Expected String fallback for rfc3339 input on timestamp OID, got {ev:?}"
@@ -1077,27 +1077,27 @@ mod tests {
 
     #[test]
     fn decode_unparseable_timestamp_falls_back_to_string() {
-        let ev = decode_column_value_text("not-a-date", 1114).unwrap();
+        let ev = decode_text_to_element_value("not-a-date", 1114).unwrap();
         assert!(
             matches!(ev, ElementValue::String(_)),
             "Expected String fallback, got {ev:?}"
         );
     }
 
-    // ── decode_column_value_text: non-timestamp types still work ───────
+    // ── decode_text_to_element_value: non-timestamp types still work ───
 
     #[test]
     fn decode_bool_text() {
         assert_eq!(
-            decode_column_value_text("true", 16).unwrap(),
+            decode_text_to_element_value("true", 16).unwrap(),
             ElementValue::Bool(true)
         );
         assert_eq!(
-            decode_column_value_text("t", 16).unwrap(),
+            decode_text_to_element_value("t", 16).unwrap(),
             ElementValue::Bool(true)
         );
         assert_eq!(
-            decode_column_value_text("f", 16).unwrap(),
+            decode_text_to_element_value("f", 16).unwrap(),
             ElementValue::Bool(false)
         );
     }
@@ -1105,7 +1105,7 @@ mod tests {
     #[test]
     fn decode_int4_text() {
         assert_eq!(
-            decode_column_value_text("42", 23).unwrap(),
+            decode_text_to_element_value("42", 23).unwrap(),
             ElementValue::Integer(42)
         );
     }
@@ -1113,7 +1113,7 @@ mod tests {
     #[test]
     fn decode_text_type() {
         assert_eq!(
-            decode_column_value_text("hello world", 25).unwrap(),
+            decode_text_to_element_value("hello world", 25).unwrap(),
             ElementValue::String(Arc::from("hello world"))
         );
     }
