@@ -704,6 +704,10 @@ impl Reaction for LogReaction {
         Ok(())
     }
 
+    async fn delete_owned_resources(&self) -> Result<()> {
+        self.base.delete_owned_resources_common().await
+    }
+
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
     }
@@ -833,6 +837,11 @@ mod checkpoint_tests {
             self.inner.delete_many(partition, keys).await
         }
         async fn clear_store(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(StateStoreError::StorageError(
+                    "injected checkpoint cleanup failure".into(),
+                ));
+            }
             self.inner.clear_store(partition).await
         }
         async fn list_keys(&self, partition: &StorePartition) -> StateStoreResult<Vec<String>> {
@@ -873,6 +882,47 @@ mod checkpoint_tests {
             ))
             .await;
         Ok((reaction, store, first, second))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_cleanup_preserves_other_partitions_and_retries_storage_failure() -> Result<()> {
+        for started in [false, true] {
+            let (reaction, store, first, _) = fixture(ReactionRecoveryPolicy::AutoSkipGap).await?;
+            let unrelated = StorePartition::component(ComponentId::generate());
+            store.set(&unrelated, "sentinel", vec![7]).await?;
+            reaction
+                .base
+                .write_checkpoint(
+                    &first,
+                    &ReactionCheckpoint {
+                        sequence: 5,
+                        config_hash: 43,
+                    },
+                )
+                .await?;
+            if started {
+                reaction.start().await?;
+            }
+            reaction.stop().await?;
+            assert!(reaction.base.read_checkpoint(&first).await?.is_some());
+            store.fail.store(true, Ordering::SeqCst);
+            assert!(reaction
+                .delete_owned_resources()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("injected checkpoint cleanup failure"));
+            assert!(reaction.base.read_checkpoint(&first).await?.is_some());
+            store.fail.store(false, Ordering::SeqCst);
+            reaction.delete_owned_resources().await?;
+            reaction.delete_owned_resources().await?;
+            assert!(store
+                .list_keys(&StorePartition::component(reaction.id().clone()))
+                .await?
+                .is_empty());
+            assert_eq!(store.get(&unrelated, "sentinel").await?, Some(vec![7]));
+        }
+        Ok(())
     }
 
     fn result(query: &ComponentId, sequence: u64) -> QueryResult {

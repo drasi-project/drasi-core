@@ -532,12 +532,32 @@ capacity and busy failures do not consume a client or graph sequence. Accepted
 entries already belong to every QoS subscriber, so there is no second send.
 
 The handle exposes `register_producer`, `retire_producer`, `producer_status`,
-`admission_receipt` and `admit`. All use one mailbox with 16 waiting requests and
-at most one executing request, driven by the existing graph task. Full mailboxes
-return `Busy`; admission can also return `Busy` while a subscriber commits its
-progress. Clients retry with the same session, sequence and unchanged input.
+`admission_receipt`, `admit` and `admit_wait`. All use one mailbox with 16 waiting
+requests and at most one executing request, driven by the existing graph task.
+`admit` remains fail-fast: full mailboxes return `Busy`; admission can also return
+`Busy` while a subscriber commits its progress. Clients retry with the same
+session, sequence and unchanged input.
 Only one graph admission owner can bind a channel, even through different handles.
 No admission worker is spawned.
+
+`admit_wait(&session, sequence, &input).await` waits for mailbox space, journal
+mutex contention and subscriber capacity using notifications, not polling,
+timers, another queue or another worker. A full-journal response releases the
+graph task before the caller waits, so producer metadata requests can still run.
+It preserves the same session, sequence, payload comparison and receipt rules.
+Even a full journal returns a retained exact duplicate receipt or payload
+conflict immediately once the request is processed. Registration and other
+metadata operations retain their existing fail-fast mailbox behavior.
+
+The caller supplies any deadline, for example
+`tokio::time::timeout(deadline, admission.admit_wait(&session, sequence, &input)).await??`.
+Cancellation while waiting for mailbox space, queued execution, journal mutex or
+subscriber capacity does not consume input or sequence. Once storage work starts,
+a lost response has the same uncertainty rules as `admit`: do not automatically
+resubmit uncertain writes. Stop, channel closure and failures wake pending waits;
+a wait cannot cross into a restarted activation. Invalid sessions/sequences,
+conflicting or expired retries, storage failures and uncertain writes are
+returned, not retried as capacity pressure.
 
 After successful host/graph startup, await
 `SourceAdmission::wait_active(&self) -> Result<(), PipeError>` before the first

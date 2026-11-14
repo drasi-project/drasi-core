@@ -129,6 +129,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(fail_start: bool) -> Self {
+        Self::with_capacity(fail_start, 128).await
+    }
+
+    async fn with_capacity(fail_start: bool, capacity: usize) -> Self {
         let directory = tempfile::tempdir().expect("store directory");
         let provider = LegacyIndexProviderAdapter::scoped(
             Arc::new(
@@ -147,7 +151,7 @@ impl Fixture {
         let channel = QosChannel::persistent_with_recovery(
             QosChannelDefinition {
                 stream: stream.clone(),
-                capacity: size(128),
+                capacity: size(capacity),
                 durable: true,
                 retention: RetentionPolicy::Backpressure,
                 subscribers: BTreeMap::from([("sink".into(), SubscriptionStart::Earliest)]),
@@ -402,6 +406,83 @@ async fn fence_and_actual_admission_work_on_multithread_runtime() {
     tokio::time::timeout(DEADLINE, real_mailbox_after_start())
         .await
         .expect("activation deadline");
+}
+
+async fn awaitable_admission_after_start() {
+    let mut fixture = Fixture::with_capacity(false, 1).await;
+    fixture.core.start().await.expect("host start");
+    fixture.admission.wait_active().await.expect("mailbox");
+    let session = fixture
+        .admission
+        .register_producer(id("caller"))
+        .await
+        .expect("session");
+    let input = input();
+    assert_eq!(
+        fixture
+            .admission
+            .admit_wait(&session, 1, &input)
+            .await
+            .expect("first input")
+            .position,
+        1
+    );
+    fixture
+        .received
+        .recv()
+        .await
+        .expect("first downstream input");
+    {
+        let waiting = fixture.admission.admit_wait(&session, 2, &input);
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        // A later mailbox request proves capacity waiting does not block the graph.
+        assert_eq!(
+            fixture
+                .admission
+                .producer_status(&session)
+                .await
+                .expect("status during backpressure")
+                .next_sequence,
+            Some(2)
+        );
+        assert!(futures::poll!(&mut waiting).is_pending());
+        fixture.handled.add_permits(1);
+        assert_eq!(
+            waiting.await.expect("admit after acknowledgement").position,
+            2
+        );
+    }
+    fixture
+        .received
+        .recv()
+        .await
+        .expect("second downstream input");
+    assert_eq!(
+        fixture
+            .admission
+            .admit_wait(&session, 2, &input)
+            .await
+            .expect("idempotent retry")
+            .position,
+        2
+    );
+    fixture.handled.add_permits(1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn awaitable_admission_backpressures_through_the_actual_graph() {
+    tokio::time::timeout(DEADLINE, awaitable_admission_after_start())
+        .await
+        .expect("admission deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn awaitable_admission_backpressures_on_multithread_runtime() {
+    tokio::time::timeout(DEADLINE, awaitable_admission_after_start())
+        .await
+        .expect("admission deadline");
 }
 
 #[tokio::test]

@@ -6,11 +6,284 @@ use crate::computation::v1::{
     ComponentCreationError, ComponentDescriptor, ComponentFactory, ComponentSpecification,
     ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan, ConfigurationSchema,
     ConstructedComponent, ConstructionContext, Endpoint, FactoryDescriptor, ImplementationIdentity,
-    PipeRequirements,
+    PipeRequirements, ResourceCleanup, ResourceRealization,
 };
 use async_trait::async_trait;
 
 struct Source(ComponentDescriptor);
+
+#[derive(Default)]
+struct RemovalAcquisition {
+    acquired: std::sync::atomic::AtomicBool,
+    fail_cleanup: std::sync::atomic::AtomicBool,
+    active: std::sync::atomic::AtomicUsize,
+    returned: std::sync::atomic::AtomicUsize,
+    deletes: std::sync::atomic::AtomicUsize,
+    disposals: std::sync::atomic::AtomicUsize,
+    cleanups: std::sync::atomic::AtomicUsize,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ResourceCleanup for RemovalAcquisition {
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering;
+        self.cleanups.fetch_add(1, Ordering::SeqCst);
+        anyhow::ensure!(
+            !self.fail_cleanup.load(Ordering::SeqCst),
+            "acquisition cleanup failed"
+        );
+        assert_eq!(self.active.load(Ordering::SeqCst), 0);
+        self.acquired.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct RemovalFactory {
+    descriptor: FactoryDescriptor,
+    mode: u8,
+}
+
+struct ConstructionAttempt(Arc<RemovalAcquisition>);
+impl Drop for ConstructionAttempt {
+    fn drop(&mut self) {
+        self.0
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct RemovalService(ComponentDescriptor, Arc<RemovalAcquisition>);
+#[async_trait]
+impl crate::computation::v1::ComputationComponent for RemovalService {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.0
+    }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("initialization failed after construction")
+    }
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        self.1
+            .deletes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.1
+            .disposals
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+#[async_trait]
+impl crate::computation::v1::ComputationService for RemovalService {
+    async fn run(&mut self) -> anyhow::Result<()> {
+        std::future::pending().await
+    }
+}
+#[async_trait]
+impl ComponentFactory for RemovalFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, _: &ComponentSpecification) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> Result<ConstructedComponent, ComponentCreationError> {
+        use std::sync::atomic::Ordering;
+        let owner = context
+            .resources::<RemovalAcquisition>("acquisition")
+            .map_err(ComponentCreationError::terminal)?
+            .remove(0);
+        owner.acquired.store(true, Ordering::SeqCst);
+        owner.active.fetch_add(1, Ordering::SeqCst);
+        let _attempt = ConstructionAttempt(owner.clone());
+        if self.mode == 1 {
+            owner.release.notified().await;
+        }
+        if self.mode == 0 {
+            return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                "construction failed"
+            )));
+        }
+        owner.returned.fetch_add(1, Ordering::SeqCst);
+        Ok(ConstructedComponent::service(Box::new(RemovalService(
+            context.specification.descriptor.clone(),
+            owner,
+        ))))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn destructive_declaration_removal_retains_acquisitions_and_constructed_owners() {
+    use std::sync::atomic::Ordering;
+    for mode in 0..3 {
+        let owner = Arc::new(RemovalAcquisition::default());
+        let borrowed = Arc::new(RemovalAcquisition::default());
+        let id = ComponentId::generate();
+        let resource = ResourceId::try_new("acquisition").unwrap();
+        let borrowed_id = ResourceId::try_new("borrowed").unwrap();
+        let factory = Arc::new(RemovalFactory {
+            descriptor: FactoryDescriptor {
+                implementation: ImplementationIdentity::try_new("test/removal", "1").unwrap(),
+                role: ComponentRole::Service,
+                configuration_version: 1,
+                configuration: ConfigurationSchema::default(),
+                dependencies: BTreeMap::from([(
+                    "acquisition".into(),
+                    crate::computation::v1::ResourceRequirement::exactly_one::<RemovalAcquisition>(
+                        ResourceRole::StateStore,
+                    ),
+                )]),
+            },
+            mode,
+        });
+        let specification = ComponentSpecification {
+            descriptor: ComponentDescriptor::try_new(id.clone(), vec![]).unwrap(),
+            role: ComponentRole::Service,
+            completion: None,
+            implementation: factory.descriptor.implementation.clone(),
+            configuration_version: 1,
+            configuration: BTreeMap::new(),
+            dependencies: BTreeMap::from([("acquisition".into(), vec![resource.clone()])]),
+        };
+        let mut graph = ComputationGraph::builder("removal")
+            .component(
+                ComponentName::try_new("failed").unwrap(),
+                specification,
+                factory,
+            )
+            .declare_resource(ResourceSpecification {
+                id: resource.clone(),
+                role: ResourceRole::StateStore,
+                ownership: ResourceOwnership::Graph,
+                binding: "acquisition".into(),
+            })
+            .unwrap()
+            .provide_resource(
+                resource.clone(),
+                ResourceHandle::new(ResourceRole::StateStore, owner.clone())
+                    .with_cleanup(owner.clone()),
+            )
+            .unwrap()
+            .declare_resource(ResourceSpecification {
+                id: borrowed_id.clone(),
+                role: ResourceRole::StateStore,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "borrowed".into(),
+            })
+            .unwrap()
+            .provide_resource(
+                borrowed_id.clone(),
+                ResourceHandle::new(ResourceRole::StateStore, borrowed.clone())
+                    .with_cleanup(borrowed.clone()),
+            )
+            .unwrap()
+            .construction_timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let run = graph.run().unwrap();
+        let control = run.control();
+        let (result, ()) = tokio::join!(run, async {
+            assert!(control
+                .component_handle_by_id(&id)
+                .unwrap()
+                .wait_created()
+                .await
+                .is_err());
+            assert!(owner.acquired.load(Ordering::SeqCst));
+            assert_eq!(owner.active.load(Ordering::SeqCst), 0);
+            owner.release.notify_one();
+            tokio::task::yield_now().await;
+            assert_eq!(
+                owner.returned.load(Ordering::SeqCst),
+                usize::from(mode == 2),
+                "an interrupted constructor cannot return an untracked late object"
+            );
+            if mode == 2 {
+                let mut preview = control
+                    .preview(
+                        control.desired_snapshot().revision,
+                        vec![DesiredMutation::RemoveComponents {
+                            selection: GraphSelection::Exact(vec![id.clone()]),
+                            policy: RemovalPolicy::Reject,
+                        }],
+                    )
+                    .await
+                    .unwrap();
+                preview.delete_owned_resources.insert(id.clone());
+                let report = control
+                    .reconcile(preview, TopologyBindings::default())
+                    .await
+                    .unwrap();
+                assert!(!report.committed);
+                assert!(report.failures.iter().any(|failure| failure
+                    .cause
+                    .to_string()
+                    .contains("disposed component cannot delete owned resources")));
+                assert_eq!(owner.deletes.load(Ordering::SeqCst), 0);
+                assert_eq!(owner.disposals.load(Ordering::SeqCst), 1);
+                assert!(owner.acquired.load(Ordering::SeqCst));
+                assert_eq!(owner.cleanups.load(Ordering::SeqCst), 0);
+            }
+            owner.fail_cleanup.store(true, Ordering::SeqCst);
+            for retry in [false, true] {
+                let mut preview = control
+                    .preview(
+                        control.desired_snapshot().revision,
+                        vec![
+                            DesiredMutation::RemoveComponents {
+                                selection: GraphSelection::Exact(vec![id.clone()]),
+                                policy: RemovalPolicy::Reject,
+                            },
+                            DesiredMutation::RemoveResource {
+                                resource: resource.clone(),
+                                policy: RemovalPolicy::Reject,
+                            },
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                if mode != 2 {
+                    preview.delete_owned_resources.insert(id.clone());
+                }
+                let report = control
+                    .reconcile(preview, TopologyBindings::default())
+                    .await
+                    .unwrap();
+                if !retry {
+                    assert!(!report.committed);
+                    assert!(owner.acquired.load(Ordering::SeqCst));
+                    assert!(
+                        control.observed().resources[&resource].failure.is_some(),
+                        "mode {mode}: {report:?}"
+                    );
+                    assert_eq!(
+                        control.observed().resources[&resource].realization,
+                        ResourceRealization::CleanupRequired
+                    );
+                    owner.fail_cleanup.store(false, Ordering::SeqCst);
+                } else {
+                    assert!(report.committed, "{:?}", report.failures);
+                    assert!(report.failures.is_empty());
+                    assert!(!owner.acquired.load(Ordering::SeqCst));
+                }
+                assert_eq!(owner.deletes.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    owner.disposals.load(Ordering::SeqCst),
+                    usize::from(mode == 2)
+                );
+                assert_eq!(borrowed.cleanups.load(Ordering::SeqCst), 0);
+            }
+            assert_eq!(owner.cleanups.load(Ordering::SeqCst), 2);
+            control.cancel();
+        });
+        assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
+    }
+}
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for Source {
     fn descriptor(&self) -> &ComponentDescriptor {

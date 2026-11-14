@@ -4600,12 +4600,18 @@ impl Operations {
                         lease.processing_paused = false;
                         lease.slot.processing_ready.store(true, std::sync::atomic::Ordering::Release);
                     }
+                    // An unresolved/deferred declaration has no component-owned
+                    // state. Its declared resource owners are still retired by
+                    // reconciliation, including acquisitions retained after failure.
+                    if delete_owned_resources && !lease.component.is_constructed()
+                        && (lease.initialization_attempted || lease.attempted || lease.disposal_started)
+                    {
+                        return Err(topology("unconstructed declaration has unfinished component lifecycle work"));
+                    }
                     if delete_owned_resources
                         && !lease.resources_deleted
+                        && lease.component.is_constructed()
                     {
-                        if !lease.component.is_constructed() {
-                            return Err(topology("owned resource deletion requires the actual constructed component"));
-                        }
                         if lease.disposed {
                             return Err(topology("disposed component cannot delete owned resources"));
                         }

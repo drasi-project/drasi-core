@@ -75,6 +75,38 @@ mod checkpoint_tests {
         Ok((reaction, store, query))
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_cleanup_removes_only_checkpoints_after_normal_stop() -> anyhow::Result<()> {
+        for started in [false, true] {
+            let (reaction, store, query) = fixture().await?;
+            let unrelated = StorePartition::component(ComponentId::generate());
+            store.set(&unrelated, "sentinel", vec![7]).await?;
+            reaction
+                .base
+                .write_checkpoint(
+                    &query,
+                    &ReactionCheckpoint {
+                        sequence: 5,
+                        config_hash: 43,
+                    },
+                )
+                .await?;
+            if started {
+                reaction.start().await?;
+            }
+            reaction.stop().await?;
+            assert!(reaction.base.read_checkpoint(&query).await?.is_some());
+            reaction.delete_owned_resources().await?;
+            reaction.delete_owned_resources().await?;
+            assert!(store
+                .list_keys(&StorePartition::component(reaction.id().clone()))
+                .await?
+                .is_empty());
+            assert_eq!(store.get(&unrelated, "sentinel").await?, Some(vec![7]));
+        }
+        Ok(())
+    }
+
     fn result(query: &ComponentId, sequence: u64) -> QueryResult {
         QueryResult::new(
             query.clone(),
@@ -729,6 +761,10 @@ impl Reaction for SseReaction {
             .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
             .await;
         Err(error)
+    }
+
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.base.delete_owned_resources_common().await
     }
 
     async fn status(&self) -> ComponentStatus {

@@ -13,6 +13,7 @@ enum Request {
         session: ProducerSession,
         sequence: u64,
         input: ChangeEnvelope,
+        wait: bool,
         reply: Reply<AdmissionReceipt>,
     },
     Register(ComponentId, Reply<ProducerSession>),
@@ -235,6 +236,7 @@ impl SourceAdmission {
                     session: session.clone(),
                     sequence,
                     input: input.clone(),
+                    wait: false,
                     reply,
                 })
             },
@@ -243,6 +245,114 @@ impl SourceAdmission {
             },
         )
         .await
+    }
+
+    /// Admit the same input with event-driven backpressure instead of returning
+    /// `Busy` or waiting for the caller to retry a full journal.
+    ///
+    /// This uses the existing bounded graph mailbox. It waits for mailbox space,
+    /// the journal mutex, and subscriber capacity without another queue or worker.
+    /// It never crosses an activation generation or retries an uncertain write.
+    /// Session, sequence, payload comparison and receipt semantics match [`Self::admit`].
+    ///
+    /// Callers own their deadline. Cancellation before execution has no admission
+    /// side effects; once storage work starts, cancellation can lose the response,
+    /// just as with `admit`. Resolve that outcome using the original input/receipt,
+    /// and reconstruct first if the channel is fenced.
+    pub async fn admit_wait(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &ChangeEnvelope,
+    ) -> Result<AdmissionReceipt, PipeError> {
+        self.channel.check()?;
+        self.channel
+            .storage()?
+            .ok_or(AdmissionRejection::NotEnabled)?
+            .codec
+            .encode(input)
+            .map_err(|error| PipeError::Backend(error.into()))?;
+        let (generation, sender) = {
+            let binding = self
+                .binding
+                .lock()
+                .map_err(|_| backend("source admission binding poisoned"))?;
+            (
+                binding.generation,
+                binding.requests.clone().ok_or(PipeError::Closed)?,
+            )
+        };
+        loop {
+            // Register before submission so an acknowledgement cannot race the
+            // full-journal response and leave this caller asleep.
+            let changed = self.channel.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let permit = self
+                .wait_in_activation(generation, async {
+                    sender.reserve().await.map_err(|_| PipeError::Closed)
+                })
+                .await?;
+            let (reply, receive) = oneshot::channel();
+            permit.send(Request::Admit {
+                session: session.clone(),
+                sequence,
+                input: input.clone(),
+                wait: true,
+                reply,
+            });
+            let result = receive.await.map_err(|_| PipeError::AcceptanceUnknown {
+                source: anyhow::anyhow!("graph admission ended before its acceptance response"),
+            })?;
+            match result {
+                Err(PipeError::CapacityExhausted) => {
+                    self.wait_in_activation(generation, self.channel.wait_changed(changed))
+                        .await?;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn wait_in_activation<T>(
+        &self,
+        generation: u64,
+        wait: impl std::future::Future<Output = Result<T, PipeError>>,
+    ) -> Result<T, PipeError> {
+        tokio::pin!(wait);
+        let mut completed = None;
+        loop {
+            let activated = self.activation_changed.notified();
+            let changed = self.channel.changed.notified();
+            tokio::pin!(activated, changed);
+            activated.as_mut().enable();
+            changed.as_mut().enable();
+            self.channel.check()?;
+            {
+                let binding = self
+                    .binding
+                    .lock()
+                    .map_err(|_| backend("source admission binding poisoned"))?;
+                if generation != binding.generation {
+                    return Err(PipeError::Closed);
+                }
+                if let Some(failure) = &binding.failure {
+                    return Err(failure.error());
+                }
+                if !binding.opening {
+                    return Err(PipeError::Closed);
+                }
+            }
+            if let Some(result) = completed.take() {
+                return result;
+            }
+            tokio::select! {
+                // Recheck activation when mailbox completion races its revocation.
+                result = &mut wait => completed = Some(result),
+                _ = &mut activated => {},
+                result = self.channel.wait_changed(changed) => result?,
+            }
+        }
     }
 
     pub async fn register_producer(
@@ -448,11 +558,35 @@ impl AdmissionLease {
                 session,
                 sequence,
                 input,
-                reply,
+                wait,
+                mut reply,
             } => {
-                let result = channel
-                    .admit_validated(&session, sequence, &input, validate)
-                    .await;
+                let result = if wait {
+                    let state = tokio::select! {
+                        biased;
+                        _ = reply.closed() => return Ok(Some(false)),
+                        _ = quiesce.wait_for(|paused| *paused) => {
+                            let _ = reply.send(Err(PipeError::Closed));
+                            return Ok(None);
+                        },
+                        state = self.service.wait_in_activation(
+                            self.generation,
+                            channel.lock_admission(),
+                        ) => state,
+                    };
+                    match state {
+                        Ok(state) => {
+                            channel
+                                .admit_locked(state, &session, sequence, &input, validate)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    channel
+                        .admit_validated(&session, sequence, &input, validate)
+                        .await
+                };
                 accepted = result.is_ok();
                 let _ = reply.send(result);
             }
@@ -487,6 +621,9 @@ impl Drop for AdmissionLease {
         self.service.end_activation(self.generation);
     }
 }
+
+#[cfg(test)]
+mod backpressure_tests;
 
 #[cfg(test)]
 mod tests {
