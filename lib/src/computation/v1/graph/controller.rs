@@ -2330,6 +2330,7 @@ impl DrainReply {
 }
 
 struct Draining {
+    feedback: Option<FeedbackDrain>,
     id: u64,
     selected: BTreeSet<usize>,
     pending: BTreeSet<usize>,
@@ -2338,9 +2339,23 @@ struct Draining {
     reply: DrainReply,
 }
 
+struct FeedbackDrain {
+    producers: BTreeSet<usize>,
+    waiting: Option<AbortHandle>,
+    sealed: bool,
+}
+
+impl Drop for FeedbackDrain {
+    fn drop(&mut self) {
+        if let Some(waiting) = &self.waiting {
+            waiting.abort();
+        }
+    }
+}
+
 pub(super) struct DrainCompletion {
     group: u64,
-    index: usize,
+    index: Option<usize>,
     result: GraphResult<()>,
 }
 
@@ -3274,7 +3289,7 @@ impl Operations {
             || self
                 .draining
                 .iter()
-                .any(|group| !group.selected.is_disjoint(selected))
+                .any(|group| group.feedback.is_some() || !group.selected.is_disjoint(selected))
     }
 
     fn begin_drain(
@@ -3296,6 +3311,60 @@ impl Operations {
             return;
         };
         self.next_drain = next;
+        let feedback =
+            if let Some(activity) = graph.feedback.as_ref().filter(|_| {
+                selected.len() == graph.ids.len() && matches!(reply, DrainReply::Stop(_))
+            }) {
+                let mut producers = BTreeSet::new();
+                // Validate all bindings before fencing anything.
+                let admissions = match selected
+                    .iter()
+                    .map(|&index| {
+                        let contract = graph.components[index].recovery_contract()?;
+                        if contract.source_admission.is_none()
+                            && matches!(
+                                graph.nodes[index].role,
+                                super::super::ComponentRole::Source
+                                    | super::super::ComponentRole::Service
+                            )
+                        {
+                            producers.insert(index);
+                        }
+                        Ok((index, contract.source_admission))
+                    })
+                    .collect::<GraphResult<Vec<_>>>()
+                {
+                    Ok(admissions) => admissions,
+                    Err(error) => {
+                        reply.reject(error);
+                        return;
+                    }
+                };
+                activity.begin();
+                for (index, admission) in admissions {
+                    if let Some(admission) = admission {
+                        admission.wake_feedback();
+                        update(graph, |state| {
+                            let node = state
+                                .components
+                                .get_mut(graph.nodes[index].descriptor.id())
+                                .expect("component");
+                            node.lifecycle = ComponentLifecycle::Quiescing;
+                            node.transition_time = Utc::now();
+                        });
+                    }
+                }
+                for &index in &producers {
+                    self.pause_for_drain(graph, index, false);
+                }
+                Some(FeedbackDrain {
+                    producers,
+                    waiting: None,
+                    sealed: false,
+                })
+            } else {
+                None
+            };
         self.suspended_starts.extend(&selected);
         if matches!(reply, DrainReply::Stop(_)) {
             for index in &selected {
@@ -3304,6 +3373,7 @@ impl Operations {
             }
         }
         self.draining.push(Draining {
+            feedback,
             id: next,
             pending: selected.clone(),
             selected,
@@ -3361,6 +3431,13 @@ impl Operations {
     }
 
     fn fail_drain(&mut self, graph: &ComputationGraph, group: Draining, error: GraphError) {
+        if let Some(abort) = group
+            .feedback
+            .as_ref()
+            .and_then(|feedback| feedback.waiting.as_ref())
+        {
+            abort.abort();
+        }
         for abort in group.waiting.values() {
             abort.abort();
         }
@@ -3391,11 +3468,31 @@ impl Operations {
         else {
             return;
         };
-        self.draining[position].waiting.remove(&completion.index);
+        let Some(index) = completion.index else {
+            let feedback = self.draining[position]
+                .feedback
+                .as_mut()
+                .expect("feedback drain");
+            feedback.waiting = None;
+            match completion.result {
+                Ok(()) => {
+                    feedback.sealed = true;
+                    for index in self.draining[position].selected.clone() {
+                        self.pause_for_drain(graph, index, false);
+                    }
+                }
+                Err(error) => {
+                    let group = self.draining.remove(position);
+                    self.fail_drain(graph, group, error);
+                }
+            }
+            return;
+        };
+        self.draining[position].waiting.remove(&index);
         match completion.result {
             Ok(()) => self.pause_for_drain(
                 graph,
-                completion.index,
+                index,
                 matches!(self.draining[position].reply, DrainReply::Quiesce(_)),
             ),
             Err(error) => {
@@ -3411,11 +3508,113 @@ impl Operations {
         controls: &PipeGuard,
     ) -> GraphResult<()> {
         for mut group in std::mem::take(&mut self.draining) {
+            // A failed consumer cannot satisfy an already installed handled
+            // drain. Retain its actual cause instead of waiting for the deadline.
+            if let Some(cause) = group.selected.iter().find_map(|index| {
+                if group.feedback.is_none() && !group.waiting.contains_key(index) {
+                    return None;
+                }
+                graph.observed().components[graph.nodes[*index].descriptor.id()]
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.cause.clone())
+            }) {
+                self.fail_drain(graph, group, GraphError::Reported { cause });
+                continue;
+            }
             if tokio::time::Instant::now() >= group.deadline {
                 self.fail_drain(graph, group, GraphError::ReconciliationTimeout);
                 continue;
             }
             let result = (|| {
+                if let Some(feedback) = &mut group.feedback {
+                    if feedback.sealed {
+                        group.pending.retain(|index| {
+                            self.active
+                                .get(index)
+                                .is_some_and(|active| active.operation == Operation::Process)
+                        });
+                    } else if feedback.waiting.is_none()
+                        && !feedback.producers.iter().any(|index| {
+                            self.active
+                                .get(index)
+                                .is_some_and(|active| active.operation == Operation::Process)
+                        })
+                    {
+                        let activity = graph.feedback.as_ref().expect("feedback enabled").clone();
+                        let pipes = controls
+                            .0
+                            .iter()
+                            .map(|(edge, control)| (*edge, control.clone()))
+                            .collect::<Vec<_>>();
+                        let deadline = group.deadline;
+                        let id = group.id;
+                        let identity = super::execution::GraphIdentity {
+                            graph: graph.snapshot.id.clone(),
+                            run_epoch: graph.observed().run_epoch,
+                            phase: FailurePhase::Stop,
+                        };
+                        let (abort, registration) = AbortHandle::new_pair();
+                        let joined = graph.tasks.drains.spawn(
+                            identity.clone(),
+                            abort.clone(),
+                            async move {
+                                let result = identity
+                                    .run(async {
+                                        Abortable::new(
+                                            tokio::time::timeout_at(deadline, async {
+                                                loop {
+                                                    let changed = activity.changed.notified();
+                                                    tokio::pin!(changed);
+                                                    changed.as_mut().enable();
+                                                    if let Some(epoch) = activity.idle_epoch() {
+                                                        let mut idle = true;
+                                                        for (edge, pipe) in &pipes {
+                                                            if !pipe.is_idle().await.map_err(
+                                                                |source| GraphError::Pipe {
+                                                                    edge: *edge,
+                                                                    source,
+                                                                },
+                                                            )? {
+                                                                idle = false;
+                                                                break;
+                                                            }
+                                                        }
+                                                        if idle && activity.seal(epoch) {
+                                                            return Ok(());
+                                                        }
+                                                    }
+                                                    changed.await;
+                                                }
+                                            }),
+                                            registration,
+                                        )
+                                        .await
+                                        .map_err(|_| GraphError::Cancelled)?
+                                        .map_err(|_| GraphError::ReconciliationTimeout)?
+                                    })
+                                    .await;
+                                DrainCompletion {
+                                    group: id,
+                                    index: None,
+                                    result,
+                                }
+                            },
+                        )?;
+                        feedback.waiting = Some(abort);
+                        self.drain_futures.push(
+                            async move {
+                                joined.await.unwrap_or_else(|error| DrainCompletion {
+                                    group: id,
+                                    index: None,
+                                    result: Err(error),
+                                })
+                            }
+                            .boxed(),
+                        );
+                    }
+                    return Ok(());
+                }
                 // Stable registration indices need not follow dependencies.
                 // Removing an upstream must unblock its consumers in this pass.
                 for index in graph.order.iter().copied() {
@@ -3526,7 +3725,7 @@ impl Operations {
                                     .await;
                                 DrainCompletion {
                                     group: id,
-                                    index,
+                                    index: Some(index),
                                     result,
                                 }
                             })?;
@@ -3535,7 +3734,7 @@ impl Operations {
                         async move {
                             joined.await.unwrap_or_else(|error| DrainCompletion {
                                 group: id,
-                                index,
+                                index: Some(index),
                                 result: Err(error),
                             })
                         }
@@ -4167,6 +4366,15 @@ impl Operations {
             .map(|edge| edge.definition.to.component.clone())
             .collect();
         let (quiesce, mut quiescence) = watch::channel(false);
+        let feedback = graph.feedback.clone();
+        let startup_work = if operation == Operation::Process {
+            feedback
+                .as_ref()
+                .map(|activity| activity.enter(false).ok_or(GraphError::OperationInProgress))
+                .transpose()?
+        } else {
+            None
+        };
         let pause_component = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let perform_pause = pause_component.clone();
         let identity = super::execution::Identity {
@@ -4197,6 +4405,11 @@ impl Operations {
                 .recovery_contract()?
                 .source_admission
                 .map(|admission| {
+                    admission
+                        .bind_activity(graph.feedback.clone())
+                        .map_err(|error| {
+                            component_error(&node, "bind feedback admission", error.into())
+                        })?;
                     admission
                         .begin_activation()
                         .map_err(|error| component_error(&node, "activate admission", error.into()))
@@ -4703,7 +4916,7 @@ impl Operations {
                     )
                     .await?;
                     let budget = super::NodeWorkBudget::default();
-                    let result = budget
+                    let processing = budget
                         .run(run_node(
                             component,
                             &node,
@@ -4719,8 +4932,13 @@ impl Operations {
                             &budget,
                             sink_batch,
                             input_progress,
-                        ))
-                        .await;
+                            startup_work,
+                        ));
+                    let result = if let Some(feedback) = &feedback {
+                        feedback.scope(processing).await
+                    } else {
+                        processing.await
+                    };
                     if result.is_ok() {
                         if let Some(fence) = progress_fence {
                             fence.completed();
@@ -4903,6 +5121,17 @@ impl Operations {
         force: bool,
         cancellation: Option<crate::computation::instance::StartupCancellation>,
     ) {
+        if self.draining.is_empty()
+            && self.stopping.is_empty()
+            && !self
+                .active
+                .values()
+                .any(|active| active.operation == Operation::Process)
+        {
+            if let Some(activity) = &graph.feedback {
+                activity.resume();
+            }
+        }
         update(graph, |state| {
             for index in &selected {
                 let id = graph.nodes[*index].descriptor.id();

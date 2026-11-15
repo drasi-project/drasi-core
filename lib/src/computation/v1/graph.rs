@@ -720,6 +720,7 @@ impl Component {
 /// One producer output cannot route to multiple input ports of the same component:
 /// independent queues would not preserve component-wide FIFO for that stream.
 pub struct ComputationGraphBuilder {
+    feedback_shutdown: bool,
     id: Arc<str>,
     components: Vec<(ComponentName, Component)>,
     edges: Vec<(EdgeDefinition, Box<dyn PipeProvider>)>,
@@ -745,6 +746,15 @@ pub struct ComputationGraphBuilder {
 }
 
 impl ComputationGraphBuilder {
+    /// Coordinate finite same-graph feedback before whole-graph stop.
+    /// External admission is fenced first; future wakeups are not admitted.
+    /// Unknown pipe-idle observations and feedback cycles that cannot progress
+    /// fail rather than claiming completed handling.
+    pub fn feedback_shutdown(mut self, enabled: bool) -> Self {
+        self.feedback_shutdown = enabled;
+        self
+    }
+
     pub fn require_recovery(mut self, requirement: super::RecoveryRequirement) -> Self {
         self.recovery_requirements.push(requirement);
         self
@@ -1437,6 +1447,9 @@ impl ComputationGraphBuilder {
             .expect("new metadata publication")
             .clear();
         let graph = ComputationGraph {
+            feedback: self
+                .feedback_shutdown
+                .then(|| Arc::new(super::feedback::Activity::default())),
             execution_scope: snapshot.id.clone(),
             inspector: super::ComputationInspector::new(
                 desired.clone(),
@@ -1707,6 +1720,7 @@ impl GraphControl {
 /// quarantines the construction generation even after a successful stop.
 /// Components owning external workers must retain and join them in their hooks.
 pub struct ComputationGraph {
+    feedback: Option<Arc<super::feedback::Activity>>,
     snapshot: GraphSnapshot,
     // Stable runtime indices survive compact desired snapshots and removals.
     nodes: Vec<NodeSnapshot>,
@@ -1806,6 +1820,7 @@ impl ComputationGraph {
     }
     pub fn builder(id: impl Into<Arc<str>>) -> ComputationGraphBuilder {
         ComputationGraphBuilder {
+            feedback_shutdown: false,
             id: id.into(),
             components: Vec::new(),
             edges: Vec::new(),
@@ -2675,7 +2690,10 @@ impl FlowProgress {
     }
 }
 
-struct DeliveryWork(Arc<FlowProgress>);
+struct DeliveryWork {
+    progress: Arc<FlowProgress>,
+    _activity: Option<super::feedback::Work>,
+}
 
 impl DeliveryWork {
     fn new(progress: Arc<FlowProgress>) -> GraphResult<Self> {
@@ -2686,14 +2704,17 @@ impl DeliveryWork {
             })
             .map_err(|_| topology("in-flight delivery counter exhausted"))?;
         progress.notify.notify_one();
-        Ok(Self(progress))
+        Ok(Self {
+            progress,
+            _activity: None,
+        })
     }
 }
 
 impl Drop for DeliveryWork {
     fn drop(&mut self) {
-        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
-        self.0.notify.notify_one();
+        self.progress.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.progress.notify.notify_one();
     }
 }
 
@@ -2703,15 +2724,29 @@ struct PendingInput {
 }
 
 async fn receive(input: &mut Incoming) -> (&mut Incoming, std::result::Result<(), PipeError>) {
+    let activity = super::feedback::Activity::current();
     let result = if input.pending.is_some() || input.exhausted {
         Ok(())
     } else {
-        match input.receiver.receive().await {
+        let (received, work) = if let Some(activity) = &activity {
+            let (received, work) =
+                Box::pin(activity.poll_work(false, input.receiver.receive())).await;
+            (received, Some(work))
+        } else {
+            (input.receiver.receive().await, None)
+        };
+        match received {
             Ok(delivery) => {
                 input.exhausted = delivery.is_none();
                 if let Some(delivery) = delivery {
                     match DeliveryWork::new(input.progress.clone()) {
-                        Ok(work) => input.pending = Some(PendingInput { delivery, work }),
+                        Ok(mut delivery_work) => {
+                            delivery_work._activity = work;
+                            input.pending = Some(PendingInput {
+                                delivery,
+                                work: delivery_work,
+                            });
+                        }
                         Err(error) => return (input, Err(PipeError::Backend(error.into()))),
                     }
                 }
@@ -2974,6 +3009,7 @@ async fn run_node(
     budget: &NodeWorkBudget,
     sink_batch: &mut Option<Box<sink_batching::SinkBatchState>>,
     input_progress: &mut Option<Box<input_progress::InputProgress>>,
+    mut startup_work: Option<super::feedback::Work>,
 ) -> GraphResult<()> {
     validate_source_progress(
         component,
@@ -2986,6 +3022,7 @@ async fn run_node(
             .batching()
             .map_err(|error| component_error(node, "sink batch policy", error))?;
         if batching.is_some() || sink_batch.is_some() {
+            drop(startup_work.take());
             return Box::pin(sink_batching::run(
                 component,
                 node,
@@ -3011,6 +3048,7 @@ async fn run_node(
         _ => None,
     };
     if inputs.is_empty() && !matches!(component, Component::Source(_)) && wakeup.is_none() {
+        drop(startup_work.take());
         cancelled(quiesce).await;
         return Ok(());
     }
@@ -3022,6 +3060,7 @@ async fn run_node(
     let mut ready: Vec<&mut Incoming> = Vec::new();
     if let Component::Source(source) = component {
         if let Some(admission) = source.admission() {
+            drop(startup_work.take());
             // Keep the opt-in journal future out of every fast node's state.
             return Box::pin(run_admitted_source(
                 component, node, sequences, outputs, quiesce, budget, admission,
@@ -3029,6 +3068,7 @@ async fn run_node(
             .await;
         }
     }
+    let activity = super::feedback::Activity::current();
     'processing: loop {
         if let Some(yield_node) = budget.checkpoint() {
             yield_node.await;
@@ -3039,6 +3079,7 @@ async fn run_node(
         let mut acknowledgement = None;
         let mut consumed = None;
         let mut handled_input = None;
+        let mut scheduled_work = startup_work.take();
         let mut emissions = match component {
             Component::Source(source) => {
                 match tokio::select! {
@@ -3056,12 +3097,31 @@ async fn run_node(
             _ => 'input_work: {
                 if let Component::Transformer(transformer) = component {
                     if transformer.has_pending_emissions() {
+                        if scheduled_work.is_none() {
+                            scheduled_work =
+                                activity.as_ref().and_then(|activity| activity.enter(false));
+                            if activity.is_some() && scheduled_work.is_none() {
+                                cancelled(quiesce).await;
+                                return Ok(());
+                            }
+                        }
                         break 'input_work transformer.continue_transform().await.map_err(
                             |source| component_error(node, "recovered processing", source),
                         )?;
                     }
                 }
+                drop(scheduled_work.take());
                 if ready.is_empty() {
+                    let wait = async {
+                        let wakeup = wakeup.as_ref().expect("wakeup branch");
+                        if let Some(activity) = &activity {
+                            let (result, work) =
+                                Box::pin(activity.poll_work(true, wakeup.wait())).await;
+                            result.map(|()| Some(work))
+                        } else {
+                            wakeup.wait().await.map(|()| None)
+                        }
+                    };
                     let (scheduled, incoming) = tokio::select! {
                         biased;
                         _ = cancelled(quiesce) => return Ok(()),
@@ -3075,14 +3135,14 @@ async fn run_node(
                             {
                                 return Ok::<_, GraphError>((false, None));
                             }
-                            wakeup.wait().await.map_err(|source| {
+                            scheduled_work = wait.await.map_err(|source| {
                                 component_error(node, "scheduled wait", source)
                             })?;
                             Ok((true, None))
                         } else {
                             tokio::select! {
-                                result = wakeup.wait() => {
-                                    result.map_err(|source| component_error(node, "scheduled wait", source))?;
+                                result = wait => {
+                                    scheduled_work = result.map_err(|source| component_error(node, "scheduled wait", source))?;
                                     Ok((true, None))
                                 }
                                 incoming = receivers.next() => Ok((false, incoming)),
@@ -3285,6 +3345,7 @@ async fn run_node(
                 .map_err(|source| GraphError::Pipe { edge, source })?;
         }
         drop(consumed);
+        drop(scheduled_work);
     }
 }
 

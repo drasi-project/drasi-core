@@ -400,6 +400,7 @@ impl InspectionAPI {
             construction_timeout_secs: self.config.construction_timeout_secs,
             resource_construction_timeout_secs: self.config.resource_construction_timeout_secs,
             cleanup_timeout_secs: self.config.cleanup_timeout_secs,
+            feedback_shutdown: self.config.feedback_shutdown,
             storage_backends: self.config.storage_backends.clone(),
             queries: self
                 .computation

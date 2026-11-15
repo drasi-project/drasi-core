@@ -459,6 +459,91 @@ same-domain publication participation remains unfinished, and the broad
 
 ## Opt-in producer admission (Rust service)
 
+### Coordinated feedback shutdown
+
+For a graph whose awaited processing callbacks submit feedback to admitted
+Sources, enable `DrasiLib::builder().with_feedback_shutdown(true)` (or
+`ComputationGraph::builder(...).feedback_shutdown(true)` for a standalone graph).
+The serializable instance option is `feedback_shutdown`, defaulting to `false`.
+This opts into a **bounded finite feedback drain** on whole-graph stop, including
+`DrasiLib::stop()` and `shutdown()`. It is not a promise to finish future scheduled
+work or an arbitrary nonterminating feedback loop.
+
+External callers keep their `Arc<SourceAdmission>`. A sink, transformer or
+scheduled processing callback uses the distinct `FeedbackAdmission` view:
+
+```rust,ignore
+// Store this view in the component, or obtain it inside handle/transform.
+let feedback = source_admission.feedback();
+
+// Run inside the opted-in graph's awaited processing callback.
+feedback.wait_active().await?;
+let session = feedback.register_producer(producer_id.clone()).await?;
+let receipt = feedback.admit_wait(&session, sequence, &unchanged_input).await?;
+```
+
+`FeedbackAdmission` also exposes `producer_status` and `admission_receipt`.
+Keep producer identity, sequence and payload stable on retries, just as with
+ordinary admission. The capability checks the executing graph's context:
+external callers, another graph, lifecycle hooks and independently spawned
+workers cannot use it. It does not confer cancellation safety on external effects.
+All admitted publication must still go through the graph service, not direct
+`QosChannel` writes.
+
+Code shared by callbacks and external ingress can choose its path with
+`source_admission.in_feedback_context()`. It is true only inside an awaited
+processing callback of that admission's opted-in graph, and false for ordinary
+graphs, external callers, spawned workers and other graphs. It grants no
+authority: the chosen capability still enforces the executing context.
+
+Whole-graph stop fences **new external submissions** first. An external
+`wait_active` then returns `Closed`, even while `is_active()` still reports the
+mailbox retained for internal feedback. Requests already submitted to the bounded
+mailbox remain owned until execution or an explicit failure. External callers
+waiting for mailbox space or retrying a rejected full journal are not accepted
+work and are woken with `Closed`.
+
+The controller keeps consumers and admitted Sources running while queued data,
+in-flight callbacks, admitted wakeups, their output continuations and their
+acknowledgements drain. It quiesces ordinary non-admitted producers/services using
+their existing lifecycle contracts. Wakeups not yet admitted at the fence are
+not polled again: their pending state belongs to the component/provider and must
+survive cancellation/restart under its declared recovery contract. A partial
+host-collected sink batch remains owned through handling and acknowledgement.
+This option does not discover arbitrary worker, network or resource dependencies.
+
+The final boundary is not a one-time empty-queue sample. Graph work is registered
+before a receive or wakeup is polled, retained through processing/acknowledgement,
+and sequenced with mailbox submissions. The controller seals further processing
+only when no work is active and every pipe reports idle at an unchanged activity
+epoch. If sealing wins a dequeue race, the receiver is not polled; accepted input
+remains with its existing pipe/provider. Consumers are not individually parked
+while other callbacks still need them to relieve backpressure.
+
+Failure remains failure. Unknown pipe-idle evidence, processing failures and
+nonterminating or self-capacity-blocked feedback do not become successful stops.
+The cleanup budget bounds the drain; the ordinary cancellation/cleanup path
+preserves actual durable journals and unacknowledged cursors. An installed drain
+whose consumer fails returns that processing cause rather than waiting for an
+impossible acknowledgement until timeout. A failed shutdown is not proof of clean
+handling; preserve its error and resolve uncertain effects/receipts before retry.
+Stopping alone never retires subscribers or authorizes deletion of accepted data.
+Volatile data and arbitrary external side effects are not made durable by opting in.
+
+A capacity-one source whose handler must synchronously admit another record
+before acknowledging the first has a causal capacity cycle. This contract returns
+a bounded failure and retains the first record; it neither increases capacity nor
+pretends feedback was accepted. A full journal with an independently progressing
+consumer can drain normally.
+
+With the option disabled, existing source-first shutdown and fail-fast admission
+remain unchanged. Scoped stop/quiesce keeps its existing selected-edge semantics;
+it is not a feedback-aware partial-graph barrier. A successful whole-graph stop
+followed by start reopens external admission on the new activation without
+resetting durable producer sessions or receipts.
+
+### Durable admission setup
+
 `QosChannel` can also own durable client acceptance. Rust sources delegate
 publication to the graph using `SourceAdmission`. Native HTTP/gRPC sources can
 bind the same service through the optional native service-v1 interface and their

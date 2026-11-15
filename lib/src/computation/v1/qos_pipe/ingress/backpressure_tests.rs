@@ -202,6 +202,97 @@ fn rejected(error: PipeError, expected: AdmissionRejection) {
 }
 
 #[tokio::test]
+async fn feedback_fence_preserves_submitted_external_request_and_uncertain_result() {
+    for uncertain in [false, true] {
+        let fixture = Fixture::new().await;
+        let service = &fixture.service;
+        let activity = Arc::new(crate::computation::v1::feedback::Activity::default());
+        service.bind_activity(Some(activity.clone())).unwrap();
+        let _activation = service.begin_activation().unwrap();
+        let mut lease = service.bind().unwrap();
+        let (_pause, mut quiesce) = watch::channel(false);
+        let input = input(1);
+        let request = service.admit_wait(&fixture.session, 1, &input);
+        tokio::pin!(request);
+        assert!(futures::poll!(&mut request).is_pending());
+        assert!(activity.idle_epoch().is_none());
+        activity.begin();
+        service.wake_feedback();
+        assert!(matches!(
+            service.wait_active().await,
+            Err(PipeError::Closed)
+        ));
+        assert!(matches!(
+            service.register_producer(ComponentId::generate()).await,
+            Err(PipeError::Closed)
+        ));
+        if uncertain {
+            fixture.gate.mode.store(2, Ordering::SeqCst);
+        }
+        let processed = lease.process(&mut quiesce, |_| Ok(())).await;
+        let result = request.await;
+        if uncertain {
+            assert!(processed.is_err());
+            assert!(matches!(result, Err(PipeError::AcceptanceUnknown { .. })));
+        } else {
+            assert_eq!(processed.unwrap(), Some(true));
+            assert_eq!(result.unwrap().position, 1);
+        }
+        assert!(matches!(
+            lease.requests.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(activity.idle_epoch().is_some());
+        drop(lease);
+        service.channel.shutdown().await.unwrap();
+        let reopened = Fixture::open(fixture.directory.path(), fixture.gate.clone()).await;
+        assert_eq!(
+            reopened
+                .admission_receipt(&fixture.session, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .position,
+            1
+        );
+        assert_eq!(reopened.progress().await.unwrap().processed["consumer"], 0);
+        reopened.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn external_capacity_wait_is_revoked_without_consuming_sequence() {
+    let fixture = Fixture::new().await;
+    fixture.fill().await;
+    let service = &fixture.service;
+    let activity = Arc::new(crate::computation::v1::feedback::Activity::default());
+    service.bind_activity(Some(activity.clone())).unwrap();
+    let _activation = service.begin_activation().unwrap();
+    let mut lease = service.bind().unwrap();
+    let (_pause, mut quiesce) = watch::channel(false);
+    let input = input(2);
+    let waiting = service.admit_wait(&fixture.session, 2, &input);
+    tokio::pin!(waiting);
+    assert!(futures::poll!(&mut waiting).is_pending());
+    assert_eq!(
+        lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+        Some(false)
+    );
+    assert!(futures::poll!(&mut waiting).is_pending());
+    activity.begin();
+    service.wake_feedback();
+    assert!(matches!(waiting.await, Err(PipeError::Closed)));
+    assert!(service
+        .channel
+        .admission_receipt(&fixture.session, 2)
+        .await
+        .unwrap()
+        .is_none());
+    drop(lease);
+    service.channel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn waits_for_cursor_commit_contention_while_admit_stays_fail_fast() {
     let fixture = Fixture::new().await;
     fixture.fill().await;

@@ -8,6 +8,11 @@ const PENDING_REQUESTS: usize = 16;
 
 type Reply<T> = oneshot::Sender<Result<T, PipeError>>;
 
+struct QueuedRequest {
+    request: Request,
+    _work: Option<super::super::feedback::Work>,
+}
+
 enum Request {
     Admit {
         session: ProducerSession,
@@ -71,7 +76,8 @@ pub struct SourceAdmission {
 struct Binding {
     generation: u64,
     opening: bool,
-    requests: Option<mpsc::Sender<Request>>,
+    requests: Option<mpsc::Sender<QueuedRequest>>,
+    activity: Option<Arc<super::super::feedback::Activity>>,
     failure: Option<ActivationFailure>,
 }
 
@@ -95,6 +101,73 @@ impl ActivationFailure {
 }
 
 impl SourceAdmission {
+    /// Obtain the callback-only view for opt-in feedback shutdown.
+    /// The view is usable only in an awaited processing callback of the same
+    /// graph. Spawned workers and external ingress must use ordinary admission.
+    pub fn feedback(self: &Arc<Self>) -> FeedbackAdmission {
+        FeedbackAdmission(self.clone())
+    }
+
+    /// Whether the caller is an awaited processing callback of this admission's
+    /// opted-in graph, where [`Self::feedback`] is the required path. False for
+    /// ordinary graphs, external callers, spawned workers and other graphs.
+    /// Shared code reachable from both callbacks and external ingress uses this
+    /// to choose a path; it grants no authority.
+    pub fn in_feedback_context(&self) -> bool {
+        self.binding.lock().is_ok_and(|binding| {
+            binding
+                .activity
+                .as_ref()
+                .is_some_and(|activity| activity.is_current())
+        })
+    }
+
+    pub(crate) fn bind_activity(
+        &self,
+        activity: Option<Arc<super::super::feedback::Activity>>,
+    ) -> Result<(), PipeError> {
+        let mut binding = self
+            .binding
+            .lock()
+            .map_err(|_| backend("source admission binding poisoned"))?;
+        if binding.opening {
+            return Err(backend("cannot change an active admission binding"));
+        }
+        binding.activity = activity;
+        Ok(())
+    }
+
+    pub(crate) fn wake_feedback(&self) {
+        self.activation_changed.notify_waiters();
+    }
+
+    fn check_binding(binding: &Binding) -> Result<(), PipeError> {
+        if let Some(activity) = &binding.activity {
+            activity.check_admission()?;
+        } else if super::super::feedback::Activity::feedback_requested() {
+            return Err(backend(
+                "feedback target requires coordinated feedback shutdown",
+            ));
+        }
+        Ok(())
+    }
+
+    fn queued(&self, request: Request) -> Result<QueuedRequest, PipeError> {
+        let binding = self
+            .binding
+            .lock()
+            .map_err(|_| backend("source admission binding poisoned"))?;
+        Self::check_binding(&binding)?;
+        Ok(QueuedRequest {
+            request,
+            _work: binding
+                .activity
+                .as_ref()
+                .map(|activity| activity.request())
+                .transpose()?,
+        })
+    }
+
     pub async fn new(channel: Arc<QosChannel>, port: PortId) -> Result<Arc<Self>, PipeError> {
         let state = channel.state.lock().await;
         channel.check()?;
@@ -173,6 +246,7 @@ impl SourceAdmission {
                 if *generation.get_or_insert(binding.generation) != binding.generation {
                     return Err(PipeError::Closed);
                 }
+                Self::check_binding(&binding)?;
                 if let Some(failure) = &binding.failure {
                     return Err(failure.error());
                 }
@@ -289,24 +363,24 @@ impl SourceAdmission {
             tokio::pin!(changed);
             changed.as_mut().enable();
             let permit = self
-                .wait_in_activation(generation, async {
+                .wait_in_activation(generation, false, async {
                     sender.reserve().await.map_err(|_| PipeError::Closed)
                 })
                 .await?;
             let (reply, receive) = oneshot::channel();
-            permit.send(Request::Admit {
+            permit.send(self.queued(Request::Admit {
                 session: session.clone(),
                 sequence,
                 input: input.clone(),
                 wait: true,
                 reply,
-            });
+            })?);
             let result = receive.await.map_err(|_| PipeError::AcceptanceUnknown {
                 source: anyhow::anyhow!("graph admission ended before its acceptance response"),
             })?;
             match result {
                 Err(PipeError::CapacityExhausted) => {
-                    self.wait_in_activation(generation, self.channel.wait_changed(changed))
+                    self.wait_in_activation(generation, false, self.channel.wait_changed(changed))
                         .await?;
                 }
                 result => return result,
@@ -317,6 +391,7 @@ impl SourceAdmission {
     async fn wait_in_activation<T>(
         &self,
         generation: u64,
+        submitted: bool,
         wait: impl std::future::Future<Output = Result<T, PipeError>>,
     ) -> Result<T, PipeError> {
         tokio::pin!(wait);
@@ -335,6 +410,9 @@ impl SourceAdmission {
                     .map_err(|_| backend("source admission binding poisoned"))?;
                 if generation != binding.generation {
                     return Err(PipeError::Closed);
+                }
+                if !submitted {
+                    Self::check_binding(&binding)?;
                 }
                 if let Some(failure) = &binding.failure {
                     return Err(failure.error());
@@ -403,19 +481,20 @@ impl SourceAdmission {
         lost_response: impl FnOnce() -> PipeError,
     ) -> Result<T, PipeError> {
         self.channel.check()?;
-        let sender = self
-            .binding
-            .lock()
-            .map_err(|_| backend("source admission binding poisoned"))?
-            .requests
-            .clone()
-            .ok_or(PipeError::Closed)?;
+        let sender = {
+            let binding = self
+                .binding
+                .lock()
+                .map_err(|_| backend("source admission binding poisoned"))?;
+            Self::check_binding(&binding)?;
+            binding.requests.clone().ok_or(PipeError::Closed)?
+        };
         let permit = sender.try_reserve().map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => AdmissionRejection::Busy.into(),
             mpsc::error::TrySendError::Closed(_) => PipeError::Closed,
         })?;
         let (reply, receive) = oneshot::channel();
-        permit.send(request(reply)?);
+        permit.send(self.queued(request(reply)?)?);
         receive.await.map_err(|_| lost_response())?
     }
 
@@ -516,7 +595,7 @@ fn metadata_unknown() -> PipeError {
 pub(crate) struct AdmissionLease {
     service: Arc<SourceAdmission>,
     generation: u64,
-    requests: mpsc::Receiver<Request>,
+    requests: mpsc::Receiver<QueuedRequest>,
 }
 
 pub(crate) struct AdmissionActivation {
@@ -548,6 +627,7 @@ impl AdmissionLease {
             }
             request = self.requests.recv() => request.ok_or(PipeError::Closed)?,
         };
+        let QueuedRequest { request, _work } = request;
         if request.cancelled() {
             return Ok(Some(false));
         }
@@ -571,6 +651,7 @@ impl AdmissionLease {
                         },
                         state = self.service.wait_in_activation(
                             self.generation,
+                            true,
                             channel.lock_admission(),
                         ) => state,
                     };
@@ -612,13 +693,57 @@ impl Drop for AdmissionLease {
     fn drop(&mut self) {
         self.requests.close();
         while let Ok(request) = self.requests.try_recv() {
-            request.reject();
+            request.request.reject();
         }
         self.service
             .channel
             .admission_bound
             .store(false, Ordering::Release);
         self.service.end_activation(self.generation);
+    }
+}
+
+/// Same-graph processing callback capability for coordinated feedback shutdown.
+/// This does not extend to spawned workers, other graphs or lifecycle hooks.
+#[derive(Clone, Debug)]
+pub struct FeedbackAdmission(Arc<SourceAdmission>);
+
+impl FeedbackAdmission {
+    /// Observe the internal mailbox, including during the external ingress fence.
+    pub async fn wait_active(&self) -> Result<(), PipeError> {
+        super::super::feedback::feedback(self.0.wait_active()).await
+    }
+    /// Register the same stable producer identity in the durable session ledger.
+    pub async fn register_producer(
+        &self,
+        producer: ComponentId,
+    ) -> Result<ProducerSession, PipeError> {
+        super::super::feedback::feedback(self.0.register_producer(producer)).await
+    }
+    /// Read the durable producer frontier.
+    pub async fn producer_status(
+        &self,
+        session: &ProducerSession,
+    ) -> Result<ProducerStatus, PipeError> {
+        super::super::feedback::feedback(self.0.producer_status(session)).await
+    }
+    /// Resolve a possibly lost response without submitting different input.
+    pub async fn admission_receipt(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+    ) -> Result<Option<AdmissionReceipt>, PipeError> {
+        super::super::feedback::feedback(self.0.admission_receipt(session, sequence)).await
+    }
+    /// Submit feedback with the original session/sequence/payload and bounded
+    /// mailbox. Uncertain commits are returned, never automatically retried.
+    pub async fn admit_wait(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &ChangeEnvelope,
+    ) -> Result<AdmissionReceipt, PipeError> {
+        super::super::feedback::feedback(self.0.admit_wait(session, sequence, input)).await
     }
 }
 

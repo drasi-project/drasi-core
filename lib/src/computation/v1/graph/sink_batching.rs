@@ -340,6 +340,7 @@ pub(super) async fn run(
         return Ok(());
     }
     let state = retained.get_or_insert_with(|| Box::new(SinkBatchState::default()));
+    let activity = super::super::feedback::Activity::current();
     loop {
         check_descriptor(component, node)?;
         let Component::Sink(sink) = component else {
@@ -359,11 +360,17 @@ pub(super) async fn run(
             }
             return Ok(());
         }
-        if state.should_flush(policy) {
+        if state.should_flush(policy)
+            || (!state.is_empty()
+                && activity
+                    .as_ref()
+                    .is_some_and(|activity| activity.draining()))
+        {
             state.flush(component, node, input_progress).await?;
             continue;
         }
         if state.is_empty()
+            && activity.is_none()
             && inputs.len() == 1
             && inputs[0].pending.is_none()
             && !inputs[0].exhausted
@@ -415,6 +422,8 @@ pub(super) async fn run(
         let selected = tokio::select! {
             biased;
             _ = cancelled(quiesce) => continue,
+            _ = async { activity.as_ref().expect("feedback enabled").wait_draining().await },
+                if activity.is_some() && !state.is_empty() => continue,
             _ = async {
                 match deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,

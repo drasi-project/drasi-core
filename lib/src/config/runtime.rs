@@ -275,6 +275,8 @@ pub struct RuntimeConfig {
     pub construction_timeout_secs: Option<u64>,
     pub resource_construction_timeout_secs: Option<u64>,
     pub cleanup_timeout_secs: Option<u64>,
+    /// Opt-in same-graph feedback drain at whole-graph stop.
+    pub feedback_shutdown: bool,
     /// Original storage backend configurations
     pub storage_backends: Vec<crate::indexes::StorageBackendConfig>,
     /// Global default recovery policy for all queries.
@@ -322,6 +324,7 @@ impl std::fmt::Debug for RuntimeConfig {
                 &self.resource_construction_timeout_secs,
             )
             .field("cleanup_timeout_secs", &self.cleanup_timeout_secs)
+            .field("feedback_shutdown", &self.feedback_shutdown)
             .field("default_recovery_policy", &self.default_recovery_policy)
             .finish()
     }
@@ -409,6 +412,7 @@ impl RuntimeConfig {
             construction_timeout_secs: config.construction_timeout_secs,
             resource_construction_timeout_secs: config.resource_construction_timeout_secs,
             cleanup_timeout_secs: config.cleanup_timeout_secs,
+            feedback_shutdown: config.feedback_shutdown,
             storage_backends,
             default_recovery_policy,
         }

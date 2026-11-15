@@ -248,6 +248,9 @@ pub struct DrasiLibConfig {
     /// Per-owner cleanup deadline, independent of the overall shutdown budget (default: 5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_timeout_secs: Option<u64>,
+    /// Coordinate a finite same-graph feedback drain before whole-graph stop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub feedback_shutdown: bool,
     /// Global storage backend definitions that can be referenced by queries
     #[serde(default)]
     pub storage_backends: Vec<StorageBackendConfig>,
@@ -269,6 +272,7 @@ impl Default for DrasiLibConfig {
             construction_timeout_secs: None,
             resource_construction_timeout_secs: None,
             cleanup_timeout_secs: None,
+            feedback_shutdown: false,
             storage_backends: Vec::new(),
             queries: Vec::new(),
         }
