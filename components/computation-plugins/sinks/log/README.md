@@ -1,18 +1,20 @@
 # Native log sink
 
-`drasi-computation-sink-log` provides `drasi.standard/log` as a native
-ComputationGraph sink.
-
-The sink consumes standard graph-change envelopes and completes each input only
-after formatting and emitting every change. Graph pipes therefore own retry and
-durability; the sink has no legacy reaction checkpoint or migration behavior.
-
-Configuration supports optional `outputs` aliases, per-output `routes`, and a
-`defaultTemplate`. Templates use the standard native change context, including
-`output`, `sequence`, `operation`, `identity`, `before`, `after`, and
-`removedProperties`. Without a template, the complete change notification is
-logged as JSON.
+`drasi-computation-sink-log` provides `drasi.standard/log` (implementation `1`,
+configuration version `1`, native ABI 4.0). It writes each standard graph
+change as one line, rendered by a per-output Handlebars template or formatted
+as JSON or the legacy compact form, to the process `log` facade, stdout or
+stderr. Each input completes (`Handled`) after its lines are emitted.
 
 ```sh
 cargo build -p drasi-computation-sink-log --features dynamic-plugin
 ```
+
+- **[DESIGN.md](DESIGN.md)**: rendering and validation, routing, render-failure
+  policy, delivery profile, lifecycle, management and legacy differences.
+- **[CONFIGURATION.md](CONFIGURATION.md)**: every field with defaults and update
+  boundaries, the template reference (context, helpers, routing), examples and
+  the legacy mapping.
+
+Minimal configuration: `{}` logs every change as JSON at `info` on target
+`drasi.log`.

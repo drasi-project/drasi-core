@@ -8,7 +8,6 @@ use anyhow::{ensure, Result};
 use drasi_computation_contracts::ComponentId;
 #[cfg(feature = "ingress")]
 use drasi_computation_contracts::StreamId;
-#[cfg(any(feature = "ingress", feature = "http-sink", feature = "grpc-sink"))]
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
 use serde_json::Value;
@@ -42,7 +41,7 @@ pub fn timeout_ms() -> u64 {
 }
 
 /// Listeners bind the loopback interface unless configured otherwise.
-#[cfg(feature = "ingress")]
+#[cfg(feature = "listener")]
 pub fn host() -> String {
     "127.0.0.1".into()
 }
@@ -52,7 +51,7 @@ pub fn ingress_capacity() -> usize {
     1024
 }
 
-#[cfg(feature = "ingress")]
+#[cfg(feature = "listener")]
 pub fn max_connections() -> usize {
     1024
 }
@@ -60,12 +59,10 @@ pub fn max_connections() -> usize {
 /// A configuration string, such as a token or private key, that is never
 /// printed by `Debug`. Serialization is transparent: `configuration()` is the
 /// persistence hook and must return the configured value.
-#[cfg(feature = "ingress")]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SecretString(String);
 
-#[cfg(feature = "ingress")]
 impl SecretString {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
@@ -75,7 +72,6 @@ impl SecretString {
     }
 }
 
-#[cfg(feature = "ingress")]
 impl std::fmt::Debug for SecretString {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("<redacted>")
@@ -83,7 +79,7 @@ impl std::fmt::Debug for SecretString {
 }
 
 /// Per-client admission rate, in requests (and streamed messages) per second.
-#[cfg(feature = "ingress")]
+#[cfg(feature = "listener")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RateLimit {
     pub per_second: u32,
@@ -92,7 +88,7 @@ pub struct RateLimit {
 
 /// Validated PEM material for a TLS listener. A client CA enables mutual TLS:
 /// clients must then present a certificate issued by that CA.
-#[cfg(feature = "ingress")]
+#[cfg(feature = "listener")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TlsMaterial {
     pub certificate_pem: String,
@@ -101,7 +97,7 @@ pub struct TlsMaterial {
 }
 
 /// Validated access-control settings shared by the HTTP and gRPC listeners.
-#[cfg(feature = "ingress")]
+#[cfg(feature = "listener")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IngressSecurity {
     /// Accepted bearer tokens. Two tokens allow rotation without downtime.
@@ -113,7 +109,7 @@ pub struct IngressSecurity {
 }
 
 /// Raw shared security fields, as they appear in a component configuration.
-#[cfg(feature = "ingress")]
+#[cfg(feature = "listener")]
 #[derive(Clone, Copy, Default)]
 pub struct SecuritySettings<'a> {
     pub auth_token: Option<&'a SecretString>,
@@ -126,7 +122,7 @@ pub struct SecuritySettings<'a> {
     pub tls_client_ca_pem: Option<&'a str>,
 }
 
-#[cfg(feature = "ingress")]
+#[cfg(feature = "listener")]
 impl SecuritySettings<'_> {
     pub fn build(self) -> Result<IngressSecurity> {
         let mut auth_tokens = Vec::new();
@@ -296,6 +292,9 @@ pub enum FailurePolicy {
 
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
 impl FailurePolicy {
+    /// Applies the policy to one delivery's outcome. Under `skip` the failure
+    /// is logged (sanitized) and the input completes; under `strict` the
+    /// failure is returned so the host retries the input.
     pub fn delivery(
         self,
         result: Result<()>,
@@ -307,11 +306,44 @@ impl FailurePolicy {
             (_, Ok(())) => Ok(()),
             (Self::Strict, Err(error)) => Err(error),
             (Self::Skip, Err(error)) => {
-                crate::diag!(Warn, "deliberate delivery skip: component={component} output={output} sequence={sequence} error={error:#}");
+                crate::diag!(
+                    Warn,
+                    "deliberate delivery skip: component={component} output={} sequence={sequence} error={}",
+                    sanitize(output),
+                    sanitize(&format!("{error:#}"))
+                );
                 Ok(())
             }
         }
     }
+}
+
+/// Upper bound on one logged field, so logs never carry whole bodies.
+#[cfg(feature = "sink")]
+pub const MAX_LOG_FIELD_LEN: usize = 512;
+
+/// A log-safe rendering of untrusted text: control characters escaped and
+/// the length capped at [`MAX_LOG_FIELD_LEN`] bytes.
+#[cfg(feature = "sink")]
+pub fn sanitize(text: &str) -> String {
+    let mut result = String::with_capacity(text.len().min(MAX_LOG_FIELD_LEN));
+    for character in text.chars() {
+        if character.is_control() {
+            result.extend(character.escape_default());
+        } else {
+            result.push(character);
+        }
+        if result.len() >= MAX_LOG_FIELD_LEN {
+            let mut end = MAX_LOG_FIELD_LEN;
+            while !result.is_char_boundary(end) {
+                end -= 1;
+            }
+            result.truncate(end);
+            result.push_str("...");
+            break;
+        }
+    }
+    result
 }
 
 /// Header and gRPC metadata names carrying the real component and output port
@@ -320,6 +352,104 @@ impl FailurePolicy {
 pub const COMPONENT_HEADER: &str = "x-drasi-component";
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
 pub const PORT_HEADER: &str = "x-drasi-port";
+/// Header and gRPC metadata name carrying a request's stable delivery
+/// identity; see [`delivery_id`].
+#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
+pub const DELIVERY_ID_HEADER: &str = "x-drasi-delivery-id";
+
+/// Names a sink sets itself; configuration and templates may not set them.
+#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
+pub const RESERVED_HEADERS: [&str; 3] = [COMPONENT_HEADER, PORT_HEADER, DELIVERY_ID_HEADER];
+
+/// The stable identity of the changes `first..=last` from one output:
+/// `{component}/{port}/{sequence}.{ordinal}` for one change, or
+/// `{component}/{port}/{sequence}.{ordinal}-{sequence}.{ordinal}` for a
+/// contiguous run. The producer's logical sequence and the change ordinal are
+/// replayed unchanged, so a retried or replayed delivery carries the same
+/// identity and a receiver can deduplicate it. It contains no transport,
+/// retry or configuration identity.
+#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
+pub fn delivery_id(
+    first: &drasi_computation_contracts::ChangeNotification,
+    last: &drasi_computation_contracts::ChangeNotification,
+) -> String {
+    let output = first.output();
+    let start = (first.sequence(), first.change().ordinal());
+    let end = (last.sequence(), last.change().ordinal());
+    if start == end {
+        format!(
+            "{}/{}/{}.{}",
+            output.component, output.port, start.0, start.1
+        )
+    } else {
+        format!(
+            "{}/{}/{}.{}-{}.{}",
+            output.component, output.port, start.0, start.1, end.0, end.1
+        )
+    }
+}
+
+/// Validated client TLS settings for an outbound connection: an optional
+/// private CA to trust in addition to the system roots, and an optional
+/// client certificate and key for mutual TLS.
+#[cfg(feature = "sink")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClientTls {
+    pub ca_pem: Option<String>,
+    pub certificate_pem: Option<String>,
+    pub private_key_pem: Option<SecretString>,
+}
+
+#[cfg(feature = "sink")]
+impl ClientTls {
+    /// Checks the PEM documents parse and the certificate and key are paired.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(ca) = &self.ca_pem {
+            ensure!(
+                pem_certificates(ca, "tlsCaPem")? > 0,
+                "tlsCaPem contains no certificate"
+            );
+        }
+        match (&self.certificate_pem, &self.private_key_pem) {
+            (None, None) => {}
+            (Some(certificate), Some(key)) => {
+                ensure!(
+                    pem_certificates(certificate, "tlsClientCertificatePem")? > 0,
+                    "tlsClientCertificatePem contains no certificate"
+                );
+                ensure!(
+                    key.expose().len() <= MAX_PEM_BYTES,
+                    "tlsClientPrivateKeyPem exceeds 256 KiB"
+                );
+                rustls_pemfile::private_key(&mut key.expose().as_bytes())
+                    .map_err(|_| anyhow::anyhow!("tlsClientPrivateKeyPem is not valid PEM"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("tlsClientPrivateKeyPem contains no private key")
+                    })?;
+            }
+            _ => anyhow::bail!(
+                "tlsClientCertificatePem and tlsClientPrivateKeyPem must be configured together"
+            ),
+        }
+        Ok(())
+    }
+
+    /// Whether any setting is present.
+    pub fn is_configured(&self) -> bool {
+        self.ca_pem.is_some() || self.certificate_pem.is_some()
+    }
+}
+
+#[cfg(feature = "sink")]
+fn pem_certificates(pem: &str, field: &str) -> Result<usize> {
+    ensure!(pem.len() <= MAX_PEM_BYTES, "{field} exceeds 256 KiB");
+    let mut count = 0;
+    for certificate in rustls_pemfile::certs(&mut pem.as_bytes()) {
+        certificate.map_err(|_| anyhow::anyhow!("{field} is not valid PEM"))?;
+        count += 1;
+    }
+    Ok(count)
+}
 
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
 pub fn validate_output_templates(value: &Value, extensions: &[&str]) -> Result<()> {
@@ -373,8 +503,8 @@ pub fn normalized_headers(headers: &BTreeMap<String, String>) -> Result<BTreeMap
         let name: reqwest::header::HeaderName = key.parse()?;
         let _: reqwest::header::HeaderValue = value.parse()?;
         ensure!(
-            name.as_str() != COMPONENT_HEADER && name.as_str() != PORT_HEADER,
-            "{name} identifies the producing output and is supplied automatically"
+            !RESERVED_HEADERS.contains(&name.as_str()),
+            "{name} is supplied automatically and may not be configured"
         );
         ensure!(
             result.insert(name.to_string(), value.clone()).is_none(),
@@ -382,14 +512,6 @@ pub fn normalized_headers(headers: &BTreeMap<String, String>) -> Result<BTreeMap
         );
     }
     Ok(result)
-}
-
-#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
-pub async fn backoff(attempt: u32) {
-    tokio::time::sleep(Duration::from_millis(
-        100u64.saturating_mul(1u64 << attempt.min(6)).min(5000),
-    ))
-    .await;
 }
 
 #[cfg(all(test, feature = "ingress"))]
@@ -509,5 +631,48 @@ mod tests {
         assert!(config("localhost", IngressSecurity::default())
             .validate()
             .is_err());
+    }
+}
+
+#[cfg(all(test, feature = "sink"))]
+mod sink_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_escapes_control_characters_and_caps_length() {
+        assert_eq!(sanitize("a\nb"), "a\\nb");
+        let long = "x".repeat(MAX_LOG_FIELD_LEN * 2);
+        let clean = sanitize(&long);
+        assert!(clean.len() <= MAX_LOG_FIELD_LEN + 3 && clean.ends_with("..."));
+        assert!(sanitize(&"é".repeat(400)).len() <= MAX_LOG_FIELD_LEN + 3);
+    }
+
+    #[test]
+    fn client_tls_requires_paired_valid_pem() {
+        assert!(ClientTls::default().validate().is_ok());
+        assert!(ClientTls {
+            ca_pem: Some("not pem".into()),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        let key = rcgen::KeyPair::generate().expect("key");
+        let certificate = rcgen::CertificateParams::new(vec!["localhost".into()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("certificate");
+        assert!(ClientTls {
+            certificate_pem: Some(certificate.pem()),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        ClientTls {
+            ca_pem: Some(certificate.pem()),
+            certificate_pem: Some(certificate.pem()),
+            private_key_pem: Some(SecretString::new(key.serialize_pem())),
+        }
+        .validate()
+        .expect("valid client TLS");
     }
 }

@@ -13,6 +13,8 @@ async fn roundtrip(statically_linked: bool) -> Result<()> {
         "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},
         "host": "127.0.0.1", "port": port,
         "ssePath": "/events", "heartbeatIntervalMs": 25,
+        // CORS is off by default; this round trip opts in explicitly.
+        "corsAllowedOrigins": ["*"],
     });
     let mut sink = if statically_linked {
         let plugin = NativePlugin::from_definition(drasi_computation_sink_sse::plugin()?)?;

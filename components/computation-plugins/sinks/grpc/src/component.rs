@@ -1,48 +1,207 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! The gRPC sink component: lifecycle, management and delivery.
+
 use crate::{
-    config::{backoff, duration, BatchingConfig, GrpcSinkConfig},
+    config::{ascii_metadata, BatchingConfig, GrpcReactionConfig, GrpcSinkConfig, OutputFormat},
     proto::reaction,
+    render::Renderer,
+    transport::{self, ChangeClient, Failure},
 };
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, InputEnvelope, SinkBatching, SinkCompletion, SinkOutputs,
+    ChangeNotification, ComponentDescriptor, InputEnvelope, SinkBatching, SinkCompletion,
+    SinkOutputs,
 };
 use drasi_computation_network_common::{
     batching::{AdaptiveBatchConfig, AdaptivePolicy},
-    config::{normalized_headers, COMPONENT_HEADER, PORT_HEADER},
+    config::{
+        delivery_id, sanitize, FailurePolicy, COMPONENT_HEADER, DELIVERY_ID_HEADER, PORT_HEADER,
+    },
+    diag,
+    retry::{Retry, RetryPolicy},
+    update::{ensure_same_component, inputs_changed, BoundaryPlanner},
     wire,
 };
 use drasi_computation_plugin_sdk::lifecycle::{
-    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
-    StartContext, StopContext,
+    ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext, LifecycleError,
+    LifecycleResult, PauseContext, ResumeContext, StartContext, StopContext, UpdateBoundary,
 };
-use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
-use drasi_grpc_common::output::{
-    batch::merge_metadata,
-    changes::{
+use drasi_computation_plugin_sdk::{
+    ApplyUpdateRequest, NativeComponent, NativeManagement, NativeSink, UpdateRequest,
+};
+use drasi_grpc_common::{
+    convert_json_to_proto_struct,
+    output::changes::{
         build_proto_change, change_wire_size, latest_change_timestamp, request_overhead,
-        ChangeBatchKey, PendingChanges,
+        ChangeBatchKey,
     },
-    config::GrpcReactionConfig,
-    send::categorize_error,
-    templates::TemplateEngine,
 };
 use std::{collections::BTreeMap, time::Duration};
-use tonic::Request;
+use tonic::{
+    metadata::{Ascii, MetadataKey, MetadataMap, MetadataValue},
+    transport::Endpoint,
+    Request,
+};
 
-type ChangeClient = reaction::change_service_client::ChangeServiceClient<tonic::transport::Channel>;
+/// Settings read per delivery. Rebuilt as a whole at an in-place update, so a
+/// delivery never sees a mix of old and new settings.
+struct Live {
+    /// Change projection without templates, in the configured output format.
+    projection: GrpcReactionConfig,
+    /// Change projection for a templated body: the canonical payload is
+    /// replaced, so it is not built.
+    templated: GrpcReactionConfig,
+    renderer: Option<Renderer>,
+    adaptive: Option<AdaptivePolicy>,
+    fixed_batch_size: usize,
+    fixed_flush_ms: u64,
+    max_batch_bytes: usize,
+    max_request_bytes: usize,
+    /// Lowercase configured metadata.
+    metadata: BTreeMap<String, String>,
+    /// Secret metadata, sent only as headers.
+    secret: MetadataMap,
+    timeout: Duration,
+    retry: RetryPolicy,
+    failure_policy: FailurePolicy,
+}
+
+impl Live {
+    fn new(config: &GrpcSinkConfig) -> Result<Self> {
+        let projection = GrpcReactionConfig {
+            output_templates: None,
+            ..config.reaction_config()
+        };
+        let templated = GrpcReactionConfig {
+            output_format: OutputFormat::Proto,
+            ..projection.clone()
+        };
+        let (fixed_batch_size, fixed_flush_ms, adaptive) = match config.batching_config() {
+            BatchingConfig::Fixed {
+                batch_size,
+                batch_flush_timeout_ms,
+            } => (batch_size, batch_flush_timeout_ms, None),
+            BatchingConfig::Adaptive {
+                adaptive_min_batch_size,
+                adaptive_max_batch_size,
+                adaptive_window_size,
+                adaptive_batch_timeout_ms,
+            } => {
+                let max_wait = Duration::from_millis(adaptive_batch_timeout_ms);
+                let policy = AdaptivePolicy::new(
+                    AdaptiveBatchConfig {
+                        min_batch_size: adaptive_min_batch_size,
+                        max_batch_size: adaptive_max_batch_size,
+                        throughput_window: Duration::from_millis(adaptive_window_size as u64 * 100),
+                        max_wait_time: max_wait,
+                        min_wait_time: Duration::from_millis(100).min(max_wait),
+                        adaptive_enabled: true,
+                    },
+                    config.max_batch_bytes,
+                )?;
+                (
+                    adaptive_max_batch_size,
+                    adaptive_batch_timeout_ms,
+                    Some(policy),
+                )
+            }
+        };
+        let mut secret = MetadataMap::new();
+        for (name, value) in config.secret_headers()? {
+            let key: MetadataKey<Ascii> = name.parse()?;
+            let value: MetadataValue<Ascii> = value
+                .expose()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("secretMetadata entry {name} is invalid"))?;
+            secret.insert(key, value);
+        }
+        Ok(Self {
+            projection,
+            templated,
+            renderer: Renderer::new(config.output_templates.as_ref())?,
+            adaptive,
+            fixed_batch_size,
+            fixed_flush_ms,
+            max_batch_bytes: config.max_batch_bytes,
+            max_request_bytes: config.max_request_bytes,
+            metadata: config.normalized_metadata()?,
+            secret,
+            timeout: Duration::from_millis(config.timeout_ms),
+            retry: RetryPolicy {
+                max_retries: config.max_retries,
+                budget: Duration::from_millis(config.retry_budget_ms),
+            },
+            failure_policy: config.failure_policy,
+        })
+    }
+
+    fn batching(&self) -> Option<SinkBatching> {
+        if let Some(adaptive) = &self.adaptive {
+            return Some(adaptive.current());
+        }
+        (self.fixed_batch_size > 1).then_some(SinkBatching {
+            // The host contract allows at most 1024 inputs per batch.
+            max_inputs: self.fixed_batch_size.min(1024),
+            max_operations: self.fixed_batch_size,
+            max_bytes: self.max_batch_bytes,
+            max_delay_ms: self.fixed_flush_ms,
+        })
+    }
+
+    fn item_limit(&self) -> usize {
+        match &self.adaptive {
+            Some(adaptive) => adaptive.current().max_operations,
+            None => self.fixed_batch_size,
+        }
+    }
+}
+
+/// The receiver connection while the sink is started.
+struct Connection {
+    endpoint: Endpoint,
+    client: ChangeClient,
+}
+
+/// One change ready to send.
+struct Item {
+    key: ChangeBatchKey,
+    change: reaction::Change,
+    bytes: usize,
+    notification: ChangeNotification,
+}
+
+/// One request: a contiguous run of changes from one output with one set of
+/// request metadata.
+struct Batch {
+    key: ChangeBatchKey,
+    changes: Vec<reaction::Change>,
+    bytes: usize,
+    first: ChangeNotification,
+    last: Option<ChangeNotification>,
+}
+
+impl Batch {
+    fn last(&self) -> &ChangeNotification {
+        self.last.as_ref().unwrap_or(&self.first)
+    }
+}
+
+/// Upper bound on the encoded `x-drasi-delivery-id` map entry for a key.
+fn delivery_id_bytes(key: &ChangeBatchKey) -> usize {
+    // `{component}/{port}/{u64}.{u64}-{u64}.{u64}` plus the name and framing.
+    DELIVERY_ID_HEADER.len() + key.component.as_str().len() + key.port.as_str().len() + 2 + 83 + 8
+}
 
 pub(crate) struct GrpcSink {
     descriptor: ComponentDescriptor,
     config: GrpcSinkConfig,
     outputs: SinkOutputs,
-    output: GrpcReactionConfig,
-    renderer: Option<TemplateEngine>,
-    adaptive: Option<AdaptivePolicy>,
-    client: Option<ChangeClient>,
+    live: Live,
+    connection: Option<Connection>,
+    paused: bool,
 }
 
 impl GrpcSink {
@@ -51,243 +210,387 @@ impl GrpcSink {
         config: GrpcSinkConfig,
         outputs: SinkOutputs,
     ) -> Result<Self> {
-        let output = config.reaction_config();
-        let renderer = output
-            .output_templates
-            .as_ref()
-            .filter(|templates| templates.has_renderable_templates())
-            .map(|_| TemplateEngine::new());
-        let adaptive = output
-            .batching
-            .as_adaptive_config()
-            .map(|adaptive| {
-                let max_wait = Duration::from_millis(adaptive.adaptive_batch_timeout_ms);
-                AdaptivePolicy::new(
-                    AdaptiveBatchConfig {
-                        min_batch_size: adaptive.adaptive_min_batch_size,
-                        max_batch_size: adaptive.adaptive_max_batch_size,
-                        throughput_window: Duration::from_millis(
-                            adaptive.adaptive_window_size as u64 * 100,
-                        ),
-                        max_wait_time: max_wait,
-                        min_wait_time: Duration::from_millis(100).min(max_wait),
-                        adaptive_enabled: true,
-                    },
-                    config.max_batch_bytes,
-                )
-            })
-            .transpose()?;
+        config.validate_outputs(&outputs)?;
+        transport::endpoint(&config)?;
         Ok(Self {
+            live: Live::new(&config)?,
             descriptor,
             config,
             outputs,
-            output,
-            renderer,
-            adaptive,
-            client: None,
+            connection: None,
+            paused: false,
         })
     }
 
-    async fn connect(&self) -> Result<ChangeClient> {
-        let endpoint = tonic::transport::Endpoint::from_shared(self.config.connection_uri())?
-            .connect_timeout(duration(
-                self.config.initial_connection_timeout_ms,
-                "initialConnectionTimeoutMs",
-            )?)
-            .timeout(duration(self.config.timeout_ms, "timeoutMs")?);
-        let channel = tokio::time::timeout(
-            Duration::from_millis(self.config.initial_connection_timeout_ms),
-            endpoint.connect(),
-        )
-        .await
-        .context("gRPC connection timeout")??;
-        Ok(ChangeClient::new(channel)
-            .max_encoding_message_size(self.config.max_request_bytes)
-            .max_decoding_message_size(self.config.max_request_bytes))
+    fn running(&self) -> bool {
+        self.connection.is_some()
     }
 
-    async fn deliver(&mut self, batch: &PendingChanges) -> Result<()> {
-        let metadata = batch.key.metadata_map();
-        let expected = u32::try_from(batch.changes.len())?;
-        let message = reaction::ProcessChangesRequest {
-            changes: Some(reaction::ChangeBatch {
-                output: Some(batch.key.output_identity()),
-                timestamp: latest_change_timestamp(&batch.changes),
-                changes: batch.changes.clone(),
-            }),
-            metadata: metadata.clone(),
+    /// Connects during Start, retrying within the retry policy, and returns
+    /// as soon as the Start operation is cancelled or its deadline passes.
+    async fn connect_at_start(
+        &self,
+        endpoint: &Endpoint,
+        ctx: &StartContext,
+    ) -> LifecycleResult<tonic::transport::Channel> {
+        let deadline = ctx.deadline();
+        let expired = || async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
         };
-        for attempt in 0..=self.config.max_retries {
-            let mut request = Request::new(message.clone());
-            for (name, value) in &metadata {
-                request.metadata_mut().insert(
-                    name.parse::<tonic::metadata::MetadataKey<tonic::metadata::Ascii>>()?,
-                    value.parse()?,
-                );
-            }
-            request.set_timeout(Duration::from_millis(self.config.timeout_ms));
-            let client = self.client.as_mut().context("gRPC sink has not started")?;
-            let result = tokio::time::timeout(
-                Duration::from_millis(self.config.timeout_ms),
-                client.process_changes(request),
-            )
-            .await;
-            let (error, kind) = match result {
-                Ok(Ok(response)) => {
-                    let response = response.into_inner();
-                    if response.success {
-                        ensure!(response.items_processed == expected,
-                            "gRPC receiver acknowledged {} of {expected} items; batch is incomplete",
-                            response.items_processed);
-                        return Ok(());
-                    }
-                    (
-                        anyhow::anyhow!("gRPC receiver rejected delivery: {}", response.error),
-                        "Application",
-                    )
-                }
-                Ok(Err(error)) => {
-                    let kind = categorize_error(&error.to_string().to_lowercase());
-                    (anyhow::Error::from(error), kind)
-                }
-                Err(error) => (
-                    anyhow::Error::from(error).context("gRPC delivery timeout"),
-                    "Timeout",
-                ),
+        let mut retry = Retry::new(self.live.retry);
+        loop {
+            let attempt = tokio::select! {
+                biased;
+                _ = ctx.cancellation().cancelled() => return Err(LifecycleError::cancelled()),
+                _ = expired() => return Err(LifecycleError::retryable(anyhow::anyhow!(
+                    "the Start deadline passed before the gRPC receiver accepted a connection"
+                ))),
+                attempt = endpoint.connect() => attempt,
             };
-            if attempt == self.config.max_retries {
-                return Err(error);
-            }
-            eprintln!(
-                "drasi.network gRPC retry: output={} sequence={} attempt={} error={error:#}",
-                batch.key.endpoint(),
-                batch.seen_sequence,
-                attempt + 1
+            let error = match attempt {
+                Ok(channel) => return Ok(channel),
+                Err(error) => error,
+            };
+            let Some(delay) = retry.next_delay(None) else {
+                return Err(LifecycleError::retryable(
+                    anyhow::Error::from(error).context(format!(
+                        "gRPC receiver connection failed after {} retries",
+                        retry.attempt()
+                    )),
+                ));
+            };
+            diag!(
+                Warn,
+                "gRPC sink connect retry: component={} attempt={} error={}",
+                self.descriptor.id(),
+                retry.attempt(),
+                sanitize(&format!("{error:#}"))
             );
-            if matches!(
-                kind,
-                "GoAway" | "Connection" | "BrokenPipe" | "ChannelClosed" | "Unavailable"
-            ) {
-                match self.connect().await {
-                    Ok(client) => self.client = Some(client),
-                    Err(error) => eprintln!("drasi.network gRPC reconnect failed: {error:#}"),
-                }
-            }
-            if kind == "ResourceExhausted" {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            } else {
-                backoff(attempt).await;
+            tokio::select! {
+                biased;
+                _ = ctx.cancellation().cancelled() => return Err(LifecycleError::cancelled()),
+                _ = expired() => return Err(LifecycleError::retryable(anyhow::anyhow!(
+                    "the Start deadline passed before the gRPC receiver accepted a connection"
+                ))),
+                _ = tokio::time::sleep(delay) => {}
             }
         }
-        unreachable!("retry loop always returns")
     }
 
-    async fn flush(&mut self, batch: PendingChanges) -> Result<()> {
-        let result = self.deliver(&batch).await;
-        self.config.failure_policy.delivery(
-            result,
-            self.descriptor.id(),
-            &batch.key.endpoint(),
-            batch.seen_sequence,
-        )
-    }
-
-    fn item_limit(&self) -> usize {
-        match &self.adaptive {
-            Some(adaptive) => adaptive.current().max_operations,
-            None => match self.output.batching {
-                BatchingConfig::Fixed { batch_size, .. } => batch_size,
-                BatchingConfig::Adaptive { .. } => unreachable!("adaptive policy installed"),
-            },
+    /// Projects one change: rendered templates, the protobuf item and its
+    /// request metadata (configured, then rendered, then the identity
+    /// metadata naming the real producing output).
+    fn build(
+        &self,
+        notification: &ChangeNotification,
+    ) -> Result<(ChangeBatchKey, reaction::Change)> {
+        let rendered = match &self.live.renderer {
+            Some(renderer) => renderer.render(notification)?,
+            None => Default::default(),
+        };
+        let projection = if rendered.body.is_some() {
+            &self.live.templated
+        } else {
+            &self.live.projection
+        };
+        let mut change = build_proto_change(projection, None, notification)?.change;
+        if let Some(body) = &rendered.body {
+            change.payload = Some(convert_json_to_proto_struct(body));
         }
+        let mut metadata = self.live.metadata.clone();
+        for (name, value) in rendered.metadata {
+            metadata.insert(name.to_ascii_lowercase(), value);
+        }
+        metadata.insert(
+            COMPONENT_HEADER.into(),
+            notification.output().component.as_str().to_owned(),
+        );
+        metadata.insert(
+            PORT_HEADER.into(),
+            notification.output().port.as_str().to_owned(),
+        );
+        for (name, value) in &metadata {
+            ascii_metadata(name, value).with_context(|| {
+                format!("request metadata {name} is not valid ASCII gRPC metadata")
+            })?;
+        }
+        Ok((
+            ChangeBatchKey::new(notification, metadata.into_iter().collect()),
+            change,
+        ))
     }
 
     async fn process(&mut self, inputs: Vec<InputEnvelope>) -> Result<()> {
-        ensure!(self.client.is_some(), "gRPC sink has not started");
+        ensure!(self.running(), "gRPC sink is not started");
         let notifications = inputs
             .iter()
             .map(|input| wire::notifications(input, &self.outputs))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let item_limit = self.item_limit();
-        let mut pending: Option<PendingChanges> = None;
-        let mut pending_bytes = 0usize;
-        let mut count = 0;
+            .flatten();
+        // Project every change before sending anything, so a strict template
+        // or size failure has no remote effect.
+        let mut items = Vec::new();
         for notification in notifications {
-            let label = notification.output().endpoint().to_string();
-            let sequence = notification.sequence();
-            let built = build_proto_change(&self.output, self.renderer.as_ref(), &notification)?;
-            let metadata = merge_metadata(&self.output.metadata, &built.request_metadata);
-            let metadata = (|| -> Result<_> {
-                for (key, value) in &metadata {
-                    let _: tonic::metadata::MetadataKey<tonic::metadata::Ascii> = key.parse()?;
-                    let _: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
-                        value.parse()?;
-                }
-                let mut checked =
-                    normalized_headers(&metadata.into_iter().collect::<BTreeMap<_, _>>())?;
-                checked.insert(
-                    COMPONENT_HEADER.into(),
-                    notification.output().component.as_str().to_owned(),
+            let built = self.build(&notification).and_then(|(key, change)| {
+                let bytes = change_wire_size(&change);
+                ensure!(
+                    request_overhead(&key) + delivery_id_bytes(&key) + bytes
+                        <= self.live.max_request_bytes,
+                    "gRPC change exceeds maxRequestBytes"
                 );
-                checked.insert(
-                    PORT_HEADER.into(),
-                    notification.output().port.as_str().to_owned(),
-                );
-                Ok(checked.into_iter().collect())
-            })();
-            let metadata = match metadata {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    self.config.failure_policy.delivery(
-                        Err(error),
-                        self.descriptor.id(),
-                        &label,
-                        sequence,
-                    )?;
+                Ok((key, change, bytes))
+            });
+            match built {
+                Ok((key, change, bytes)) => items.push(Item {
+                    key,
+                    change,
+                    bytes,
+                    notification,
+                }),
+                Err(error) => self.live.failure_policy.delivery(
+                    Err(error),
+                    self.descriptor.id(),
+                    &notification.output().endpoint().to_string(),
+                    notification.sequence(),
+                )?,
+            }
+        }
+        let count = items.len();
+        let limit = self.live.item_limit();
+        let mut pending: Option<Batch> = None;
+        for item in items {
+            if let Some(batch) = pending.take() {
+                if batch.key == item.key
+                    && batch.changes.len() < limit
+                    && batch.bytes + item.bytes <= self.live.max_request_bytes
+                {
+                    pending = Some(Batch {
+                        bytes: batch.bytes + item.bytes,
+                        changes: {
+                            let mut changes = batch.changes;
+                            changes.push(item.change);
+                            changes
+                        },
+                        last: Some(item.notification),
+                        ..batch
+                    });
                     continue;
                 }
-            };
-            let key = ChangeBatchKey::new(&notification, metadata);
-            let item_bytes = change_wire_size(&built.change);
-            let overhead = request_overhead(&key);
-            if overhead.saturating_add(item_bytes) > self.config.max_request_bytes {
-                self.config.failure_policy.delivery(
-                    Err(anyhow::anyhow!("gRPC change exceeds maxRequestBytes")),
-                    self.descriptor.id(),
-                    &label,
-                    sequence,
-                )?;
-                continue;
+                self.flush(batch).await?;
             }
-            if pending.as_ref().is_some_and(|batch| {
-                !batch.can_accept(&key)
-                    || batch.changes.len() >= item_limit
-                    || pending_bytes.saturating_add(item_bytes) > self.config.max_request_bytes
-            }) {
-                self.flush(pending.take().expect("pending batch")).await?;
-            }
-            match &mut pending {
-                Some(batch) => {
-                    batch.push(built.change);
-                    pending_bytes += item_bytes;
-                }
-                None => {
-                    pending_bytes = overhead + item_bytes;
-                    pending = Some(PendingChanges::new(key, built.change));
-                }
-            }
-            count += 1;
+            pending = Some(Batch {
+                bytes: request_overhead(&item.key) + delivery_id_bytes(&item.key) + item.bytes,
+                key: item.key,
+                changes: vec![item.change],
+                first: item.notification,
+                last: None,
+            });
         }
         if let Some(batch) = pending {
             self.flush(batch).await?;
         }
-        if let Some(adaptive) = &mut self.adaptive {
+        if let Some(adaptive) = &mut self.live.adaptive {
             adaptive.record(count);
         }
         Ok(())
+    }
+
+    async fn flush(&mut self, batch: Batch) -> Result<()> {
+        let label = batch.key.endpoint();
+        let sequence = batch.last().sequence();
+        let result = self.deliver(batch).await;
+        self.live
+            .failure_policy
+            .delivery(result, self.descriptor.id(), &label, sequence)
+    }
+
+    /// Sends one request until it is acknowledged exactly, fails permanently,
+    /// or the retry policy is exhausted. The loop keeps no state outside this
+    /// future, so the host cancelling the delivery drops it at once.
+    async fn deliver(&mut self, batch: Batch) -> Result<()> {
+        let id = delivery_id(&batch.first, batch.last());
+        let mut metadata = batch.key.metadata_map();
+        metadata.insert(DELIVERY_ID_HEADER.into(), id);
+        let mut headers = self.live.secret.clone();
+        for (name, value) in &metadata {
+            let key: MetadataKey<Ascii> = name.parse()?;
+            headers.insert(key, value.parse()?);
+        }
+        let expected = u32::try_from(batch.changes.len())?;
+        let message = reaction::ProcessChangesRequest {
+            changes: Some(reaction::ChangeBatch {
+                output: Some(batch.key.output_identity()),
+                timestamp: latest_change_timestamp(&batch.changes),
+                changes: batch.changes,
+            }),
+            metadata,
+        };
+        let mut retry = Retry::new(self.live.retry);
+        loop {
+            let connection = self
+                .connection
+                .as_mut()
+                .context("gRPC sink is not started")?;
+            let mut request = Request::from_parts(
+                headers.clone(),
+                tonic::Extensions::default(),
+                message.clone(),
+            );
+            request.set_timeout(self.live.timeout);
+            let status = match connection.client.process_changes(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    ensure!(
+                        response.success,
+                        "gRPC receiver rejected the delivery (success=false; not retried): {}",
+                        sanitize(&response.error)
+                    );
+                    ensure!(
+                        response.items_processed == expected,
+                        "gRPC receiver acknowledged {} of {expected} changes; the request is incomplete (not retried)",
+                        response.items_processed
+                    );
+                    return Ok(());
+                }
+                Err(status) => status,
+            };
+            let error = anyhow::anyhow!(
+                "gRPC ProcessChanges failed with {:?}: {}",
+                status.code(),
+                sanitize(status.message())
+            );
+            let (reconnect, requested) = match transport::classify(&status) {
+                Failure::Permanent => {
+                    return Err(error.context("permanent gRPC failure; not retried"))
+                }
+                Failure::Retryable { reconnect, delay } => (reconnect, delay),
+            };
+            if reconnect {
+                connection.client =
+                    transport::client(connection.endpoint.connect_lazy(), &self.config);
+            }
+            let Some(delay) = retry.next_delay(requested) else {
+                return Err(error.context(format!(
+                    "gRPC delivery failed after {} retries",
+                    retry.attempt()
+                )));
+            };
+            diag!(
+                Warn,
+                "gRPC sink retry: component={} output={} attempt={} error={error:#}",
+                self.descriptor.id(),
+                sanitize(&batch.key.endpoint()),
+                retry.attempt()
+            );
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
+/// Classifies each configuration change by the weakest safe boundary.
+///
+/// * Pause (in place): everything read per delivery: templates, metadata,
+///   secret metadata, the call deadline, retries, the retry budget, the
+///   failure policy, batching, the output format and `requireConnectedAtStart`
+///   (read only by the next Start).
+/// * Stop (restart): settings bound into the channel at Start: endpoint, TLS,
+///   connect timeout, keepalive, compression and `maxRequestBytes`.
+/// * Replace: output aliases.
+pub(crate) fn plan(current: &GrpcSinkConfig, proposed: &GrpcSinkConfig) -> Assessment {
+    use UpdateBoundary::*;
+    let mut planner = BoundaryPlanner::default();
+    let (c, p) = (current, proposed);
+    planner.field("outputs", c.outputs != p.outputs, Replace);
+    planner.field("endpoint", c.endpoint != p.endpoint, Stop);
+    planner.field(
+        "tls",
+        c.tls_ca_pem != p.tls_ca_pem
+            || c.tls_client_certificate_pem != p.tls_client_certificate_pem
+            || c.tls_client_private_key_pem != p.tls_client_private_key_pem
+            || c.tls_domain_name != p.tls_domain_name,
+        Stop,
+    );
+    planner.field(
+        "connectTimeoutMs",
+        c.connect_timeout_ms != p.connect_timeout_ms,
+        Stop,
+    );
+    planner.field(
+        "keepalive",
+        c.keepalive_interval_ms != p.keepalive_interval_ms
+            || c.keepalive_timeout_ms != p.keepalive_timeout_ms,
+        Stop,
+    );
+    planner.field("compression", c.compression != p.compression, Stop);
+    planner.field(
+        "maxRequestBytes",
+        c.max_request_bytes != p.max_request_bytes,
+        Stop,
+    );
+    planner.field("metadata", c.metadata != p.metadata, Pause);
+    planner.field(
+        "secretMetadata",
+        c.secret_metadata != p.secret_metadata,
+        Pause,
+    );
+    planner.field("timeoutMs", c.timeout_ms != p.timeout_ms, Pause);
+    planner.field(
+        "retries",
+        c.max_retries != p.max_retries || c.retry_budget_ms != p.retry_budget_ms,
+        Pause,
+    );
+    planner.field("failurePolicy", c.failure_policy != p.failure_policy, Pause);
+    planner.field(
+        "requireConnectedAtStart",
+        c.require_connected_at_start != p.require_connected_at_start,
+        Pause,
+    );
+    planner.field(
+        "batching",
+        c.batching != p.batching
+            || c.batch_size != p.batch_size
+            || c.batch_flush_timeout_ms != p.batch_flush_timeout_ms
+            || c.max_batch_bytes != p.max_batch_bytes,
+        Pause,
+    );
+    planner.field(
+        "outputTemplates",
+        c.output_templates != p.output_templates,
+        Pause,
+    );
+    planner.field("outputFormat", c.output_format != p.output_format, Pause);
+    planner.assessment()
+}
+
+/// Pure planning used by the factory and the live instance. A change to the
+/// bound inputs replaces the component.
+pub(crate) fn assess(request: &UpdateRequest) -> Result<Assessment> {
+    ensure_same_component(request)?;
+    let current = GrpcSinkConfig::parse(request.current.configuration.clone())
+        .context("current configuration")?;
+    let proposed = GrpcSinkConfig::parse(request.proposed.configuration.clone())
+        .context("proposed configuration")?;
+    if !request.proposed.inputs.is_empty() {
+        let outputs = SinkOutputs::from_inputs(&request.proposed.inputs, &proposed.outputs)?;
+        proposed.validate_outputs(&outputs)?;
+    }
+    if inputs_changed(request) {
+        return Ok(Assessment::supported(
+            UpdateBoundary::Replace,
+            drasi_computation_contracts::ComponentUpdateData::Preserve,
+        ));
+    }
+    Ok(plan(&current, &proposed))
+}
+
+fn refused(reason: impl std::fmt::Display) -> ApplyError {
+    ApplyError::Refused {
+        now_requires: None,
+        reason: reason.to_string(),
     }
 }
 
@@ -297,54 +600,113 @@ impl NativeComponent for GrpcSink {
         &self.descriptor
     }
     fn configuration(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::to_value(&self.config)?)
+        self.config.to_value()
     }
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        Some(self)
+    }
+    /// Templates, metadata, TLS material and routes were compiled and
+    /// validated at construction; nothing is contacted.
     async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
-        nothing_to_do()
+        Ok(())
     }
-    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
-        Ok(self.start_activation().await?)
+    /// Builds the channel. By default the receiver is not contacted: the
+    /// first delivery connects. With `requireConnectedAtStart`, connects
+    /// within the retry policy, the Start deadline and its cancellation.
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
+        if ctx.cancellation().is_cancelled() {
+            return Err(LifecycleError::cancelled());
+        }
+        if self.running() {
+            return Err(anyhow::anyhow!("gRPC sink is already started").into());
+        }
+        let endpoint = transport::endpoint(&self.config)?;
+        let channel = if self.config.require_connected_at_start {
+            self.connect_at_start(&endpoint, ctx).await?
+        } else {
+            endpoint.connect_lazy()
+        };
+        self.connection = Some(Connection {
+            client: transport::client(channel, &self.config),
+            endpoint,
+        });
+        self.paused = false;
+        Ok(())
     }
+    /// Host-driven: the sink owns no worker. The host calls no `handle`
+    /// while paused and settles the in-flight one (whose retries are bounded
+    /// by `retryBudgetMs`) before Pause completes.
     async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
-        nothing_to_do()
+        self.paused = self.running();
+        Ok(())
     }
     async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
-        nothing_to_do()
+        self.paused = false;
+        Ok(())
     }
+    /// Closes the channel. No delivery runs concurrently with Stop: the host
+    /// awaits (Drain) or drops (Abort) the in-flight one first, so both modes
+    /// complete at once. Stop before Start succeeds.
     async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
-        Ok(self.stop_activation().await?)
+        self.connection = None;
+        self.paused = false;
+        Ok(())
     }
+    /// The sink owns no destination-side state; `Preserve` and `Erase` are
+    /// idempotent no-ops.
     async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
-        nothing_to_do()
+        self.connection = None;
+        Ok(())
     }
 }
 
-impl GrpcSink {
-    async fn start_activation(&mut self) -> Result<()> {
-        ensure!(self.client.is_none(), "gRPC sink already started");
-        for attempt in 0..self.config.connection_retry_attempts {
-            match self.connect().await {
-                Ok(client) => {
-                    self.client = Some(client);
-                    return Ok(());
-                }
-                Err(error) if attempt + 1 == self.config.connection_retry_attempts => {
-                    return Err(error)
-                }
-                Err(error) => {
-                    eprintln!(
-                        "drasi.network gRPC connect retry: component={} attempt={} error={error:#}",
-                        self.descriptor.id(),
-                        attempt + 1
-                    );
-                    backoff(attempt).await;
+#[async_trait]
+impl NativeManagement for GrpcSink {
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+        assess(request)
+    }
+
+    async fn apply(
+        &mut self,
+        ctx: &ApplyContext,
+        update: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError> {
+        let current =
+            GrpcSinkConfig::parse(update.request.current.configuration.clone()).map_err(refused)?;
+        let proposed = GrpcSinkConfig::parse(update.request.proposed.configuration.clone())
+            .map_err(refused)?;
+        if current != self.config {
+            return Err(refused(
+                "the sink configuration changed after the update was assessed",
+            ));
+        }
+        let Some(plan) = assess(&update.request).map_err(refused)?.plan() else {
+            return Err(refused("the update is not supported"));
+        };
+        if plan != update.plan {
+            return Err(ApplyError::Refused {
+                now_requires: Some(plan.mode.into()),
+                reason: "the update now requires a different boundary".into(),
+            });
+        }
+        match ctx.boundary() {
+            UpdateBoundary::Pause => {
+                if self.running() && !self.paused {
+                    return Err(refused("in-place updates require a completed pause"));
                 }
             }
+            UpdateBoundary::Stop => {
+                if self.running() {
+                    return Err(refused("restart updates require a stopped sink"));
+                }
+                transport::endpoint(&proposed).map_err(refused)?;
+            }
+            UpdateBoundary::Replace => return Err(refused("Replace is not an instance update")),
         }
-        unreachable!("positive connection attempts")
-    }
-    async fn stop_activation(&mut self) -> Result<()> {
-        self.client = None;
+        proposed.validate_outputs(&self.outputs).map_err(refused)?;
+        let live = Live::new(&proposed).map_err(refused)?;
+        self.live = live;
+        self.config = proposed;
         Ok(())
     }
 }
@@ -355,27 +717,13 @@ impl NativeSink for GrpcSink {
         SinkCompletion::Handled
     }
     fn batching(&self) -> Result<Option<SinkBatching>> {
-        if let Some(adaptive) = &self.adaptive {
-            return Ok(Some(adaptive.current()));
-        }
-        let BatchingConfig::Fixed {
-            batch_size,
-            batch_flush_timeout_ms,
-        } = self.output.batching
-        else {
-            unreachable!("adaptive policy installed")
-        };
-        Ok((batch_size > 1).then_some(SinkBatching {
-            max_inputs: batch_size.min(1024),
-            max_operations: batch_size,
-            max_bytes: self.config.max_batch_bytes,
-            max_delay_ms: batch_flush_timeout_ms,
-        }))
+        Ok(self.live.batching())
     }
+    /// Accepts any nonempty host batch. Requests are split by the current
+    /// item and byte limits, so a batch collected under an earlier policy
+    /// (before an in-place update) is still delivered.
     async fn handle_batch(&mut self, inputs: Vec<InputEnvelope>) -> Result<()> {
-        self.batching()?
-            .context("gRPC batching is disabled")?
-            .validate_inputs(&inputs)?;
+        ensure!(!inputs.is_empty(), "empty gRPC sink batch");
         self.process(inputs).await
     }
     async fn handle(&mut self, input: InputEnvelope) -> Result<()> {

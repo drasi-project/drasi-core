@@ -52,7 +52,7 @@ compatibility-shim or automatic old-state migration programme is implied.
 | Testing quality and selection | [Testing overview](#testing-and-qualification), [production-path oracles](#cw-83), [honest runners](#cw-84), [CI selection](#cw-85), [duplication](#cw-86), [behavior ledgers](#cw-88) |
 | Recovery and behavior qualification | [Pending input](#cw-14), [reset](#cw-20), [completion evidence](#cw-36), [combined failures](#cw-39), [FFI](#cw-41), [Server](#cw-46), [examples](#cw-90) |
 | Query-plugin follow-ups | [Large items](#cw-76), [native parity coverage](#cw-77), [complete test run](#cw-78), [performance](#cw-79), [linked-reference retirement](#cw-80) |
-| Integration and applications | [Connectors](#cw-44), [native network sources](#cw-100), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
+| Integration and applications | [Connectors](#cw-44), [native network sources](#cw-100), [native network and log sinks](#cw-101), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
 | Scaling and maintainability | [Publication](#cw-31), [storage](#cw-28), [hot paths](#cw-32), [decomposition](#cw-34) |
 | Testing reliability and cost | [Asynchronous tests](#cw-37), [MySQL/Postgres container failures](#cw-99), [build/fixture cost](#cw-87), [shared conformance](#cw-89), [application benchmarks](#cw-40), [native-query comparison](#cw-79) |
 | Public API and release | [API curation](#cw-69), [formats](#cw-18), [lints/MSRV](#cw-61), [release documentation](#cw-73) |
@@ -450,7 +450,6 @@ workers keep running:
 - the MySQL, SQL Server and SQLite sources keep their replication or polling
   workers (and SQLite its REST listener) running. These were found by the
   [native source review](native-source-production-readiness-plan.md);
-- the SSE sink keeps serving its connected clients;
 - the profiler keeps logging its periodic reports.
 
 **Implemented for HTTP and gRPC:** Pause now closes admission in the shared
@@ -463,6 +462,13 @@ network runtime:
 Pause waits for in-flight admissions and honours cancellation and the deadline.
 A cancelled Pause reopens admission, and Resume reopens it. Plugin and
 conformance-kit tests cover this.
+
+**Implemented for the SSE sink (2026-11-15):** Pause closes a gate: new
+subscribers and snapshot reads get 503 with `Retry-After`, and connected
+clients receive only keep-alive comments until Resume. The HTTP, gRPC and log
+sinks have no workers and rely on host-driven pause; their retry waits are
+drop-safe. See the
+[native reaction plan](native-reaction-production-readiness-plan.md#6-sse-sink-drasi-computation-sink-sse).
 
 **Work:** For each listed component, either gate its worker inside a completed
 Pause and reopen it on Resume, or return `unsupported` so that updates at the
@@ -513,7 +519,10 @@ Rebuild every native plugin that Server loads at ABI 4.0.
 idempotent no-op erase, because they own no external state. The SDK
 conformance kit runs erasure twice for both. Still open: whether the host
 erases their durable admission state (QoS producer registry and journal) on
-removal; see [CW-100](#cw-100).
+removal; see [CW-100](#cw-100). The HTTP, gRPC, SSE and log sinks (and the
+`drasi.network/http-delivery` consumer) also declare a no-op erase, and the
+sink conformance kit runs it twice. Whether removing the HTTP delivery consumer
+erases its DeliveryRunner progress is not yet tested.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -533,7 +542,7 @@ conversion and protocol logic:
 | Kafka and Kubernetes | Native sources and initial-data providers, independently packaged. |
 | SQL Server | Close capture-table permission, large sink-batch and orphan-marker gaps. |
 | Database discovery | Populate the remaining family catalogs through the existing native schema reader and Server APIs; factory configuration schemas are not source data schemas. |
-| Network profiles | Implement stronger snapshot/progress replacement or destination-backed completion only for profiles that require them. Native gRPC TLS and mutual TLS are now implemented (tonic `tls-ring`); their qualification through the loaded library is owned by [CW-41](#cw-41). |
+| Network profiles | Implement stronger snapshot/progress replacement or destination-backed completion only for profiles that require them. Native gRPC TLS and mutual TLS are now implemented for the source and the sink (tonic `tls-ring`); their qualification through the loaded library is owned by [CW-41](#cw-41). The HTTP sink no longer treats a queued `202` as completion (`successStatusCodes`), offers destination-backed completion through the `drasi.network/http-delivery` consumer, and the HTTP and gRPC sinks send an `x-drasi-delivery-id` idempotency key. gRPC sink consumer completion remains in [CW-101](#cw-101). |
 | HTTP ingress authentication | **Implemented.** Bearer tokens protect the standard single-event, batch and producer-session routes on HTTP, and every gRPC RPC; two tokens are supported for rotation. Per-client rate limits and connection limits apply, and TLS/mTLS is optional. Listeners default to `127.0.0.1`; a non-loopback listener needs a token or an explicit `allowUnauthenticated: true`. Remaining follow-ups are in [CW-100](#cw-100). |
 | Application components | Move remaining old-interface application/example consumers to the native components. Test-consumer migration is owned by [CW-41](#cw-41) and [CW-77](#cw-77). |
 
@@ -607,6 +616,43 @@ These items remain:
 **Finish when:** removal-with-erase of a durable network source leaves no
 host-owned admission state, webhook secrets can be secret references, the
 listed input limits hold, and the remaining tests run in CI.
+
+<a id="cw-101"></a>
+
+### Finish the native network and log sink follow-ups (CW-101)
+
+**Kind:** Issue/hardening. **Area:** Native sinks (`common/network`, HTTP,
+gRPC, SSE and log sinks), Host, `grpc-common`, `reaction-common`.
+**Priority:** Medium. **Effort:** Medium.
+
+**Current boundary:** the native HTTP, gRPC, SSE and log sinks implement all
+six lifecycle hooks, managed updates at every boundary, the shared jittered and
+budgeted retry policy, idempotency keys (HTTP and gRPC), secret credential
+fields, client TLS, and SSE exposure controls and a real pause. Their review
+is [the native reaction plan, §3–§6 and §13](native-reaction-production-readiness-plan.md#implementation-status-2026-11-15).
+These items remain:
+
+- **Object secrets:** `secretHeaders` (HTTP) and `secretMetadata` (gRPC)
+  assume the host resolves a secret reference to a whole JSON object. Confirm
+  and test it, or replace the maps with one secret field per header.
+- **gRPC consumer completion:** add a `DeliveryBatchIdentity` field to the
+  `grpc-common` acknowledgement so the gRPC sink can offer a consumer mode
+  like `drasi.network/http-delivery`.
+- **Shared helpers:** SSE and log carry local copies of the pause gate, the
+  exposure check and template-helper registration. Move them into
+  `common/network` and `reaction-common`; gRPC keeps a strict renderer of its
+  own.
+- **Observability:** no sink metrics; `failurePolicy: skip` logs skips but does
+  not count them ([CW-26](#cw-26)).
+- **Tests:** the log sink has no Host SDK real-library tests and is not in the
+  `plugin_package` mapping. The sink conformance kit runs only through the
+  linked definition; add dynamic-library and dual-flavour drivers
+  ([CW-41](#cw-41)). Two SSE live-rebind tests stay ignored under
+  [CW-94](#cw-94).
+
+**Finish when:** object-secret resolution is proven or replaced, the gRPC sink
+has a consumer mode, every sink's conformance kit runs through the loaded
+library in CI, and sink metrics are reported.
 
 <a id="cw-45"></a>
 

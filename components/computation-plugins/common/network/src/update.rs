@@ -1,10 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Update-planning helpers for the network sources.
+//! Update-planning helpers for the network sources and sinks.
 //!
-//! Each source classifies every configuration field by the weakest boundary
-//! at which a change can be applied safely. The planner takes the strongest
+//! Each component classifies every configuration field by the weakest
+//! boundary at which a change can be applied safely. The planner takes the strongest
 //! boundary required by any changed field.
 
 use drasi_computation_contracts::ComponentUpdateData;
@@ -37,7 +37,7 @@ impl BoundaryPlanner {
         &self.changed
     }
 
-    /// The assessment for the recorded changes. Network sources own no
+    /// The assessment for the recorded changes. Network components own no
     /// processing state, so every supported change preserves data. An empty
     /// change set is applied in place.
     pub fn assessment(&self) -> Assessment {
@@ -58,6 +58,13 @@ pub fn ensure_same_component(request: &UpdateRequest) -> anyhow::Result<()> {
         "updates cannot change component identity, implementation or configuration version"
     );
     Ok(())
+}
+
+/// Whether the update changes the sink's incoming graph edges. A binding
+/// change replaces the component: live input rebinding is a host decision
+/// (CW-94), never an in-place configuration update.
+pub fn inputs_changed(request: &UpdateRequest) -> bool {
+    request.current.inputs != request.proposed.inputs
 }
 
 #[cfg(test)]

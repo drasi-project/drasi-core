@@ -1,15 +1,16 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! The HTTP listener: accepts connections (optionally over TLS), bounds them,
-//! serves the router with HTTP/1.1 and HTTP/2, and drains gracefully.
+//! The shared HTTP listener: accepts connections (optionally over TLS),
+//! bounds them, serves an axum router with HTTP/1.1 and HTTP/2, and drains
+//! gracefully. Used by the HTTP source and the SSE sink.
 //!
 //! Every connection task is owned by the serving future. Cancelling the
 //! activation stops accepting and lets in-flight requests finish (Drain);
 //! aborting the serving task drops all connection tasks (Abort).
 
+use crate::diag;
 use axum::Router;
-use drasi_computation_network_common::diag;
 use hyper::{body::Incoming, Request};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
@@ -22,25 +23,26 @@ use tower::ServiceExt;
 
 /// The client address of a request, inserted by the listener.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PeerAddress(pub SocketAddr);
+pub struct PeerAddress(pub SocketAddr);
 
-pub(crate) struct ServerOptions {
-    pub tls: Option<Arc<rustls_config::ServerConfig>>,
+/// Listener settings.
+pub struct ServerOptions {
+    /// TLS server configuration; plaintext when absent.
+    pub tls: Option<Arc<rustls::ServerConfig>>,
+    /// Simultaneously open connections; further connections are closed.
     pub max_connections: usize,
+    /// Deadline for a client to send request headers (and finish a TLS
+    /// handshake), so a stalled client cannot hold a connection or a Drain.
     pub header_read_timeout: Duration,
-}
-
-/// Re-exported so the component can name the TLS configuration type without
-/// a direct rustls dependency.
-pub(crate) mod rustls_config {
-    pub use tokio_rustls::rustls::ServerConfig;
 }
 
 /// Pause between accept attempts after an accept error, such as running out
 /// of file descriptors, so a persistent error cannot spin the loop.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 
-pub(crate) async fn serve(
+/// Serves `router` on `listener` until `shutdown` completes, then drains
+/// in-flight requests. Each request carries a [`PeerAddress`] extension.
+pub async fn serve(
     listener: TcpListener,
     router: Router,
     shutdown: impl std::future::Future<Output = ()> + Send,

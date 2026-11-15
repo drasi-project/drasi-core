@@ -2,8 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Shared helpers for the native network components: ingress configuration,
-//! security (authentication, rate limiting, TLS material), the source ingress
-//! runtime with pause/stop control, durable admission and wire conversion.
+//! listener security (authentication, rate limiting, TLS) and the shared
+//! HTTP listener, the source ingress runtime with pause/stop control, durable
+//! admission, sink retry policy, client TLS, delivery identities and wire
+//! conversion.
 //!
 //! This crate registers no component factories. Each component crate owns its
 //! configuration type, factory, transport and export.
@@ -15,9 +17,12 @@ pub mod config;
 pub mod durable;
 #[cfg(feature = "ingress")]
 pub mod ingress;
-#[cfg(feature = "ingress")]
+#[cfg(feature = "sink")]
+pub mod retry;
+#[cfg(feature = "listener")]
 pub mod security;
-#[cfg(feature = "ingress")]
+#[cfg(feature = "listener")]
+pub mod server;
 pub mod update;
 pub mod wire;
 
