@@ -37,7 +37,7 @@ compatibility shims or automatic migration of old state are planned.
 |---|---|
 | Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred) |
 | Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [linked query entry points](#cw-80), [oversized query records](#cw-76) |
-| Native plugins: shared work | [Pause and stop](#cw-96), [erasing disposal](#cw-98), [conformance kit](#source-x-02), [configuration and secrets](#source-x-03), [update planning](#source-x-04), [retry policy](#source-x-05), [delivery contract](#sink-x-03), [observability](#source-x-07), [starter project](#dx-1), [packaging](#dx-10) |
+| Native plugins: shared work | [Pause and stop](#cw-96), [erasing disposal](#cw-98), [conformance kit](#source-x-02), [configuration and secrets](#source-x-03), [update planning](#source-x-04), [retry policy](#source-x-05), [delivery contract](#sink-x-03), [observability](#source-x-07), [starter project](#dx-1), [packaging](#dx-10), [provider and transformer review](#cw-103) |
 | Native sources | [Network runtime](#plugin-source-network), [PostgreSQL](#plugin-source-postgres), [MySQL](#plugin-source-mysql), [SQL Server](#plugin-source-mssql), [SQLite](#plugin-source-sqlite), [HTTP](#plugin-source-http), [gRPC](#plugin-source-grpc), [bridge](#plugin-source-bridge), [counter and mock](#plugin-source-counter-mock) |
 | Native sinks | [Network runtime](#plugin-sink-network-runtime), [HTTP](#plugin-sink-http), [gRPC](#plugin-sink-grpc), [SSE](#plugin-sink-sse), [log](#plugin-sink-log), [capture](#plugin-sink-capture), [profiler](#plugin-sink-profiler), [stored procedures](#plugin-sink-storedproc-shared), [PostgreSQL](#plugin-sink-storedproc-postgres), [MySQL](#plugin-sink-storedproc-mysql), [SQL Server](#plugin-sink-storedproc-mssql), [bridge](#plugin-sink-bridge), [legacy reactions](#plugin-legacy-reactions) |
 | Data, errors and diagnostics | [Saved-data formats](#cw-18), [deep data](#cw-19), [error messages](#cw-22), [status and log updates](#cw-23), [background work](#cw-17), [logging control](#cw-24), [request tracing](#cw-25), [measurements](#cw-26), [monitoring export](#cw-27) |
@@ -328,6 +328,7 @@ keep the old stack for them.
 | Area | Remaining work |
 |---|---|
 | Kafka and Kubernetes | Write native sources and initial-data providers, packaged independently. Only ordinary versions exist (`drasi-core/components/sources/{kafka,kubernetes}`, `drasi-core/components/bootstrappers/{kafka,kubernetes}`); there is nothing under `drasi-core/components/computation-plugins/sources/`. |
+| Other legacy sources and initial-data providers (decision Source D-14) | These ordinary plugins have no native counterpart and no recorded decision: sources `cloudflare-radar`, `dataverse`, `gtfs-rt`, `here-traffic`, `hyperliquid`, `neo4j`, `open511`, `oracle`, `otel`, `platform`, `ris-live`, `sui-deepbook` and `websocket` (`drasi-core/components/sources/*`), and initial-data providers `cloudflare-radar`, `dataverse`, `gtfs-rt`, `here-traffic`, `neo4j`, `open511`, `oracle`, `platform`, `scriptfile` and `sui-deepbook` (`drasi-core/components/bootstrappers/*`). `here-traffic` and `open511` are unpublished. For each, decide (as [Sink D-7](#sink-d-7) does for reactions): port to the native SDK, keep ordinary, or retire. `mock` is [MK-01](#mk-01); `noop` needs no port; check whether the `application` initial-data provider is covered by the application source's native module. |
 | Schema discovery | The native PostgreSQL, MySQL, SQL Server, SQLite and HTTP sources implement `source_schema_reader`. Kafka and Kubernetes need one when they are ported. Factory configuration schemas are not source data schemas. |
 
 **Constraints:** keep what already works natively: HTTP bootstrap, adaptive
@@ -1440,8 +1441,9 @@ for plugins that have nothing to erase.
 - For `drasi.network/http-delivery` sinks, erase must also remove the Host
   `DeliveryRunner` progress record.
 
-Per-plugin erase gaps (factories without erase, the PostgreSQL storedproc
-delivery table, the bridge sink) belong to those plugins.
+Per-plugin erase gaps (factories without erase, the bridge sink) belong to
+those plugins. The three stored-procedure sinks erase only their own progress
+rows, idempotently.
 
 **Example:** removing a log sink with `StateIntent::Erase` fails at the Host
 check, although the log sink stores nothing.
@@ -1592,10 +1594,13 @@ SQL Server have no common policy. `ConsumerFailure::retryable` defaults to
 - A typed error taxonomy (transient, permanent, configuration, authentication)
   that maps onto `retryable` and onto activation failure, replacing string
   matching such as the legacy `categorize_error`.
-- Implement `retryable` in every durable consumer sink.
+- Implement `retryable` in every durable consumer sink. The three
+  stored-procedure sinks do, each with its own classification (SQLSTATE,
+  MySQL and SQL Server error numbers) and its own copy of jittered backoff;
+  they should move onto the shared policy.
 
-**Example:** a SQL Server deadlock in the storedproc sink is reported with the
-default `retryable = false`, so it is treated as permanent.
+**Example:** the stored-procedure sinks, the PostgreSQL source and the network
+sinks each implement full-jitter backoff separately, with different ceilings.
 
 **Evidence:** `drasi-core/components/computation-plugins/common/network/src/retry.rs`;
 `drasi-core/components/computation-plugins/sources/postgres/src/worker.rs:620`;
@@ -1666,23 +1671,22 @@ be split into bounded calls, each with a timeout.
 **Kind:** Improvement. **Priority:** Low (P2). **Effort:** Medium.
 
 Handlebars setup and helpers are repeated across the HTTP, gRPC and log sinks
-and several common crates, and each SQL family has its own parameter-only
-validator.
+and several common crates. The SQL parameter-only rule is already shared:
+`drasi_reaction_common::sql_template` is used by the three native
+stored-procedure sinks (the legacy SQL Server reaction is [SMS-08](#sms-08)).
 
-**What remains:** one renderer with the standard helpers and one SQL template
-validator in `reaction-common`, used by the native sinks. This overlaps NI-03
-in [CW-101](#cw-101).
+**What remains:** one renderer with the standard helpers in `reaction-common`,
+used by the native sinks. This overlaps NI-03 in [CW-101](#cw-101).
 
 **Example:** a `json` helper fix in the HTTP sink does not reach the log sink.
 
 **Evidence:** `drasi-core/components/computation-plugins/sinks/http/src/render.rs`;
 `drasi-core/components/computation-plugins/sinks/grpc/src/render.rs`;
 `drasi-core/components/computation-plugins/sinks/log/src/render.rs`;
-`drasi-core/components/postgres-common/src/sql/template.rs:75-86`;
-`drasi-core/components/mssql-common/src/sql/template.rs`.
+`drasi-core/components/reaction-common/src/sql_template.rs`.
 
-**Done when:** native sinks use the shared renderer and validator, with the
-existing template tests moved to it.
+**Done when:** native sinks use the shared renderer, with the existing
+template tests moved to it.
 
 <a id="source-x-07"></a>
 <a id="sink-x-11"></a>
@@ -1842,6 +1846,40 @@ warning.
 with published tools.
 
 <a id="native-sources"></a>
+
+<a id="cw-103"></a>
+
+### Review the native initial-data providers and transformers (CW-103)
+
+**Kind:** Investigation. **Area:** Native plugins. **Priority:** Medium.
+**Effort:** Large.
+
+The production reviews covered the native sources and sinks. The native
+initial-data providers and transformers have not been reviewed, so their
+lifecycle, erase, update planning, configuration, failure handling and
+documentation gaps are unknown and untracked.
+
+- Initial-data providers: `http`, `mssql`, `mysql`, `postgres` and `sqlite`
+  (`drasi-core/components/computation-plugins/bootstrappers/*`). The
+  PostgreSQL provider was only changed to share its source's flat
+  configuration and managed slot identity.
+- Transformers: `arithmetic`, `middleware`, `query` and `view`
+  (`drasi-core/components/computation-plugins/transformers/*`). `query`
+  implements update planning; none of the four has `DESIGN.md` or
+  `CONFIGURATION.md`.
+
+**What remains:** review each plugin against the native sink and source
+standards (lifecycle hooks, erase, update planning, configuration and secrets,
+retries, tests, documentation) and record the findings as per-plugin entries
+here, as the source and sink sections do.
+
+**Example:** whether a SQLite initial-data provider stopped mid-snapshot
+releases its read transaction within the stop deadline is not known.
+
+**Evidence:** no `DESIGN.md` or `CONFIGURATION.md` in any of these crates.
+
+**Done when:** each provider and transformer has been reviewed and its open
+work is listed here.
 
 ## Native sources
 
@@ -2257,6 +2295,42 @@ The plugin crate has two metadata tests and no lifecycle tests; behaviour is cov
 **Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/tests.rs:10,51`.
 
 **Done when:** these run in a named CI job ([CW-85](#cw-85)).
+
+<a id="my-35"></a>
+
+#### Repair the stale native MySQL family tests (MY-35)
+
+**Kind:** Issue. **Area:** Host SDK tests. **Priority:** High. **Effort:** Medium.
+
+Every older live test in `native_mysql_components.rs` fails before it reaches
+the component under test, so `make test-native-mysql` gives no evidence for
+the MySQL source, bootstrapper or sink family scenarios. Only the two new
+stored-procedure proofs (`native_mysql_storedproc_*`) pass. The tests had
+rotted: their `id("source")` helper panicked once `ComponentId` became
+UUID-only. Names are now mapped to fixed UUIDs, and the tests then fail in
+setup with three different errors:
+
+- `native configuration field source has an incompatible type` (the
+  bootstrapper configuration);
+- a duplicate component name `fixture-transformer-2`;
+- `uninitialized real owners must fence startup`.
+
+The sink wiring was converted to the consumer model and flat configuration, but
+has not run end to end because of these failures.
+
+**What remains:** fix each setup failure against the current host and SDK
+contracts (component IDs, bootstrapper configuration, graph naming and
+progress-owner startup), then confirm every family scenario passes, both Tokio
+flavours, static and dynamic.
+
+**Example:** `cargo test -p drasi-host-sdk --test native_mysql_components -- --ignored`
+should pass every test, not only the stored-procedure proofs.
+
+**Evidence:** `drasi-core/components/host-sdk/tests/native_mysql_components.rs`;
+`drasi-core/components/host-sdk/tests/fixtures/native_mysql/{database,identity,parity}.rs`.
+
+**Done when:** the whole suite passes and runs in a named CI job
+([CW-85](#cw-85)).
 
 <a id="my-40"></a>
 <a id="my-21"></a>
@@ -3886,333 +3960,202 @@ undecided whether it should publish through the SDK metric facility instead.
 ### Shared stored-procedure sink support
 
 The three stored-procedure sinks (`drasi.postgres/storedproc`,
-`drasi.mysql/storedproc`, `drasi.mssql/storedproc`) share their templates,
-lifecycle and configuration problems. Only PostgreSQL commits each effect
-together with a destination cursor. The items below apply to all three unless
-they say otherwise.
+`drasi.mysql/storedproc`, `drasi.mssql/storedproc`) are production-ready
+External consumers. Each procedure call commits in one destination transaction
+with its row in a per-sink progress table (format 2, identical across the
+three, with a per-owner `maxStreams` limit and idempotent erase). They share
+one parameter-only template rule (`drasi_reaction_common::sql_template`), keep
+one connection per activation with budgeted reconnect, honour deadlines and
+Drain/Abort, plan updates field by field, and publish flat configuration with
+only credentials secret. Behaviour is in each sink's `DESIGN.md` and
+`CONFIGURATION.md`. Decisions Sink D-3 (consumer plus destination cursor),
+Sink D-10 (configurable, per-owner progress table) and Sink D-15 (Entra ID
+tokens) are implemented. The items below are what remains; the first two are
+regressions for the MySQL and SQL Server sinks relative to their earlier plain
+sink versions and the legacy reactions.
 
-<a id="sink-d-3"></a>
+<a id="sp-10"></a>
 
-#### Decide the delivery profile for MySQL and SQL Server stored procedures (Sink D-3)
+#### Deliver activation credentials to consumer sinks (SP-10, Sink X-09)
 
-**Kind:** Decision. **Priority:** High.
+**Kind:** Issue. **Area:** Host SDK. **Priority:** High. **Effort:** Medium.
 
-MySQL and SQL Server report `Handled` after running every command in an input,
-with no transaction and no destination cursor. A crash or failure partway
-through an input therefore repeats the commands that already ran.
+The Host SDK never passes activation credentials to a consumer. The factory
+proxy accepts an `identity` dependency only when the component is not a
+consumer, and every consumer creation request is sent with
+`activation_credentials_bound: false`. All three stored-procedure sinks now
+declare `supports_activation_credentials`, map username/password and token
+credentials, and keep the last activation's credentials in memory so erase can
+run after Stop (SQL Server maps a token to Tiberius `AuthMethod::aad_token`).
+None of that is reachable. Only a configured `password` (a secret reference)
+works.
 
-**Options:** (a) keep `Handled` at-least-once and document partial effects;
-(b) declare `ConsumerMode::External` and use only the host `DeliveryRunner`;
-(c) do (b) and also add a destination cursor table committed in the same
-destination transaction as the effect, as PostgreSQL does. The recommendation
-is (c). It restores per-command retry and matches PostgreSQL. Procedures that
-commit internally would still be at-least-once, and this must be documented.
-
-**Example:** an input carries 500 changes. The 300th `EXEC` fails on a
-deadlock. Under (a) the host replays all 500 and the first 299 run twice.
-Under (c) the replay resumes at operation 300.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/lib.rs:85,97`;
-`drasi-core/components/mysql-common/src/storedproc/runtime.rs:24-25,175-227`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:365-399`.
-
-**Done when:** the profile is chosen and recorded in each sink's `DESIGN.md`.
-[SP-01](#sp-01) implements it.
-
-<a id="sp-01"></a>
-
-#### Give MySQL and SQL Server a destination cursor (SP-01)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Large.
-
-This item implements [Sink D-3](#sink-d-3) option (c). MySQL and SQL Server
-are plain `Component::Sink` with `Handled` completion. The PostgreSQL consumer
-already shows the pattern to follow.
+This is a regression: the legacy reactions used identity providers
+(PostgreSQL password, token and certificate; MySQL; SQL Server password), and
+the native MySQL and SQL Server sinks supported activation credentials while
+they were plain sinks. It also blocks Entra ID for SQL Server (Sink D-15) and
+affects the HTTP `drasi.network/http-delivery` consumer.
 
 **What remains:**
 
-- Declare `ConsumerMode::External` for MySQL and SQL Server, with a cursor
-  table modelled on `postgres-common/src/delivery.rs`. Run one destination
-  transaction per operation that commits the procedure effect and the cursor
-  advance together.
-- Factor the cursor protocol into a shared crate or one documented pattern, so
-  the three databases keep identical semantics: rollover, conflict and gap
-  rejection, and ownership (see [SPG-01](#spg-01)).
-- Classify retryable errors per database: MySQL deadlock and lock-wait errors,
-  and SQL Server 1205.
+- Let consumer factories declare an `identity` dependency and bind a
+  `NativeIdentityResource`, as plain sinks do.
+- Resolve credentials for each activation and pass them through the consumer
+  proxy's start, with `activation_credentials_bound` set on creation.
+- Refresh credentials on restart; decide whether a running consumer reconnects
+  with refreshed credentials.
+- Restore the credential-rotation live tests: the MySQL identity scenario was
+  reduced to asserting this gap, and the SQL Server fixture records the host's
+  refusal so that it fails once the host supports it.
 
-**Example:** the commit reply is lost after MySQL commits operation 7. The
-runner retries operation 7. The cursor shows it is done, so the procedure does
-not run again.
+**Example:** an Azure SQL database with SQL authentication disabled, or a MySQL
+server whose password an identity provider rotates, cannot be targeted today.
 
-**Evidence:** `drasi-core/components/postgres-common/src/delivery.rs:67-187`
-(the reference); `drasi-core/components/mysql-common/src/storedproc/runtime.rs:175-227`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:384-397`.
+**Evidence:** `drasi-core/components/host-sdk/src/computation/factory.rs:1385-1387`
+(`"identity" => … && self.consumer.is_none()`) and `:569-581`
+(`create_consumer_with_inputs` sends `activation_credentials_bound: false`);
+`drasi-core/components/host-sdk/tests/fixtures/native_mssql/credentials.rs`;
+`drasi-core/components/host-sdk/tests/fixtures/native_mysql/identity.rs`.
 
-**Done when:** both sinks are External consumers with a destination cursor.
-A crash between the effect and the local progress commit does not repeat a
-committed operation, and tests prove it.
+**Done when:** a consumer sink connects with provider-supplied credentials
+through the loaded library, a test rotates them across a restart, and SQL
+Server authenticates with an Entra ID token.
 
-<a id="sp-03"></a><a id="smy-02"></a><a id="sms-03"></a>
+<a id="sp-11"></a>
 
-#### Stop refusing all input after one interrupted command (SP-03, SMY-02, SMS-03)
+#### Decide whether consumer sinks may consume in-memory queries (SP-11)
 
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+**Kind:** Decision. **Area:** Core, native sinks. **Priority:** High.
+**Effort:** Medium if a weaker mode is added.
 
-Each sink sets an `interrupted` flag before it executes. It clears the flag only
-on success (PostgreSQL also clears it on a retryable rollback). After a timeout,
-a non-retryable error or an unknown commit, every later `handle` is refused
-until the sink is stopped and restarted. One slow procedure call can therefore
-stop delivery for good.
+The `DeliveryRunner` rejects input whose immediate producer has no persistent
+progress (`ReplayRejection::MissingProgress`), and its own ledger must be
+stored durably. The stored-procedure sinks therefore cannot consume an
+in-memory query. This is a regression for MySQL and SQL Server, which accepted
+any producer while they were plain sinks, and for every legacy reaction. The
+PostgreSQL sink already had this limit.
 
-**What remains:**
+**Options:** (a) keep the restriction and document it (done in each sink's
+`DESIGN.md`); (b) add an explicit weaker delivery mode for volatile producers:
+at-least-once, no resume across a process restart, the destination cursor still
+deduplicating within one producer incarnation; (c) let the sink fall back to a
+plain `Handled` sink when its producer is volatile.
 
-- Remove the latched refusal.
-- Classify each error. A confirmed rollback or a command that never ran is
-  retryable. An unknown outcome goes to the runner, which is safe once
-  [SP-01](#sp-01) and [SPG-03](#spg-03) are in place. A dead connection is
-  reconnected inside the activation.
-- SQL Server: a dropped `handle` future must not leave `Work` pending, so that
-  the next `handle` is not refused (see [SMS-07](#sms-07)).
+**Example:** a MySQL stored-procedure sink fed by a memory-backed query fails
+at delivery; the same graph worked before this change.
 
-**Example:** `command_timeout_ms: 30000`, and one procedure call takes 31 s. The
-sink fails that input. Every retry then fails with "SQL Server sink is stopped
-or requires cleanup after interrupted work" until an operator restarts the
-reaction.
+**Evidence:** `drasi-core/components/computation-contracts/src/output_identity.rs:64-84`;
+`drasi-core/lib/src/computation/v1/delivery.rs:342-357`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mysql/DESIGN.md:223-224`.
 
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:274-305`;
-`drasi-core/components/mysql-common/src/storedproc/runtime.rs:298-308`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:365-368,383-397`.
+**Done when:** the option is chosen and recorded, and either the restriction
+is documented in all three sinks or the chosen mode is implemented and tested.
 
-**Done when:** a test times out, fails or interrupts one input, and the next
-retry of the same input succeeds without Stop/Start on all three sinks.
+<a id="sp-12"></a>
 
-<a id="sms-01"></a><a id="sp-05"></a>
+#### Extend the sink conformance kit to consumers (SP-12, Sink X-02)
 
-#### Enforce parameter-only templates in one shared validator (SMS-01, SP-05, Sink X-08)
+**Kind:** Qualification. **Area:** SDK, Host SDK. **Priority:** Medium.
+**Effort:** Medium.
 
-**Kind:** Issue. **Priority:** High. **Effort:** Small.
+`drasi_computation_plugin_sdk::testing::SinkConformance` drives plain
+`NativeSink`s only. The stored-procedure sinks, and the HTTP delivery consumer,
+reuse only its `assess_matrix`; their lifecycle, erase and retry behaviour is
+proven by hand-written unit and live tests instead.
 
-The SQL Server sink only checks that its templates compile. Its `{{json}}`
-helper writes raw text into the SQL. A template such as `EXEC p '{{json after}}'`
-therefore puts unescaped change data into the command, which is SQL injection.
-PostgreSQL (`ensure_param_only`) and MySQL (`validate_parameterized_template`)
-each have their own parameter-only check.
+**What remains:** add a consumer driver that runs lifecycle, erase twice,
+retry-after-failure without Stop/Start, cancellation, configuration round trip
+and the assess matrix through a `DeliveryRunner`, linked and through the
+loaded library, on both Tokio flavours.
 
-**What remains:**
+**Example:** a new database sink should get the same lifecycle proof by
+supplying only a destination fixture.
 
-- Write one shared validator and use it for all three sinks.
-- Reject bare `{{x}}` in SQL text, `{{{x}}}`, inline `{{json x}}`, partials and
-  decorators. Allow values only through `{{param …}}`.
-- Write the failing SQL Server test first.
-- Document the change for migrating legacy templates. The legacy SQL Server
-  reaction allowed inline `{{json}}`, so this is a deliberate tightening.
+**Evidence:** `drasi-core/components/computation-plugin-sdk/src/testing.rs`;
+`drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/tests.rs`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/tests.rs`.
 
-**Example:** `added: "EXEC dbo.upsert '{{json after}}'"` with a property value
-`x'); DROP TABLE t;--` should be rejected when the sink is created, but it is
-accepted today.
+**Done when:** the kit runs for all three stored-procedure sinks and the HTTP
+delivery consumer in CI.
 
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:75`;
-`drasi-core/components/mssql-common/src/sql/template.rs:4-16,245-252`;
-`drasi-core/components/postgres-common/src/sql/template.rs:86`;
-`drasi-core/components/mysql-common/src/storedproc.rs:111`.
+<a id="sp-13"></a>
 
-**Done when:** one validator rejects every non-parameter interpolation for all
-three sinks, and a SQL Server test shows the injection template is refused.
+#### Report consumer delivery progress through management (SP-13, Sink X-04)
 
-<a id="sp-02"></a>
+**Kind:** Improvement. **Area:** SDK, Host SDK. **Priority:** Low.
+**Effort:** Small.
 
-#### Honour the lifecycle contract in start, stop and dispose (SP-02, Sink X-01)
+Operators cannot read a consumer sink's delivered position through
+management. `consumer_progress_reader` exists only for producers (sources and
+transformers); the Host SDK refuses a consumer-progress binding on a consumer.
+Progress is visible only through the consumer proxy's `progress()` in tests,
+or by querying the destination progress table.
 
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+**What remains:** decide whether consumer delivery progress belongs in
+`consumer_progress_reader` or a separate read capability, and expose the
+runner ledger (and optionally the destination cursor) through it.
 
-Start and stop use configuration timeouts and ignore `ctx.deadline()`,
-`ctx.cancellation()` and `StopMode`. An `Abort` stop waits as long as a `Drain`
-stop, and a cancelled start keeps connecting. Dispose ignores `Erase`, and no
-sink declares `erases_owned_state`. Removing any of them with erase therefore
-fails before the plugin runs.
+**Example:** an operator investigating a stalled SQL Server sink should see
+which stream and operation it last completed without querying the database.
 
-**What remains:**
+**Evidence:** `drasi-core/components/computation-plugin-sdk/src/component.rs:64-66`;
+`drasi-core/components/host-sdk/src/computation/factory.rs:500-509`.
 
-- Bound start and stop by the context deadline and cancellation. `Abort`
-  cancels in-flight work. MySQL can use its session `KILL` path. For SQL
-  Server, document that Tiberius cannot send ATTENTION.
-- Declare `erases_owned_state` on all three factories. PostgreSQL deletes its
-  own cursor rows ([SPG-01](#spg-01)). MySQL and SQL Server erase their cursor
-  rows once [SP-01](#sp-01) lands; until then their erase is a documented no-op.
-  Make erase idempotent ([CW-98](#cw-98)).
-- Pause and resume stay no-ops, because the host stops calling `handle`
-  ([CW-96](#cw-96)).
-
-**Example:** `stop(Abort)` while a MySQL procedure is running should return
-within the stop deadline after it kills the session. Today it waits up to
-`shutdown_timeout_ms`.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:192-269`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/component.rs:53-73`;
-`drasi-core/components/mysql-common/src/storedproc/runtime.rs:258-283`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:286-305,318-354`.
-
-**Done when:** the lifecycle conformance kit (Sink X-02) passes for all three
-sinks, including Abort within the deadline and erase run twice.
-
-<a id="sp-06"></a><a id="smy-03"></a><a id="sms-05"></a>
-
-#### Keep one connection per activation for MySQL and SQL Server (SP-06, SMY-03, SMS-05)
-
-**Kind:** Improvement. **Priority:** Medium. **Effort:** Medium.
-
-MySQL opens two new connections (control and procedure) for every input, plus
-two more at start. SQL Server opens a new TCP, TLS and login connection for
-every input and discards its start test connection. Throughput is therefore
-bounded by connection setup. The legacy reactions used a pool or a shared
-client.
-
-**What remains:** keep a persistent connection (for MySQL, a control and
-procedure pair) per activation, with bounded reconnect using the shared retry
-policy (Sink X-05).
-
-**Example:** 1,000 one-change inputs cost 2,000 MySQL connections today. After
-this change they should cost two.
-
-**Evidence:** `drasi-core/components/mysql-common/src/storedproc/runtime.rs:175-227,258-270`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:286-305,384-385`;
-legacy `drasi-core/components/reactions/storedproc-mysql/src/executor.rs:94` and
-`drasi-core/components/reactions/storedproc-mssql/src/executor.rs:115-119`.
-
-**Done when:** a test shows that the connection count stays constant across
-many inputs and that the sink reconnects after a database restart.
-
-<a id="sp-04"></a>
-
-#### Publish configuration defaults and mark only real secrets (SP-04, Sink X-09)
-
-**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
-
-Each factory marks the whole `settings` object as secret by hand. Templates,
-routes and hosts are therefore redacted, and none of the sinks publishes
-`configuration_details` with defaults. The SDK already provides
-`ConfigOption::secret()`.
-
-**What remains:**
-
-- Flatten the settings so that `password` and the TLS private keys are
-  top-level secret fields, and leave templates visible.
-- Publish `configuration_details` with defaults.
-- Restore per-field configuration values as the legacy `ConfigValue` fields
-  allowed.
-
-**Example:** the Server UI should show an operator `added: "CALL upsert({{param after.id}})"`
-and hide `password`. Today both are hidden.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/lib.rs:47-61`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/lib.rs:73-77`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:141-145`;
-`drasi-core/components/computation-plugin-sdk/src/configuration.rs:223`.
-
-**Done when:** each factory's metadata marks only credentials and keys secret,
-and publishes its defaults.
-
-<a id="sp-07"></a>
-
-#### Plan updates through `assess` and native management (SP-07, Sink X-10)
-
-**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
-
-None of the sinks implements `Factory::assess`, so every configuration change
-recreates the component.
-
-**What remains:** apply template, route and timeout changes in place. Restart
-for connection and credential changes. Recreate for output changes and for the
-cursor identity.
-
-**Example:** editing one `updated` template should not reconnect or reset the
-cursor.
-
-**Evidence:** none of the three factories implements `assess`
-(`drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/lib.rs`,
-`.../storedproc-mysql/src/lib.rs`, `.../storedproc-mssql/src/lib.rs`).
-
-**Done when:** each factory returns InPlace, Restart or Recreate per field, and
-tests cover each class.
+**Done when:** a consumer's delivery progress is readable through management
+for all three sinks.
 
 <a id="sink-x-11-storedproc"></a>
 
-#### Add delivery logging and metrics (Sink X-11)
+#### Add delivery metrics (Sink X-11)
 
 **Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
 
-The SQL Server and MySQL sink crates log nothing, and the PostgreSQL delivery
-path logs nothing. An operator cannot see retries, timeouts or the cursor
-position.
+All three sinks log retries, reconnects and failures with sanitized fields,
+but none reports metrics. An operator cannot chart retries, cursor lag or
+delivery latency.
 
-**What remains:** add sanitized logs and sink metrics (deliveries, items,
-retries, failures, durations), following the network sinks.
+**What remains:** report the shared sink metrics (deliveries, operations,
+retries by class, reconnects, failures, duration, stream count against
+`maxStreams`) once [Source X-07 and Sink X-11](#source-x-07) define them.
 
-**Example:** a deadlock retry should produce a warning that names the output
-alias and the SQLSTATE or error number, and never the parameter values.
+**Example:** a rising deadlock retry rate on one output alias should be visible
+without reading logs.
 
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/` and
-`drasi-core/components/computation-plugins/sinks/storedproc-mysql/` contain no
-`log::` or `tracing::` calls. Neither does `drasi-core/components/postgres-common/src/delivery.rs`.
+**Evidence:** no metric emission in
+`drasi-core/components/computation-plugins/sinks/storedproc-*/src/` or
+`drasi-core/components/mysql-common/src/storedproc/`.
 
-**Done when:** each sink emits the shared sink metrics and logs retries and
-failures without logging data.
+**Done when:** each sink emits the shared sink metrics.
 
 <a id="sp-08"></a>
 
-#### Cover the failure paths with tests (SP-08, Sink X-02)
+#### Run the stored-procedure live suites in CI (SP-08, Sink X-15)
 
-**Kind:** Qualification. **Priority:** Medium. **Effort:** Medium.
+**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
 
-The tests prove the happy path and some PostgreSQL recovery cases. They do not
-cover the failures that the items above fix.
+The PostgreSQL and MySQL live tests now cover erase twice, the per-owner
+stream limit, reconnect after the session is killed, recovery and retry
+without Stop/Start (including through the host proxy), partial failure with
+replay against a fresh ledger, Abort with rollback, large inputs and template
+rejection. They are `#[ignore]`d and need Podman, and no CI job runs them.
 
-**What remains:** for all three sinks, test:
+**What remains:**
 
-- pause, Abort, and erase run twice;
-- reconnect after a database restart;
-- inputs larger than the current caps;
-- rejection of template injection;
-- credential refresh;
-- recovery after a failure without Stop/Start;
-- a crash between the effect and the cursor commit.
+- Run `drasi-source-postgres --test native_transactions` (the `storedproc`
+  module) and `drasi-host-sdk --test native_mysql_components`
+  (`native_mysql_storedproc_*`) in named CI jobs ([CW-85](#cw-85)).
+- Add the scenarios still missing: a database container restart during a
+  delivery (not only a killed session), credential rotation once
+  [SP-10](#sp-10) lands, and pause during delivery.
+- SQL Server is [SMS-30](#sms-30).
 
-Use the sink conformance kit (Sink X-02) once it exists. The per-database live
-suites are [SPG-30](#spg-30), [SMY-30](#smy-30) and [SMS-30](#sms-30).
+**Example:** restart the MySQL container during a 5,000-change input; the sink
+should finish without Stop/Start and without repeating committed operations.
 
-**Example:** restart the database container during a 1,000-change input. The
-sink should finish without Stop/Start and with no duplicated committed
-operations.
+**Evidence:** `drasi-core/components/sources/postgres/tests/native_transactions/storedproc.rs`;
+`drasi-core/components/host-sdk/tests/fixtures/native_mysql/storedproc.rs`.
 
-**Evidence:** see the per-database qualification items.
-
-**Done when:** every scenario listed runs in CI for each database that has a
-live environment.
-
-<a id="sp-09"></a>
-
-#### Write the legacy-to-native migration guide (SP-09)
-
-**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
-
-The legacy reactions rendered templates from the query-result context. The
-native sinks render from the graph-change context. A `PATCH` carries only the
-properties it sets, and a delete may carry no before image. Copied legacy
-templates can therefore bind missing values.
-
-**What remains:** document each legacy context field and its native
-equivalent, the `PATCH` `after` semantics, identity-only deletes and the
-template tightening ([SMS-01](#sms-01)). First check with a test how `after`
-renders for a patch.
-
-**Example:** a legacy `updated: "CALL upd({{param after.name}}, {{param after.price}})"`
-receives only `after.price` when a patch changes the price.
-
-**Evidence:** `drasi-core/components/computation-plugins/SINKS.md:79-117`.
-
-**Done when:** each sink's `CONFIGURATION.md` links a migration section with
-before/after templates for add, patch and delete.
+**Done when:** both suites run in CI with the added scenarios.
 
 <a id="dx-7"></a>
 
@@ -4225,7 +4168,9 @@ patches, removed properties and identity-only deletes. An absent before image
 is not null. The author must also choose between `Handled`, `ConsumerMode::External`
 and `NativeTransactionalConsumer`, which give different guarantees. The SDK
 explains each part separately, but no example shows them together. Authors
-copy legacy templates or assume every delete has `before.id`.
+copy legacy templates or assume every delete has `before.id`. The
+stored-procedure sinks now implement the External profile with a destination
+cursor, but they are large production crates, not a teaching example.
 
 **What remains:**
 
@@ -4248,9 +4193,7 @@ use the element identity instead.
 `drasi-core/components/computation-contracts/src/graph_view.rs:583-626`;
 `drasi-core/components/computation-contracts/src/component_data.rs:21-31`;
 `drasi-core/components/computation-contracts/src/delivery.rs:77-87`;
-`drasi-core/components/computation-plugin-sdk/README.md:1092-1170`;
-`drasi-core/components/computation-plugins/sinks/storedproc-postgres/README.md:15-41`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mysql/README.md:61-73`.
+`drasi-core/components/computation-plugin-sdk/README.md:1092-1170`.
 
 **Done when:** a tested example sink exists that covers patch, identity-only
 delete and lost-commit replay, and the guides state the scope of each
@@ -4260,388 +4203,77 @@ guarantee.
 
 ### PostgreSQL stored-procedure sink
 
-`drasi-core/components/computation-plugins/sinks/storedproc-postgres` is an
-External consumer. It commits each operation's procedure effect and its cursor
-in one transaction (`drasi-core/components/postgres-common/src/delivery.rs`).
-The shared items above also apply.
+`drasi-core/components/computation-plugins/sinks/storedproc-postgres` (with
+`drasi-core/components/postgres-common/src/delivery/progress.rs`).
+Production-ready: see its [DESIGN.md](../../components/computation-plugins/sinks/storedproc-postgres/DESIGN.md)
+and [CONFIGURATION.md](../../components/computation-plugins/sinks/storedproc-postgres/CONFIGURATION.md).
+The shared items above apply. Its credential support waits on [SP-10](#sp-10),
+its progress reporting on [SP-13](#sp-13) and its CI run on [SP-08](#sp-08).
 
-<a id="spg-01"></a><a id="sink-d-10"></a>
+<a id="spg-06"></a>
 
-#### Scope the delivery table to its consumer and erase it (SPG-01, Sink D-10, CW-98 part)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-Every sink writes cursors to one hard-coded `public.drasi_delivery_stream_v1`
-table. The 4,096-stream cap counts rows across the whole database, and no row
-is ever deleted. Sinks that are added and removed over time therefore exhaust
-the database for every later sink. The factory does not declare
-`erases_owned_state`, so erase cannot clean up. The accepted direction (Sink
-D-10) is a configurable table, an owner column and per-consumer cleanup.
-
-**What remains:**
-
-- Make the schema and table configurable.
-- Add an owner column for the consumer scope.
-- Replace the database-wide limit with a per-consumer or configurable limit.
-- Declare `erases_owned_state`, and in `dispose(Erase)` delete only this
-  consumer's rows, idempotently.
-- Document the required grants.
-- Check whether a non-superuser can create the table in `public` on
-  PostgreSQL 15+ (see [SPG-04](#spg-04)).
-
-**Example:** adding and erasing 4,096 sinks against one database leaves 4,096
-rows. The next sink fails with "destination delivery stream capacity is
-exhausted".
-
-**Evidence:** `drasi-core/components/postgres-common/src/delivery.rs:11-20,67-88,151-158`;
-`drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:192-209`.
-
-**Done when:** each consumer's rows are owned and bounded per consumer. Erase
-removes them and is safe to repeat. A test runs erase twice and then adds a new
-sink.
-
-<a id="spg-03"></a>
-
-#### Reconnect after driver loss and retry unknown commits (SPG-03)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-The connection driver task only logs when it fails, so a lost connection stays
-lost. A connection error (08xxx) or `CommitUnknown` is then not retryable, and
-the wedge in [SP-03](#sp-03) refuses all later input. The cursor makes a retry
-after reconnect safe.
-
-**What remains:** reconnect within the activation, with bounded backoff
-(Sink X-05). Treat 08xxx and `CommitUnknown` as retry-after-reconnect.
-
-**Example:** a PostgreSQL failover drops the connection mid-commit. The sink
-should reconnect, retry, find the operation in the cursor and continue.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:233-240,274-305`;
-`drasi-core/components/postgres-common/src/delivery.rs:226-231,257`.
-
-**Done when:** a live test restarts PostgreSQL during delivery, and the sink
-recovers with no duplicated effects and no Stop/Start.
-
-<a id="spg-02"></a>
-
-#### Support activation credentials (SPG-02, Sink X-09)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
-
-The PostgreSQL sink accepts only a static password and PEM files. The legacy
-reaction used identity providers, including tokens and certificate mTLS, and
-the native MySQL and SQL Server sinks already support activation credentials.
-
-**What remains:**
-
-- Declare `supports_activation_credentials` for token and password providers.
-- Decide whether certificate providers need an SDK extension or stay static
-  PEM.
-
-**Example:** an Azure Database for PostgreSQL sink should use a refreshed Entra
-token instead of a stored password.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/lib.rs:47-61`
-(compare `drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/lib.rs:47-61`);
-legacy `drasi-core/components/reactions/storedproc-postgres/src/executor.rs:51-72`.
-
-**Done when:** the sink connects with a refreshed provider token, and a test
-covers credential refresh.
-
-<a id="spg-04"></a>
-
-#### Expose consumer progress and create the table safely (SPG-04, Sink X-04)
-
-**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
-
-The sink does not expose `consumer_progress_reader`, so management cannot
-report delivery progress. The cursor table is created inside the delivery
-`initialize` path, so a missing `CREATE` privilege appears as a delivery
-failure.
-
-**What remains:**
-
-- Implement the progress reader.
-- Move table creation into a checked, retry-safe step that fails with a clear
-  privilege error.
-
-**Example:** a role without `CREATE` on `public` should fail at start with
-"grant CREATE on schema … or pre-create table …".
-
-**Evidence:** `drasi-core/components/postgres-common/src/delivery.rs:67-88`;
-`drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/lib.rs:69-78`.
-
-**Done when:** progress is readable through management, and the privilege
-failure has a test with a clear error.
-
-<a id="spg-05"></a>
-
-#### Remove the double connect timeout and allow refusing plaintext (SPG-05)
+#### Retire the format-1 delivery handler with the legacy reaction (SPG-06, CW-63)
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Small.
 
-Start applies the connect timeout twice, so it can wait twice as long as
-configured. A plaintext connection to a non-loopback host only logs a warning.
+`postgres-common` keeps the format-1 `PostgresDeliveryHandler` and its
+database-wide `public.drasi_delivery_stream_v1` table unchanged, because the
+legacy `drasi-reaction-storedproc-postgres` still uses it. The legacy table
+keeps its 4,096-stream database-wide cap and is never erased.
 
-**What remains:**
+**What remains:** remove the format-1 handler and its table when the legacy
+reaction is retired ([CW-63](#cw-63)), and document how to drop the old table.
 
-- Apply the timeout once.
-- Add an option to refuse plaintext to non-loopback hosts.
+**Example:** a database used by both the legacy reaction and the native sink
+has two progress tables with different formats.
 
-**Example:** `connect_timeout_ms: 5000` against an unreachable host should fail
-within 5 s, not 10 s.
+**Evidence:** `drasi-core/components/postgres-common/src/delivery.rs`;
+`drasi-core/components/reactions/storedproc-postgres/src/executor.rs`.
 
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:135,171-176,219-224`.
-
-**Done when:** start honours one timeout, and the refusal option is tested.
-
-<a id="spg-30"></a>
-
-#### Qualify the PostgreSQL sink live (SPG-30, Sink X-15)
-
-**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
-
-Live tests exist for partial-batch resume, deduplication, retryable rollback
-and cancellation. They are ignored by default because they need a
-Docker-compatible runtime, and they do not cover the cases the items above
-change.
-
-**What remains:**
-
-- Run the live suite in CI.
-- Add tests for stream-cap exhaustion, erase, reconnect, a PostgreSQL 15
-  non-superuser role and the [SP-08](#sp-08) scenarios.
-
-**Example:** `cargo test -p drasi-source-postgres --test native_transactions -- --ignored`
-should run in a CI job.
-
-**Evidence:** `drasi-core/components/sources/postgres/tests/native_transactions/libraries.rs:514-749`.
-
-**Done when:** the live suite, including the new cases, runs in CI.
-
-<a id="spg-40"></a>
-
-#### Write DESIGN.md and CONFIGURATION.md, and fix the ABI text (SPG-40, Sink X-14)
-
-**Kind:** Improvement. **Priority:** High. **Effort:** Small.
-
-The sink has only a README, and it states ABI `2.0.0`.
-
-**What remains:**
-
-- `DESIGN.md`: the cursor protocol, the exactly-once conditions and table
-  ownership.
-- `CONFIGURATION.md`: grants, procedure rules, TLS, credentials, the update
-  matrix, erase, and a runbook for the cursor table.
-- Correct the ABI text.
-
-**Example:** an operator who needs to know whether a procedure may `COMMIT`
-should find the answer in `CONFIGURATION.md`.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/README.md:5`.
-
-**Done when:** both documents exist and the README states the current ABI.
+**Done when:** only the format-2 progress table remains in `postgres-common`.
 
 <a id="plugin-sink-storedproc-mysql"></a>
 
 ### MySQL stored-procedure sink
 
-`drasi-core/components/computation-plugins/sinks/storedproc-mysql` is a
-`Handled` sink. The runtime is in `drasi-core/components/mysql-common/src/storedproc/`.
-Its profile, wedge and connection work are [SP-01](#sp-01), [SMY-02](#smy-02)
-and [SMY-03](#smy-03).
-
-<a id="smy-01"></a><a id="sms-02"></a>
-
-#### Chunk large inputs instead of failing them forever (SMY-01, SMS-02, CW-44 part)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-MySQL refuses inputs with more than 4,096 changes or more than
-`max_protocol_bytes` in total. SQL Server refuses more than 100,000 commands
-and applies one `command_timeout_ms` to the whole input. The host retries a
-refused input forever, so one large source transaction stops the reaction. The
-legacy reactions had no cap.
-
-**What remains:**
-
-- Execute in chunks.
-- Bound the memory used for rendering.
-- Apply timeouts per command.
-- Enforce SQL Server's 2,100-parameter limit per command with a clear error.
-- This is the "SQL Server and MySQL sinks" row of [CW-44](#cw-44), which moves
-  here.
-
-**Example:** a bulk `UPDATE` of 10,000 source rows becomes one 10,000-change
-input. MySQL refuses it on every retry.
-
-**Evidence:** `drasi-core/components/mysql-common/src/storedproc/runtime.rs:95-98,123-131`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:375-378,394-396`.
-
-**Done when:** tests deliver more than 4,096 changes (MySQL) and more than
-100,000 commands (SQL Server). A command with more than 2,100 parameters fails
-with a clear error.
+`drasi-core/components/computation-plugins/sinks/storedproc-mysql` (runtime in
+`drasi-core/components/mysql-common/src/storedproc/`). Production-ready: see
+its [DESIGN.md](../../components/computation-plugins/sinks/storedproc-mysql/DESIGN.md)
+and [CONFIGURATION.md](../../components/computation-plugins/sinks/storedproc-mysql/CONFIGURATION.md).
+The shared items above apply; [SP-10](#sp-10) and [SP-11](#sp-11) are
+regressions for this sink.
 
 <a id="smy-04"></a>
 
-#### Rename `retry_attempts` and stop reusing binlog fields (SMY-04)
+#### Stop requiring binlog fields for the sink's connection (SMY-04)
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Small.
 
-`retry_attempts` retries only connection setup, unlike the legacy command
-retry. The sink's connection also reuses binlog settings (`server_id = 1`,
-heartbeat 1,000).
+`retry_attempts` is renamed `connectRetryAttempts` and the binlog settings are
+no longer exposed in the sink configuration. The shared MySQL connection
+struct still requires a `server_id` and heartbeat, so the sink sets
+placeholder values in one private place.
 
-**What remains:**
+**What remains:** give `mysql-common`'s connection a constructor that needs no
+replication settings, and use it for the sink.
 
-- Rename the field to `connectRetryAttempts` (or apply it to commands after
-  [SP-01](#sp-01)).
-- Build the sink connection without the binlog fields.
+**Example:** a reader of the sink's connection code should not see a
+`server_id` that has nothing to do with the sink.
 
-**Example:** an operator setting `retry_attempts: 5` expects a failed procedure
-to be retried. It is not.
+**Evidence:** `drasi-core/components/mysql-common/src/storedproc/session.rs`.
 
-**Evidence:** `drasi-core/components/mysql-common/src/storedproc/config.rs:39-73,89-90`;
-`drasi-core/components/mysql-common/src/storedproc/runtime.rs:138-173`.
-
-**Done when:** the field name matches its behaviour, and the connection uses no
-replication settings.
-
-<a id="smy-30"></a>
-
-#### Qualify the MySQL sink live (SMY-30, Sink X-15)
-
-**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
-
-Construction tests exist. The live procedure lifecycle tests are ignored and
-need Podman and rebuilt native libraries.
-
-**What remains:**
-
-- Run the live tests in CI.
-- Add tests for more than 4,096 changes, partial failure with replay,
-  reconnect and the [SP-08](#sp-08) scenarios.
-
-**Example:** stop MySQL during a 5,000-change input, then restart it. The sink
-should recover without Stop/Start.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/tests.rs`;
-`drasi-core/components/host-sdk/tests/native_mysql_components.rs:1317-1692`.
-
-**Done when:** the live MySQL suite runs in CI and covers these cases.
-
-<a id="smy-40"></a>
-
-#### Write DESIGN.md and CONFIGURATION.md (SMY-40, Sink X-14)
-
-**Kind:** Improvement. **Priority:** High. **Effort:** Small.
-
-The sink has only a README.
-
-**What remains:**
-
-- `DESIGN.md`: delivery profile, duplicate windows, session cleanup.
-- `CONFIGURATION.md`: grants, TLS, credentials, limits.
-- Document the current caps and the per-input connection cost until
-  [SMY-01](#smy-01) and [SMY-03](#smy-03) land.
-
-**Example:** an operator should learn from `CONFIGURATION.md` that one input
-cannot exceed 4,096 changes.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mysql/README.md`.
-
-**Done when:** both documents exist.
+**Done when:** the sink builds its connection without replication fields.
 
 <a id="plugin-sink-storedproc-mssql"></a>
 
 ### SQL Server stored-procedure sink
 
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql` is a
-`Handled` sink, and all its code is in `src/lib.rs`. Its injection, large-input,
-profile, wedge and connection work are [SMS-01](#sms-01), [SMS-02](#sms-02),
-[SP-01](#sp-01), [SMS-03](#sms-03) and [SMS-05](#sms-05). Live qualification
-depends on [CW-78](#cw-78).
-
-<a id="sms-04"></a>
-
-#### Give the sink its own configuration struct (SMS-04)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
-
-The sink embeds the source's `MsSqlSourceConfig`. That struct derives `Debug`
-including the password, has no `deny_unknown_fields`, accepts source-only
-fields (`tables`, `poll_interval_ms`, `table_keys`, `start_position`) and
-defaults `encryption` to `NotSupported`. The sink also accepts a configuration
-with no template. The PostgreSQL and MySQL sinks reject that.
-
-**What remains:**
-
-- Define a sink connection struct with a redacting `Debug` and
-  `deny_unknown_fields`.
-- Default encryption to `On`, or warn on plaintext.
-- Require at least one template.
-
-**Example:** `{"connection": {"host": "db", "tables": ["x"]}, "outputs": {}}`
-is accepted today. It should be rejected.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:33-49`;
-`drasi-core/components/mssql-common/src/config.rs:150-196`.
-
-**Done when:** unknown or source-only fields and template-less configurations
-are rejected, and `Debug` output contains no password.
-
-<a id="sms-06"></a><a id="sink-d-15"></a>
-
-#### Support Entra ID access tokens (SMS-06, Sink D-15)
-
-**Kind:** Decision and Issue. **Priority:** Medium. **Effort:** Small.
-
-The sink supports only SQL authentication. A token from an activation
-credential is collapsed into a SQL-auth username and password, so Azure SQL
-with Entra ID cannot be used. The recommendation (open Sink D-15) is to add
-Tiberius `AADToken` authentication through activation credentials, shared with
-source MS-12, rather than document the gap.
-
-**What remains:**
-
-- Decide (Sink D-15).
-- Pass access tokens as `AuthMethod::AADToken`.
-- Refresh tokens on reconnect.
-
-**Example:** an Azure SQL database that has SQL authentication disabled should
-accept the sink's managed-identity token.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:229-254`.
-
-**Done when:** a token credential authenticates as Entra ID, and a test covers
-it.
-
-<a id="sms-07"></a>
-
-#### Cancel pending work on drop and tidy the crate (SMS-07, Sink X-13)
-
-**Kind:** Investigation and Improvement. **Priority:** Low. **Effort:** Small.
-
-`Work` holds a spawned task's `JoinHandle` and has no `Drop`. Dropping the sink
-or timing out therefore detaches a running SQL task. Unverified: whether this
-leaves commands running after stop in practice. The crate also has an
-`unreachable!` on an input-reachable path, and a single 674-line `lib.rs`.
-
-**What remains:**
-
-- Reproduce the detach and add a drop guard that aborts pending work.
-- Replace `unreachable!` with an error.
-- Split into `config.rs`, `component.rs` and `lib.rs`, as PostgreSQL does.
-
-**Example:** drop the sink while a 60 s procedure runs. The procedure should be
-cancelled, not left running.
-
-**Evidence:** `drasi-core/components/mssql-common/src/native/work.rs:10-35`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:276`.
-
-**Done when:** a test shows that dropping the sink aborts pending work, and no
-`unreachable!` remains on input paths.
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql`.
+Production-ready by code review and unit tests: see its
+[DESIGN.md](../../components/computation-plugins/sinks/storedproc-mssql/DESIGN.md)
+and [CONFIGURATION.md](../../components/computation-plugins/sinks/storedproc-mssql/CONFIGURATION.md).
+The shared items above apply; [SP-10](#sp-10) (including Entra ID tokens) and
+[SP-11](#sp-11) are regressions for this sink.
 
 <a id="sms-30"></a>
 
@@ -4649,41 +4281,48 @@ cancelled, not left running.
 
 **Kind:** Qualification. **Priority:** High. **Effort:** Medium.
 
-The tests cover construction only. The live cases are ignored and need an
-isolated SQL Server fixture ([CW-78](#cw-78)).
+The sink has 39 unit tests, including the cursor protocol through a
+database-free seam, and 4 database-free host tests. Nothing has run against a
+real SQL Server: live qualification is deferred by the owner
+([CW-78](#cw-78)). The live tests compile, and the fixture's `setup.sql` and
+`cleanup.sql` create and grant `<schema>.DrasiDeliveryProgress`.
 
-**What remains:** once the CW-78 environment exists, run the live cases and the
-[SP-08](#sp-08) scenarios.
+**What remains:** once the CW-78 environment exists, run the live cases:
+per-operation transactions, exactly-once replay, `@@TRANCOUNT` detection of a
+procedure that changes the transaction, Abort dropping the connection, erase
+twice, the 2,098-parameter limit, Azure redirect handling and Entra ID tokens
+(after [SP-10](#sp-10)).
 
-**Example:** the ignored live tests should run unattended in CI against a SQL
-Server container.
-
-**Evidence:** `drasi-core/components/host-sdk/tests/native_mssql_components.rs:335-351`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:405-674`.
+**Evidence:** `drasi-core/components/host-sdk/tests/native_mssql_components.rs`;
+`drasi-core/components/host-sdk/tests/fixtures/native_mssql/sink_effects.rs`;
+`drasi-core/components/host-sdk/tests/fixtures/native_mssql/README.md`.
 
 **Done when:** the SQL Server live suite runs in CI.
 
-<a id="sms-40"></a>
+<a id="sms-08"></a>
 
-#### Write DESIGN.md and CONFIGURATION.md, and fix the ABI text (SMS-40, Sink X-14)
+#### Close the injection gap in the legacy SQL Server reaction (SMS-08)
 
-**Kind:** Improvement. **Priority:** High. **Effort:** Small.
+**Kind:** Issue. **Area:** Legacy reaction. **Priority:** High.
+**Effort:** Small.
 
-The README states "ABI 2.0.0 / wire 2", and there is no design or configuration
-document.
+The native sink rejects any template that writes a value into the SQL text.
+The legacy `drasi-reaction-storedproc-mssql` still accepts inline
+`{{json …}}` (and the other value helpers), which writes unescaped change data
+into the command: the SQL injection that SMS-01 fixed in the native sink.
 
-**What remains:**
+**What remains:** either apply `drasi_reaction_common::sql_template` to the
+legacy reaction (a deliberate breaking tightening, with a migration note), or
+retire the reaction with [CW-63](#cw-63) and document the risk until then.
 
-- Add `DESIGN.md` and `CONFIGURATION.md`.
-- Correct the ABI text.
-- Keep and extend the capability table.
+**Example:** `added: "EXEC dbo.upsert '{{json after}}'"` with a property value
+`x'); DROP TABLE t;--` is accepted by the legacy reaction.
 
-**Example:** an operator should find out from `CONFIGURATION.md` that Tiberius
-cannot cancel a running command.
+**Evidence:** `drasi-core/components/mssql-common/src/sql/template.rs`;
+`drasi-core/components/reactions/storedproc-mssql/src/render.rs`.
 
-**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/README.md:7,31-43`.
-
-**Done when:** both documents exist and the README is current.
+**Done when:** the legacy reaction rejects non-parameter interpolation, or it
+is retired.
 
 <a id="plugin-sink-bridge"></a>
 
