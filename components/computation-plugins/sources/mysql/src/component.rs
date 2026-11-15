@@ -7,6 +7,10 @@ use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ConsumerProgressView, InputPositionPolicy, OutputEnvelope,
     SourceProgressView,
 };
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
 use drasi_core_types::interface::StorageDurability;
 use drasi_mysql_common::native::MySqlSource;
@@ -35,10 +39,31 @@ impl NativeComponent for MySqlComponent {
     fn input_position_policy(&self) -> Option<Arc<InputPositionPolicy>> {
         self.source.position_policy()
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl MySqlComponent {
+    async fn start_activation(&mut self) -> Result<()> {
         self.source.start().await
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_activation(&mut self) -> Result<()> {
         self.source.stop().await
     }
 }

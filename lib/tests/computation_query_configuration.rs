@@ -285,7 +285,10 @@ async fn native_query_executes_synthetic_joins_and_the_configured_source_middlew
         ])
         .await
         .expect("host-owned input bindings");
-    query.start().await.expect("start");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     assert!(query
         .transform(input(
             fixture_support::component_id(2),
@@ -314,7 +317,7 @@ async fn native_query_executes_synthetic_joins_and_the_configured_source_middlew
     assert!(
         matches!(&legacy.results[0], drasi_lib::channels::ResultDiff::Add { data, .. } if *data == serde_json::json!({"item":"normalized:order","customer":"Ada"}))
     );
-    query.stop().await.expect("stop");
+    query.stop(&lifecycle_contexts::stop()).await.expect("stop");
 }
 
 struct CountingProvider(Arc<AtomicUsize>);
@@ -407,4 +410,46 @@ async fn recovery_detects_changed_join_or_middleware_configuration() {
         Some(QueryRecoveryError::ConfigurationChanged)
     ));
     query.stop().await.expect("cleanup");
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

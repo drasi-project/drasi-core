@@ -524,7 +524,10 @@ impl ComputationComponent for MiddlewareTransformer {
         Ok(configuration)
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.failed.load(Ordering::Acquire),
             "middleware transformer must be reconstructed after failed or cancelled processing"
@@ -548,7 +551,7 @@ impl ComputationComponent for MiddlewareTransformer {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.running = false;
         self.wakeup.set(false);
         if let Some(durable) = &self.durable {
@@ -566,6 +569,37 @@ impl ComputationComponent for MiddlewareTransformer {
             } else if let Some(progress) = &self.source_progress {
                 progress.pending();
             }
+        }
+        Ok(())
+    }
+
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
         }
         Ok(())
     }
@@ -1055,7 +1089,10 @@ mod tests {
         definition.pipeline.push("wait".into());
         let mut transformer = MiddlewareTransformer::new(definition.clone(), Arc::new(registry))
             .expect("transformer");
-        transformer.start().await.expect("start");
+        transformer
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         {
             let processing = transformer.transform(input(1));
             tokio::pin!(processing);
@@ -1064,8 +1101,14 @@ mod tests {
                 _ = entered.notified() => {}
             }
         }
-        transformer.stop().await.expect("stop");
-        assert!(transformer.start().await.is_err());
+        transformer
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
+        assert!(transformer
+            .start(&lifecycle_contexts::start())
+            .await
+            .is_err());
         assert_eq!(transformer.sequence, 0);
     }
 
@@ -1075,7 +1118,10 @@ mod tests {
             MiddlewareTransformer::new(definition(), Arc::new(MiddlewareTypeRegistry::new()))
                 .expect("transformer");
         transformer.sequence = u64::MAX;
-        transformer.start().await.expect("start");
+        transformer
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         assert!(transformer.transform(input(1)).await.is_err());
         assert_eq!(transformer.sequence, u64::MAX);
         assert!(transformer
@@ -1084,8 +1130,14 @@ mod tests {
             .await
             .expect("lookup")
             .is_none());
-        transformer.stop().await.expect("stop");
-        assert!(transformer.start().await.is_err());
+        transformer
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
+        assert!(transformer
+            .start(&lifecycle_contexts::start())
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -1094,11 +1146,20 @@ mod tests {
             MiddlewareTransformer::new(definition(), Arc::new(MiddlewareTypeRegistry::new()))
                 .expect("transformer");
         assert!(transformer.transform(input(1)).await.is_err());
-        transformer.start().await.expect("start");
+        transformer
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         let first = transformer.transform(input(1)).await.expect("first");
-        transformer.stop().await.expect("stop");
+        transformer
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
         assert!(transformer.transform(input(2)).await.is_err());
-        transformer.start().await.expect("restart");
+        transformer
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("restart");
         let second = transformer.transform(input(2)).await.expect("second");
         assert_eq!(first[0].envelope.system().sequence(), 1);
         assert_eq!(second[0].envelope.system().sequence(), 2);
@@ -1108,5 +1169,47 @@ mod tests {
             .await
             .expect("retained state")
             .is_some());
+    }
+
+    #[allow(dead_code)]
+    mod lifecycle_contexts {
+        use crate::computation::v1::{
+            CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+            PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+        };
+
+        fn scope() -> OperationScope {
+            OperationScope::new("test", "component", 1, None, CancellationToken::new())
+        }
+
+        pub fn initialize() -> InitializeContext {
+            InitializeContext::new(scope())
+        }
+
+        pub fn start() -> StartContext {
+            StartContext::new(scope())
+        }
+
+        pub fn pause() -> PauseContext {
+            PauseContext::new(scope())
+        }
+
+        pub fn resume() -> ResumeContext {
+            ResumeContext::new(scope())
+        }
+
+        pub fn stop() -> StopContext {
+            StopContext::new(scope(), StopMode::Drain)
+        }
+
+        pub fn dispose() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+                .expect("shutdown preserves state")
+        }
+
+        pub fn erase() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+                .expect("removal may erase state")
+        }
     }
 }

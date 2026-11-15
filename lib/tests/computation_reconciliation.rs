@@ -70,22 +70,39 @@ impl ComputationComponent for Source {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.calls.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.calls.initializes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         self.calls.disposes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.calls.stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
 }
 #[async_trait]
 impl EnvelopeSource for Source {
@@ -114,11 +131,20 @@ impl Drop for Sink {
 }
 #[async_trait]
 impl ComputationComponent for Sink {
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.calls.initializes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         self.calls.disposes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -145,7 +171,10 @@ impl ComputationComponent for Sink {
             .push(bindings.to_vec());
         Ok(())
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         if let Some(gate) = self.start_gate.take() {
             gate.entered.notify_one();
             gate.release.notified().await;
@@ -153,14 +182,35 @@ impl ComputationComponent for Sink {
         self.calls.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.calls.stops.fetch_add(1, Ordering::SeqCst);
         if self.calls.fail_stop.swap(false, Ordering::SeqCst) {
             anyhow::bail!("cleanup has not completed");
         }
         Ok(())
     }
-    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+    fn management(&self) -> Option<&dyn drasi_lib::computation::v1::ComponentManagement> {
+        Some(self)
+    }
+    fn management_mut(
+        &mut self,
+    ) -> Option<&mut dyn drasi_lib::computation::v1::ComponentManagement> {
+        Some(self)
+    }
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+}
+
+#[async_trait]
+impl drasi_lib::computation::v1::ComponentManagement for Sink {
+    async fn apply(
+        &mut self,
+        _apply: &drasi_lib::computation::v1::ApplyContext,
+        context: ComponentUpdateContext,
+    ) -> std::result::Result<(), drasi_lib::computation::v1::ApplyError> {
         assert_eq!(
             context.plan,
             ComponentUpdatePlan {
@@ -2806,12 +2856,7 @@ impl ComputationComponent for GatedTransform {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl Transformer for GatedTransform {
@@ -3304,13 +3349,31 @@ impl ComputationComponent for FiniteSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.calls.starts.fetch_add(1, Ordering::SeqCst);
         self.emit = true;
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.calls.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -3814,12 +3877,30 @@ impl ComputationComponent for StallingService {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.gate.entered.notify_one();
         self.gate.release.notified().await;
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }

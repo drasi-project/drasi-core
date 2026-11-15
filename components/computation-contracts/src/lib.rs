@@ -37,6 +37,7 @@ mod graph_view;
 mod identity;
 mod input_position;
 mod internal;
+pub mod lifecycle;
 mod output_follow;
 mod output_read;
 mod port_formats;

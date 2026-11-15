@@ -31,9 +31,16 @@ async fn disposing_an_unstarted_consumer_releases_constructor_owned_storage() ->
             options(),
         )
         .await?;
-    first.initialize().await?;
-    first.dispose().await?;
-    assert!(first.start().await.is_err());
+    first
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    first
+        .dispose(&crate::computation::test_hooks::dispose_ctx())
+        .await?;
+    assert!(first
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     let mut second = factory
         .create_consumer(
             component_id,
@@ -43,8 +50,12 @@ async fn disposing_an_unstarted_consumer_releases_constructor_owned_storage() ->
             options(),
         )
         .await?;
-    second.initialize().await?;
-    second.dispose().await?;
+    second
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    second
+        .dispose(&crate::computation::test_hooks::dispose_ctx())
+        .await?;
     Ok(())
 }
 
@@ -60,12 +71,7 @@ impl ComputationComponent for BatchSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSource for BatchSource {
@@ -144,7 +150,9 @@ pub(in crate::computation) async fn initialized_consumer(
     let mut consumer = factory
         .create_consumer(id, configuration, scope, provider, options)
         .await?;
-    consumer.initialize().await?;
+    consumer
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
     Ok(consumer)
 }
 
@@ -233,7 +241,9 @@ async fn external_reconstruction(plugin: &NativePlugin) -> anyhow::Result<()> {
             options(),
         )
         .await?;
-        consumer.start().await?;
+        consumer
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         let result = consumer.handle(batch()?).await;
         let progress = consumer.progress().await?;
         if mode == "fail-second" {
@@ -246,7 +256,9 @@ async fn external_reconstruction(plugin: &NativePlugin) -> anyhow::Result<()> {
             assert_eq!(progress[0].completed_operations, 3);
             assert_eq!(progress[0].handled_sequence, 1);
         }
-        consumer.stop().await?;
+        consumer
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
     // Second operation repeated after an uncertain destination response, with the same key.
     assert_eq!(effects(&destination)?, (3, 4, 3));
@@ -266,7 +278,9 @@ async fn transactional_reconstruction(plugin: &NativePlugin) -> anyhow::Result<(
             options(),
         )
         .await?;
-        consumer.start().await?;
+        consumer
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         let result = consumer.handle(batch()?).await;
         if mode == "fail-second" {
             assert!(result.is_err());
@@ -274,7 +288,9 @@ async fn transactional_reconstruction(plugin: &NativePlugin) -> anyhow::Result<(
             result?;
         }
         assert_eq!(consumer.progress().await?[0].completed_operations, expected);
-        consumer.stop().await?;
+        consumer
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!(
             count(provider.as_ref()).await?,
             Some(ElementValue::Integer(expected as i64))
@@ -313,10 +329,14 @@ async fn native_consumer_ignored_state_errors_cannot_commit() -> anyhow::Result<
         options(),
     )
     .await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert!(consumer.handle(batch()?).await.is_err());
     assert_eq!(consumer.progress().await?[0].completed_operations, 0);
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(count(provider.as_ref()).await?, None);
     Ok(())
 }
@@ -336,7 +356,9 @@ async fn native_consumer_cancelled_transaction_requires_cleanup_and_replays() ->
         options(),
     )
     .await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     {
         let handle = consumer.handle(batch()?);
         tokio::pin!(handle);
@@ -347,8 +369,13 @@ async fn native_consumer_cancelled_transaction_requires_cleanup_and_replays() ->
             }) => { entered?; }
         }
     }
-    assert!(consumer.start().await.is_err());
-    consumer.stop().await?;
+    assert!(consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(count(provider.as_ref()).await?, None);
     let mut replacement = initialized_consumer(
         factory.as_ref(),
@@ -359,9 +386,13 @@ async fn native_consumer_cancelled_transaction_requires_cleanup_and_replays() ->
         options(),
     )
     .await?;
-    replacement.start().await?;
+    replacement
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     replacement.handle(batch()?).await?;
-    replacement.stop().await?;
+    replacement
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(
         count(provider.as_ref()).await?,
         Some(ElementValue::Integer(3))
@@ -383,9 +414,13 @@ async fn native_consumer_cannot_reinterpret_existing_handling_mode() -> anyhow::
         options(),
     )
     .await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     consumer.handle(batch()?).await?;
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     let transactional = factory(&plugin, sdk::ConsumerMode::Transactional);
     let mut consumer = initialized_consumer(
         transactional.as_ref(),
@@ -396,8 +431,13 @@ async fn native_consumer_cannot_reinterpret_existing_handling_mode() -> anyhow::
         options(),
     )
     .await?;
-    assert!(consumer.start().await.is_err());
-    consumer.stop().await?;
+    assert!(consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 #[test]
@@ -519,11 +559,20 @@ async fn native_consumer_panic_requires_reconstruction_after_cleanup() -> anyhow
         options(),
     )
     .await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert!(consumer.handle(batch()?).await.is_err());
-    consumer.stop().await?;
-    assert!(consumer.start().await.is_err());
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
+    assert!(consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(count(provider.as_ref()).await?, None);
     let mut replacement = initialized_consumer(
         factory.as_ref(),
@@ -534,9 +583,13 @@ async fn native_consumer_panic_requires_reconstruction_after_cleanup() -> anyhow
         options(),
     )
     .await?;
-    replacement.start().await?;
+    replacement
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     replacement.handle(batch()?).await?;
-    replacement.stop().await?;
+    replacement
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -641,9 +694,11 @@ async fn native_consumer_recipe_preserves_progress_and_isolates_instance_owners(
             resource.options.clone(),
         )
         .await?;
-        sink.start().await?;
+        sink.start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         sink.handle(batch()?).await?;
-        sink.stop().await?;
+        sink.stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!(
             count(resource.provider.as_ref()).await?,
             Some(ElementValue::Integer(3))
@@ -739,8 +794,12 @@ async fn native_consumer_rejected_construction_awaits_acquired_storage_cleanup(
         options(),
     )
     .await?;
-    consumer.start().await?;
-    consumer.stop().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(provider.closed.load(Ordering::Acquire), 2);
     Ok(())
 }
@@ -760,10 +819,13 @@ async fn native_consumer_cancelled_stop_retains_storage_until_cleanup_completes(
         options(),
     )
     .await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     provider.hold.store(true, Ordering::Release);
     {
-        let stop = consumer.stop();
+        let stop_context = crate::computation::test_hooks::stop_ctx();
+        let stop = consumer.stop(&stop_context);
         tokio::pin!(stop);
         tokio::select! {
             result = &mut stop => panic!("cleanup unexpectedly finished: {result:?}"),
@@ -771,13 +833,22 @@ async fn native_consumer_cancelled_stop_retains_storage_until_cleanup_completes(
         }
     }
     assert_eq!(provider.closed.load(Ordering::Acquire), 0);
-    assert!(consumer.start().await.is_err());
+    assert!(consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     provider.hold.store(false, Ordering::Release);
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(provider.closed.load(Ordering::Acquire), 1);
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     consumer.handle(batch()?).await?;
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(provider.closed.load(Ordering::Acquire), 2);
     Ok(())
 }
@@ -798,14 +869,22 @@ async fn native_consumer_weakened_restart_retains_rejected_storage_for_cleanup(
         options(),
     )
     .await?;
-    consumer.start().await?;
-    consumer.stop().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     provider.weakened.store(true, Ordering::Release);
-    assert!(consumer.start().await.is_err());
+    assert!(consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     assert_eq!(provider.closed.load(Ordering::Acquire), 1);
     provider.hold.store(true, Ordering::Release);
     {
-        let stop = consumer.stop();
+        let stop_context = crate::computation::test_hooks::stop_ctx();
+        let stop = consumer.stop(&stop_context);
         tokio::pin!(stop);
         tokio::select! {
             biased;
@@ -813,13 +892,22 @@ async fn native_consumer_weakened_restart_retains_rejected_storage_for_cleanup(
             entered = tokio::time::timeout(Duration::from_secs(10), provider.entered.notified()) => { entered?; }
         }
     }
-    assert!(consumer.start().await.is_err());
+    assert!(consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     provider.hold.store(false, Ordering::Release);
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(provider.closed.load(Ordering::Acquire), 2);
     provider.weakened.store(false, Ordering::Release);
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     consumer.handle(batch()?).await?;
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }

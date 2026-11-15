@@ -285,31 +285,68 @@ impl ComputationComponent for Counter {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::json!({"factor": self.factor}))
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.record("initialize");
         Ok(())
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.record("start");
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.record("stop");
         Ok(())
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         self.record("dispose");
         Ok(())
     }
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+    async fn pause(
+        &mut self,
+        _context: &drasi_lib::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
         self.record("pause");
         Ok(())
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+    async fn resume(
+        &mut self,
+        _context: &drasi_lib::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
         self.record("resume");
         Ok(())
     }
-    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+    fn management(&self) -> Option<&dyn drasi_lib::computation::v1::ComponentManagement> {
+        Some(self)
+    }
+    fn management_mut(
+        &mut self,
+    ) -> Option<&mut dyn drasi_lib::computation::v1::ComponentManagement> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl drasi_lib::computation::v1::ComponentManagement for Counter {
+    async fn apply(
+        &mut self,
+        _apply: &drasi_lib::computation::v1::ApplyContext,
+        context: ComponentUpdateContext,
+    ) -> std::result::Result<(), drasi_lib::computation::v1::ApplyError> {
         self.factory
             .assert_accepted(self.descriptor.id(), &context.operation_id);
         self.factory.record(

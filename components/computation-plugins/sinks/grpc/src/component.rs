@@ -15,6 +15,10 @@ use drasi_computation_network_common::{
     config::{normalized_headers, COMPONENT_HEADER, PORT_HEADER},
     wire,
 };
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
 use drasi_grpc_common::output::{
     batch::merge_metadata,
@@ -295,7 +299,28 @@ impl NativeComponent for GrpcSink {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(&self.config)?)
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl GrpcSink {
+    async fn start_activation(&mut self) -> Result<()> {
         ensure!(self.client.is_none(), "gRPC sink already started");
         for attempt in 0..self.config.connection_retry_attempts {
             match self.connect().await {
@@ -318,7 +343,7 @@ impl NativeComponent for GrpcSink {
         }
         unreachable!("positive connection attempts")
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_activation(&mut self) -> Result<()> {
         self.client = None;
         Ok(())
     }

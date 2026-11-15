@@ -66,4 +66,6 @@ pub struct NativeConsumerFactoryMetadata {
 #[cfg(test)]
 mod activation_credentials_tests;
 #[cfg(test)]
+mod test_hooks;
+#[cfg(test)]
 mod tests;

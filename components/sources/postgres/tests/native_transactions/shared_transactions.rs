@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use drasi_postgres_common::replication::shared_transactions::{
     self as cursor, SharedTransactionPosition, TransactionBoundary,
@@ -450,8 +452,8 @@ async fn different_counters() -> Result<()> {
             SharedOutput::Transactions,
         )
         .await?;
-        fast.start().await?;
-        slow.start().await?;
+        fast.start(&lifecycle_ctx::start()).await?;
+        slow.start(&lifecycle_ctx::start()).await?;
         let mut source = factory_for(&plugins, SharedOutput::Transactions)?
             .create_component_with_consumer_progress(
                 id(77),
@@ -463,8 +465,8 @@ async fn different_counters() -> Result<()> {
                     owners.clone(),
                 )?),
             )?;
-        source.initialize().await?;
-        source.start().await?;
+        source.initialize(&lifecycle_ctx::initialize()).await?;
+        source.start(&lifecycle_ctx::start()).await?;
         database
             .client()
             .batch_execute(
@@ -481,7 +483,7 @@ async fn different_counters() -> Result<()> {
                     .context("seed transaction")?,
             );
         }
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
         // Real, stopped-source transactions seed each actual persistent query.
         // These are intentionally unrelated logical counters, not fake progress.
         apply(
@@ -496,8 +498,8 @@ async fn different_counters() -> Result<()> {
         assert!(fast_position.commit_lsn < slow_position.commit_lsn);
         assert!(fast_position.sequence > slow_position.sequence);
         assert_eq!(database.feedback().await?, database.config.start_lsn);
-        fast.stop().await?;
-        slow.stop().await?;
+        fast.stop(&lifecycle_ctx::stop()).await?;
+        slow.stop(&lifecycle_ctx::stop()).await?;
         drop((fast, slow, source));
 
         let graph = build_graph_mode(
@@ -695,8 +697,8 @@ async fn interrupted_snapshots() -> Result<()> {
                 Some(libraries::scope(ComponentBatch::GRAPH_ID)),
                 Some(owner),
             )?);
-            query.start().await?;
-            query.stop().await?;
+            query.start(&lifecycle_ctx::start()).await?;
+            query.stop(&lifecycle_ctx::stop()).await?;
         }
         let restarted = build_graph_mode(
             &plugins,
@@ -782,20 +784,23 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
             .is_err());
         let mut fast = ordinary_query("fast", None, owners[0].clone()).await?;
         let mut slow = ordinary_query("slow", None, owners[1].clone()).await?;
-        fast.start().await?;
-        slow.start().await?;
+        fast.start(&lifecycle_ctx::start()).await?;
+        slow.start(&lifecycle_ctx::start()).await?;
         let mut source = factory.create_component_with_consumer_progress(
             id(77),
             configuration.clone(),
             libraries::scope(ComponentBatch::GRAPH_ID),
             group,
         )?;
-        source.initialize().await?;
-        let error = source.start().await.expect_err("volatile consumer");
+        source.initialize(&lifecycle_ctx::initialize()).await?;
+        let error = source
+            .start(&lifecycle_ctx::start())
+            .await
+            .expect_err("volatile consumer");
         assert!(format!("{error:#}").contains("persistent"), "{error:#}");
-        source.stop().await?;
-        fast.stop().await?;
-        slow.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        fast.stop(&lifecycle_ctx::stop()).await?;
+        slow.stop(&lifecycle_ctx::stop()).await?;
         drop((source, fast, slow));
 
         let snapshot_factory = plugins
@@ -825,11 +830,11 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
                 Some(owner.clone()),
             )?);
         let error = memory_query
-            .start()
+            .start(&lifecycle_ctx::start())
             .await
             .expect_err("volatile transaction snapshot");
         assert!(format!("{error:#}").contains("persistent"), "{error:#}");
-        memory_query.stop().await?;
+        memory_query.stop(&lifecycle_ctx::stop()).await?;
         assert!(owner.snapshot().checkpoints.is_empty());
 
         let path = tempfile::tempdir()?;
@@ -855,14 +860,14 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
             Some(expected.clone()),
         )?);
         let error = substituted
-            .start()
+            .start(&lifecycle_ctx::start())
             .await
             .expect_err("same-name different snapshot owner");
         assert!(
             format!("{error:#}").contains("actual progress owner"),
             "{error:#}"
         );
-        substituted.stop().await?;
+        substituted.stop(&lifecycle_ctx::stop()).await?;
         assert!(expected.snapshot().checkpoints.is_empty());
         drop(substituted);
 

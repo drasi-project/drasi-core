@@ -127,7 +127,7 @@ async fn persistent_query_named(
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false))),
     )
     .await?;
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     Ok(query)
 }
 
@@ -146,7 +146,7 @@ async fn durable_middleware(
         },
     )
     .await?;
-    middleware.start().await?;
+    middleware.start(&lifecycle_contexts::start()).await?;
     Ok(middleware)
 }
 
@@ -186,7 +186,7 @@ async fn persistent_query_must_not_silently_accept_volatile_stateful_middleware(
     let registry_owner = lib_integration_tests::query_builder().build().await?;
     let mut middleware =
         MiddlewareTransformer::new(definition()?, registry_owner.middleware_registry())?;
-    middleware.start().await?;
+    middleware.start(&lifecycle_contexts::start()).await?;
     let mut query = persistent_query(directory.path()).await?;
     let mut output = middleware.transform(input(1, false)?).await?;
     assert_eq!(output.len(), 1);
@@ -198,8 +198,8 @@ async fn persistent_query_must_not_silently_accept_volatile_stateful_middleware(
         .await;
     assert!(accepted.is_err(), "persistent query must reject a known volatile middleware boundary rather than imply restart safety");
     assert!(query.results().snapshot()?.rows.is_empty());
-    middleware.stop().await?;
-    query.stop().await?;
+    middleware.stop(&lifecycle_contexts::stop()).await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     registry_owner.shutdown().await?;
     Ok(())
 }
@@ -226,8 +226,8 @@ async fn durable_unwind_reconstruction_recovers_state_and_unconfirmed_delivery()
                     assert_eq!(child_ids(&query)?, ["a", "b"]);
                 }
                 // No completion callback: publication or its acknowledgement was lost.
-                middleware.stop().await?;
-                query.stop().await?;
+                middleware.stop(&lifecycle_contexts::stop()).await?;
+                query.stop(&lifecycle_contexts::stop()).await?;
                 output[0].envelope.clone()
             };
 
@@ -269,8 +269,8 @@ async fn durable_unwind_reconstruction_recovers_state_and_unconfirmed_delivery()
                 "removed children must not survive reconstruction"
             );
             middleware.delivery_completed(&update).await?;
-            middleware.stop().await?;
-            query.stop().await?;
+            middleware.stop(&lifecycle_contexts::stop()).await?;
+            query.stop(&lifecycle_contexts::stop()).await?;
         }
     }
     registry_owner.shutdown().await?;
@@ -305,8 +305,8 @@ async fn full_middleware_retention_preserves_input_for_retry_after_durable_confi
     deliver(&mut query, &second).await?;
     assert_eq!(child_ids(&query)?, ["a"]);
     middleware.delivery_completed(&second).await?;
-    middleware.stop().await?;
-    query.stop().await?;
+    middleware.stop(&lifecycle_contexts::stop()).await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     registry_owner.shutdown().await?;
     Ok(())
 }
@@ -406,9 +406,9 @@ async fn middleware_recovery_crash_worker() -> Result<()> {
     middleware.delivery_completed(&update).await?;
     assert_eq!(child_ids(&first)?, ["a"]);
     assert_eq!(child_ids(&second)?, ["a"]);
-    middleware.stop().await?;
-    first.stop().await?;
-    second.stop().await?;
+    middleware.stop(&lifecycle_contexts::stop()).await?;
+    first.stop(&lifecycle_contexts::stop()).await?;
+    second.stop(&lifecycle_contexts::stop()).await?;
     registry_owner.shutdown().await?;
     Ok(())
 }
@@ -457,4 +457,46 @@ async fn abrupt_process_exit_recovers_state_delivery_and_partial_fanout() -> Res
         }
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

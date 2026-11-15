@@ -96,8 +96,8 @@ async fn corrupted_state_recovery() -> Result<()> {
                     (provider.clone(), provider.clone(), provider)
                 };
             let mut original = query(&database, provider.clone(), 1, non_atomic, "strict")?;
-            original.initialize().await?;
-            original.start().await?;
+            original.initialize(&crate::hooks::initialize_ctx()).await?;
+            original.start(&crate::hooks::start_ctx()).await?;
             let mut output = Vec::new();
             for sequence in 1..=3 {
                 let emitted = original.transform(live(sequence, 7)?).await?;
@@ -124,9 +124,9 @@ async fn corrupted_state_recovery() -> Result<()> {
                 progress.clone(),
                 ConsumerRecoveryPolicy::AutoReset,
             )?;
-            consumer.start().await?;
+            consumer.start(&crate::hooks::start_ctx()).await?;
             deliver(&mut destination, consumer.on_wakeup().await?).await?;
-            original.stop().await?;
+            original.stop(&crate::hooks::stop_ctx()).await?;
             drop(original);
 
             let owner = ComputationTransaction::try_new(
@@ -219,20 +219,23 @@ async fn corrupted_state_recovery() -> Result<()> {
             drop(owner);
 
             let mut strict = query(&database, provider.clone(), 2, non_atomic, "strict")?;
-            strict.initialize().await?;
-            assert!(strict.start().await.is_err(), "Strict adopted {damage:?}");
+            strict.initialize(&crate::hooks::initialize_ctx()).await?;
+            assert!(
+                strict.start(&crate::hooks::start_ctx()).await.is_err(),
+                "Strict adopted {damage:?}"
+            );
             assert!(snapshot_reader(&strict)?.snapshot().await.is_err());
-            strict.stop().await?;
+            strict.stop(&crate::hooks::stop_ctx()).await?;
             drop(strict);
             let mut repaired = query(&database, provider.clone(), 3, non_atomic, "auto_reset")?;
-            repaired.initialize().await?;
+            repaired.initialize(&crate::hooks::initialize_ctx()).await?;
             if matches!(damage, Damage::ForeignOutputAndInvalidRow) {
                 let error = repaired
-                    .start()
+                    .start(&crate::hooks::start_ctx())
                     .await
                     .expect_err("foreign state must not be reset");
                 assert!(format!("{error:#}").contains("different producer"));
-                repaired.stop().await?;
+                repaired.stop(&crate::hooks::stop_ctx()).await?;
                 drop(repaired);
                 let owner = ComputationTransaction::try_new(
                     primary.create_indexes(GRAPH, &component_id()?).await?,
@@ -263,7 +266,7 @@ async fn corrupted_state_recovery() -> Result<()> {
                 continue;
             }
             repaired
-                .start()
+                .start(&crate::hooks::start_ctx())
                 .await
                 .with_context(|| format!("AutoReset of {damage:?}"))?;
             let snapshot = snapshot_reader(&repaired)?.snapshot().await?;
@@ -281,7 +284,7 @@ async fn corrupted_state_recovery() -> Result<()> {
                 "reset cannot regress consumer progress"
             );
             let mut consumer = replay(reader, progress.clone(), ConsumerRecoveryPolicy::AutoReset)?;
-            consumer.start().await?;
+            consumer.start(&crate::hooks::start_ctx()).await?;
             let reset_output = consumer.on_wakeup().await?;
             assert!(QueryChangeCodec::is_snapshot(&reset_output[0].envelope));
             deliver(&mut destination, reset_output).await?;
@@ -293,12 +296,12 @@ async fn corrupted_state_recovery() -> Result<()> {
                     .generation,
                 1
             );
-            repaired.stop().await?;
+            repaired.stop(&crate::hooks::stop_ctx()).await?;
             drop(repaired);
 
             let mut reopened = query(&database, provider.clone(), 4, non_atomic, "strict")?;
-            reopened.initialize().await?;
-            reopened.start().await?;
+            reopened.initialize(&crate::hooks::initialize_ctx()).await?;
+            reopened.start(&crate::hooks::start_ctx()).await?;
             assert_eq!(
                 snapshot_reader(&reopened)?
                     .snapshot()
@@ -314,7 +317,7 @@ async fn corrupted_state_recovery() -> Result<()> {
                 39.0
             );
             reopened.delivery_completed(&output).await?;
-            reopened.stop().await?;
+            reopened.stop(&crate::hooks::stop_ctx()).await?;
         }
     }
     Ok(())

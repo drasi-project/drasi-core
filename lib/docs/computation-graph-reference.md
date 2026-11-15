@@ -109,7 +109,8 @@ keys retain their own namespaces.
 | Sink | Inputs only, at least one | `EnvelopeSink::handle()` |
 | Service | No data ports | `ComputationService::run()` |
 
-All implement `ComputationComponent` start/stop hooks. A factory can construct an
+All implement the six required `ComputationComponent` lifecycle hooks
+(`initialize`, `start`, `pause`, `resume`, `stop`, `dispose`). A factory can construct an
 instance from a `ComponentSpecification`; alternatively, the caller supplies an
 already-constructed object.
 
@@ -256,10 +257,11 @@ Component work normally becomes ready when its start hook succeeds. Components
 needing later confirmation call `control.ready()`. Plugin wrappers wait for the
 plugin's Running observation; query wrappers check the inner query.
 
-`ComputationService::quiesce()` runs after its `run()` future has been dropped for
-a pause. A service with separately owned work must wait for that work to pause.
-The default needs no extra action for work living entirely in `run()`.
-Query wrappers propagate this pause to their nested graph and resume only the
+A pause calls the component's `pause(&PauseContext)` hook after its in-flight
+data call (for a service, its `run()` future) has settled. A component with
+separately owned work must gate that work before returning; one that cannot
+pause returns `unsupported` rather than succeeding. `resume(&ResumeContext)`
+reopens a completed pause. Query wrappers propagate this pause to their nested graph and resume only the
 appropriate paused component instances.
 
 Normal source exhaustion sets `exhausted` and closes its output. It is not itself
@@ -407,8 +409,12 @@ Call `GraphControl::preview(revision, mutations)`, then
 revision and affected instances before changing them.
 
 Supported changes include add/replace/update/remove, connect/disconnect, resource
-replacement, subscription changes, restart and retry. A registered factory's
-`plan_update` assesses live configuration changes. Retained-object updates cannot
+replacement, subscription changes, restart and retry. Preview asks an idle live
+object's optional `ComponentManagement::assess` first and falls back to the
+registered factory's `plan_update`. The resulting `UpdateBoundary` (Pause, Stop
+or Replace) determines the boundary the graph establishes before `apply` or
+replacement; `apply` re-assesses and refuses an update that now requires a
+stronger boundary. Retained-object updates cannot
 silently change an interface, resource binding or implementation. Construction
 support alone does not authorize reconstruction; unsupported changes are rejected.
 See [object lifecycle and assessed updates](computation-graph-configuration.md#object-lifecycle-and-assessed-updates).
@@ -691,7 +697,7 @@ dynamic loading by itself neither supplies nor rules out replay support.
 
 The [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
 [native SDK](../../components/computation-plugin-sdk/README.md) are separate from
-the existing Source/Reaction plugin interface. ABI 2.0 loads sources,
+the existing Source/Reaction plugin interface. ABI 4.0 loads sources,
 transformers, sinks and services directly into graph-native proxies; it does not
 translate them back into the older component model.
 

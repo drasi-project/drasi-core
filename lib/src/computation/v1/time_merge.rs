@@ -723,7 +723,10 @@ impl ComputationComponent for SourceTimeMergeTransformer {
         )
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.check_storage()?;
         if self.running {
             return self.check_held();
@@ -737,7 +740,7 @@ impl ComputationComponent for SourceTimeMergeTransformer {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.running = false;
         self.in_flight = None;
         self.publish();
@@ -749,6 +752,37 @@ impl ComputationComponent for SourceTimeMergeTransformer {
                 transaction.quiesce().await?;
             }
             guard.complete = true;
+        }
+        Ok(())
+    }
+
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
         }
         Ok(())
     }

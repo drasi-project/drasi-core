@@ -9,9 +9,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_lib::computation::v1::{
     ComponentDescriptor, ComponentId, ComponentRecovery, ComponentSemanticKind,
-    ComputationComponent, Endpoint, EnvelopeSource, GraphChangeCodec, GraphProducerIdentity,
-    GraphProducerProgress, OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    SourceAdmission, StreamId,
+    ComputationComponent, DisposeContext, Endpoint, EnvelopeSource, GraphChangeCodec,
+    GraphProducerIdentity, GraphProducerProgress, OutputEnvelope, PipeRequirements, PortDescriptor,
+    PortDirection, PortId, SourceAdmission, StartContext, StopContext, StreamId,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -176,7 +176,11 @@ impl ComputationComponent for ApplicationSource {
         }))
     }
 
-    async fn start(&mut self) -> Result<()> {
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn start(&mut self, _context: &StartContext) -> Result<()> {
         anyhow::ensure!(
             !self.running,
             "native application source is already running"
@@ -185,8 +189,16 @@ impl ComputationComponent for ApplicationSource {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &StopContext) -> Result<()> {
         self.running = false;
+        Ok(())
+    }
+
+    async fn dispose(&mut self, context: &DisposeContext) -> Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }

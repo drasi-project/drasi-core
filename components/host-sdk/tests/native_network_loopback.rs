@@ -5,6 +5,8 @@
 //! make build-native-network-plugins
 //! cargo test --offline -p drasi-host-sdk --test native_network_loopback
 
+#[path = "common/hooks.rs"]
+mod hooks;
 use anyhow::{Context, Result};
 use axum::{
     extract::State,
@@ -305,8 +307,8 @@ async fn http_source_order_batch_backpressure_cancel_and_awaited_stop() -> Resul
         TcpListener::bind(("127.0.0.1", port)).await.is_ok(),
         "factory must not bind"
     );
-    source.initialize().await?;
-    source.start().await?;
+    source.initialize(&crate::hooks::initialize_ctx()).await?;
+    source.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(source.configuration()?, before);
     let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
     let base = format!("http://127.0.0.1:{port}");
@@ -319,13 +321,13 @@ async fn http_source_order_batch_backpressure_cancel_and_awaited_stop() -> Resul
         "00000000-0000-0000-0000-000000000605",
         before.clone(),
     )?;
-    occupied.initialize().await?;
+    occupied.initialize(&crate::hooks::initialize_ctx()).await?;
     assert!(
-        occupied.start().await.is_err(),
+        occupied.start(&crate::hooks::start_ctx()).await.is_err(),
         "bind conflict must reach the host"
     );
-    occupied.stop().await?;
-    occupied.dispose().await?;
+    occupied.stop(&crate::hooks::stop_ctx()).await?;
+    occupied.dispose(&crate::hooks::dispose_ctx()).await?;
     let url = format!("{base}/sources/{NETWORK_SOURCE_ID}/events");
     let bad = client
         .post(format!(
@@ -452,12 +454,17 @@ async fn http_source_order_batch_backpressure_cancel_and_awaited_stop() -> Resul
             .await
             .is_err()
     );
-    let (stop, response) =
-        tokio::time::timeout(DEADLINE, async { tokio::join!(source.stop(), blocked) }).await?;
+    let (stop, response) = {
+        let stop_ctx = crate::hooks::stop_ctx();
+        tokio::time::timeout(DEADLINE, async {
+            tokio::join!(source.stop(&stop_ctx), blocked)
+        })
+        .await?
+    };
     stop?;
     assert_eq!(response?.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(source.next().await.is_err());
-    source.dispose().await?;
+    source.dispose(&crate::hooks::dispose_ctx()).await?;
     let rebound = TcpListener::bind(("127.0.0.1", port)).await?;
     drop(rebound);
     Ok(())
@@ -473,8 +480,8 @@ async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_stream
             "stream":"facilities-db/out","host":"127.0.0.1","port":port,"ingressCapacity":2,"timeoutMs":1000,"maxMessageBytes":1024
         }),
     )?;
-    source.initialize().await?;
-    source.start().await?;
+    source.initialize(&crate::hooks::initialize_ctx()).await?;
+    source.start(&crate::hooks::start_ctx()).await?;
     let mut client = source::source_service_client::SourceServiceClient::connect(format!(
         "http://127.0.0.1:{port}"
     ))
@@ -627,14 +634,19 @@ async fn grpc_source_unary_stream_cumulative_accounting_and_stop_own_open_stream
             .await
             .is_err()
     );
-    let (stop, message) =
-        tokio::time::timeout(DEADLINE, async { tokio::join!(source.stop(), pending) }).await?;
+    let (stop, message) = {
+        let stop_ctx = crate::hooks::stop_ctx();
+        tokio::time::timeout(DEADLINE, async {
+            tokio::join!(source.stop(&stop_ctx), pending)
+        })
+        .await?
+    };
     stop?;
     assert!(message.is_err(), "stopped stream must not report success");
     drop(send);
     drop(client);
     assert!(source.next().await.is_err());
-    source.dispose().await?;
+    source.dispose(&crate::hooks::dispose_ctx()).await?;
     drop(TcpListener::bind(("127.0.0.1", port)).await?);
     Ok(())
 }
@@ -849,8 +861,8 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
     let base = json!({"outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"url":format!("http://{}/reaction", receiver.address),"maxRetries":1,"timeoutMs":1000});
     let mut sink = component(HTTP_SINK, NETWORK_SINK_ID, base.clone())?;
     assert!(sink.handle(result_input(1)?).await.is_err());
-    sink.initialize().await?;
-    sink.start().await?;
+    sink.initialize(&crate::hooks::initialize_ctx()).await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     receiver.state.failures.store(1, Ordering::Release);
     sink.handle(result_input(1)?).await?;
     {
@@ -877,28 +889,28 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
         sink.handle(result_input(2)?).await.is_err(),
         "strict retry exhaustion fails"
     );
-    sink.stop().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
     let mut config = base;
     config["failurePolicy"] = json!("skip");
     config["maxRetries"] = json!(0);
     let mut skip = component(HTTP_SINK, "00000000-0000-0000-0000-000000000604", config)?;
-    skip.initialize().await?;
-    skip.start().await?;
+    skip.initialize(&crate::hooks::initialize_ctx()).await?;
+    skip.start(&crate::hooks::start_ctx()).await?;
     skip.handle(result_input(3)?).await?;
-    skip.stop().await?;
-    skip.dispose().await?;
+    skip.stop(&crate::hooks::stop_ctx()).await?;
+    skip.dispose(&crate::hooks::dispose_ctx()).await?;
     receiver.state.failures.store(0, Ordering::Release);
     receiver.state.delay.store(1, Ordering::Release);
-    sink.start().await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), sink.handle(result_input(4)?))
             .await
             .is_err(),
         "pending delivery cannot be early Handled success"
     );
-    sink.stop().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
     assert!(sink.handle(result_input(5)?).await.is_err());
-    sink.dispose().await?;
+    sink.dispose(&crate::hooks::dispose_ctx()).await?;
     receiver.stop().await?;
     Ok(())
 }
@@ -954,8 +966,8 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
         json!({"outputs":{"facilities-db":{"component":NETWORK_SOURCE_ID,"port":"out"}},"url":format!("http://{}/reaction", http.address),
             "maxRetries":0,"timeoutMs":1000}),
     )?;
-    sink.initialize().await?;
-    sink.start().await?;
+    sink.initialize(&crate::hooks::initialize_ctx()).await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     sink.handle(source_graph_input(7)?).await?;
     {
         let delivered = http.state.http.lock().expect("capture");
@@ -1002,8 +1014,8 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
         )?,
     };
     assert!(sink.handle(due).await.is_err());
-    sink.stop().await?;
-    sink.dispose().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
+    sink.dispose(&crate::hooks::dispose_ctx()).await?;
     http.stop().await?;
 
     let mut grpc = grpc_receiver().await?;
@@ -1014,8 +1026,8 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
             "maxRetries":0,"timeoutMs":1000,"connectionRetryAttempts":1,
             "initialConnectionTimeoutMs":1000}),
     )?;
-    sink.initialize().await?;
-    sink.start().await?;
+    sink.initialize(&crate::hooks::initialize_ctx()).await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     sink.handle(source_graph_input(7)?).await?;
     {
         let delivered = grpc.state.grpc.lock().expect("capture");
@@ -1056,8 +1068,8 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
         // An identity-only delete carries neither image.
         assert!(items[2].before.is_none() && items[2].after.is_none());
     }
-    sink.stop().await?;
-    sink.dispose().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
+    sink.dispose(&crate::hooks::dispose_ctx()).await?;
     grpc.stop().await?;
     Ok(())
 }
@@ -1069,8 +1081,8 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
         "maxRetries":1,"timeoutMs":1000,"connectionRetryAttempts":1,"initialConnectionTimeoutMs":1000,
         "metadata":{"x-custom":"custom"}});
     let mut sink = component(GRPC_SINK, NETWORK_SINK_ID, config)?;
-    sink.initialize().await?;
-    sink.start().await?;
+    sink.initialize(&crate::hooks::initialize_ctx()).await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     receiver.state.failures.store(1, Ordering::Release);
     sink.handle(result_input(1)?).await?;
     {
@@ -1119,9 +1131,9 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
             .await
             .is_err()
     );
-    sink.stop().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
     assert!(sink.handle(result_input(4)?).await.is_err());
-    sink.dispose().await?;
+    sink.dispose(&crate::hooks::dispose_ctx()).await?;
     receiver.stop().await?;
     let mut failed = component(
         GRPC_SINK,
@@ -1131,13 +1143,13 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
             "connectionRetryAttempts":1,"initialConnectionTimeoutMs":50,"timeoutMs":50
         }),
     )?;
-    failed.initialize().await?;
+    failed.initialize(&crate::hooks::initialize_ctx()).await?;
     assert!(
-        failed.start().await.is_err(),
+        failed.start(&crate::hooks::start_ctx()).await.is_err(),
         "connection failure must not be lazy startup success"
     );
-    failed.stop().await?;
-    failed.dispose().await?;
+    failed.stop(&crate::hooks::stop_ctx()).await?;
+    failed.dispose(&crate::hooks::dispose_ctx()).await?;
     Ok(())
 }
 

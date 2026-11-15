@@ -460,7 +460,7 @@ async fn graph_export_restores_byte_policy_without_external_pipe_bindings() {
     let desired = graph.snapshot().select(GraphSelection::All).unwrap();
     let mut topology =
         ComputationTopologySource::new(component(733), stream("topology"), graph.inspector());
-    topology.start().await.unwrap();
+    topology.start(&lifecycle_contexts::start()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = topology.next().await.unwrap().unwrap();
@@ -492,7 +492,7 @@ async fn graph_export_restores_byte_policy_without_external_pipe_bindings() {
     })
     .await
     .expect("byte policy must be queryable");
-    topology.stop().await.unwrap();
+    topology.stop(&lifecycle_contexts::stop()).await.unwrap();
     let restored = DesiredTopology::from_json(&desired.to_json().unwrap()).unwrap();
     assert_eq!(
         restored.relationships[0].pipe,
@@ -538,4 +538,46 @@ async fn graph_export_restores_byte_policy_without_external_pipe_bindings() {
         vec![vec![1], vec![2]],
     );
     restored.dispose().await.unwrap();
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

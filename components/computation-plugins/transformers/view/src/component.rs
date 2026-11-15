@@ -7,7 +7,13 @@ use drasi_computation_contracts::{
     ComponentDescriptor, GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress,
     InputEnvelope, OutputEnvelope, OutputReaders, PortId, StreamId,
 };
-use drasi_computation_plugin_sdk::{NativeComponent, NativeTransformer, Scope};
+use drasi_computation_plugin_sdk::{
+    lifecycle::{
+        nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext,
+        ResumeContext, StartContext, StopContext,
+    },
+    NativeComponent, NativeTransformer, Scope,
+};
 use drasi_core_types::models::SourceMiddlewareConfig;
 use serde::{Deserialize, Serialize};
 
@@ -86,10 +92,6 @@ impl NativeComponent for View {
         Ok(serde_json::to_value(&self.configuration)?)
     }
 
-    fn supports_delete_owned_resources(&self) -> bool {
-        true
-    }
-
     fn output_readers(&self) -> OutputReaders {
         OutputReaders::new().with_snapshot(
             PortId::try_new("out").expect("constant port"),
@@ -97,14 +99,29 @@ impl NativeComponent for View {
         )
     }
 
-    async fn start(&mut self) -> Result<()> {
-        anyhow::ensure!(!self.retired, "view state has been deprovisioned");
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        if self.retired {
+            return Err(anyhow::anyhow!("view state has been deprovisioned").into());
+        }
         self.output.set_running(true)?;
         self.running = true;
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<()> {
+    // Transformation is driven by the host; there are no independent workers.
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
         if !self.retired {
             self.output.set_running(false)?;
         }
@@ -112,11 +129,15 @@ impl NativeComponent for View {
         Ok(())
     }
 
-    async fn delete_owned_resources(&mut self) -> Result<()> {
-        anyhow::ensure!(!self.running, "stop the view before removing its state");
-        self.output.retire()?;
-        self.state = State::default();
-        self.retired = true;
+    async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult {
+        if ctx.erases_owned_state() {
+            if self.running {
+                return Err(anyhow::anyhow!("stop the view before removing its state").into());
+            }
+            self.output.retire()?;
+            self.state = State::default();
+            self.retired = true;
+        }
         Ok(())
     }
 }

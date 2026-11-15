@@ -74,12 +74,12 @@ async fn file_bootstrap() -> Result<()> {
     let indexes = directory.path().join("indexes");
     sqlite::create_database(&database)?;
     let mut query = file_query(&database, &indexes, 1)?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     let progress = query
         .processing_progress_owner()
         .context("missing actual progress owner")?;
     assert!(!progress.snapshot().recovered);
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.continue_transform().await?.is_empty());
     let snapshot = reader(&query)?.snapshot().await?;
     assert_eq!(total(&snapshot)?, 30.0);
@@ -96,13 +96,13 @@ async fn file_bootstrap() -> Result<()> {
         "row ordinals are not source checkpoints"
     );
     let producer = snapshot.cursor().producer().clone();
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     rusqlite::Connection::open(&database)?.execute("INSERT INTO items VALUES (3, 30)", [])?;
     let mut query = file_query(&database, &indexes, 2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let reopened = reader(&query)?.snapshot().await?;
     assert_eq!(
         total(&reopened)?,
@@ -115,7 +115,7 @@ async fn file_bootstrap() -> Result<()> {
     assert_eq!(observed.live_results, 1);
     assert_eq!(observed.outbox_size, 0);
     assert!(query.continue_transform().await?.is_empty());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -139,11 +139,11 @@ async fn volatile_file_bootstrap() -> Result<()> {
         scope(1),
         Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(file_provider(
         &database, 1,
     )?)))?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let original = reader(&query)?.snapshot().await?;
     assert_eq!(total(&original)?, 30.0);
     assert!(!original.cursor().producer().persistent());
@@ -154,14 +154,14 @@ async fn volatile_file_bootstrap() -> Result<()> {
             .snapshot()
             .persistent
     );
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     rusqlite::Connection::open(&database)?.execute("INSERT INTO items VALUES (3, 30)", [])?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let retained = reader(&query)?.snapshot().await?;
     assert_eq!(total(&retained)?, 30.0);
     assert_eq!(retained.cursor().producer(), original.cursor().producer());
-    query.stop().await?;
-    query.delete_owned_resources().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
+    query.dispose(&crate::hooks::erase_ctx()).await?;
     assert_eq!(
         rusqlite::Connection::open(&database)?.query_row(
             "SELECT count(*) FROM items",
@@ -215,16 +215,16 @@ async fn volatile_bootstrap_recovery() -> Result<()> {
         scope(1),
         Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(provider.clone())))?;
-    assert!(query.start().await.is_err());
+    assert!(query.start(&crate::hooks::start_ctx()).await.is_err());
     assert!(reader(&query)?.snapshot().await.is_err());
     provider
         .0
         .store(false, std::sync::atomic::Ordering::Release);
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(total(&reader(&query)?.snapshot().await?)?, 7.0);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 

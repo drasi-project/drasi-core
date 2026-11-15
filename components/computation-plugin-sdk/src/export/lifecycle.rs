@@ -6,7 +6,11 @@
 //! dropping an operation never rolls a partial transition back into readiness.
 
 use super::*;
-use crate::{ApplyUpdateRequest, ComponentUpdateMode};
+use crate::{
+    lifecycle::{DisposeReason, StateIntent},
+    wire::LifecycleRequest,
+    ApplyUpdateRequest, ComponentUpdateMode,
+};
 use std::{future::Future, sync::MutexGuard};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -45,8 +49,8 @@ pub(super) struct Lifecycle {
     pub retiring: bool,
     pub disposing: bool,
     pub disposed: bool,
-    pub deletion_started: bool,
-    pub deletion_complete: bool,
+    /// Fixed by the first DISPOSE; retries must repeat it.
+    pub dispose: Option<(DisposeReason, StateIntent)>,
     pub request: CreateRequest,
     pub configuration: serde_json::Value,
     pub update: Option<PendingUpdate>,
@@ -91,8 +95,7 @@ impl StateAdministration {
                 retiring: false,
                 disposing: false,
                 disposed: false,
-                deletion_started: false,
-                deletion_complete: false,
+                dispose: None,
                 request,
                 configuration,
                 update: None,
@@ -120,42 +123,17 @@ impl StateAdministration {
         &self,
         instance: &Instance,
         code: u32,
-        input: &[u8],
-        update: Option<ApplyUpdateRequest>,
+        context: Option<&LifecycleRequest>,
     ) -> Result<bool, Failure> {
         use abi::operation::*;
-        if matches!(
-            code,
-            INITIALIZE
-                | STOP
-                | DISPOSE
-                | PAUSE_PROCESSING
-                | RESUME_PROCESSING
-                | DELETE_OWNED_RESOURCES
-        ) && !input.is_empty()
-        {
-            return Err(Failure::protocol(
-                "native lifecycle operation requires an empty payload",
-            ));
-        }
-        if code == START {
-            if instance.activation_credentials_bound {
-                wire::decode::<crate::ActivationCredentials>(input)
-                    .and_then(|credentials| credentials.validate())
-                    .map_err(|_| Failure::protocol("invalid activation credential payload"))?;
-            } else if !input.is_empty() {
-                return Err(Failure::protocol(
-                    "unbound native START requires an empty payload",
-                ));
-            }
+        if let Some(context) = context {
+            validate_context(instance, code, context)?;
         }
         let mut state = self.state()?;
-        if state.retiring && !matches!(code, STOP | DISPOSE | DELETE_OWNED_RESOURCES) {
+        if state.retiring && !matches!(code, STOP | DISPOSE) {
             return Err(Failure::closed());
         }
-        if state.update.is_some()
-            && !matches!(code, APPLY_UPDATE | STOP | DISPOSE | DELETE_OWNED_RESOURCES)
-        {
+        if state.update.is_some() && !matches!(code, APPLY | STOP | DISPOSE) {
             return Err(Failure::failed("native component has an incomplete update"));
         }
         match code {
@@ -201,6 +179,17 @@ impl StateAdministration {
                 instance.bootstrapping.store(false, Ordering::Release);
             }
             DISPOSE => {
+                let request = context
+                    .and_then(|context| context.dispose)
+                    .expect("validated");
+                let intent = (request.reason, request.intent);
+                if let Some(fixed) = state.dispose {
+                    if fixed != intent {
+                        return Err(Failure::protocol(
+                            "native DISPOSE retry changed its reason or state intent",
+                        ));
+                    }
+                }
                 if state.disposed {
                     return Ok(true);
                 }
@@ -209,30 +198,18 @@ impl StateAdministration {
                         "native disposal requires successful activation cleanup",
                     ));
                 }
-                if state.deletion_started && !state.deletion_complete {
+                if state.initialization == Initialization::Incomplete
+                    && request.intent != StateIntent::Preserve
+                {
                     return Err(Failure::failed(
-                        "native owned-resource deletion is incomplete",
+                        "native disposal after incomplete initialization must preserve state",
                     ));
                 }
+                state.dispose = Some(intent);
                 state.retiring = true;
                 state.disposing = true;
             }
-            DELETE_OWNED_RESOURCES => {
-                if state.deletion_complete {
-                    return Ok(true);
-                }
-                if state.disposing {
-                    return Err(Failure::closed());
-                }
-                if state.activation != Activation::Stopped {
-                    return Err(Failure::failed(
-                        "native deletion requires successfully stopped work",
-                    ));
-                }
-                state.retiring = true;
-                state.deletion_started = true;
-            }
-            PAUSE_PROCESSING => {
+            PAUSE => {
                 if state.activation != Activation::Started
                     || instance.bootstrapping.load(Ordering::Acquire)
                 {
@@ -250,7 +227,7 @@ impl StateAdministration {
                     }
                 }
             }
-            RESUME_PROCESSING => {
+            RESUME => {
                 if state.activation != Activation::Started
                     || instance.bootstrapping.load(Ordering::Acquire)
                 {
@@ -268,8 +245,10 @@ impl StateAdministration {
                     }
                 }
             }
-            APPLY_UPDATE => {
-                let update = update.expect("validated update payload");
+            APPLY => {
+                let update = context
+                    .and_then(|context| context.update.clone())
+                    .expect("validated update payload");
                 if state.applied.as_ref() == Some(&update) {
                     return Ok(true);
                 }
@@ -488,4 +467,65 @@ impl Drop for IndependentGuard {
         }
         self.administration.independent_changed.send_modify(|_| ());
     }
+}
+
+/// Rejects malformed contexts before any plugin code runs.
+fn validate_context(
+    instance: &Instance,
+    code: u32,
+    context: &LifecycleRequest,
+) -> Result<(), Failure> {
+    use abi::operation::*;
+    if context.version != LifecycleRequest::VERSION {
+        return Err(Failure::protocol(
+            "unsupported native lifecycle context version",
+        ));
+    }
+    if let Some(required) = context.required.first() {
+        return Err(Failure::protocol(format!(
+            "native lifecycle context requires unsupported semantics `{required}`"
+        )));
+    }
+    if context.component_id != instance.metadata.descriptor.id().as_str() {
+        return Err(Failure::protocol(
+            "native lifecycle context names a different component",
+        ));
+    }
+    drasi_computation_contracts::validate_identifier(
+        "native lifecycle operation",
+        &context.operation_id,
+    )
+    .map_err(|error| Failure::protocol(format!("{error:#}")))?;
+    let credentials = code == START && instance.activation_credentials_bound;
+    if context.credentials.is_some() != credentials
+        || context.stop_mode.is_some() != (code == STOP)
+        || context.dispose.is_some() != (code == DISPOSE)
+        || context.update.is_some() != (code == APPLY)
+    {
+        return Err(Failure::protocol(
+            "native lifecycle context fields do not match the operation",
+        ));
+    }
+    if let Some(credentials) = &context.credentials {
+        credentials
+            .validate()
+            .map_err(|_| Failure::protocol("invalid activation credential payload"))?;
+    }
+    if let Some(dispose) = context.dispose {
+        dispose
+            .reason
+            .validate(dispose.intent)
+            .map_err(|error| Failure::protocol(error.to_string()))?;
+        if dispose.intent == StateIntent::Erase && !instance.factory.capabilities.erases_owned_state
+        {
+            return Err(Failure::new(
+                abi::status::UNSUPPORTED,
+                "native component does not erase owned state",
+            ));
+        }
+        if dispose.attempt == 0 {
+            return Err(Failure::protocol("native dispose attempts start at one"));
+        }
+    }
+    Ok(())
 }

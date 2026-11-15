@@ -203,8 +203,8 @@ async fn reused_across_bootstrap_live_and_restart() -> Result<()> {
     for language in ["cypher", "gql"] {
         let (_directory, mut query, calls) = query(true, language)?;
         assert_eq!(calls.setups.load(Ordering::Acquire), 0);
-        query.initialize().await?;
-        query.start().await?;
+        query.initialize(&crate::hooks::initialize_ctx()).await?;
+        query.start(&crate::hooks::start_ctx()).await?;
         assert_eq!(
             calls.setups.load(Ordering::Acquire),
             1,
@@ -243,8 +243,8 @@ async fn reused_across_bootstrap_live_and_restart() -> Result<()> {
             query.delivery_completed(&output).await?;
             assert_eq!(calls.setups.load(Ordering::Acquire), 1);
         }
-        query.stop().await?;
-        query.start().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
+        query.start(&crate::hooks::start_ctx()).await?;
         assert_eq!(calls.setups.load(Ordering::Acquire), 2);
         assert_eq!(total(&reader(&query)?.snapshot().await?)?, 30.0);
         assert!(query.continue_transform().await?.is_empty());
@@ -259,7 +259,7 @@ async fn reused_across_bootstrap_live_and_restart() -> Result<()> {
         aggregate(&output, Some(30.0), 35.0, 4)?;
         query.delivery_completed(&output).await?;
         assert_eq!(calls.setups.load(Ordering::Acquire), 2);
-        query.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
     }
     Ok(())
 }
@@ -285,15 +285,15 @@ async fn retained_evaluator_bootstrap_live_and_restart_multi_thread() -> Result<
 #[tokio::test(flavor = "current_thread")]
 async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> {
     let (directory, mut original, calls) = query(true, "cypher")?;
-    original.initialize().await?;
-    original.start().await?;
+    original.initialize(&crate::hooks::initialize_ctx()).await?;
+    original.start(&crate::hooks::start_ctx()).await?;
     let producer = reader(&original)?
         .snapshot()
         .await?
         .cursor()
         .producer()
         .clone();
-    original.stop().await?;
+    original.stop(&crate::hooks::stop_ctx()).await?;
     drop(original);
     let database = directory.path().join("source.sqlite");
     rusqlite::Connection::open(&database)?.execute("UPDATE items SET amount=11 WHERE id=1", [])?;
@@ -314,14 +314,14 @@ async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> 
             calls: calls.clone(),
         }),
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(Arc::new(
         lifecycle::PausedProvider {
             inner: file_provider(&database, 2)?,
             gate,
         },
     ))))?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(
         calls.setups.load(Ordering::Acquire),
         2,
@@ -342,7 +342,7 @@ async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> 
     aggregate(&output, Some(31.0), 36.0, 1)?;
     query.delivery_completed(&output).await?;
     assert_eq!(calls.setups.load(Ordering::Acquire), 2);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -350,13 +350,13 @@ async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> 
 async fn retained_evaluator_recovers_after_setup_and_processing_failures() -> Result<()> {
     let (_directory, mut query, calls) = query(false, "cypher")?;
     calls.fail_setup.store(true, Ordering::Release);
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     query
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("injected Core setup failure must fail activation");
-    query.stop().await?;
-    query.start().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(calls.setups.load(Ordering::Acquire), 2);
     let output = query
         .transform(input(
@@ -379,8 +379,8 @@ async fn retained_evaluator_recovers_after_setup_and_processing_failures() -> Re
         .await
         .expect_err("injected Core evaluation failure must fence the query");
     assert_eq!(calls.setups.load(Ordering::Acquire), 2);
-    query.stop().await?;
-    query.start().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(calls.setups.load(Ordering::Acquire), 3);
     assert!(query.continue_transform().await?.is_empty());
     let output = query
@@ -394,6 +394,6 @@ async fn retained_evaluator_recovers_after_setup_and_processing_failures() -> Re
     aggregate(&output, Some(10.0), 12.0, 2)?;
     query.delivery_completed(&output).await?;
     assert_eq!(calls.setups.load(Ordering::Acquire), 3);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }

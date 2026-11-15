@@ -230,7 +230,7 @@ async fn query(path: &Path) -> Result<ContinuousQueryTransformer> {
     let mut query = unstarted_query(path, QueryOptions::default())
         .await?
         .with_delivery_tracking();
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     Ok(query)
 }
 
@@ -353,7 +353,7 @@ async fn retained_query_output_recovers_partial_separate_store_handoff_without_d
         left.publish(&resumed[0].envelope).await?.position(),
         Some(1)
     );
-    producer.stop().await?;
+    producer.stop(&lifecycle_contexts::stop()).await?;
     left.shutdown().await?;
     right.shutdown().await?;
     drop((producer, left, right));
@@ -385,7 +385,7 @@ async fn retained_query_output_recovers_partial_separate_store_handoff_without_d
     producer
         .bind_output_destinations(&OutputBindings::default())
         .await?;
-    producer.stop().await?;
+    producer.stop(&lifecycle_contexts::stop()).await?;
     left.shutdown().await?;
     right.shutdown().await?;
     drop((producer, left, right));
@@ -398,7 +398,7 @@ async fn retained_query_output_recovers_partial_separate_store_handoff_without_d
             .has_pending()
             .await?
     );
-    producer.stop().await?;
+    producer.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -447,7 +447,7 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
                     envelope: event(1)?,
                 })
                 .await?;
-            producer.stop().await?;
+            producer.stop(&lifecycle_contexts::stop()).await?;
         }
         let provider = LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
             directory.path(),
@@ -541,7 +541,10 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
                 Some(&OutputBindingError::RecoveryRequired)
             );
         }
-        let error = producer.start().await.expect_err(corruption);
+        let error = producer
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect_err(corruption);
         assert!(
             error.downcast_ref::<OutputBindingError>().is_some(),
             "{corruption}: {error:#}"
@@ -563,7 +566,7 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
                 Some(&OutputBindingError::RecoveryRequired)
             );
         }
-        producer.stop().await?;
+        producer.stop(&lifecycle_contexts::stop()).await?;
         drop(producer);
         let indexes = provider
             .create_indexes(
@@ -604,12 +607,7 @@ impl ComputationComponent for BindingSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -642,12 +640,7 @@ impl ComputationComponent for BindingSink {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({"url": self.destination_url}))
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -874,6 +867,48 @@ async fn graph_pending_output_follows_replacement_but_rejects_a_different_journa
     drop((graph, left, right));
     let mut producer = query(&directory.path().join("producer")).await?;
     assert!(!producer.wakeup_source().unwrap().has_pending().await?);
-    producer.stop().await?;
+    producer.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

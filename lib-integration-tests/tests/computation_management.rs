@@ -23,12 +23,7 @@ impl ComputationComponent for IdleQueryInput {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -230,7 +225,7 @@ impl ComputationComponent for Service {
     fn configuration(&self) -> Result<Value> {
         Ok(self.config.clone())
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         if let Some(gate) = &self.start_gate {
             gate.starts.fetch_add(1, Ordering::SeqCst);
             gate.entered.notify_one();
@@ -238,7 +233,19 @@ impl ComputationComponent for Service {
         }
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }

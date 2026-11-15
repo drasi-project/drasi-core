@@ -129,14 +129,59 @@ impl sdk::NativeComponent for PluginSource {
     fn configuration(&self) -> Result<serde_json::Value> {
         self.source.configuration()
     }
-    fn requires_readiness_confirmation(&self) -> bool {
-        self.source.requires_readiness_confirmation()
+    async fn initialize(
+        &mut self,
+        ctx: &sdk::lifecycle::InitializeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        Ok(self
+            .source
+            .initialize(&InitializeContext::new(ctx.scope().clone()))
+            .await?)
     }
-    async fn start(&mut self) -> Result<()> {
-        self.source.start().await
+    async fn start(
+        &mut self,
+        ctx: &mut sdk::lifecycle::StartContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        Ok(self
+            .source
+            .start(&StartContext::new(ctx.scope().clone()))
+            .await?)
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.source.stop().await
+    async fn pause(
+        &mut self,
+        ctx: &sdk::lifecycle::PauseContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        Ok(self
+            .source
+            .pause(&PauseContext::new(ctx.scope().clone()))
+            .await?)
+    }
+    async fn resume(
+        &mut self,
+        ctx: &sdk::lifecycle::ResumeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        Ok(self
+            .source
+            .resume(&ResumeContext::new(ctx.scope().clone()))
+            .await?)
+    }
+    async fn stop(&mut self, ctx: &sdk::lifecycle::StopContext) -> sdk::lifecycle::LifecycleResult {
+        Ok(self
+            .source
+            .stop(&StopContext::new(ctx.scope().clone(), ctx.mode()))
+            .await?)
+    }
+    async fn dispose(
+        &mut self,
+        ctx: &sdk::lifecycle::DisposeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        let context = DisposeContext::new(
+            ctx.scope().clone(),
+            ctx.reason(),
+            ctx.intent(),
+            ctx.attempt(),
+        )?;
+        Ok(self.source.dispose(&context).await?)
     }
 }
 

@@ -999,25 +999,43 @@ impl ComputationComponent for SourcePluginAdapter {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.subscription.host.initialize_component().await
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         self.subscription.host.dispose_failed_initialization().await
     }
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
         self.subscription
             .host
             .pause_subscription(&self.subscription.id)
             .await
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
         self.subscription
             .host
             .resume_subscription(&self.subscription.id)
             .await
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.subscription
             .phase
             .send_replace(SubscriptionPhase::Waiting);
@@ -1030,7 +1048,7 @@ impl ComputationComponent for SourcePluginAdapter {
             anyhow::Error::new(error)
         })
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.live = None;
         self.subscription.close().await
     }

@@ -55,13 +55,24 @@ impl ComputationComponent for Configured {
         self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(json!({"setting": self.setting}))
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
+    fn management(&self) -> Option<&dyn drasi_lib::computation::v1::ComponentManagement> {
+        Some(self)
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
+    fn management_mut(
+        &mut self,
+    ) -> Option<&mut dyn drasi_lib::computation::v1::ComponentManagement> {
+        Some(self)
     }
-    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+    drasi_lib::passive_component_lifecycle!();
+}
+
+#[async_trait]
+impl drasi_lib::computation::v1::ComponentManagement for Configured {
+    async fn apply(
+        &mut self,
+        _apply: &drasi_lib::computation::v1::ApplyContext,
+        context: ComponentUpdateContext,
+    ) -> std::result::Result<(), drasi_lib::computation::v1::ApplyError> {
         assert_eq!(
             context.plan,
             ComponentUpdatePlan {
@@ -498,15 +509,24 @@ async fn builtin_config_getters_preserve_definitions_and_do_not_include_processi
     )
     .unwrap();
     let before = middleware.configuration().unwrap();
-    middleware.initialize().await.unwrap();
-    middleware.start().await.unwrap();
+    middleware
+        .initialize(&lifecycle_contexts::initialize())
+        .await
+        .unwrap();
+    middleware
+        .start(&lifecycle_contexts::start())
+        .await
+        .unwrap();
     assert_eq!(before, middleware.configuration().unwrap());
     assert_eq!(
         before,
         json!({"stream":"middleware/out","middleware":[],"pipeline":[]})
     );
-    middleware.stop().await.unwrap();
-    middleware.dispose().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+    middleware
+        .dispose(&lifecycle_contexts::dispose())
+        .await
+        .unwrap();
 
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
@@ -522,14 +542,17 @@ async fn builtin_config_getters_preserve_definitions_and_do_not_include_processi
     .await
     .unwrap();
     let before = query.configuration().unwrap();
-    query.initialize().await.unwrap();
-    query.start().await.unwrap();
+    query
+        .initialize(&lifecycle_contexts::initialize())
+        .await
+        .unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     assert_eq!(before, query.configuration().unwrap());
     assert_eq!(before["query"], "MATCH (n) RETURN n");
     assert_eq!(before["outbox_capacity"], 9);
     assert!(before.get("rows").is_none());
-    query.stop().await.unwrap();
-    query.dispose().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
+    query.dispose(&lifecycle_contexts::dispose()).await.unwrap();
 }
 
 #[test]
@@ -576,12 +599,7 @@ fn opaque_components_export_an_explicit_configuration_error_not_an_empty_configu
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl ComputationService for Opaque {
@@ -697,4 +715,46 @@ async fn resource_recipes_survive_component_updates_but_never_follow_a_rebound_p
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
     graph.dispose().await.unwrap();
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

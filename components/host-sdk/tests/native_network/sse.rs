@@ -26,8 +26,8 @@ async fn roundtrip(statically_linked: bool) -> Result<()> {
     };
     assert_eq!(sink.completion(), SinkCompletion::Accepted);
     assert!(sink.handle(result_input(1)?).await.is_err());
-    sink.initialize().await?;
-    sink.start().await?;
+    sink.initialize(&crate::hooks::initialize_ctx()).await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     let original = sink.configuration()?;
     let client = reqwest::Client::new();
     assert_eq!(
@@ -107,17 +107,17 @@ async fn roundtrip(statically_linked: bool) -> Result<()> {
     assert_eq!(frame["changes"][0]["operation"], "ADD");
     assert_eq!(frame["changes"][0]["after"], json!({"value": 42}));
     assert_eq!(sink.configuration()?, original);
-    sink.stop().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
     tokio::time::timeout(DEADLINE, async {
         while response.chunk().await?.is_some() {}
         Ok::<_, anyhow::Error>(())
     })
     .await??;
     assert!(sink.handle(result_input(43)?).await.is_err());
-    sink.start().await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     sink.handle(result_input(44)?).await?;
-    sink.stop().await?;
-    sink.dispose().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
+    sink.dispose(&crate::hooks::dispose_ctx()).await?;
     let _released = TcpListener::bind(("127.0.0.1", port)).await?;
     Ok(())
 }
@@ -159,8 +159,8 @@ async fn native_sse_dynamic_routes_are_bounded_and_recreated_only_after_cleanup(
         } else {
             component(SSE_SINK, NETWORK_SINK_ID, config)?
         };
-        sink.initialize().await?;
-        sink.start().await?;
+        sink.initialize(&crate::hooks::initialize_ctx()).await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         let client = reqwest::Client::new();
         let path = format!("http://127.0.0.1:{port}/events/values/42");
         assert_eq!(
@@ -189,7 +189,7 @@ async fn native_sse_dynamic_routes_are_bounded_and_recreated_only_after_cleanup(
                 .status(),
             StatusCode::NOT_FOUND,
         );
-        sink.stop().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
         tokio::time::timeout(DEADLINE, async {
             while events.response.chunk().await?.is_some() {}
             Ok::<_, anyhow::Error>(())
@@ -197,7 +197,7 @@ async fn native_sse_dynamic_routes_are_bounded_and_recreated_only_after_cleanup(
         .await??;
         drop(events);
         drop(client);
-        sink.start().await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         // Route reconstruction must use a connection to the new listener.
         let client = reqwest::Client::new();
         assert_eq!(
@@ -206,8 +206,8 @@ async fn native_sse_dynamic_routes_are_bounded_and_recreated_only_after_cleanup(
         );
         sink.handle(result_input(4)?).await?;
         assert_eq!(client.get(&path).send().await?.status(), StatusCode::OK);
-        sink.stop().await?;
-        sink.dispose().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
+        sink.dispose(&crate::hooks::dispose_ctx()).await?;
         let _released = TcpListener::bind(("127.0.0.1", port)).await?;
     }
     Ok(())

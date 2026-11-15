@@ -9,6 +9,19 @@ use drasi_core::models::{
 use serde_json::json;
 use std::time::Duration;
 
+/// The v3 planner view of the factory assessment: unsupported is an error.
+trait PlanUpdate {
+    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan>;
+}
+
+impl<F: Factory> PlanUpdate for F {
+    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+        self.assess(request)?
+            .plan()
+            .ok_or_else(|| anyhow::anyhow!("update unsupported"))
+    }
+}
+
 fn request(
     factory: &dyn Factory,
     configuration: serde_json::Value,
@@ -194,8 +207,8 @@ async fn retention_update_preserves_rows_cursor_and_existing_readers() -> anyhow
     let Component::Transformer(mut query) = created.component else {
         anyhow::bail!("query factory did not return a transformer")
     };
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&lifecycle_ctx::initialize()).await?;
+    query.start(&mut lifecycle_ctx::start()).await?;
     let first = query.transform(change(1)?).await?;
     assert_eq!(first.len(), 1);
     let readers = query.output_readers();
@@ -213,15 +226,21 @@ async fn retention_update_preserves_rows_cursor_and_existing_readers() -> anyhow
     let plan = factory.plan_update(&request)?;
     assert_eq!(plan.mode, ComponentUpdateMode::InPlace);
     assert_eq!(plan.data, ComponentUpdateData::Preserve);
-    query.pause_processing().await?;
+    query.pause(&lifecycle_ctx::pause()).await?;
     query
-        .apply_update(&ApplyUpdateRequest {
-            operation_id: "increase-query-retention".into(),
-            request,
-            plan,
-        })
+        .management()
+        .context("query management missing")?
+        .apply(
+            &lifecycle_ctx::apply(plan.mode.into()),
+            &ApplyUpdateRequest {
+                operation_id: "increase-query-retention".into(),
+                request,
+                plan,
+                fingerprint: None,
+            },
+        )
         .await?;
-    query.resume_processing().await?;
+    query.resume(&lifecycle_ctx::resume()).await?;
     let after = snapshots.snapshot().await?;
     assert_eq!(before.cursor(), after.cursor());
     assert_eq!(before.records().len(), after.records().len());
@@ -241,7 +260,46 @@ async fn retention_update_preserves_rows_cursor_and_existing_readers() -> anyhow
     assert_eq!(cursor.sequence(), 2);
     assert_eq!(view.snapshot.rows.len(), 2);
     assert_eq!(view.retained.len(), 2);
-    query.stop().await?;
-    query.dispose().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
+    query.dispose(&lifecycle_ctx::dispose()).await?;
     Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) mod lifecycle_ctx {
+    use drasi_computation_plugin_sdk::lifecycle::{
+        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
+        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
+        StopMode, UpdateBoundary,
+    };
+
+    pub(crate) fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+    pub(crate) fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+    pub(crate) fn start() -> StartContext {
+        StartContext::new(scope(), None)
+    }
+    pub(crate) fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+    pub(crate) fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+    pub(crate) fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+    pub(crate) fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
+        ApplyContext::new(scope(), boundary)
+    }
 }

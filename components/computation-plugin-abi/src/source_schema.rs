@@ -35,7 +35,7 @@ mod tests {
             24 + 2 * size_of::<usize>()
         );
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * size_of::<usize>());
-        assert_eq!(ABI_VERSION, "3.0.0");
-        assert_eq!(WIRE_VERSION, 3);
+        assert_eq!(ABI_VERSION, "4.0.0");
+        assert_eq!(WIRE_VERSION, 4);
     }
 }

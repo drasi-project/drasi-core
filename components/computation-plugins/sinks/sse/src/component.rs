@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
 
 use anyhow::{ensure, Context, Result};
@@ -443,7 +447,28 @@ impl NativeComponent for SseSink {
     fn configuration(&self) -> Result<Value> {
         Ok(serde_json::to_value(&self.config)?)
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl SseSink {
+    async fn start_activation(&mut self) -> Result<()> {
         ensure!(
             self.running.is_none(),
             "SSE sink is started or still needs cleanup"
@@ -551,7 +576,7 @@ impl NativeComponent for SseSink {
         .await?;
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_activation(&mut self) -> Result<()> {
         let Some(running) = &self.running else {
             return Ok(());
         };
@@ -643,6 +668,7 @@ fn notifications(input: &InputEnvelope, outputs: &SinkOutputs) -> Result<Vec<Cha
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle_ctx;
     use futures_util::{FutureExt, StreamExt};
 
     const OUTPUT_COMPONENT_ID: &str = "76b8e87b-4275-567c-a37f-d48582112ba1";
@@ -741,7 +767,7 @@ mod tests {
             Ok(())
         })
         .await?;
-        assert!(sink.stop().now_or_never().is_none());
+        assert!(sink.stop(&lifecycle_ctx::stop()).now_or_never().is_none());
         assert!(sink
             .running
             .as_ref()
@@ -750,11 +776,11 @@ mod tests {
             .read()
             .await
             .is_some());
-        assert!(sink.start().await.is_err());
+        assert!(sink.start(&mut lifecycle_ctx::start()).await.is_err());
         release.send(()).expect("server still owned");
-        sink.stop().await?;
-        sink.start().await?;
-        sink.stop().await?;
+        sink.stop(&lifecycle_ctx::stop()).await?;
+        sink.start(&mut lifecycle_ctx::start()).await?;
+        sink.stop(&lifecycle_ctx::stop()).await?;
         Ok(())
     }
 
@@ -763,12 +789,12 @@ mod tests {
         let mut sink = sink()?;
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         sink.config.port = listener.local_addr()?.port();
-        assert!(sink.start().await.is_err());
+        assert!(sink.start(&mut lifecycle_ctx::start()).await.is_err());
         assert!(sink.running.is_none());
         drop(listener);
-        sink.start().await?;
-        assert!(sink.start().await.is_err());
-        sink.stop().await?;
+        sink.start(&mut lifecycle_ctx::start()).await?;
+        assert!(sink.start(&mut lifecycle_ctx::start()).await.is_err());
+        sink.stop(&lifecycle_ctx::stop()).await?;
         Ok(())
     }
 }

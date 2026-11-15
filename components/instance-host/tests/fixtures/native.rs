@@ -99,7 +99,46 @@ impl drasi_computation_plugin_sdk::NativeComponent for Service {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(self.values.clone())
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn dispose(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn start(
+        &mut self,
+        _: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(self.start_service().await?)
+    }
+    async fn stop(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(self.stop_service().await?)
+    }
+}
+
+impl Service {
+    async fn start_service(&mut self) -> Result<()> {
         if !self.configuration.marker.is_empty() {
             std::fs::write(&self.configuration.marker, std::process::id().to_string())?;
         }
@@ -112,7 +151,7 @@ impl drasi_computation_plugin_sdk::NativeComponent for Service {
         );
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_service(&mut self) -> Result<()> {
         if self.configuration.mode == "pending-stop" {
             std::future::pending::<()>().await;
         }

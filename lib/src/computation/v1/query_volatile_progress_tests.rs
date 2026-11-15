@@ -78,7 +78,7 @@ async fn failed_input_does_not_bind_a_volatile_producer_epoch() -> anyhow::Resul
         Arc::new(InMemoryComputationProvider),
     )
     .await?;
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     let mut input = event(1, 1, b"uncommitted")?;
     let producer = crate::computation::v1::GraphProducerIdentity::volatile(
         "volatile".into(),
@@ -93,7 +93,7 @@ async fn failed_input_does_not_bind_a_volatile_producer_epoch() -> anyhow::Resul
         .expect_err("abs cannot evaluate a string");
     assert!(query.input_producers.lock().unwrap().is_empty());
     assert!(query.watermarks.lock().unwrap().is_empty());
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -101,7 +101,7 @@ async fn failed_input_does_not_bind_a_volatile_producer_epoch() -> anyhow::Resul
 async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transport(
 ) -> anyhow::Result<()> {
     let (mut query, owner) = query().await?;
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     query.transform(event(1, 10, &[0, 255, 1])?).await?;
     let key = SourceProgressKey::Source(
         drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
@@ -161,7 +161,7 @@ async fn volatile_progress_retains_handled_cursor_and_monotonic_duplicate_transp
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 1);
     assert_eq!(owner.snapshot().transport_sequences[&stream], 90);
     assert!(owner.snapshot().failure.is_some());
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -201,7 +201,7 @@ async fn position_replay_keeps_handled_cursor_and_rejects_new_position_sequence_
             vec![StreamId::try_new("source/out")?],
         )
         .is_err());
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     query.transform(event(5, 10, &[5])?).await?;
     assert!(query.transform(event(100, 11, &[5])?).await?.is_empty());
     let key = SourceProgressKey::Source(
@@ -222,7 +222,7 @@ async fn position_replay_keeps_handled_cursor_and_rejects_new_position_sequence_
     assert_eq!(state.transport_sequences[&stream], 12);
     assert!(state.failure.is_some());
     assert!(!state.persistent);
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -241,11 +241,11 @@ async fn malformed_initial_position_fails_before_becoming_handled() -> anyhow::R
         )?)),
         vec![StreamId::try_new("source/out")?],
     )?;
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     assert!(query.transform(event(1, 1, &[])?).await.is_err());
     assert!(owner.snapshot().checkpoints.is_empty());
     assert!(owner.snapshot().transport_sequences.is_empty());
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -294,7 +294,7 @@ async fn volatile_bootstrap_cursor_is_published_only_after_complete_snapshot() -
 {
     let (query, owner) = query().await?;
     let mut query = query.with_bootstrap(Arc::new(Snapshot(End::Complete)));
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     let key = SourceProgressKey::Source(
         drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
             .expect("fixture UUID"),
@@ -319,7 +319,7 @@ async fn volatile_bootstrap_cursor_is_published_only_after_complete_snapshot() -
         owner.snapshot().transport_sequences[&StreamId::try_new("source/out")?],
         80
     );
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -336,21 +336,64 @@ async fn failed_or_cancelled_volatile_bootstrap_never_confirms_its_watermark() -
         };
         let mut query = query.with_bootstrap(Arc::new(Snapshot(end)));
         if cancelled {
+            let start = lifecycle_contexts::start();
             tokio::time::timeout(Duration::from_secs(2), async {
                 tokio::select! {
-                    result = query.start() => anyhow::bail!("unexpected completion: {result:?}"),
+                    result = query.start(&start) => anyhow::bail!("unexpected completion: {result:?}"),
                     _ = ready.notified() => Ok(()),
                 }
             })
             .await??;
         } else {
-            assert!(query.start().await.is_err());
+            assert!(query.start(&lifecycle_contexts::start()).await.is_err());
         }
         let progress = owner.snapshot();
         assert!(!progress.ready && !progress.persistent && !progress.bootstrap_complete);
         assert!(progress.failure.is_some());
         assert!(progress.checkpoints.is_empty() && progress.transport_sequences.is_empty());
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use crate::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

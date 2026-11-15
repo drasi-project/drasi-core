@@ -102,7 +102,7 @@ async fn query(capacity: usize) -> ContinuousQueryTransformer {
     )
     .await
     .unwrap();
-    query.start().await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     query
 }
 
@@ -228,12 +228,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -296,7 +291,7 @@ async fn initial(
     replay: &mut QueryReplayTransformer,
     sink: &mut CheckpointedSink,
 ) -> ChangeEnvelope {
-    replay.start().await.unwrap();
+    replay.start(&lifecycle_contexts::start()).await.unwrap();
     let envelope = replay.on_wakeup().await.unwrap().pop().unwrap().envelope;
     sink.handle(input(envelope.clone())).await.unwrap();
     envelope
@@ -327,7 +322,7 @@ async fn recreated_volatile_producers_require_explicit_recovery_even_at_identica
             let mut first = replay(old.results(), progress.clone(), policy);
             let old_snapshot = initial(&mut first, &mut sink).await;
             let old_checkpoint = progress.load(&id("query")).await.unwrap().unwrap();
-            old.stop().await.unwrap();
+            old.stop(&lifecycle_contexts::stop()).await.unwrap();
 
             let mut new = query(4).await;
             if !empty {
@@ -336,7 +331,7 @@ async fn recreated_volatile_producers_require_explicit_recovery_even_at_identica
             let identity = new.results().recovery_view(None).unwrap().identity;
             assert_ne!(identity, old_checkpoint.identity);
             let mut restored = replay(new.results(), progress.clone(), policy);
-            restored.start().await.unwrap();
+            restored.start(&lifecycle_contexts::start()).await.unwrap();
             let output = restored.on_wakeup().await;
             if policy == ConsumerRecoveryPolicy::Strict {
                 assert!(output
@@ -383,7 +378,7 @@ async fn recreated_volatile_producers_require_explicit_recovery_even_at_identica
                 assert!(restored.transform(input(alice)).await.is_err());
                 assert_eq!(progress.load(&id("query")).await.unwrap(), Some(saved));
             }
-            new.stop().await.unwrap();
+            new.stop(&lifecycle_contexts::stop()).await.unwrap();
         }
     }
 }
@@ -428,7 +423,7 @@ async fn a_dropped_live_event_is_replayed_before_the_later_event_and_duplicates_
     );
     assert!(replay.transform(input(second)).await.unwrap().is_empty());
     assert!(replay.transform(input(third)).await.unwrap().is_empty());
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -464,7 +459,7 @@ async fn checkpointed_sink_independently_rejects_unexplained_gaps_and_acceptance
         Arc::new(MemoryConsumerProgress::default()),
     )
     .is_err());
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -526,7 +521,7 @@ async fn live_retention_gaps_fail_reset_or_emit_an_explicit_skip_before_retained
                 3
             );
         }
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -558,8 +553,8 @@ async fn partial_handling_failure_restarts_from_the_last_successfully_handled_de
         progress.load(&id("query")).await.unwrap().unwrap().sequence,
         2
     );
-    replay.stop().await.unwrap();
-    replay.start().await.unwrap();
+    replay.stop(&lifecycle_contexts::stop()).await.unwrap();
+    replay.start(&lifecycle_contexts::start()).await.unwrap();
     let retry = replay.on_wakeup().await.unwrap();
     assert_eq!(retry.len(), 1);
     assert_eq!(
@@ -569,7 +564,7 @@ async fn partial_handling_failure_restarts_from_the_last_successfully_handled_de
     deliver(&mut sink, retry).await;
     assert_eq!(handled.names(), ["Charlie"]);
     assert_eq!(*handled.sequences.lock().unwrap(), [2, 3]);
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -594,7 +589,7 @@ async fn failed_or_cancelled_replacement_never_adopts_the_new_producer_checkpoin
             progress.clone(),
             ConsumerRecoveryPolicy::AutoReset,
         );
-        restored.start().await.unwrap();
+        restored.start(&lifecycle_contexts::start()).await.unwrap();
         let reset = restored.on_wakeup().await.unwrap().pop().unwrap().envelope;
         if cancel {
             handled.block_snapshot.store(true, Ordering::Release);
@@ -611,16 +606,16 @@ async fn failed_or_cancelled_replacement_never_adopts_the_new_producer_checkpoin
             assert!(sink.handle(input(reset)).await.is_err());
         }
         assert_eq!(progress.load(&id("query")).await.unwrap(), saved);
-        restored.stop().await.unwrap();
-        restored.start().await.unwrap();
+        restored.stop(&lifecycle_contexts::stop()).await.unwrap();
+        restored.start(&lifecycle_contexts::start()).await.unwrap();
         deliver(&mut sink, restored.on_wakeup().await.unwrap()).await;
         assert_eq!(handled.names(), ["Bob"]);
         assert_eq!(
             progress.load(&id("query")).await.unwrap(),
             Some(checkpoint(&replacement.results(), 1))
         );
-        old.stop().await.unwrap();
-        replacement.stop().await.unwrap();
+        old.stop(&lifecycle_contexts::stop()).await.unwrap();
+        replacement.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -683,7 +678,7 @@ async fn untrusted_missing_malformed_wrong_scope_and_stale_identity_are_not_inve
             progress.clone(),
             ConsumerRecoveryPolicy::AutoReset,
         );
-        replay.start().await.unwrap();
+        replay.start(&lifecycle_contexts::start()).await.unwrap();
         assert!(replay.transform(input(invalid.clone())).await.is_err());
         assert_eq!(progress.load(&id("query")).await.unwrap(), None);
         let mut sink = sink_without_skips(progress.clone());
@@ -694,7 +689,7 @@ async fn untrusted_missing_malformed_wrong_scope_and_stale_identity_are_not_inve
             Some(checkpoint(&query.results(), 1))
         );
     }
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -755,7 +750,7 @@ async fn unidentified_unknown_or_malformed_persisted_progress_is_rejected_withou
             .await
             .is_err());
         let mut replay = replay(query.results(), progress, ConsumerRecoveryPolicy::AutoReset);
-        replay.start().await.unwrap();
+        replay.start(&lifecycle_contexts::start()).await.unwrap();
         assert!(replay.on_wakeup().await.is_err());
         assert_eq!(
             provider
@@ -766,7 +761,7 @@ async fn unidentified_unknown_or_malformed_persisted_progress_is_rejected_withou
         );
     }
 
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[cfg(feature = "computation-rocksdb-tests")]
@@ -1129,8 +1124,8 @@ async fn authorized_new_incarnations_can_reset_lower_but_stale_commits_and_decis
         .allocate_sequence(&StreamId::try_new("replay/out").unwrap())
         .await
         .is_err());
-    old.stop().await.unwrap();
-    new.stop().await.unwrap();
+    old.stop(&lifecycle_contexts::stop()).await.unwrap();
+    new.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1173,7 +1168,7 @@ async fn consumer_identity_and_producer_sequence_survive_an_actual_state_store_r
         assert_eq!(progress.load(&id("query")).await.unwrap(), Some(saved));
         assert_eq!(progress.allocate_sequence(&stream).await.unwrap(), 2);
     }
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 struct MutableBootstrap(Arc<Mutex<Vec<ChangeEnvelope>>>);
@@ -1203,7 +1198,7 @@ async fn live_query_reset_wakes_recovery_and_replaces_with_an_empty_snapshot() {
     .await
     .unwrap()
     .with_bootstrap(Arc::new(MutableBootstrap(rows.clone())));
-    query.start().await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     let progress = Arc::new(MemoryConsumerProgress::default());
     let handled = Arc::new(Handled::default());
     let mut sink = sink(progress.clone(), handled.clone(), false);
@@ -1222,8 +1217,8 @@ async fn live_query_reset_wakes_recovery_and_replaces_with_an_empty_snapshot() {
     let previous = progress.load(&id("query")).await.unwrap().unwrap();
     rows.lock().unwrap().clear();
     assert!(query.transform(input(initial)).await.is_err());
-    query.stop().await.unwrap();
-    query.start().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     let wakeup = replay.wakeup_source().unwrap();
     assert!(wakeup.has_pending().await.unwrap());
     tokio::time::timeout(Duration::from_secs(5), wakeup.wait())
@@ -1241,7 +1236,7 @@ async fn live_query_reset_wakes_recovery_and_replaces_with_an_empty_snapshot() {
     assert_eq!(recovered.sequence, previous.sequence);
     assert!(handled.names().is_empty());
     assert!(sink.handle(input(old)).await.is_err());
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[cfg(feature = "computation-rocksdb-tests")]
@@ -1399,12 +1394,7 @@ impl ComputationComponent for PlainSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -1435,12 +1425,12 @@ async fn snapshot_support_is_absent_by_default_and_a_wrapped_unsupported_snapsho
         progress.clone(),
         ConsumerRecoveryPolicy::Strict,
     );
-    replay.start().await.unwrap();
+    replay.start(&lifecycle_contexts::start()).await.unwrap();
     let snapshot = replay.on_wakeup().await.unwrap().pop().unwrap().envelope;
     assert!(QueryChangeCodec::is_snapshot(&snapshot));
     assert!(sink.handle(input(snapshot)).await.is_err());
     assert_eq!(progress.load(&id("query")).await.unwrap(), None);
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1455,7 +1445,7 @@ async fn checkpointed_snapshot_handler_is_port_scoped_and_keeps_the_checkpointed
         progress.clone(),
         ConsumerRecoveryPolicy::Strict,
     );
-    replay.start().await.unwrap();
+    replay.start(&lifecycle_contexts::start()).await.unwrap();
     let snapshot = replay.on_wakeup().await.unwrap().pop().unwrap().envelope;
     let live = emit(&mut query, 2, "Bob").await;
 
@@ -1483,5 +1473,47 @@ async fn checkpointed_snapshot_handler_is_port_scoped_and_keeps_the_checkpointed
         progress.load(&id("query")).await.unwrap(),
         Some(checkpoint(&query.results(), 1))
     );
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

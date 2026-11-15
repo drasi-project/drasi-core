@@ -1,7 +1,13 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
+use drasi_computation_plugin_sdk::{
+    lifecycle::{
+        nothing_to_do, ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext,
+        LifecycleResult, PauseContext, ResumeContext, StartContext, StopContext,
+    },
+    NativeComponent, NativeManagement, NativeSource,
+};
 
 use async_trait::async_trait;
 use drasi_computation_contracts::{
@@ -131,10 +137,49 @@ impl NativeComponent for Counter {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::to_value(&self.configuration)?)
     }
-    fn supports_apply_update(&self) -> bool {
-        true
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        Some(self)
     }
-    async fn apply_update(&mut self, update: &ApplyUpdateRequest) -> anyhow::Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        if self.running {
+            return Err(anyhow::anyhow!("counter already started").into());
+        }
+        self.running = true;
+        Ok(())
+    }
+    // The host pulls `next`; the counter owns no independent workers.
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        self.running = false;
+        Ok(())
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+#[async_trait]
+impl NativeManagement for Counter {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        plan_update(request).map(Assessment::from)
+    }
+    async fn apply(
+        &mut self,
+        _ctx: &ApplyContext,
+        update: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError> {
+        Ok(self.apply_update(update)?)
+    }
+}
+impl Counter {
+    fn apply_update(&mut self, update: &ApplyUpdateRequest) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.running,
             "counter update requires an activated instance"
@@ -151,15 +196,6 @@ impl NativeComponent for Counter {
         );
         let proposed = Configuration::parse(update.request.proposed.configuration.clone())?;
         self.configuration.interval_ms = proposed.interval_ms;
-        Ok(())
-    }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.running, "counter already started");
-        self.running = true;
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        self.running = false;
         Ok(())
     }
 }

@@ -98,7 +98,7 @@ async fn matches_builtin() -> Result<()> {
                 "volatile": true, "joins": joins,
             }),
         )?;
-        query.initialize().await?;
+        query.initialize(&crate::hooks::initialize_ctx()).await?;
         let mut reference = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: "synthetic-join-reference".into(),
@@ -117,8 +117,8 @@ async fn matches_builtin() -> Result<()> {
             None,
         )
         .await?;
-        query.start().await?;
-        reference.start().await?;
+        query.start(&crate::hooks::start_ctx()).await?;
+        reference.start(&crate::hooks::start_ctx()).await?;
         for (index, (change, expected)) in [
             (
                 SourceChange::Insert {
@@ -202,8 +202,8 @@ async fn matches_builtin() -> Result<()> {
             assert_eq!(component_rows(&query).await?, expected);
             assert_eq!(component_rows(&reference).await?, expected);
         }
-        query.stop().await?;
-        reference.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
+        reference.stop(&crate::hooks::stop_ctx()).await?;
     }
     Ok(())
 }
@@ -460,13 +460,13 @@ async fn synthetic_join_file_provider_uses_the_same_core_builder() -> Result<()>
             scope(1),
             Arc::new(NativeBootstrapResource(file_bootstrap(&database, 1)?)),
         )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(
         component_rows(&query).await?,
         expected(&[(10, 100, "Ada"), (20, 200, "Bea")])
     );
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -483,17 +483,17 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
         scope(1),
         provider(&indexes)?,
     )?;
-    original.initialize().await?;
+    original.initialize(&crate::hooks::initialize_ctx()).await?;
     original.bind_bootstrap(Arc::new(NativeBootstrapResource(file_bootstrap(
         &database, 1,
     )?)))?;
-    original.start().await?;
+    original.start(&crate::hooks::start_ctx()).await?;
     let saved = reader(&original)?.snapshot().await?;
     assert_eq!(
         rows(&saved)?,
         expected(&[(10, 100, "Ada"), (20, 200, "Bea")])
     );
-    original.stop().await?;
+    original.stop(&crate::hooks::stop_ctx()).await?;
     drop(original);
 
     let mut changed = join_settings();
@@ -507,11 +507,11 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
         scope(2),
         provider(&indexes)?,
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.bind_bootstrap(Arc::new(NativeBootstrapResource(file_bootstrap(
         &database, 2,
     )?)))?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let snapshot = reader(&query)?.snapshot().await?;
     assert!(rows(&snapshot)?.is_empty());
     assert_ne!(snapshot.cursor().producer(), saved.cursor().producer());
@@ -533,7 +533,7 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
     assert_eq!(output.len(), 1);
     query.delivery_completed(&output).await?;
     assert_eq!(component_rows(&query).await?, expected(&[(30, 1, "Ada")]));
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -606,8 +606,8 @@ async fn synthetic_join_empty_and_omitted_settings_share_retained_identity() -> 
         scope(1),
         provider(directory.path())?,
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -620,7 +620,7 @@ async fn synthetic_join_empty_and_omitted_settings_share_retained_identity() -> 
     let producer = GraphProducerProgress::from_envelope(&output[0].envelope)?
         .context("missing output producer")?;
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     configuration["joins"] = json!([]);
@@ -630,8 +630,8 @@ async fn synthetic_join_empty_and_omitted_settings_share_retained_identity() -> 
         scope(2),
         provider(directory.path())?,
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.continue_transform().await?.is_empty());
     let output = query
         .transform(input(
@@ -656,6 +656,6 @@ async fn synthetic_join_empty_and_omitted_settings_share_retained_identity() -> 
         other => anyhow::bail!("unexpected reopened result: {other:?}"),
     }
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }

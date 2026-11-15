@@ -98,12 +98,7 @@ impl ComputationComponent for IdleSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSource for IdleSource {
@@ -717,7 +712,10 @@ async fn persisted_reaction_checkpoint_is_reset_for_a_new_volatile_query_incarna
         let services = drasi.computation_plugin_services().expect("services");
         let catalog = QueryResultsCatalog::new("reactions").expect("catalogue");
         let mut query = snapshot_query(&catalog, name).await;
-        query.start().await.expect("bootstrap native query");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("bootstrap native query");
         assert_eq!(
             query.results().snapshot().expect("snapshot").as_of_sequence,
             0
@@ -730,15 +728,27 @@ async fn persisted_reaction_checkpoint_is_reset_for_a_new_volatile_query_incarna
         )
         .expect("reaction");
         let mut adapter = ReactionPluginAdapter::new(id("sink"), host.clone()).expect("adapter");
-        adapter.initialize().await.expect("initialize reaction");
-        adapter.start().await.expect("recover destination");
+        adapter
+            .initialize(&lifecycle_contexts::initialize())
+            .await
+            .expect("initialize reaction");
+        adapter
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("recover destination");
         assert_eq!(
             *destination.rows.lock().expect("rows"),
             vec![serde_json::json!({"name":name})]
         );
-        adapter.stop().await.expect("stop reaction");
+        adapter
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop reaction");
         host.shutdown().await.expect("host cleanup");
-        query.stop().await.expect("stop query");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop query");
         drasi.shutdown().await.expect("instance cleanup");
     }
     assert_eq!(
@@ -758,7 +768,10 @@ async fn a_gap_after_a_sequence_zero_checkpoint_discards_prior_materialized_stat
     let services = drasi.computation_plugin_services().expect("services");
     let catalog = QueryResultsCatalog::new("reactions").expect("catalogue");
     let mut query = snapshot_query(&catalog, "A").await;
-    query.start().await.expect("query bootstrap");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("query bootstrap");
     let destination = MaterializedReaction::default();
     let host = ReactionPluginHost::owned(
         Box::new(destination.clone()),
@@ -768,9 +781,18 @@ async fn a_gap_after_a_sequence_zero_checkpoint_discards_prior_materialized_stat
     )
     .expect("host");
     let mut adapter = ReactionPluginAdapter::new(id("sink"), host.clone()).expect("adapter");
-    adapter.initialize().await.expect("initialize reaction");
-    adapter.start().await.expect("initial snapshot");
-    adapter.stop().await.expect("pause reaction");
+    adapter
+        .initialize(&lifecycle_contexts::initialize())
+        .await
+        .expect("initialize reaction");
+    adapter
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("initial snapshot");
+    adapter
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("pause reaction");
     let bytes = services
         .state_store
         .as_ref()
@@ -800,7 +822,10 @@ async fn a_gap_after_a_sequence_zero_checkpoint_discards_prior_materialized_stat
         query.results().replay(0).is_err(),
         "fixture must force a retained-history gap"
     );
-    adapter.start().await.expect("gap snapshot reset");
+    adapter
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("gap snapshot reset");
     assert_eq!(
         *destination.rows.lock().expect("rows"),
         vec![serde_json::json!({"name":"B"})]
@@ -809,8 +834,56 @@ async fn a_gap_after_a_sequence_zero_checkpoint_discards_prior_materialized_stat
         *destination.resets.lock().expect("resets"),
         vec![false, true]
     );
-    adapter.stop().await.expect("stop reaction");
+    adapter
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop reaction");
     host.shutdown().await.expect("host cleanup");
-    query.stop().await.expect("query cleanup");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("query cleanup");
     drasi.shutdown().await.expect("instance cleanup");
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

@@ -57,7 +57,7 @@ async fn query(catalog: &QueryResultsCatalog, capacity: usize) -> ContinuousQuer
     .unwrap()
     .with_result_catalog(catalog)
     .unwrap();
-    query.start().await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     query
 }
 
@@ -107,7 +107,10 @@ async fn host(
     )
     .unwrap();
     let mut adapter = ReactionPluginAdapter::new(id("sink"), host.clone()).unwrap();
-    adapter.initialize().await.unwrap();
+    adapter
+        .initialize(&lifecycle_contexts::initialize())
+        .await
+        .unwrap();
     (host, adapter)
 }
 
@@ -168,7 +171,8 @@ async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_met
         reaction.start_gate = Some(gate.clone());
         let probe = reaction.probe.clone();
         let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-        let mut start = Box::pin(adapter.start());
+        let start_context = lifecycle_contexts::start();
+        let mut start = Box::pin(adapter.start(&start_context));
         tokio::time::timeout(DEADLINE, async {
             tokio::select! {
                 _ = gate.entered.notified() => {},
@@ -221,9 +225,9 @@ async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_met
                 .sequence,
             2
         );
-        adapter.stop().await.unwrap();
+        adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
         host.shutdown().await.unwrap();
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -239,7 +243,7 @@ async fn accepted_but_unhandled_results_replay_on_every_restart() {
     );
     let probe = reaction.probe.clone();
     let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-    adapter.start().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     let baseline = checkpoint(state.as_ref(), &id("sink"), &id("q"))
         .await
         .unwrap();
@@ -259,9 +263,9 @@ async fn accepted_but_unhandled_results_replay_on_every_restart() {
             .unwrap();
         assert_eq!(saved.sequence, baseline.sequence);
         assert_eq!(saved.config_hash, baseline.config_hash);
-        adapter.stop().await.unwrap();
+        adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
         if accepted_count < 3 {
-            adapter.start().await.unwrap();
+            adapter.start(&lifecycle_contexts::start()).await.unwrap();
         }
     }
     assert!(probe
@@ -271,7 +275,7 @@ async fn accepted_but_unhandled_results_replay_on_every_restart() {
         .iter()
         .all(|result| result.sequence == 1));
     host.shutdown().await.unwrap();
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -286,7 +290,7 @@ async fn strict_recovers_transport_loss_from_accepted_tail_without_checkpointing
     );
     let probe = reaction.probe.clone();
     let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-    adapter.start().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     adapter
         .handle(InputEnvelope {
             port: port("in"),
@@ -325,9 +329,9 @@ async fn strict_recovers_transport_loss_from_accepted_tail_without_checkpointing
             .sequence,
         0
     );
-    adapter.stop().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     host.shutdown().await.unwrap();
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -342,7 +346,7 @@ async fn strict_rejects_unretained_transport_loss_without_later_deliveries() {
     );
     let probe = reaction.probe.clone();
     let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-    adapter.start().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     adapter
         .handle(InputEnvelope {
             port: port("in"),
@@ -378,9 +382,9 @@ async fn strict_rejects_unretained_transport_loss_without_later_deliveries() {
             .sequence,
         0
     );
-    adapter.stop().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     host.shutdown().await.unwrap();
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -396,11 +400,11 @@ async fn an_explicit_gap_skip_does_not_acknowledge_later_queued_results() {
     reaction.policy = ReactionRecoveryPolicy::AutoSkipGap;
     let probe = reaction.probe.clone();
     let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-    adapter.start().await.unwrap();
-    adapter.stop().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     emit(&mut query, 1, 1).await;
     emit(&mut query, 2, 2).await;
-    adapter.start().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     assert!(probe.accepted.lock().unwrap().is_empty());
     assert_eq!(
         checkpoint(state.as_ref(), &id("sink"), &id("q"))
@@ -417,8 +421,8 @@ async fn an_explicit_gap_skip_does_not_acknowledge_later_queued_results() {
         })
         .await
         .unwrap();
-    adapter.stop().await.unwrap();
-    adapter.start().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     assert_eq!(
         probe
             .accepted
@@ -437,9 +441,9 @@ async fn an_explicit_gap_skip_does_not_acknowledge_later_queued_results() {
         2,
         "only the explicit unavailable-history skip is persisted"
     );
-    adapter.stop().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     host.shutdown().await.unwrap();
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -457,7 +461,8 @@ async fn replacing_a_query_during_reaction_start_does_not_seed_an_old_head() {
     reaction.start_gate = Some(gate.clone());
     let probe = reaction.probe.clone();
     let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-    let mut start = Box::pin(adapter.start());
+    let start_context = lifecycle_contexts::start();
+    let mut start = Box::pin(adapter.start(&start_context));
     tokio::time::timeout(DEADLINE, async {
         tokio::select! {
             _ = gate.entered.notified() => {},
@@ -466,7 +471,7 @@ async fn replacing_a_query_during_reaction_start_does_not_seed_an_old_head() {
     })
     .await
     .unwrap();
-    first.stop().await.unwrap();
+    first.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(first);
     let mut replacement = query(&catalog, 8).await;
     emit(&mut replacement, 1, 99).await;
@@ -477,9 +482,9 @@ async fn replacing_a_query_during_reaction_start_does_not_seed_an_old_head() {
         .await
         .is_none());
     assert!(probe.accepted.lock().unwrap().is_empty());
-    adapter.stop().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     host.shutdown().await.unwrap();
-    replacement.stop().await.unwrap();
+    replacement.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -497,7 +502,7 @@ async fn handler_failure_does_not_advance_progress_and_is_redelivered() {
     let probe = reaction.probe.clone();
     let mut status = reaction.base.status_handle().subscribe_status();
     let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-    adapter.start().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     if let Err(error) = adapter
         .handle(InputEnvelope {
             port: port("in"),
@@ -522,20 +527,20 @@ async fn handler_failure_does_not_advance_progress_and_is_redelivered() {
         0
     );
     assert!(probe.handled.lock().unwrap().is_empty());
-    if let Err(error) = adapter.stop().await {
+    if let Err(error) = adapter.stop(&lifecycle_contexts::stop()).await {
         assert!(format!("{error:#}").contains("effect"), "{error:#}");
-        adapter.stop().await.unwrap();
+        adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
-    adapter.start().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     wait_checkpoint(state.as_ref(), &id("sink"), &id("q"), 1).await;
     assert_eq!(
         *probe.attempts.lock().unwrap(),
         vec![(id("q"), 1), (id("q"), 1)]
     );
     assert_eq!(probe.handled.lock().unwrap().len(), 1);
-    adapter.stop().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     host.shutdown().await.unwrap();
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -556,7 +561,8 @@ async fn bootstrap_checkpoint_waits_for_success_and_retries_a_partial_snapshot()
     reaction.bootstrap_gate = Some(gate.clone());
     let probe = reaction.probe.clone();
     let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-    let mut start = Box::pin(adapter.start());
+    let start_context = lifecycle_contexts::start();
+    let mut start = Box::pin(adapter.start(&start_context));
     tokio::time::timeout(DEADLINE, async {
         tokio::select! {
             _ = gate.entered.notified() => {},
@@ -574,8 +580,8 @@ async fn bootstrap_checkpoint_waits_for_success_and_retries_a_partial_snapshot()
     assert!(checkpoint(state.as_ref(), &id("sink"), &id("q"))
         .await
         .is_none());
-    adapter.stop().await.unwrap();
-    adapter.start().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     assert_eq!(
         checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
@@ -590,9 +596,9 @@ async fn bootstrap_checkpoint_waits_for_success_and_retries_a_partial_snapshot()
         assert!(snapshots[1].1);
         assert_eq!(snapshots[1].3, vec![serde_json::json!({ "value": 1 })]);
     }
-    adapter.stop().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     host.shutdown().await.unwrap();
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -610,14 +616,14 @@ async fn a_new_volatile_query_incarnation_requires_snapshot_recovery() {
     reaction.policy = ReactionRecoveryPolicy::AutoReset;
     let probe = reaction.probe.clone();
     let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-    adapter.start().await.unwrap();
-    adapter.stop().await.unwrap();
-    first.stop().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
+    first.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(first);
 
     let mut replacement = query(&catalog, 8).await;
     emit(&mut replacement, 1, 99).await;
-    adapter.start().await.unwrap();
+    adapter.start(&lifecycle_contexts::start()).await.unwrap();
     {
         let snapshots = probe.snapshots.lock().unwrap();
         assert_eq!(snapshots.len(), 2);
@@ -632,9 +638,9 @@ async fn a_new_volatile_query_incarnation_requires_snapshot_recovery() {
             .sequence,
         1
     );
-    adapter.stop().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     host.shutdown().await.unwrap();
-    replacement.stop().await.unwrap();
+    replacement.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -652,8 +658,8 @@ async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it(
         reaction.policy = policy;
         let probe = reaction.probe.clone();
         let (host, mut adapter) = host(reaction, &catalog, state.clone()).await;
-        adapter.start().await.unwrap();
-        adapter.stop().await.unwrap();
+        adapter.start(&lifecycle_contexts::start()).await.unwrap();
+        adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
         let baseline = checkpoint(state.as_ref(), &id("sink"), &id("q"))
             .await
             .unwrap();
@@ -673,7 +679,7 @@ async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it(
             .await
             .unwrap();
 
-        let result = adapter.start().await;
+        let result = adapter.start(&lifecycle_contexts::start()).await;
         if policy == ReactionRecoveryPolicy::Strict {
             assert!(result.is_err());
             assert_eq!(
@@ -694,8 +700,8 @@ async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it(
                 })
                 .await
                 .unwrap();
-            adapter.stop().await.unwrap();
-            adapter.start().await.unwrap();
+            adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
+            adapter.start(&lifecycle_contexts::start()).await.unwrap();
             assert_eq!(
                 probe
                     .accepted
@@ -712,8 +718,50 @@ async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it(
                 Some(baseline)
             );
         }
-        adapter.stop().await.unwrap();
+        adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
         host.shutdown().await.unwrap();
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

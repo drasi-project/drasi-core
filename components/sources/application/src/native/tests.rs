@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use crate::PropertyMapBuilder;
 use anyhow::Result;
@@ -105,7 +107,7 @@ fn shared_handles_preserve_nodes_relations_properties_and_source_identity() {
             .await
             .unwrap();
         clone.send_delete("one", vec!["Item"]).await.unwrap();
-        source.start().await.unwrap();
+        source.start(&lifecycle_ctx::start()).await.unwrap();
         for expected in 1..=4 {
             let envelope = next(&mut source).await;
             assert_eq!(envelope.system().sequence(), expected);
@@ -168,7 +170,7 @@ fn shared_handles_preserve_nodes_relations_properties_and_source_identity() {
                 other => panic!("unexpected source change: {other:?}"),
             }
         }
-        source.stop().await.unwrap();
+        source.stop(&lifecycle_ctx::stop()).await.unwrap();
     });
 }
 
@@ -176,22 +178,22 @@ fn shared_handles_preserve_nodes_relations_properties_and_source_identity() {
 fn volatile_identity_survives_soft_restart_but_not_reconstruction() {
     both_runtimes(|| async {
         let (mut first, handle) = source(2);
-        first.start().await.unwrap();
+        first.start(&lifecycle_ctx::start()).await.unwrap();
         handle.send_delete("one", vec!["Item"]).await.unwrap();
         let initial = GraphProducerProgress::from_envelope(&next(&mut first).await)
             .unwrap()
             .unwrap();
-        first.stop().await.unwrap();
-        first.start().await.unwrap();
+        first.stop(&lifecycle_ctx::stop()).await.unwrap();
+        first.start(&lifecycle_ctx::start()).await.unwrap();
         handle.send_delete("two", vec!["Item"]).await.unwrap();
         let resumed = GraphProducerProgress::from_envelope(&next(&mut first).await)
             .unwrap()
             .unwrap();
         assert_eq!(resumed.identity(), initial.identity());
         assert_eq!(resumed.sequence(), 2);
-        first.stop().await.unwrap();
+        first.stop(&lifecycle_ctx::stop()).await.unwrap();
         let (mut rebuilt, handle) = source(2);
-        rebuilt.start().await.unwrap();
+        rebuilt.start(&lifecycle_ctx::start()).await.unwrap();
         handle.send_delete("three", vec!["Item"]).await.unwrap();
         let new = GraphProducerProgress::from_envelope(&next(&mut rebuilt).await)
             .unwrap()
@@ -201,7 +203,7 @@ fn volatile_identity_survives_soft_restart_but_not_reconstruction() {
             initial.identity().incarnation()
         );
         assert!(!new.identity().persistent());
-        rebuilt.stop().await.unwrap();
+        rebuilt.stop(&lifecycle_ctx::stop()).await.unwrap();
     });
 }
 
@@ -217,12 +219,12 @@ fn queued_input_and_backpressure_survive_stop_restart_and_cancelled_reads() {
                 .is_err()
         );
         assert!(source.next().await.is_err());
-        source.start().await.unwrap();
+        source.start(&lifecycle_ctx::start()).await.unwrap();
         assert_eq!(next(&mut source).await.system().sequence(), 1);
         blocked.await.unwrap();
-        source.stop().await.unwrap();
+        source.stop(&lifecycle_ctx::stop()).await.unwrap();
         assert!(source.next().await.is_err());
-        source.start().await.unwrap();
+        source.start(&lifecycle_ctx::start()).await.unwrap();
         let second = next(&mut source).await;
         assert_eq!(second.system().sequence(), 2);
         assert_eq!(
@@ -239,7 +241,7 @@ fn queued_input_and_backpressure_survive_stop_restart_and_cancelled_reads() {
         );
         handle.send_delete("third", vec!["Item"]).await.unwrap();
         assert_eq!(next(&mut source).await.system().sequence(), 3);
-        source.stop().await.unwrap();
+        source.stop(&lifecycle_ctx::stop()).await.unwrap();
     });
 }
 
@@ -257,14 +259,14 @@ fn batches_and_closed_receivers_keep_the_existing_handle_contract() {
             })
             .collect();
         handle.send_batch(changes.clone()).await.unwrap();
-        source.start().await.unwrap();
+        source.start(&lifecycle_ctx::start()).await.unwrap();
         for expected in changes {
             assert_eq!(
                 GraphChangeCodec::decode_changes(&next(&mut source).await).unwrap(),
                 [expected]
             );
         }
-        source.stop().await.unwrap();
+        source.stop(&lifecycle_ctx::stop()).await.unwrap();
         drop(source);
         assert!(handle.send_delete("closed", vec!["Item"]).await.is_err());
     });
@@ -284,21 +286,21 @@ fn encoding_failure_retains_the_admitted_event_and_sequence() {
             })
             .await
             .unwrap();
-        source.start().await.unwrap();
+        source.start(&lifecycle_ctx::start()).await.unwrap();
         assert!(source.next().await.is_err());
         let Input::Channel(input) = &source.input else {
             unreachable!()
         };
         assert!(input.pending.is_some());
         assert_eq!(input.sequence, 0);
-        source.stop().await.unwrap();
-        source.start().await.unwrap();
+        source.stop(&lifecycle_ctx::stop()).await.unwrap();
+        source.start(&lifecycle_ctx::start()).await.unwrap();
         assert!(source.next().await.is_err());
         let Input::Channel(input) = &source.input else {
             unreachable!()
         };
         assert!(input.pending.is_some());
-        source.stop().await.unwrap();
+        source.stop(&lifecycle_ctx::stop()).await.unwrap();
     });
 }
 
@@ -312,10 +314,25 @@ impl ComputationComponent for Capture {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }

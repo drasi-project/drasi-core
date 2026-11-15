@@ -15,9 +15,9 @@ use std::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComponentId, ComponentSemanticKind, ComputationComponent, Endpoint,
-    EnvelopeSink, InputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    SchemaDescriptor, SinkCompletion,
+    ComponentDescriptor, ComponentId, ComponentSemanticKind, ComputationComponent, DisposeContext,
+    Endpoint, EnvelopeSink, InputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId,
+    SchemaDescriptor, SinkCompletion, StartContext, StopContext,
 };
 use futures::{future::BoxFuture, FutureExt};
 use tokio::sync::{mpsc, Mutex};
@@ -251,7 +251,11 @@ impl ComputationComponent for ApplicationReaction {
         &self.descriptor
     }
 
-    async fn start(&mut self) -> Result<()> {
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn start(&mut self, _context: &StartContext) -> Result<()> {
         if self.state != State::Stopped {
             return Err(ApplicationReactionError::CleanupRequired.into());
         }
@@ -271,12 +275,20 @@ impl ComputationComponent for ApplicationReaction {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &StopContext) -> Result<()> {
         self.state = State::CleanupRequired;
         if let Delivery::Callback(callback) = &mut self.delivery {
             finish_callback(callback.get_mut()).await?;
         }
         self.state = State::Stopped;
+        Ok(())
+    }
+
+    async fn dispose(&mut self, context: &DisposeContext) -> Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }

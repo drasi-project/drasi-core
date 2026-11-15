@@ -10,9 +10,10 @@
 //! `{activation_credentials_version: 1, request: <base CreateRequest>}`; the
 //! ordinary request and immutable configuration are not modified. This envelope
 //! also applies to source/bootstrap coordinator creation when identity-bound.
-//! Bound START accepts `{kind: "usernamePassword", username, password}` or
+//! Bound START carries `credentials` in its lifecycle context, either
+//! `{kind: "usernamePassword", username, password}` or
 //! `{kind: "token", username, token}`. Certificates and unknown fields/kinds are
-//! rejected. Unbound START continues to require empty input.
+//! rejected. An unbound START context must not carry credentials.
 
 use crate::{BorrowedBytes, Header, Reply};
 use std::ffi::c_void;
@@ -55,7 +56,7 @@ mod tests {
             size_of::<crate::FactoryVTable>(),
             16 + 3 * size_of::<usize>()
         );
-        assert_eq!(crate::ABI_VERSION, "3.0.0");
-        assert_eq!(crate::WIRE_VERSION, 3);
+        assert_eq!(crate::ABI_VERSION, "4.0.0");
+        assert_eq!(crate::WIRE_VERSION, 4);
     }
 }

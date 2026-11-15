@@ -87,6 +87,7 @@ pub struct NativeFactory {
     processing: Option<abi::processing::PluginProcessingV1>,
     bootstrap_coordination: Option<abi::bootstrap_coordination::PluginBootstrapCoordinationV1>,
     activation_credentials: Option<abi::activation_credentials::PluginActivationCredentialsV1>,
+    management: Option<abi::management::PluginManagementV1>,
 }
 unsafe impl Send for NativeFactory {}
 unsafe impl Sync for NativeFactory {}
@@ -112,7 +113,7 @@ impl NativeFactory {
         anyhow::ensure!(
             !raw.state.is_null()
                 && table.create.is_some()
-                && table.plan_update.is_some()
+                && table.assess.is_some()
                 && table.release.is_some(),
             "incomplete native factory table"
         );
@@ -188,6 +189,7 @@ impl NativeFactory {
             processing: None,
             bootstrap_coordination: None,
             activation_credentials: None,
+            management: None,
         })
     }
     pub fn metadata(&self) -> &FactoryMetadata {
@@ -222,8 +224,8 @@ impl NativeFactory {
         let table = unsafe { checked_table(self.raw.vtable)? };
         let response = unsafe {
             drasi_computation_plugin_sdk::transport::take_reply(table
-                .plan_update
-                .expect("validated factory planner")(
+                .assess
+                .expect("validated factory assessment")(
                 self.raw.state,
                 abi::BorrowedBytes::new(&payload),
             ))?
@@ -232,8 +234,13 @@ impl NativeFactory {
             response.len() <= abi::MAX_MESSAGE_BYTES,
             "native update plan exceeds size limit"
         );
-        let plan: drasi_computation_contracts::ComponentUpdatePlan =
-            serde_json::from_slice(&response)?;
+        let assessment: Assessment = serde_json::from_slice(&response)?;
+        let plan = match assessment {
+            Assessment::Unsupported { reason } => {
+                anyhow::bail!("native factory reports the update as unsupported: {reason}")
+            }
+            supported => supported.plan().expect("supported assessment"),
+        };
         anyhow::ensure!(
             self.metadata.capabilities.update_modes.contains(&plan.mode),
             "native factory returned an undeclared update mode"
@@ -420,6 +427,15 @@ impl NativeFactory {
         extension: Option<abi::output_reads::PluginOutputReadsV2>,
     ) -> Self {
         self.output_reads = extension;
+        self
+    }
+    /// The plugin's instance management table, bound by components whose
+    /// metadata declares management.
+    pub(super) fn with_management(
+        mut self,
+        extension: Option<abi::management::PluginManagementV1>,
+    ) -> Self {
+        self.management = extension;
         self
     }
     pub(super) fn with_output_follow(
@@ -1263,7 +1279,8 @@ impl NativeFactory {
             .with_processing(processing)
             .with_output_snapshots(output_snapshots)
             .with_source_schema(self.source_schema)?
-            .with_output_reads(self.output_reads, self.output_follow)
+            .with_output_reads(self.output_reads, self.output_follow)?
+            .with_management(self.management)
     }
 }
 impl Drop for NativeFactory {

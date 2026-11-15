@@ -27,11 +27,14 @@ impl ComputationComponent for DrainingProgressProducer {
     fn recovery_contract(&self) -> ComponentRecovery {
         ComponentRecovery::default().with_consumer_progress(self.progress.clone())
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.progress.read_only().wait_ready().await?;
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.stops.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
         if self.fail_once {
@@ -51,6 +54,18 @@ impl ComputationComponent for DrainingProgressProducer {
         );
         Ok(())
     }
+    crate::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    crate::passive_component_lifecycle!(@hook pause, PauseContext);
+    crate::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -66,12 +81,7 @@ impl ComputationComponent for ProgressResultsSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 #[async_trait::async_trait]
 impl EnvelopeSink for ProgressResultsSink {
@@ -417,12 +427,7 @@ impl ComputationComponent for Service {
     fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
         self.handler.clone()
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 #[async_trait::async_trait]
 impl ComputationService for Service {

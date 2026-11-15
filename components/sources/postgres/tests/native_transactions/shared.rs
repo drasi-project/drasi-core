@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use async_trait::async_trait;
 use drasi_core::computation::InMemoryComputationProvider;
@@ -155,10 +157,25 @@ impl ComputationComponent for Collect {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }
@@ -748,8 +765,8 @@ async fn seed_different_progress(
     });
     let mut fast = ordinary_query("fast", Some(path), owners[0].clone()).await?;
     let mut slow = ordinary_query("slow", Some(path), owners[1].clone()).await?;
-    fast.start().await?;
-    slow.start().await?;
+    fast.start(&lifecycle_ctx::start()).await?;
+    slow.start(&lifecycle_ctx::start()).await?;
     let consumers = Arc::new(ConsumerProgressSet::new(
         ComponentBatch::GRAPH_ID,
         id(77),
@@ -764,8 +781,8 @@ async fn seed_different_progress(
         libraries::scope(ComponentBatch::GRAPH_ID),
         consumers,
     )?;
-    source.initialize().await?;
-    source.start().await?;
+    source.initialize(&lifecycle_ctx::initialize()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
     database
         .client()
         .batch_execute(
@@ -781,7 +798,7 @@ async fn seed_different_progress(
                 .context("seed row")?,
         );
     }
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     // Real query transactions establish independent counters over actual WAL
     // rows. The source is stopped first: no fabricated feedback is published.
     apply(&mut fast, renumber(&emitted[0], 8_999, 19_999)?).await?;
@@ -796,8 +813,8 @@ async fn seed_different_progress(
         Some(0)
     );
     assert_eq!(database.feedback().await?, database.config.start_lsn);
-    fast.stop().await?;
-    slow.stop().await?;
+    fast.stop(&lifecycle_ctx::stop()).await?;
+    slow.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 

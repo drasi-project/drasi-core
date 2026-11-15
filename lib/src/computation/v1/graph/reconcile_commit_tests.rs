@@ -59,21 +59,30 @@ impl crate::computation::v1::ComputationComponent for RemovalService {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         anyhow::bail!("initialization failed after construction")
     }
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        self.1
-            .deletes
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            self.1
+                .deletes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.1
             .disposals
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+    crate::passive_component_lifecycle!(@hook start, StartContext);
+    crate::passive_component_lifecycle!(@hook pause, PauseContext);
+    crate::passive_component_lifecycle!(@hook resume, ResumeContext);
+    crate::passive_component_lifecycle!(@hook stop, StopContext);
 }
 #[async_trait]
 impl crate::computation::v1::ComputationService for RemovalService {
@@ -223,7 +232,7 @@ async fn destructive_declaration_removal_retains_acquisitions_and_constructed_ow
                 assert!(report.failures.iter().any(|failure| failure
                     .cause
                     .to_string()
-                    .contains("disposed component cannot delete owned resources")));
+                    .contains("disposed component cannot erase owned state")));
                 assert_eq!(owner.deletes.load(Ordering::SeqCst), 0);
                 assert_eq!(owner.disposals.load(Ordering::SeqCst), 1);
                 assert!(owner.acquired.load(Ordering::SeqCst));
@@ -289,12 +298,7 @@ impl crate::computation::v1::ComputationComponent for Source {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 #[async_trait]
 impl crate::computation::v1::EnvelopeSource for Source {
@@ -308,12 +312,7 @@ impl crate::computation::v1::ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 #[async_trait]
 impl crate::computation::v1::EnvelopeSink for Sink {
@@ -397,14 +396,29 @@ impl crate::computation::v1::ComputationComponent for StartingService {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         if self.hang {
             std::future::pending::<()>().await;
         }
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    crate::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    crate::passive_component_lifecycle!(@hook pause, PauseContext);
+    crate::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -717,12 +731,7 @@ impl crate::computation::v1::ComputationComponent for ProgressSource {
         crate::computation::v1::ComponentRecovery::default()
             .with_consumer_progress(self.progress.clone())
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -746,12 +755,7 @@ impl crate::computation::v1::ComputationComponent for ProgressSink {
         crate::computation::v1::ComponentRecovery::default()
             .with_volatile_input_progress(self.progress.clone())
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -1169,7 +1173,10 @@ impl crate::computation::v1::ComputationComponent for StartupBindingSource {
         &self.descriptor
     }
 
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.control
             .initializations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1178,20 +1185,31 @@ impl crate::computation::v1::ComputationComponent for StartupBindingSource {
         Ok(())
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         self.control
             .disposals
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+    crate::passive_component_lifecycle!(@hook pause, PauseContext);
+    crate::passive_component_lifecycle!(@hook resume, ResumeContext);
 }
 
 #[async_trait]
@@ -1535,7 +1553,10 @@ impl crate::computation::v1::ComputationComponent for StopReservationService {
         &self.descriptor
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.control
             .starts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1550,7 +1571,7 @@ impl crate::computation::v1::ComputationComponent for StopReservationService {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.control
             .stops
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1565,6 +1586,18 @@ impl crate::computation::v1::ComputationComponent for StopReservationService {
         self.control
             .completed_stops
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    crate::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    crate::passive_component_lifecycle!(@hook pause, PauseContext);
+    crate::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }

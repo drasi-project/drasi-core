@@ -1,4 +1,5 @@
 use super::*;
+use crate::lifecycle_ctx;
 use drasi_core::models::SourceChange;
 use drasi_source_sqlite::{RestApiConfig, TableKeyConfig};
 use reqwest::{Client, StatusCode};
@@ -39,7 +40,7 @@ async fn native_rest_crud_batches_and_rowids_use_the_source_connection() -> Resu
             volatile(directory.path(), mode),
         )?
         .with_rest_api(rest())?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         let handle = source.handle();
         let result = async {
             handle
@@ -184,7 +185,7 @@ async fn native_rest_crud_batches_and_rowids_use_the_source_connection() -> Resu
             Ok::<_, anyhow::Error>(())
         }
         .await;
-        let cleanup = source.stop().await;
+        let cleanup = source.stop(&lifecycle_ctx::stop()).await;
         result?;
         cleanup?;
     }
@@ -202,7 +203,7 @@ async fn native_rest_honors_configured_keys_and_table_filters() -> Result<()> {
     }];
     let mut source =
         SqliteSource::new(id(SOURCE_ID), stream("changes"), settings)?.with_rest_api(rest())?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let result = async {
         source
             .handle()
@@ -278,7 +279,7 @@ async fn native_rest_honors_configured_keys_and_table_filters() -> Result<()> {
         Ok::<_, anyhow::Error>(())
     }
     .await;
-    let cleanup = source.stop().await;
+    let cleanup = source.stop(&lifecycle_ctx::stop()).await;
     result?;
     cleanup
 }
@@ -288,9 +289,9 @@ async fn native_rest_writes_feed_the_actual_persistent_query_and_hide_journals()
     let directory = tempfile::tempdir()?;
     let owner = progress();
     let mut consumer = query(directory.path(), owner.clone()).await?;
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     let mut producer = source(config(directory.path()), owner)?.with_rest_api(rest())?;
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     producer
         .handle()
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
@@ -320,8 +321,8 @@ async fn native_rest_writes_feed_the_actual_persistent_query_and_hide_journals()
     );
     apply(&mut consumer, next(&mut producer).await?).await?;
     assert_eq!(rows(&consumer), [json!({"id":1,"value":"durable"})]);
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -333,7 +334,7 @@ async fn native_rest_cancelled_and_timed_out_stop_retain_accepted_requests() -> 
         settings.shutdown_timeout_ms = NonZeroU64::new(80).context("cleanup timeout")?;
         let mut source =
             SqliteSource::new(id(SOURCE_ID), stream("changes"), settings)?.with_rest_api(rest())?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         let handle = source.handle();
         handle
             .execute("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
@@ -349,18 +350,21 @@ async fn native_rest_cancelled_and_timed_out_stop_retain_accepted_requests() -> 
         timeout(Duration::from_secs(2), request.read_exact(&mut interim)).await??;
         assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
         if cancel {
-            assert!(timeout(Duration::from_millis(20), source.stop())
-                .await
-                .is_err());
+            assert!(timeout(
+                Duration::from_millis(20),
+                source.stop(&lifecycle_ctx::stop())
+            )
+            .await
+            .is_err());
         } else {
             assert!(source
-                .stop()
+                .stop(&lifecycle_ctx::stop())
                 .await
                 .expect_err("unfinished request must retain cleanup")
                 .is::<drasi_lib::context::workers::WorkerCleanupError>());
         }
         assert!(
-            source.start().await.is_err(),
+            source.start(&lifecycle_ctx::start()).await.is_err(),
             "unfinished REST owner cannot be replaced"
         );
         assert!(
@@ -376,16 +380,16 @@ async fn native_rest_cancelled_and_timed_out_stop_retain_accepted_requests() -> 
             GraphChangeCodec::decode_changes(&next(&mut source).await?.envelope)?.len(),
             1
         );
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
         assert!(source.bound_rest_address().is_none());
         let released = tokio::net::TcpListener::bind(address).await?;
         drop(released);
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         assert_eq!(
             serde_json::to_value(handle.query("SELECT id,value FROM items").await?)?,
             json!([{"id":1,"value":"accepted"}])
         );
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
 }
@@ -403,18 +407,18 @@ async fn native_rest_bind_failure_does_not_create_or_admit_sql_work() -> Result<
             port: address.port(),
         },
     )?;
-    assert!(source.start().await.is_err());
+    assert!(source.start(&lifecycle_ctx::start()).await.is_err());
     assert!(!path.exists());
     assert!(source
         .handle()
         .execute("CREATE TABLE unexpected(id INTEGER)")
         .await
         .is_err());
-    assert!(source.start().await.is_err());
-    source.stop().await?;
+    assert!(source.start(&lifecycle_ctx::start()).await.is_err());
+    source.stop(&lifecycle_ctx::stop()).await?;
     drop(occupied);
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     assert_eq!(source.bound_rest_address(), Some(address));
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }

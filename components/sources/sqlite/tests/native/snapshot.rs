@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -32,12 +34,12 @@ async fn physical_rowids_match_snapshot_live_rekeys_and_recovery() -> Result<()>
     let mut consumer = query(directory.path(), owner)
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"before"})]
     );
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     producer
         .handle()
         .execute("UPDATE items SET oid=9,value='after'")
@@ -47,8 +49,8 @@ async fn physical_rowids_match_snapshot_live_rekeys_and_recovery() -> Result<()>
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"after"})]
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(producer);
     drop(consumer);
     let owner = progress();
@@ -56,8 +58,8 @@ async fn physical_rowids_match_snapshot_live_rekeys_and_recovery() -> Result<()>
     let mut consumer = query(directory.path(), owner)
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
-    producer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"after"})]
@@ -71,8 +73,8 @@ async fn physical_rowids_match_snapshot_live_rekeys_and_recovery() -> Result<()>
         rows(&consumer).is_empty(),
         "snapshot and live rowids must name the same element"
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -94,12 +96,12 @@ async fn custom_snapshot_keys_match_live_rekeys_and_reopen() -> Result<()> {
     let mut consumer = query(directory.path(), owner)
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"before"})]
     );
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     producer
         .handle()
         .execute("UPDATE items SET code='changed:key',value='after'")
@@ -109,8 +111,8 @@ async fn custom_snapshot_keys_match_live_rekeys_and_reopen() -> Result<()> {
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"after"})]
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(producer);
     drop(consumer);
 
@@ -119,8 +121,8 @@ async fn custom_snapshot_keys_match_live_rekeys_and_reopen() -> Result<()> {
     let mut consumer = query(directory.path(), owner)
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
-    producer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"after"})]
@@ -134,8 +136,8 @@ async fn custom_snapshot_keys_match_live_rekeys_and_reopen() -> Result<()> {
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"reopened"})]
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -148,7 +150,7 @@ async fn empty_snapshot_commits_a_real_zero_boundary_before_the_first_live_trans
     let mut consumer = query(directory.path(), owner.clone())
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     assert!(rows(&consumer).is_empty());
     let checkpoint = &owner.snapshot().checkpoints[&SourceProgressKey::Source(
         drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
@@ -159,7 +161,7 @@ async fn empty_snapshot_commits_a_real_zero_boundary_before_the_first_live_trans
         checkpoint.source_position.is_some(),
         "zero is a real initialized journal position, not a fabricated cursor"
     );
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     producer.handle().execute_batch("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'first')").await?;
     apply(&mut consumer, next(&mut producer).await?).await?;
     assert_eq!(
@@ -174,8 +176,8 @@ async fn empty_snapshot_commits_a_real_zero_boundary_before_the_first_live_trans
             .sequence,
         1
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -197,7 +199,7 @@ async fn snapshot_and_live_changes_share_keys_and_resume_without_reinitializing(
     let mut consumer = query(directory.path(), owner.clone())
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         rows(&consumer).len(),
         4,
@@ -212,7 +214,7 @@ async fn snapshot_and_live_changes_share_keys_and_resume_without_reinitializing(
             .sequence,
         0
     );
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     handle
         .execute_batch("UPDATE items SET value='final' WHERE id=1; DELETE FROM items WHERE id=2")
         .await?;
@@ -225,8 +227,8 @@ async fn snapshot_and_live_changes_share_keys_and_resume_without_reinitializing(
             serde_json::json!({"id":4,"value":"four"}),
         ]
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(producer);
     drop(consumer);
 
@@ -235,8 +237,8 @@ async fn snapshot_and_live_changes_share_keys_and_resume_without_reinitializing(
     let mut consumer = query(directory.path(), owner)
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
-    producer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(rows(&consumer).len(), 3);
     assert!(
         timeout(Duration::from_millis(30), producer.next())
@@ -251,8 +253,8 @@ async fn snapshot_and_live_changes_share_keys_and_resume_without_reinitializing(
     apply(&mut consumer, next(&mut producer).await?).await?;
     assert_eq!(rows(&consumer).len(), 3);
     assert!(rows(&consumer).contains(&serde_json::json!({"id":3,"value":"resumed"})));
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -271,7 +273,10 @@ async fn oversized_initial_rows_require_explicit_reset_and_larger_limits() -> Re
     let mut consumer = query(directory.path(), owner.clone())
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await.expect_err("oversized snapshot row");
+    consumer
+        .start(&lifecycle_ctx::start())
+        .await
+        .expect_err("oversized snapshot row");
     assert!(!owner.snapshot().ready);
     assert!(!owner.snapshot().bootstrap_complete);
     assert!(producer
@@ -279,8 +284,8 @@ async fn oversized_initial_rows_require_explicit_reset_and_larger_limits() -> Re
         .execute("INSERT INTO items VALUES(3,'unadmitted')")
         .await
         .is_err());
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(producer);
     drop(consumer);
 
@@ -290,14 +295,14 @@ async fn oversized_initial_rows_require_explicit_reset_and_larger_limits() -> Re
         .await?
         .with_bootstrap(snapshot);
     let error = consumer
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .expect_err("incomplete bootstrap requires reset");
     assert!(matches!(
         error.downcast_ref::<QueryRecoveryError>(),
         Some(QueryRecoveryError::IncompleteBootstrap)
     ));
-    consumer.stop().await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(producer);
     drop(consumer);
 
@@ -306,9 +311,9 @@ async fn oversized_initial_rows_require_explicit_reset_and_larger_limits() -> Re
     let mut consumer = query_with_recovery(directory.path(), owner, QueryRecoveryPolicy::AutoReset)
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(rows(&consumer).len(), 2);
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     producer
         .handle()
         .execute("UPDATE items SET value='recovered' WHERE id=2")
@@ -321,8 +326,8 @@ async fn oversized_initial_rows_require_explicit_reset_and_larger_limits() -> Re
             serde_json::json!({"id":2,"value":"recovered"})
         ]
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -337,10 +342,10 @@ async fn coordinated_journals_reject_mode_changes_and_missing_initialization_ide
         let mut consumer = query(directory.path(), owner)
             .await?
             .with_bootstrap(snapshot);
-        consumer.start().await?;
-        consumer.stop().await?;
+        consumer.start(&lifecycle_ctx::start()).await?;
+        consumer.stop(&lifecycle_ctx::stop()).await?;
         if fault == "reset" {
-            consumer.delete_owned_resources().await?;
+            consumer.dispose(&lifecycle_ctx::erase()).await?;
         }
         drop(producer);
         drop(consumer);
@@ -360,21 +365,21 @@ async fn coordinated_journals_reject_mode_changes_and_missing_initialization_ide
             .with_bootstrap(snapshot);
         if fault == "binding" || fault == "reset" {
             consumer
-                .start()
+                .start(&lifecycle_ctx::start())
                 .await
                 .expect_err("changed or missing initial source binding");
         } else {
-            consumer.start().await?;
+            consumer.start(&lifecycle_ctx::start()).await?;
             if fault == "plain" {
                 producer = source(config(directory.path()), owner)?;
             }
             producer
-                .start()
+                .start(&lifecycle_ctx::start())
                 .await
                 .expect_err("lost initialization identity or mode change");
         }
-        producer.stop().await?;
-        consumer.stop().await?;
+        producer.stop(&lifecycle_ctx::stop()).await?;
+        consumer.stop(&lifecycle_ctx::stop()).await?;
         let connection = rusqlite::Connection::open(directory.path().join("source.db"))?;
         assert_eq!(
             connection.query_row("SELECT count(*) FROM items", [], |row| row
@@ -438,7 +443,7 @@ async fn cancelled_snapshot_keeps_the_client_lease_until_blocked_sqlite_cleanup_
             started: started.clone(),
         }));
     {
-        let start = consumer.start();
+        let start = consumer.start(lifecycle_ctx::held(lifecycle_ctx::start()));
         tokio::pin!(start);
         tokio::select! {
             result = &mut start => anyhow::bail!("snapshot unexpectedly finished while database was locked: {result:?}"),
@@ -447,7 +452,7 @@ async fn cancelled_snapshot_keeps_the_client_lease_until_blocked_sqlite_cleanup_
     }
     drop(producer);
     let error = consumer
-        .stop()
+        .stop(&lifecycle_ctx::stop())
         .await
         .expect_err("blocking SQLite still owns its lease");
     assert!(
@@ -463,7 +468,7 @@ async fn cancelled_snapshot_keeps_the_client_lease_until_blocked_sqlite_cleanup_
     drop(blocker);
     timeout(Duration::from_secs(3), async {
         loop {
-            match consumer.stop().await {
+            match consumer.stop(&lifecycle_ctx::stop()).await {
                 Ok(()) => return Ok(()),
                 Err(error)
                     if matches!(
@@ -551,16 +556,16 @@ async fn retained_old_snapshot_stream_cannot_cancel_read_from_or_join_its_replac
                 .await?
                 .with_bootstrap(provider.clone());
         {
-            let start = consumer.start();
+            let start = consumer.start(lifecycle_ctx::held(lifecycle_ctx::start()));
             tokio::pin!(start);
             tokio::select! {
                 result = &mut start => anyhow::bail!("held initial snapshot unexpectedly completed: {result:?}"),
                 _ = provider.started.notified() => {}
             }
         }
-        consumer.stop().await?;
+        consumer.stop(&lifecycle_ctx::stop()).await?;
         {
-            let start = consumer.start();
+            let start = consumer.start(lifecycle_ctx::held(lifecycle_ctx::start()));
             tokio::pin!(start);
             tokio::select! {
                 result = &mut start => anyhow::bail!("replacement snapshot unexpectedly completed: {result:?}"),
@@ -584,7 +589,7 @@ async fn retained_old_snapshot_stream_cannot_cancel_read_from_or_join_its_replac
             timeout(Duration::from_secs(5), start).await??;
         }
         assert_eq!(rows(&consumer).len(), 3);
-        consumer.stop().await?;
+        consumer.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
 }
@@ -660,7 +665,7 @@ async fn sqlite_snapshot_exit_helper() -> Result<()> {
             inner: snapshot,
             mode: mode.clone(),
         }));
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     anyhow::ensure!(
         mode == "completed",
         "snapshot crash boundary was not reached"
@@ -698,7 +703,7 @@ async fn actual_process_exits_preserve_snapshot_intent_partial_rows_and_committe
                 .await?
                 .with_bootstrap(snapshot);
             let error = consumer
-                .start()
+                .start(&lifecycle_ctx::start())
                 .await
                 .expect_err("unfinished initialization");
             assert!(
@@ -708,7 +713,7 @@ async fn actual_process_exits_preserve_snapshot_intent_partial_rows_and_committe
                 ),
                 "{mode}: {error:#}"
             );
-            consumer.stop().await?;
+            consumer.stop(&lifecycle_ctx::stop()).await?;
         }
         let owner = progress();
         let (mut producer, snapshot) = paired(config(directory.path()), owner.clone())?;
@@ -720,7 +725,7 @@ async fn actual_process_exits_preserve_snapshot_intent_partial_rows_and_committe
         let mut consumer = query_with_recovery(directory.path(), owner, policy)
             .await?
             .with_bootstrap(snapshot);
-        consumer.start().await?;
+        consumer.start(&lifecycle_ctx::start()).await?;
         assert_eq!(
             rows(&consumer),
             [
@@ -729,7 +734,7 @@ async fn actual_process_exits_preserve_snapshot_intent_partial_rows_and_committe
             ],
             "{mode}"
         );
-        producer.start().await?;
+        producer.start(&lifecycle_ctx::start()).await?;
         producer
             .handle()
             .execute("UPDATE items SET value='live' WHERE id=1")
@@ -743,8 +748,8 @@ async fn actual_process_exits_preserve_snapshot_intent_partial_rows_and_committe
             ],
             "{mode}"
         );
-        producer.stop().await?;
-        consumer.stop().await?;
+        producer.stop(&lifecycle_ctx::stop()).await?;
+        consumer.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
 }

@@ -2234,23 +2234,29 @@ accept definition -> construct -> bind resources -> initialize
                                                 |         v
                                                 +------- stop
 
-final retirement: stop -> dispose
-explicit data removal: stop -> delete_owned_resources -> dispose
+temporary pause: pause -> resume (activation retained)
+final retirement: stop -> dispose(reason, Preserve)
+explicit data removal: stop -> dispose(Removal, Erase)
 ```
 
-These are awaited methods, not Rust's synchronous `Drop`:
+These are awaited methods, not Rust's synchronous `Drop`. All six hooks are
+required and each receives a typed context (`InitializeContext`,
+`StartContext`, `PauseContext`, `ResumeContext`, `StopContext`,
+`DisposeContext`) carrying the operation ID, a cooperative deadline and a
+cancellation token. A component with no work in a hook opts in explicitly with
+`passive_component_lifecycle!`:
 
 | Hook | Put this work here | How often |
 |---|---|---|
 | Factory `create` | Construct the object using its assigned ID and configuration | Once per constructed object |
 | `initialize` | Prepare resources that belong to the object's lifetime | Once, after required bindings |
 | `start` | Open or resume resources used during active processing | Every activation |
-| `stop` | Stop processing and join workers, while preserving restartable state | Every completed active run |
-| `dispose` | Release the object's remaining resources | Final retirement, also after partial initialization failure |
-| `delete_owned_resources` | Explicitly erase state owned by this component | Only an authorized permanent removal |
+| `pause` / `resume` | Gate and reopen independently owned work without ending the activation; return `unsupported` if that is impossible | Graph-coordinated pauses |
+| `stop` | Stop processing and join workers (`Drain` or `Abort`), while preserving restartable state | Every completed active run |
+| `dispose` | Release the object's remaining resources; with `StateIntent::Erase`, first erase state this component owns | Final retirement, also after partial initialization failure |
 
 Initialization failure is not retried on the same partially initialized object.
-Drasi retires that object and retains unfinished cleanup before constructing a
+Drasi disposes that object with `DisposeReason::InitializationFailure` and retains unfinished cleanup before constructing a
 replacement. A normal stop/start reuses the initialized object; it does not call
 `initialize` again or allocate another UUID. `shutdown()` is terminal for the
 `DrasiLib` instance, but does not mean "delete the database."
@@ -2264,13 +2270,17 @@ Stockroom's file source loads its initial snapshot in `initialize`:
 
 <!-- excerpt: stockroom/src/main.rs#file-initialization -->
 ```rust
-async fn initialize(&mut self) -> anyhow::Result<()> {
+async fn initialize(
+    &mut self,
+    _context: &drasi_lib::computation::v1::InitializeContext,
+) -> anyhow::Result<()> {
     self.reload().await
 }
 ```
 
 The graph owns file polling, so the source needs no separate task to cancel.
-Its default `start` and `stop` hooks do nothing; the pending changes and
+It opts into passive `start`, `pause`, `resume` and `stop` hooks with
+`passive_component_lifecycle!`, and its `dispose` refuses `StateIntent::Erase`; the pending changes and
 comparison state remain in the object between runs. In Part III, the alert
 consumer likewise keeps its transaction owner across stop/start and closes it
 in `dispose`.
@@ -2405,7 +2415,7 @@ that cannot undo an external action already performed.
 | `ComponentHandle::stop` or `DrasiLib::stop` | Stop processing and retain the initialized objects for later start |
 | `DrasiLib::shutdown` | Stop and dispose the instance's owned objects; this instance cannot restart |
 | Standalone graph `dispose` | Release graph-owned resources after its run/cleanup boundary |
-| Explicit permanent removal | Stop, delete permitted component-owned state, and dispose; distinct from removing a definition while preserving data |
+| Explicit permanent removal | Stop, then dispose with `StateIntent::Erase` to erase permitted component-owned state; distinct from removing a definition while preserving data |
 
 Quiescence is not a universal drain. Work from selected producers drains to
 the supported boundary, while other queued input can remain owned.
@@ -2424,12 +2434,14 @@ does not abandon the accepted stop operation or authorize a replacement owner.
 Unrelated cleanup remains independent; a failed producer is not permission to
 retire the owners it still needs.
 
-Temporary graph-coordinated pauses use `pause_processing` and
-`resume_processing`, not another initialization. These hooks matter for a
-component that owns background work: merely pausing calls to `next` or `transform`
-would leave that worker running.
+Temporary graph-coordinated pauses use the `pause` and `resume` hooks, not
+another initialization. These hooks matter for a component that owns background
+work: merely pausing calls to `next` or `transform` would leave that worker
+running. A component that cannot pause returns `unsupported`; it never succeeds
+as a silent no-op.
 
-Permanent state deletion is not a pause button. Similarly, a configuration change that
+Permanent state erasure is not a pause button. Because a failed dispose is
+retried with the same reason and intent, erasure must be idempotent. Similarly, a configuration change that
 removes a component is not an ordinary stop; its recovery obligations need
 separate consideration in Chapter 17.
 
@@ -4633,17 +4645,26 @@ The graph captures it at construction and reconfiguration boundaries.
 Keep configuration stable during processing. Report a missing getter as
 unavailable so the host retains the external binding.
 
-A registered factory's pure `plan_update(current, proposed)` chooses an explicit
-`ComponentUpdatePlan`, or rejects the change. `InPlace` pauses processing;
-`Restart` stops and later restarts the same initialized object. Both execute
-`apply_update` and retain the descriptor and construction generation. `Recreate`
-disposes the old object and constructs and initializes a new generation under the
-same UUID. Creation support does not imply any update support.
+Updates are separate from the lifecycle: they are assessed, then applied at a
+boundary the graph establishes. An idle live component may assess a change
+through its optional `ComponentManagement` (returned by `management()`);
+returning `Ok(None)` defers to the registered factory's pure
+`plan_update(current, proposed)`, which also plans replacement. The resulting
+`UpdateBoundary` is `Pause` (stored as `InPlace`), `Stop` (`Restart`) or
+`Replace` (`Recreate`). Pause and Stop execute
+`ComponentManagement::apply(&ApplyContext, ComponentUpdateContext)` on the same
+initialized object and retain the descriptor and construction generation;
+the graph re-assesses first and refuses an update that now needs a stronger
+boundary. Replace disposes the old object and constructs and initializes a new
+generation under the same UUID. `ApplyError::Refused` and `Failed` leave the
+object unchanged; `Damaged` leaves the component failed (stopped with `Abort`
+and disposed) rather than replaced. Creation support does not imply any update
+support.
 
-Native lifecycle hooks are zero-argument async fallible methods: `initialize`,
-`start`, `stop`, `dispose`, `pause_processing`, and `resume_processing`.
-Explicit permanent removal alone calls `delete_owned_resources`; disposal and
-updates do not imply deletion. See the
+Native lifecycle hooks are required async fallible methods taking typed
+contexts: `initialize`, `start`, `pause`, `resume`, `stop` and `dispose`.
+Explicit permanent removal alone disposes with `StateIntent::Erase`; other
+disposal and updates do not imply erasure. See the
 [accepted update and recovery contract](../computation-graph-configuration.md#object-lifecycle-and-assessed-updates).
 
 The managed lesson's `FileFactory` reads a saved path setting and constructs
@@ -5312,9 +5333,11 @@ leaves the accepted definition and revision unchanged. Read this test in
 [managed.rs](stockroom/src/managed.rs).
 
 Renaming is a metadata change, not a component reconstruction. In contrast,
-changing a factory's configuration requires that factory's `plan_update`.
-Inspect the returned strategy: `InPlace` updates a paused object; `Restart`
-updates it between stop and start; `Recreate` constructs a new generation
+changing a factory's configuration requires an assessment: the live component's
+optional `ComponentManagement::assess`, or else that factory's `plan_update`.
+Inspect the returned strategy: `InPlace` (the Pause boundary) updates a paused
+object; `Restart` (Stop) updates it between stop and start; `Recreate` (Replace)
+constructs a new generation
 under the same UUID. The accompanying data strategy says whether state is
 preserved, rebuilt from bootstrap, or reset. Only combinations supported by
 the factory and its actual dependencies can be accepted.
@@ -5621,10 +5644,11 @@ Keep handles in their owner slots until an awaited join completes. If that
 wait is cancelled, the owner can finish cleanup later. Serialize
 restart with cleanup, including after a timeout or cancellation.
 
-For services, quiescence can drop the `run` future. Pause any independently
-owned workers in `pause_processing` and resume them in `resume_processing`.
-A clean no-worker service can use the default hook; a listener cannot treat
-dropping its controller future as proof that its connections stopped.
+For services, a pause can drop the `run` future. Pause any independently
+owned workers in `pause` and resume them in `resume`. A clean no-worker service
+can opt into passive hooks; a listener cannot treat dropping its controller
+future as proof that its connections stopped, and must return `unsupported`
+from `pause` if it cannot gate them.
 
 #### Validate custom records
 

@@ -634,7 +634,10 @@ impl ComputationComponent for LinearTransaction {
         Ok(serde_json::json!({"transaction": self.definition}))
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.failed.load(Ordering::Acquire),
             "failed transaction transformer requires reconstruction"
@@ -658,7 +661,7 @@ impl ComputationComponent for LinearTransaction {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.running = false;
         self.wakeup.set(false);
         if self.failed.load(Ordering::Acquire) || self.store.transaction.recovery_required() {
@@ -673,6 +676,37 @@ impl ComputationComponent for LinearTransaction {
                 progress.pending();
             }
             guard.complete = true;
+        }
+        Ok(())
+    }
+
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
         }
         Ok(())
     }
@@ -801,29 +835,29 @@ impl ComputationComponent for TransactionTransformer {
     fn requires_readiness_confirmation(&self) -> bool {
         self.processor().requires_readiness_confirmation()
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
-        self.processor_mut().initialize().await
+    async fn initialize(&mut self, context: &super::InitializeContext) -> anyhow::Result<()> {
+        self.processor_mut().initialize(context).await
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
-        self.processor_mut().dispose().await
+    async fn start(&mut self, context: &super::StartContext) -> anyhow::Result<()> {
+        self.processor_mut().start(context).await
     }
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
-        self.processor_mut().pause_processing().await
+    async fn pause(&mut self, context: &super::PauseContext) -> anyhow::Result<()> {
+        self.processor_mut().pause(context).await
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
-        self.processor_mut().resume_processing().await
+    async fn resume(&mut self, context: &super::ResumeContext) -> anyhow::Result<()> {
+        self.processor_mut().resume(context).await
     }
-    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
-        self.processor_mut().apply_update(context).await
+    async fn stop(&mut self, context: &super::StopContext) -> anyhow::Result<()> {
+        self.processor_mut().stop(context).await
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        self.processor_mut().start().await
+    async fn dispose(&mut self, context: &super::DisposeContext) -> anyhow::Result<()> {
+        self.processor_mut().dispose(context).await
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        self.processor_mut().stop().await
+    fn management(&self) -> Option<&dyn super::ComponentManagement> {
+        self.processor().management()
     }
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        self.processor_mut().delete_owned_resources().await
+    fn management_mut(&mut self) -> Option<&mut dyn super::ComponentManagement> {
+        self.processor_mut().management_mut()
     }
 }
 

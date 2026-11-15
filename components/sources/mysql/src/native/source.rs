@@ -235,11 +235,26 @@ impl ComputationComponent for MySqlSource {
             contract
         }
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         self.inner.start().await.map_err(source_error)
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
         self.inner.stop().await.map_err(source_error)
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
+        Ok(())
     }
 }
 #[async_trait]

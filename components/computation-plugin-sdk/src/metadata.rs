@@ -215,13 +215,19 @@ pub struct Capabilities {
     /// start and processing, without requiring construction-time bindings.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub input_binding_updates: bool,
-    /// Retryable, explicit permanent deletion of owned state/resources after
-    /// positive cleanup. Never implies permission to delete borrowed/shared state.
+    /// Dispose honours `StateIntent::Erase` by permanently erasing owned
+    /// state/resources. Never implies permission to erase borrowed/shared state.
+    /// Without it the host only requests `StateIntent::Preserve`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub delete_owned_resources: bool,
-    /// Strategies the factory's pure planner can return. Empty means unsupported.
-    /// Every retained-object mode requires NativeComponent::supports_apply_update;
-    /// Recreate alone does not. These declarations are not storage/data proofs.
+    pub erases_owned_state: bool,
+    /// The component exports instance management (`NativeComponent::management`)
+    /// for live assessment and Pause/Stop boundary updates. Required exactly
+    /// when `update_modes` names a retained-object boundary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub management: bool,
+    /// Update boundaries the component supports, stored with their persisted
+    /// names: InPlace is Pause, Restart is Stop and Recreate is Replace. Empty
+    /// means unsupported. These declarations are not storage/data proofs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub update_modes: Vec<ComponentUpdateMode>,
     /// The transformer requires the host-owned indexed processing service.
@@ -406,6 +412,13 @@ impl FactoryMetadata {
             );
         }
         anyhow::ensure!(
+            c.management
+                == c.update_modes
+                    .iter()
+                    .any(|mode| *mode != ComponentUpdateMode::Recreate),
+            "native management must be declared exactly with a Pause or Stop update boundary"
+        );
+        anyhow::ensure!(
             !c.indexed_processing || (self.role == ComponentRole::Transformer && !c.transactional),
             "native indexed processing requires a non-participant transformer"
         );
@@ -574,7 +587,7 @@ impl PluginMetadata {
     /// factories before accepting a plugin with no processing components.
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.abi_version == abi::ABI_VERSION && self.wire_version == abi::WIRE_VERSION,
+            accepts_abi_version(&self.abi_version) && self.wire_version == abi::WIRE_VERSION,
             "unsupported native plugin ABI or wire format"
         );
         drasi_computation_contracts::validate_identifier("plugin", &self.plugin.id)?;
@@ -700,5 +713,30 @@ mod tests {
             .is_err());
         assert!(!schema.allow_additional);
         Ok(())
+    }
+}
+
+/// Same major and an older or equal minor, matching the binary header rule.
+fn accepts_abi_version(version: &str) -> bool {
+    let mut parts = version.split('.').map(str::parse::<u16>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(_)), None) => {
+            #[allow(clippy::absurd_extreme_comparisons)]
+            let accepted_minor = minor <= abi::ABI_MINOR;
+            major == abi::ABI_MAJOR && accepted_minor
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod abi_version_tests {
+    #[test]
+    fn accepts_same_major_older_or_equal_minor_only() {
+        assert!(super::accepts_abi_version(super::abi::ABI_VERSION));
+        assert!(!super::accepts_abi_version("3.0.0"));
+        assert!(!super::accepts_abi_version("4.1.0"));
+        assert!(!super::accepts_abi_version("4.0"));
+        assert!(!super::accepts_abi_version("5.0.0"));
     }
 }

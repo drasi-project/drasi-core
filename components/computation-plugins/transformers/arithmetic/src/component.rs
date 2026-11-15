@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{NativeComponent, NativeTransformer};
 
 use async_trait::async_trait;
@@ -155,14 +159,29 @@ impl NativeComponent for Arithmetic {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::to_value(&self.configuration)?)
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.running, "arithmetic transformer already started");
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        if self.running {
+            return Err(anyhow::anyhow!("arithmetic transformer already started").into());
+        }
         self.running = true;
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    // Transformation is driven by the host; there are no independent workers.
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
         self.running = false;
         Ok(())
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
     }
 }
 #[async_trait]

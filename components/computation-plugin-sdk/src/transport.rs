@@ -26,6 +26,9 @@ pub struct Failure {
     pub code: u32,
     pub message: String,
     pub retryable: bool,
+    /// Operation-specific structured detail, such as a management apply outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 impl Failure {
     pub fn new(code: u32, message: impl Into<String>) -> Self {
@@ -33,7 +36,12 @@ impl Failure {
             code,
             message: message.into(),
             retryable: false,
+            data: None,
         }
+    }
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
+        self
     }
     pub fn failed(message: impl Into<String>) -> Self {
         Self::new(status::FAILED, message)
@@ -50,6 +58,11 @@ impl Failure {
     pub fn panicked() -> Self {
         Self::new(status::PANICKED, "native operation panicked")
     }
+    /// Marks the failure retryable on the same owner.
+    pub fn retryable(mut self) -> Self {
+        self.retryable = true;
+        self
+    }
 }
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,9 +72,22 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {}
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
+        use drasi_computation_contracts::lifecycle::{lifecycle_error_kind, LifecycleErrorKind};
         match error.downcast::<Self>() {
             Ok(failure) => failure,
-            Err(error) => Self::failed(format!("{error:#}")),
+            Err(error) => {
+                let message = format!("{error:#}");
+                match lifecycle_error_kind(&error) {
+                    Some(LifecycleErrorKind::Retryable) => Self::failed(message).retryable(),
+                    Some(LifecycleErrorKind::Cancelled) => {
+                        Self::new(status::CANCELLED, message).retryable()
+                    }
+                    Some(LifecycleErrorKind::Unsupported) => {
+                        Self::new(status::UNSUPPORTED, message)
+                    }
+                    Some(LifecycleErrorKind::Terminal) | None => Self::failed(message),
+                }
+            }
         }
     }
 }
@@ -322,6 +348,8 @@ struct Operation {
     runtime: Option<Arc<tokio::runtime::Runtime>>,
     damaged: Option<Arc<PanicState>>,
     cleanup: bool,
+    /// Lifecycle hook token, signalled before the future is dropped on cancel.
+    cancellation: Option<drasi_computation_contracts::lifecycle::CancellationToken>,
 }
 
 impl Operation {
@@ -356,7 +384,7 @@ pub fn export_operation(
     future: impl Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
     runtime: Option<Arc<tokio::runtime::Runtime>>,
 ) -> OperationHandle {
-    export_owned_operation(future, runtime, None, false)
+    export_owned_operation(future, runtime, None, false, None)
 }
 
 pub(crate) fn export_component_operation(
@@ -365,7 +393,19 @@ pub(crate) fn export_component_operation(
     damaged: Arc<PanicState>,
     cleanup: bool,
 ) -> OperationHandle {
-    export_owned_operation(future, runtime, Some(damaged), cleanup)
+    export_owned_operation(future, runtime, Some(damaged), cleanup, None)
+}
+
+/// A component operation whose hook observes `cancellation`. ABI cancel signals
+/// the token before dropping the future.
+pub(crate) fn export_cancellable_operation(
+    future: impl Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
+    runtime: Option<Arc<tokio::runtime::Runtime>>,
+    damaged: Arc<PanicState>,
+    cleanup: bool,
+    cancellation: drasi_computation_contracts::lifecycle::CancellationToken,
+) -> OperationHandle {
+    export_owned_operation(future, runtime, Some(damaged), cleanup, Some(cancellation))
 }
 
 fn export_owned_operation(
@@ -373,6 +413,7 @@ fn export_owned_operation(
     runtime: Option<Arc<tokio::runtime::Runtime>>,
     damaged: Option<Arc<PanicState>>,
     cleanup: bool,
+    cancellation: Option<drasi_computation_contracts::lifecycle::CancellationToken>,
 ) -> OperationHandle {
     let future: Work = if let Some(state) = damaged.as_ref().filter(|_| !cleanup) {
         let mut changed = state.changed.subscribe();
@@ -393,6 +434,7 @@ fn export_owned_operation(
             runtime,
             damaged,
             cleanup,
+            cancellation,
         }))
         .cast(),
         vtable: &OPERATION_VTABLE,
@@ -493,6 +535,9 @@ unsafe extern "C" fn cancel_operation(state: *mut c_void) -> Status {
         let operation = unsafe { &mut *state.cast::<Operation>() };
         if operation.future.is_some() {
             operation.terminal = status::CANCELLED;
+            if let Some(token) = &operation.cancellation {
+                token.cancel();
+            }
             if operation.drop_work() {
                 return Err(Failure::panicked());
             }

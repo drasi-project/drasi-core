@@ -177,16 +177,22 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
     let directory = tempfile::tempdir()?;
     let progress = owner();
     let mut consumer = query(directory.path(), progress.clone()).await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let mut source = factory.construct(
         request(factory, sqlite_configuration(directory.path())),
         None,
         Some(progress.clone()),
     )?;
-    source.initialize().await?;
+    source
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
     assert!(Arc::ptr_eq(&source.recovery_progress().unwrap(), &progress));
     assert!(source.admission().is_none());
-    source.start().await?;
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     sql(
         &source,
         "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)",
@@ -206,7 +212,9 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         4
     );
     assert!(progress.snapshot().checkpoints.is_empty());
-    source.stop().await?;
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     let retained = source.inner.clone();
     drop(source);
     let error = retained
@@ -225,20 +233,28 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         abi::status::CLOSED
     );
     drop(retained);
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     drop(consumer);
     drop(progress);
 
     let progress = owner();
     let mut consumer = query(directory.path(), progress.clone()).await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let mut source = factory.construct(
         request(factory, sqlite_configuration(directory.path())),
         None,
         Some(progress.clone()),
     )?;
-    source.initialize().await?;
-    source.start().await?;
+    source
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let replay = next(&mut source).await?;
     assert_eq!(
         original.envelope.system().source_position(),
@@ -285,7 +301,9 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
             &command("fixture.flush", serde_json::Value::Null)?,
         )
         .await?;
-    source.stop().await?;
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     drop(source);
     let journal: (u64, u64, u64) = rusqlite::Connection::open(directory.path().join("source.db"))?
         .query_row(
@@ -294,20 +312,28 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
     assert_eq!(journal, (1, 1, 0));
-    consumer.stop().await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     drop(consumer);
     drop(progress);
 
     let progress = owner();
     let mut consumer = query(directory.path(), progress.clone()).await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let mut source = factory.construct(
         request(factory, sqlite_configuration(directory.path())),
         None,
         Some(progress),
     )?;
-    source.initialize().await?;
-    source.start().await?;
+    source
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), source.next())
             .await
@@ -326,8 +352,12 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         .await?;
     consumer.delivery_completed(&output).await?;
     assert!(!output.is_empty());
-    source.stop().await?;
-    consumer.stop().await?;
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
+    consumer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -337,12 +367,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSink for Sink {
@@ -438,11 +463,16 @@ async fn native_recovery_cancelled_start_retains_no_sqlite_worker_and_rejects_ab
         None,
         Some(owner()),
     )?;
-    source.initialize().await?;
-    let mut starting = Box::pin(source.start());
+    source
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    let start_context = crate::computation::test_hooks::start_ctx();
+    let mut starting = Box::pin(source.start(&start_context));
     assert!(poll!(starting.as_mut()).is_pending());
     drop(starting);
-    source.stop().await?;
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert!(!directory.path().join("source.db").exists());
     Ok(())
 }
@@ -538,12 +568,50 @@ impl sdk::NativeComponent for Probe {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({"mode":self.mode}))
     }
-    async fn start(&mut self) -> Result<()> {
-        self.started = true;
+    async fn start(
+        &mut self,
+        _ctx: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            self.started = true;
+            Ok(())
+        }
+        .await;
+        Ok(result?)
+    }
+    async fn stop(
+        &mut self,
+        _ctx: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            self.started = false;
+            Ok(())
+        }
+        .await;
+        Ok(result?)
+    }
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.started = false;
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn dispose(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
 }
@@ -670,7 +738,9 @@ async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_chang
             None,
             Some(owner()),
         )?;
-        source.initialize().await?;
+        source
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         let captured = captured().lock().unwrap().take().unwrap();
         assert_eq!(captured.reader().component_id(), &id(46));
         assert!(captured.reader().snapshot().is_ok());
@@ -678,18 +748,29 @@ async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_chang
             source.recovery_contract().replay_retention().is_some(),
             mode != "retentionless"
         );
-        assert_eq!(source.start().await.is_err(), mode == "mutate");
-        source.stop().await?;
+        assert_eq!(
+            source
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .is_err(),
+            mode == "mutate"
+        );
+        source
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         drop(source);
         assert!(captured.reader().snapshot().is_err());
     }
     let mut fast =
         old.factories()[0].create_component(id(77), serde_json::json!({"mode":"valid"}))?;
-    fast.initialize().await?;
+    fast.initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
     assert!(fast.recovery_progress().is_none());
-    fast.start().await?;
+    fast.start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert!(fast.next().await?.is_none());
-    fast.stop().await?;
+    fast.stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 

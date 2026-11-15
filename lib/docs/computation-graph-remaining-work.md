@@ -47,14 +47,14 @@ compatibility-shim or automatic old-state migration programme is implied.
 | Work area | Main entries |
 |---|---|
 | Implementation, lifecycle and diagnostics | [Deadlines](#cw-06), [errors](#cw-22), [status delivery](#cw-23), [background ownership](#cw-17) |
-| Managed component updates | [Safe rebootstrap coordination](#cw-92), [user-deferred graph-change/live-rebinding design review](#cw-94); state-preserving factory updates and lifecycle ownership are implemented |
+| Managed component updates | [Safe rebootstrap coordination](#cw-92), [user-deferred graph-change/live-rebinding design review](#cw-94), [user-deferred plugin upgrade and configuration migration](#cw-95), [Pause gating of independent workers](#cw-96), [Server ABI 4 port](#cw-97), [erasing disposal](#cw-98); state-preserving factory updates and lifecycle ownership are implemented |
 | Native named references | [Deferred bind-once endpoints](#cw-93); native topology endpoints currently require assigned UUIDs |
 | Testing quality and selection | [Testing overview](#testing-and-qualification), [production-path oracles](#cw-83), [honest runners](#cw-84), [CI selection](#cw-85), [duplication](#cw-86), [behavior ledgers](#cw-88) |
 | Recovery and behavior qualification | [Pending input](#cw-14), [reset](#cw-20), [completion evidence](#cw-36), [combined failures](#cw-39), [FFI](#cw-41), [Server](#cw-46), [examples](#cw-90) |
 | Query-plugin follow-ups | [Large items](#cw-76), [native parity coverage](#cw-77), [complete test run](#cw-78), [performance](#cw-79), [linked-reference retirement](#cw-80) |
 | Integration and applications | [Connectors](#cw-44), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
 | Scaling and maintainability | [Publication](#cw-31), [storage](#cw-28), [hot paths](#cw-32), [decomposition](#cw-34) |
-| Testing reliability and cost | [Asynchronous tests](#cw-37), [build/fixture cost](#cw-87), [shared conformance](#cw-89), [application benchmarks](#cw-40), [native-query comparison](#cw-79) |
+| Testing reliability and cost | [Asynchronous tests](#cw-37), [MySQL/Postgres container failures](#cw-99), [build/fixture cost](#cw-87), [shared conformance](#cw-89), [application benchmarks](#cw-40), [native-query comparison](#cw-79) |
 | Public API and release | [API curation](#cw-69), [formats](#cw-18), [lints/MSRV](#cw-61), [release documentation](#cw-73) |
 | Optional capabilities | [Non-query scheduling](#cw-81), [combined scheduling proof](#cw-82), [view transforms](#cw-68), [housekeeping](#cw-71), [pipe policies](#cw-74), [hosting profiles](#cw-75) |
 
@@ -242,6 +242,258 @@ the user's desired managed graph-change design, revisit and re-enable coverage
 for affected and unaffected components and actual live streams, retaining both
 Tokio flavors and linked/loaded plugin paths. Until then, report this coverage as
 deferred rather than claiming complete functional qualification.
+
+<a id="cw-95"></a>
+
+### Upgrade native plugins in place and migrate their configuration (CW-95)
+
+**Kind:** Unsupported capability / design decision.
+**Area:** Core, native SDK/Host, Server.
+**Priority:** Medium; needed before routine plugin releases can keep component
+state. **Effort:** Large.
+**Status:** USER-DEFERRED. Exact version matching is kept until this item is
+picked up; nothing below is an adopted implementation.
+
+**Current boundary:** A component is bound to the exact plugin build that
+created it. `ImplementationIdentity` contains the implementation name and
+version plus the plugin package ID and version
+(`components/computation-contracts/src/identity.rs:7-18`), and the SDK exporter
+stamps the package identity onto every factory. All of these fields are matched
+exactly:
+
+- Native libraries are never unloaded
+  (`components/host-sdk/src/computation/loader.rs:746-748`), and plugins can be
+  loaded while the host runs. The plugin registry keys each native plugin by
+  `id@version` (`components/host-sdk/src/plugin_registry.rs:144-147, 698-703`),
+  and `FactoryRegistry` keys factories by the full identity
+  (`lib/src/computation/v1/graph/topology.rs:135-138, 242-249`). Two builds of
+  one plugin can therefore be loaded side by side.
+- A factory declares a single `configuration_version`
+  (`components/computation-plugin-sdk/src/metadata.rs:284-292`). Stored
+  recipes must match it exactly, and Server applies the same exact check when
+  it builds components from its configuration files
+  (`drasi-server/src/computation.rs:688-705`).
+- Managed updates require an unchanged implementation identity and do not
+  migrate configuration.
+
+As a result, every plugin package release counts as a different component.
+Moving a component to a new build requires removal and addition, which
+discards its state and disrupts downstream components. A stored configuration
+written at an older schema version cannot be restored by a newer factory. ABI
+safety does not depend on the package version: `abi_version` and
+`wire_version` are checked separately.
+
+**Decision required first: package-version matching.**
+
+| Option | Behavior on a new package release | Gains | Losses |
+|---|---|---|---|
+| A: exact matching (current) | Old and new builds can be loaded together. Components move by removal and addition. | Side-by-side builds; gradual or canary moves. | Every release forces recreation and state loss. |
+| B: ignore the package version in matching | One build per plugin ID. Replace the library and restart; components upgrade in place. | Routine upgrades that keep state. | No side-by-side builds or canary moves. |
+| C: A plus an explicit "rebind to package version" upgrade | Both builds loaded; each component is upgraded in place on request. | Both. | Most complexity; needs a rule for retiring the old build. |
+
+Under Option B, the version fields would play these roles:
+
+- **Plugin package version** (`PluginIdentity.version`): the release artifact.
+  It is recorded for diagnostics and supplied to the component, but it is not
+  part of lookup keys. A new package version of the same plugin ID is an
+  upgrade.
+- **Implementation identity** (name, version, plugin ID): what the component
+  is. Matched exactly; a change is a different component.
+- **Configuration version**: the settings-format revision. It must fall within
+  the factory's supported range.
+
+Option B (and, in part, Option C) also requires the following:
+
+- **One package version per plugin ID.** Registration rejects a second package
+  version of a loaded plugin ID with a clear error. Otherwise the two builds'
+  factories collide in every identity-keyed map.
+- **Provenance checks compare the plugin ID only**, or run after the upgrade has
+  rewritten the stored package version. Affected checks:
+  `lib/src/computation/v1/graph/resources.rs:463-487`,
+  `lib/src/computation/runtime/component.rs:364-372`,
+  `components/computation-plugin-sdk/src/metadata.rs:540-547` and
+  `computation-plugins/transformers/query/src/update.rs:47-55`.
+- **Resource recipes are upgraded as well as components.** Native bootstrap,
+  bootstrap-coordination and time-merge recipes store a full
+  `ImplementationIdentity` (`components/host-sdk/src/management/native.rs:329`
+  and the bootstrap-coordination and time-merge recipe modules). Their factory
+  maps key on it (`components/host-sdk/src/computation/bootstrap.rs:40-43`), as
+  does the transactional transformer registry
+  (`lib/src/computation/v1/transaction_transformer.rs:98-118`).
+
+**Work, once an option allowing in-place upgrade is chosen:**
+
+1. **Configuration version ranges.** Replace `configuration_version` with
+   `configuration_versions { minimum, current }`, starting at 1 with
+   `minimum ≤ current`. New and updated recipes are always written at
+   `current`. A factory with `minimum < current` must export a migration.
+2. **Pure configuration migration.** Add
+   `migrate_configuration(from_version, configuration)` to the factory planner.
+   It returns the configuration at `current`, or `Unsupported`/`Invalid` with a
+   non-secret reason. It performs no I/O, reads no clock, uses no randomness
+   and resolves no resources or secrets: secret references may be moved or
+   dropped, but never dereferenced or turned into literals. It never changes
+   the descriptor, ports, role, completion or dependency bindings; a change
+   that needs those is a removal and addition. For native plugins it is a
+   synchronous management-table call, like factory assessment.
+   - A stored version below `minimum` fails with an error naming both
+     versions. A version newer than `current` fails as a downgrade. In both
+     cases stored state is left untouched.
+3. **SDK `MigrationChain` helper.**
+   - One step per version (`.step(1, |config| ...)` turns v1 into v2). The
+     chain must be contiguous from `minimum` to `current`, which is checked at
+     registration, and the factory's version range is derived from it.
+   - Small helpers rename a field, set a default, remove a field, and move a
+     value or reference.
+   - The exporter validates the result against the `current` schema.
+   - Test support: golden fixtures from each stored version to `current`, and
+     generated checks that migrating a `current` configuration changes nothing,
+     every supported version reaches `current`, and repeating a migration gives
+     identical output.
+   - Documented authoring rules: increase the version for every schema change,
+     never edit a published step, and treat raising `minimum` as dropping
+     support for older stored configurations.
+4. **Upgrade when a stored component is loaded.** This runs when a stored
+   component's plugin ID and implementation match a loaded factory, but its
+   package version or configuration version differs.
+   1. Migrate the configuration and validate the result with the existing
+      value validation.
+   2. Have the factory assess the change as an unconstructed component. The
+      current recipe is the migrated configuration; the previous package and
+      configuration versions are supplied as facts.
+   3. The plugin, not DrasiLib, chooses the data treatment, because only the
+      plugin knows whether its persisted state still works:
+      - `Preserve` if the state is compatible, or if the plugin migrates the
+        state itself during initialization;
+      - `Rebootstrap` if the state must be rebuilt from an authoritative
+        snapshot;
+      - `Reset` if the state must be discarded and restarted from streaming or
+        replay.
+
+      `Rebootstrap` and `Reset` require `Recreate`
+      (`lib/src/management/update_planning.rs:9-15`).
+   4. DrasiLib only checks that the choice can be carried out safely, using the
+      existing update-planning feasibility checks (see [CW-92](#cw-92) for the
+      rebootstrap limits), then provides what it needs.
+   5. Accept the upgrade as an ordinary accepted update with a deterministic
+      operation ID, so that a retry after interruption reuses the same
+      operation. The original recipe is recorded as current and the migrated
+      recipe as proposed; no new record type is introduced.
+   6. Construct the component with the accepted plan. Initialization receives
+      the previous package and configuration versions so that the component can
+      migrate its own persisted state.
+5. **No separate approval.** Loading the new plugin is the instance owner's
+   authorization. A supported assessment is executed automatically, whatever
+   its data choice. The component ends either running under the new version, or
+   in a visible error state with a non-secret reason. The error state covers an
+   unsupported assessment, a failed migration, a data choice the graph cannot
+   carry out safely, and a failed construction or initialization. Nothing falls
+   back automatically to the old plugin or the old configuration.
+6. **Rules that change.**
+   - The retained-interface and accepted-update identity checks
+     (`lib/src/management/update_planning.rs`,
+     `lib/src/management/updates.rs`, and
+     `components/computation-plugin-sdk/src/export/update.rs`) ignore the
+     package version on the upgrade path only.
+   - They allow a newer configuration version only when it came from
+     migration.
+   - Ordinary operator-submitted updates must still be at `current`.
+   - Server's file-based authoring must call the same migration, or files
+     written at an older version will be rejected.
+
+**Tradeoffs and uncertainties:**
+
+- Under Option B, upgrades happen only at load, and a `Reset` or `Rebootstrap`
+  upgrade causes a processing gap.
+- Because there is no approval step, a restart with a new plugin may start an
+  expensive rebootstrap without further confirmation.
+- Migration is forward-only. Rolling a plugin back requires restoring the
+  previous binary together with a configuration snapshot taken before the
+  upgrade.
+- Plugin authors maintain a step for every supported old version.
+  Configuration migration does not cover persisted processing state; each
+  plugin migrates its own.
+- It has not been tested against real plugins whether the previous package and
+  configuration versions are enough for a plugin to judge state compatibility.
+  Some plugins may need their own stored state version.
+
+**Finish when:**
+
+- A reference factory at configuration v3 with a v1→v3 chain restores stored
+  v1 and v2 components with the expected migrated recipes, through both static
+  and dynamically loaded paths.
+- `Preserve`, `Rebootstrap` and `Reset` upgrades each run automatically, with
+  the plugin choosing the data treatment.
+- An unsafe data choice, an unsupported assessment or a failed migration
+  leaves the component in a visible error state.
+- Out-of-range versions fail without changing stored state.
+- Secret references survive migration unresolved.
+- Retrying an interrupted upgrade reuses the same operation ID.
+- A plugin with a broken migration chain fails registration.
+- Under the chosen option, the loading rules are enforced with clear errors:
+  one package version per plugin ID (Option B), or retiring the old build
+  (Option C).
+
+<a id="cw-96"></a>
+
+### Gate independently running workers on Pause (CW-96)
+
+**Kind:** Issue. **Area:** Native plugins, in-process sources/reactions.
+**Priority:** Medium. **Effort:** Medium.
+
+**Current boundary:** Components whose output the host drives implement Pause
+and Resume as no-ops. Graph output stops while paused, but the following
+workers keep running:
+
+- the HTTP, gRPC, Postgres and Bridge sources keep accepting input into their
+  admission queues or channels;
+- the SSE sink keeps serving its connected clients;
+- the profiler keeps logging its periodic reports.
+
+**Work:** For each listed component, either gate its worker inside a completed
+Pause and reopen it on Resume, or return `unsupported` so that updates at the
+Pause boundary are refused instead of silently relying on host-side gating.
+Define how much input may be admitted while paused, and keep admission bounded.
+
+<a id="cw-97"></a>
+
+### Port drasi-server to the ABI 4 lifecycle (CW-97)
+
+**Kind:** Issue. **Area:** Server.
+**Priority:** High for the Server release. **Effort:** Medium.
+
+**Current boundary:** drasi-core implements the six required lifecycle hooks,
+`Dispose` with a reason and state intent, and optional separate management
+(`assess` then `apply`). drasi-server, including its examples, has not been
+ported, because its existing uncommitted work is untouched.
+
+**Work:** Port Server components, examples and tests to the required hooks and
+contexts. Replace `delete_owned_resources` with `dispose` under
+`StateIntent::Erase`, and replace `apply_update` with `ComponentManagement`.
+Rebuild every native plugin that Server loads at ABI 4.0.
+
+<a id="cw-98"></a>
+
+### Qualify erasing disposal (CW-98)
+
+**Kind:** Qualification. **Area:** Core, native SDK/Host, native plugins.
+**Priority:** Medium. **Effort:** Small.
+
+**Current boundary:**
+
+- A failed `Dispose` is retried with the same reason and intent. Under
+  `StateIntent::Erase`, each retry runs erasure again, so erasure must be
+  idempotent.
+- ABI 4 has no per-instance capability. An `Erase` dispose of a native
+  component that did not declare `erases_owned_state` fails before the plugin
+  runs, rather than being rejected at construction.
+
+**Work:**
+
+- Add retry tests that run erasure twice for every component that erases owned
+  state (view, indexed query, WAL-backed sources).
+- Decide whether removal with erasure should be refused at management
+  acceptance when the factory does not declare erasure.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -2332,6 +2584,35 @@ cleanup. Selection policy is [CW-85](#cw-85) and evidence semantics [CW-88](#cw-
 Add new native assertions under [CW-77](#cw-77), Server failure scenarios under
 [CW-46](#cw-46), and live example acceptance under [CW-90](#cw-90); do not turn
 this run into a replacement test framework.
+
+<a id="cw-99"></a>
+
+#### Investigate MySQL multi-thread timeouts and Postgres TLS failures (CW-99)
+
+**Kind:** Investigation. **Area:** Core, MySQL and Postgres sources.
+**Priority:** Medium. **Effort:** Small to medium.
+
+**Current boundary:**
+
+- **MySQL:** three `shared::` graph tests in
+  `cargo test -p drasi-source-mysql --lib --locked -- --ignored native:: --test-threads=1`
+  fail with "deadline has elapsed" in their `multi_thread` variants. One still
+  fails when run alone. Their `current_thread` variants pass. No baseline run
+  from before the ABI 4 lifecycle change exists, so it is unknown whether this
+  is a regression.
+- **Postgres:** two `tls::` tests in `drasi-source-postgres --test
+  native_transactions` fail on macOS with certificate errors ("An expired
+  certificate was detected").
+- **Postgres crash helper:** running that suite with `--ignored` also runs the
+  `postgres_abrupt_process_exit` crash-helper worker as a test.
+
+**Work:**
+
+- **MySQL:** compare against a run on the prior commit, then fix the
+  multi-thread deadline.
+- **Postgres TLS:** regenerate or refresh the TLS fixtures, or confirm the
+  failure is specific to the local machine.
+- **Crash helper:** exclude the helper from `--ignored` runs.
 
 ### Application and native-query performance qualification
 

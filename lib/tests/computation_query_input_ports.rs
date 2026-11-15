@@ -287,14 +287,7 @@ impl ComputationComponent for FixtureSource {
                 )
             })
     }
-
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -320,14 +313,7 @@ impl ComputationComponent for FixtureSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]

@@ -154,7 +154,45 @@ impl sdk::NativeComponent for Sink {
     fn configuration(&self) -> anyhow::Result<Value> {
         Ok(self.configuration.clone())
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _: &sdk::lifecycle::InitializeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        sdk::lifecycle::nothing_to_do()
+    }
+    async fn pause(&mut self, _: &sdk::lifecycle::PauseContext) -> sdk::lifecycle::LifecycleResult {
+        sdk::lifecycle::nothing_to_do()
+    }
+    async fn resume(
+        &mut self,
+        _: &sdk::lifecycle::ResumeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        sdk::lifecycle::nothing_to_do()
+    }
+    async fn dispose(
+        &mut self,
+        _: &sdk::lifecycle::DisposeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        sdk::lifecycle::nothing_to_do()
+    }
+    async fn start(
+        &mut self,
+        context: &mut sdk::lifecycle::StartContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        let started: anyhow::Result<()> = match context.take_credentials() {
+            None => self.start_literal(),
+            Some(credentials) => self.start_with_credentials(credentials).await,
+        };
+        Ok(started?)
+    }
+    async fn stop(&mut self, _: &sdk::lifecycle::StopContext) -> sdk::lifecycle::LifecycleResult {
+        increment(STOPPED);
+        Ok(())
+    }
+}
+
+impl Sink {
+    fn start_literal(&mut self) -> anyhow::Result<()> {
         increment(LITERAL);
         anyhow::ensure!(!self.bound, "bound component must not use literal startup");
         Ok(())
@@ -194,10 +232,6 @@ impl sdk::NativeComponent for Sink {
             _ => {}
         }
         increment(COMPLETED);
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        increment(STOPPED);
         Ok(())
     }
 }

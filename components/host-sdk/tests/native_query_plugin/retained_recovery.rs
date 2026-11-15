@@ -100,12 +100,7 @@ impl ComputationComponent for Destination {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -211,7 +206,7 @@ async fn retained_consumers() -> Result<()> {
     for profile in ["memory", "atomic", "non_atomic"] {
         let directory = tempfile::tempdir()?;
         let mut query = create_profile(directory.path(), profile)?;
-        query.initialize().await?;
+        query.initialize(&crate::hooks::initialize_ctx()).await?;
         let reader = Arc::new(CountedReader {
             inner: query
                 .query_api()
@@ -224,7 +219,7 @@ async fn retained_consumers() -> Result<()> {
             reader.recovery_head().await,
             Err(OutputReadError::NotReady(_))
         ));
-        query.start().await?;
+        query.start(&crate::hooks::start_ctx()).await?;
         query.continue_transform().await?;
         let first = query
             .transform(input(
@@ -243,7 +238,7 @@ async fn retained_consumers() -> Result<()> {
             ConsumerRecoveryPolicy::Strict,
         )?;
         let mut destination = sink(progress.clone())?;
-        consumer.start().await?;
+        consumer.start(&crate::hooks::start_ctx()).await?;
         let initial = consumer.on_wakeup().await?;
         assert_eq!(initial.len(), 1);
         assert!(QueryChangeCodec::is_snapshot(&initial[0].envelope));
@@ -266,7 +261,7 @@ async fn retained_consumers() -> Result<()> {
             .await
             .is_err());
 
-        query.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
         assert_eq!(reader.recovery_head().await?, head);
         let retained = reader.recovery_view(Some(0)).await?;
         assert_eq!(retained.snapshot.rows.len(), 1);
@@ -289,10 +284,10 @@ async fn retained_consumers() -> Result<()> {
             progress.clone(),
             ConsumerRecoveryPolicy::Strict,
         )?;
-        resumed.start().await?;
+        resumed.start(&crate::hooks::start_ctx()).await?;
         assert!(resumed.on_wakeup().await?.is_empty());
         let views = reader.views.load(Ordering::Acquire);
-        query.start().await?;
+        query.start(&crate::hooks::start_ctx()).await?;
         query.continue_transform().await?;
         for sequence in 2..=4 {
             let output = query
@@ -331,7 +326,7 @@ async fn retained_consumers() -> Result<()> {
                 .sequence,
             4
         );
-        query.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
         let retained = reader.recovery_view(Some(0)).await?;
         assert_eq!(retained.oldest_sequence, Some(3));
         assert_eq!(retained.snapshot.as_of_sequence, 4);
@@ -353,7 +348,7 @@ async fn retained_consumers() -> Result<()> {
                 )
                 .await?;
             let mut recovering = replay(reader.clone(), stale.clone(), policy)?;
-            recovering.start().await?;
+            recovering.start(&crate::hooks::start_ctx()).await?;
             let output = recovering.on_wakeup().await;
             if policy == ConsumerRecoveryPolicy::Strict {
                 assert!(output
@@ -389,7 +384,7 @@ async fn retained_consumers() -> Result<()> {
                 );
             }
         }
-        query.delete_owned_resources().await?;
+        query.dispose(&crate::hooks::erase_ctx()).await?;
         assert!(matches!(
             reader.recovery_head().await,
             Err(OutputReadError::Retired)
@@ -416,13 +411,13 @@ async fn failed_native_query_does_not_expose_uncertain_retained_state() -> Resul
         "MATCH (n:Item) RETURN abs(n.value) AS value",
         1,
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     let reader = query
         .query_api()
         .context("query API")?
         .recovery_reader()
         .context("recovery reader")?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -441,14 +436,14 @@ async fn failed_native_query_does_not_expose_uncertain_retained_state() -> Resul
         .transform(input(SourceChange::Replace { element: invalid }, 2)?)
         .await
         .is_err());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     assert!(matches!(
         reader.recovery_head().await,
         Err(OutputReadError::NotReady(_))
     ));
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(reader.recovery_head().await?, committed);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -469,13 +464,13 @@ async fn retained_query_reads_require_completed_host_cleanup_after_plugin_stop()
             gate: gate.clone(),
         }),
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     let recovery = query
         .query_api()
         .context("query API")?
         .recovery_reader()
         .context("recovery reader")?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -488,7 +483,8 @@ async fn retained_query_reads_require_completed_host_cleanup_after_plugin_stop()
     let head = recovery.recovery_head().await?;
     gate.held.store(true, Ordering::Release);
     {
-        let mut stop = Box::pin(query.stop());
+        let stop_context = crate::hooks::stop_ctx();
+        let mut stop = Box::pin(query.stop(&stop_context));
         tokio::select! {
             result = &mut stop => anyhow::bail!("cleanup finished before release: {result:?}"),
             reached = tokio::time::timeout(Duration::from_secs(10), gate.entered.notified()) =>
@@ -504,12 +500,16 @@ async fn retained_query_reads_require_completed_host_cleanup_after_plugin_stop()
         ));
     }
     assert!(
-        query.start().await.is_err(),
+        query.start(&crate::hooks::start_ctx()).await.is_err(),
         "cancelled cleanup cannot permit restart"
     );
     gate.held.store(false, Ordering::Release);
     gate.resume.notify_one();
-    tokio::time::timeout(Duration::from_secs(10), query.stop()).await??;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        query.stop(&crate::hooks::stop_ctx()),
+    )
+    .await??;
     assert_eq!(recovery.recovery_head().await?, head);
     assert_eq!(recovery.recovery_view(None).await?.snapshot.rows.len(), 1);
     Ok(())

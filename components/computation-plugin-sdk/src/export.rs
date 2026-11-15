@@ -28,6 +28,7 @@ mod input_binding_tests;
 mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
+mod management;
 mod output_follow;
 mod output_reads;
 mod source_schema;
@@ -56,14 +57,16 @@ pub trait Factory: Send + Sync + 'static {
     fn supports_update_planning(&self) -> bool {
         false
     }
-    /// Pure inspection of current/proposed configuration for one component.
-    /// Never construct/activate an object, perform I/O or consult mutable external
-    /// state. Return an explicit unsupported/error result for changes the factory
-    /// cannot safely describe. Core separately validates actual data boundaries.
-    fn plan_update(
+    /// Factory planner: pure assessment of current/proposed configuration for
+    /// one component. Used for Replace, for unconstructed components and when
+    /// no instance management exists. Never construct/activate an object,
+    /// perform I/O or consult mutable external state. Return
+    /// `Assessment::Unsupported` for changes the factory cannot safely describe.
+    /// Core separately validates actual data boundaries.
+    fn assess(
         &self,
         _request: &crate::UpdateRequest,
-    ) -> anyhow::Result<crate::ComponentUpdatePlan> {
+    ) -> anyhow::Result<crate::lifecycle::Assessment> {
         Err(Failure::new(
             abi::status::UNSUPPORTED,
             "factory does not implement update planning",
@@ -466,6 +469,9 @@ impl ExportedPlugin {
     }
     pub fn output_follow(&self) -> *const abi::output_follow::PluginOutputFollowV2 {
         &output_follow::EXTENSION
+    }
+    pub fn management(&self) -> *const abi::management::PluginManagementV1 {
+        &management::MANAGEMENT_V1
     }
     pub fn activation_credentials(
         &self,
@@ -1068,7 +1074,7 @@ static FACTORY_VTABLE: abi::FactoryVTable = abi::FactoryVTable {
     header: Header::new::<abi::FactoryVTable>(),
     release: Some(release_factory),
     create: Some(create_component),
-    plan_update: Some(update::plan_update),
+    assess: Some(update::assess),
 };
 unsafe extern "C" fn release_factory(state: *mut c_void) {
     transport::drop_boundary(|| unsafe { drop(Box::from_raw(state.cast::<FactoryState>())) });
@@ -1632,23 +1638,8 @@ unsafe fn create_component_with_services(
                 "native control handler does not match metadata"
             );
             anyhow::ensure!(
-                component.base().requires_readiness_confirmation()
-                    == metadata.capabilities.readiness,
-                "native readiness capability mismatch"
-            );
-            anyhow::ensure!(
-                component.base().supports_delete_owned_resources()
-                    == metadata.capabilities.delete_owned_resources,
-                "native owned-resource deletion capability mismatch"
-            );
-            anyhow::ensure!(
-                component.base().supports_apply_update()
-                    == metadata
-                        .capabilities
-                        .update_modes
-                        .iter()
-                        .any(|mode| { *mode != crate::ComponentUpdateMode::Recreate }),
-                "native retained-update capability mismatch"
+                component.base_mut().management().is_some() == metadata.capabilities.management,
+                "native management capability mismatch"
             );
             anyhow::ensure!(
                 component.base().supports_input_binding_updates()
@@ -1959,17 +1950,15 @@ unsafe extern "C" fn begin(
     transport::status_boundary(|| {
         require_output(out)?;
         let instance = unsafe { state_ref::<Arc<Instance>>(state)? }.clone();
-        if code == abi::operation::START
-            && input.len > crate::activation_credentials::MAX_CREDENTIAL_PAYLOAD_BYTES
-        {
-            return Err(Failure::protocol(
-                "activation credential payload exceeds the supported size",
-            ));
-        }
         let input = unsafe { copy_input(input)? };
         if (code == abi::operation::TRANSACT) == transaction.is_null() {
             return Err(Failure::protocol(
                 "transaction capability is required only for TRANSACT",
+            ));
+        }
+        if code == abi::operation::APPLY {
+            return Err(Failure::protocol(
+                "native APPLY is issued only through the management table",
             ));
         }
         let transaction = if transaction.is_null() {
@@ -1977,166 +1966,226 @@ unsafe extern "C" fn begin(
         } else {
             Some(unsafe { RetainedTransaction::new(transaction)? })
         };
-        let c = &instance.factory.capabilities;
-        use abi::operation::*;
-        let cleanup = matches!(code, STOP | DISPOSE | DELETE_OWNED_RESOURCES);
-        if !cleanup && instance.damaged.is_damaged() {
-            return Err(Failure::panicked());
-        }
-        let allowed = match code {
-            INITIALIZE | START | STOP | DISPOSE | PAUSE_PROCESSING | RESUME_PROCESSING => true,
-            NEXT => {
-                instance.factory.role == drasi_computation_contracts::ComponentRole::Source
-                    && !instance.admission
-            }
-            TRANSFORM | DELIVERY_COMPLETED => {
-                instance.factory.role == drasi_computation_contracts::ComponentRole::Transformer
-            }
-            HANDLE => instance.factory.role == drasi_computation_contracts::ComponentRole::Sink,
-            HANDLE_BATCH => instance.batching,
-            RUN => instance.factory.role == drasi_computation_contracts::ComponentRole::Service,
-            CONTINUE => c.continuations,
-            WAKE_WAIT | WAKE_PENDING | ON_WAKEUP => c.wakeups,
-            SNAPSHOT => !c.snapshot_inputs.is_empty(),
-            CONTROL => c.control,
-            TRANSACT => c.transactional,
-            DELETE_OWNED_RESOURCES => c.delete_owned_resources,
-            APPLY_UPDATE => c
-                .update_modes
-                .iter()
-                .any(|mode| *mode != crate::ComponentUpdateMode::Recreate),
-            BIND_INPUTS => c.input_binding_updates,
-            BOOTSTRAP_INPUT | BOOTSTRAP_COMPLETE => {
-                c.quiescent_bootstrap.is_some() || c.durable_bootstrap.is_some()
-            }
-            BOOTSTRAP_STATUS => c.durable_bootstrap.is_some() || c.bootstrap_optional,
-            BOOTSTRAP_RESET => c.durable_bootstrap.is_some(),
-            DELIVERY_RESUME => c.durable_output,
-            _ => false,
-        };
-        if !allowed {
-            return Err(Failure::new(
-                abi::status::UNSUPPORTED,
-                "unsupported native component operation",
-            ));
-        }
-        let guard = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
-            None
-        } else {
-            instance
-                .busy
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .map_err(|_| {
-                    Failure::new(
-                        abi::status::BUSY,
-                        "native data/lifecycle operation is already active",
-                    )
-                })?;
-            Some(BusyGuard(instance.clone()))
-        };
-        let runtime = io_runtime()?;
-        let update = if code == APPLY_UPDATE {
-            let mut update: crate::ApplyUpdateRequest =
-                wire::decode(&input).map_err(Failure::from)?;
-            update::validate_apply(&instance, &mut update).map_err(Failure::from)?;
-            Some(update)
-        } else {
-            None
-        };
-        let acknowledged = instance
-            .administration
-            .prepare(&instance, code, &input, update)?;
-        let independent = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
-            Some(
-                instance
-                    .administration
-                    .claim_independent(instance.damaged.clone())?,
-            )
-        } else {
-            None
-        };
-        if !acknowledged
-            && matches!(
-                code,
-                INITIALIZE
-                    | START
-                    | STOP
-                    | PAUSE_PROCESSING
-                    | APPLY_UPDATE
-                    | DELETE_OWNED_RESOURCES
-                    | DISPOSE
-            )
-        {
-            let permanent = matches!(code, DELETE_OWNED_RESOURCES | DISPOSE);
-            if code != START {
-                instance.administration.fence_independent(permanent)?;
-            }
-            if let Some(schema) = &instance.source_schema {
-                schema.deactivate();
-            }
-            if let Some(reads) = &instance.output_reads {
-                if permanent {
-                    reads.retire();
-                } else {
-                    reads.deactivate()?;
-                }
-            }
-        }
-        let damaged = instance.damaged.clone();
-        // Select before boxing so ordinary operations retain no consumer future.
-        let operation = if instance.consumer.is_some() {
-            transport::export_component_operation(
-                async move {
-                    let _guard = guard;
-                    let consumer = instance.consumer.as_ref().expect("checked consumer");
-                    consumer
-                        .run(execute_guarded(
-                            instance.clone(),
-                            code,
-                            input,
-                            transaction,
-                            acknowledged,
-                            independent,
-                        ))
-                        .await
-                },
-                Some(runtime),
-                damaged,
-                cleanup,
-            )
-        } else {
-            transport::export_component_operation(
-                async move {
-                    let _guard = guard;
-                    execute_guarded(
-                        instance,
-                        code,
-                        input,
-                        transaction,
-                        acknowledged,
-                        independent,
-                    )
-                    .await
-                },
-                Some(runtime),
-                damaged,
-                cleanup,
-            )
-        };
+        let operation = start_operation(instance, code, input, transaction)?;
         unsafe { transport::write_out(out, operation) }
     })
 }
 
-async fn execute_guarded(
+/// Lifecycle operations whose payload is a [`wire::LifecycleRequest`].
+fn is_lifecycle(code: u32) -> bool {
+    use abi::operation::*;
+    matches!(
+        code,
+        INITIALIZE | START | PAUSE | RESUME | STOP | DISPOSE | APPLY
+    )
+}
+
+/// Shared by component `begin` and management `apply`: one busy slot, one
+/// state machine, one fencing and quiescence path.
+fn start_operation(
     instance: Arc<Instance>,
     code: u32,
     input: Vec<u8>,
+    transaction: Option<RetainedTransaction>,
+) -> Result<abi::OperationHandle, Failure> {
+    let c = &instance.factory.capabilities;
+    use abi::operation::*;
+    let cleanup = matches!(code, STOP | DISPOSE);
+    if !cleanup && instance.damaged.is_damaged() {
+        return Err(Failure::panicked());
+    }
+    let allowed = match code {
+        INITIALIZE | START | STOP | DISPOSE | PAUSE | RESUME => true,
+        NEXT => {
+            instance.factory.role == drasi_computation_contracts::ComponentRole::Source
+                && !instance.admission
+        }
+        TRANSFORM | DELIVERY_COMPLETED => {
+            instance.factory.role == drasi_computation_contracts::ComponentRole::Transformer
+        }
+        HANDLE => instance.factory.role == drasi_computation_contracts::ComponentRole::Sink,
+        HANDLE_BATCH => instance.batching,
+        RUN => instance.factory.role == drasi_computation_contracts::ComponentRole::Service,
+        CONTINUE => c.continuations,
+        WAKE_WAIT | WAKE_PENDING | ON_WAKEUP => c.wakeups,
+        SNAPSHOT => !c.snapshot_inputs.is_empty(),
+        CONTROL => c.control,
+        TRANSACT => c.transactional,
+        APPLY => c.management,
+        BIND_INPUTS => c.input_binding_updates,
+        BOOTSTRAP_INPUT | BOOTSTRAP_COMPLETE => {
+            c.quiescent_bootstrap.is_some() || c.durable_bootstrap.is_some()
+        }
+        BOOTSTRAP_STATUS => c.durable_bootstrap.is_some() || c.bootstrap_optional,
+        BOOTSTRAP_RESET => c.durable_bootstrap.is_some(),
+        DELIVERY_RESUME => c.durable_output,
+        _ => false,
+    };
+    if !allowed {
+        return Err(Failure::new(
+            abi::status::UNSUPPORTED,
+            "unsupported native component operation",
+        ));
+    }
+    let context = if is_lifecycle(code) {
+        let mut context: wire::LifecycleRequest = wire::decode(&input)
+            .map_err(|_| Failure::protocol("invalid native lifecycle context"))?;
+        if let Some(update) = context.update.as_mut() {
+            update::validate_apply(&instance, update).map_err(Failure::from)?;
+        }
+        Some(context)
+    } else {
+        None
+    };
+    let guard = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
+        None
+    } else {
+        instance
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                Failure::new(
+                    abi::status::BUSY,
+                    "native data/lifecycle operation is already active",
+                )
+            })?;
+        Some(BusyGuard(instance.clone()))
+    };
+    let runtime = io_runtime()?;
+    let acknowledged = instance
+        .administration
+        .prepare(&instance, code, context.as_ref())?;
+    let independent = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
+        Some(
+            instance
+                .administration
+                .claim_independent(instance.damaged.clone())?,
+        )
+    } else {
+        None
+    };
+    if !acknowledged && matches!(code, INITIALIZE | START | STOP | PAUSE | APPLY | DISPOSE) {
+        let permanent = code == DISPOSE;
+        if code != START {
+            instance.administration.fence_independent(permanent)?;
+        }
+        if let Some(schema) = &instance.source_schema {
+            schema.deactivate();
+        }
+        if let Some(reads) = &instance.output_reads {
+            if permanent {
+                reads.retire();
+            } else {
+                reads.deactivate()?;
+            }
+        }
+    }
+    let damaged = instance.damaged.clone();
+    let token = crate::lifecycle::CancellationToken::new();
+    let call = Call {
+        code,
+        input,
+        context,
+        token: token.clone(),
+    };
+    // Select before boxing so ordinary operations retain no consumer future.
+    let operation = if instance.consumer.is_some() {
+        transport::export_cancellable_operation(
+            async move {
+                let _guard = guard;
+                let consumer = instance.consumer.as_ref().expect("checked consumer");
+                consumer
+                    .run(execute_guarded(
+                        instance.clone(),
+                        call,
+                        transaction,
+                        acknowledged,
+                        independent,
+                    ))
+                    .await
+            },
+            Some(runtime),
+            damaged,
+            cleanup,
+            token,
+        )
+    } else {
+        transport::export_cancellable_operation(
+            async move {
+                let _guard = guard;
+                execute_guarded(instance, call, transaction, acknowledged, independent).await
+            },
+            Some(runtime),
+            damaged,
+            cleanup,
+            token,
+        )
+    };
+    Ok(operation)
+}
+
+/// One accepted component operation.
+struct Call {
+    code: u32,
+    input: Vec<u8>,
+    context: Option<wire::LifecycleRequest>,
+    token: crate::lifecycle::CancellationToken,
+}
+
+impl Call {
+    fn scope(&self) -> crate::lifecycle::OperationScope {
+        self.context
+            .as_ref()
+            .expect("lifecycle operation has a context")
+            .scope(self.token.clone())
+    }
+}
+
+/// Waits until independent calls, schema reads and output reads drain.
+async fn quiesce(instance: &Instance) -> anyhow::Result<()> {
+    instance.administration.wait_for_independent_calls().await?;
+    if let Some(schema) = &instance.source_schema {
+        schema.wait_quiescent().await?;
+    }
+    if let Some(reads) = &instance.output_reads {
+        reads.wait_quiescent().await?;
+    }
+    Ok(())
+}
+
+/// Cancels the hook token when the host's deadline passes; hooks finish
+/// cooperatively and the host still owns the hard timeout.
+fn deadline_watch(scope: &crate::lifecycle::OperationScope) -> Option<tokio::task::JoinHandle<()>> {
+    let deadline = scope.deadline()?;
+    let token = scope.cancellation().clone();
+    Some(tokio::spawn(async move {
+        tokio::time::sleep_until(deadline).await;
+        token.cancel();
+    }))
+}
+
+/// Runs a lifecycle hook with its deadline watcher.
+async fn run_hook<T>(
+    scope: &crate::lifecycle::OperationScope,
+    hook: impl std::future::Future<Output = crate::lifecycle::LifecycleResult<T>>,
+) -> anyhow::Result<T> {
+    let watch = deadline_watch(scope);
+    let result = hook.await;
+    if let Some(watch) = watch {
+        watch.abort();
+    }
+    result.map_err(anyhow::Error::from)
+}
+
+async fn execute_guarded(
+    instance: Arc<Instance>,
+    call: Call,
     transaction: Option<RetainedTransaction>,
     acknowledged: bool,
     independent: Option<IndependentGuard>,
 ) -> Result<Vec<u8>, Failure> {
     let work = async {
-        execute(instance, code, input, transaction, acknowledged)
+        execute(instance, call, transaction, acknowledged)
             .await
             .map_err(Failure::from)
     };
@@ -2148,12 +2197,12 @@ async fn execute_guarded(
 
 async fn execute(
     instance: Arc<Instance>,
-    code: u32,
-    input: Vec<u8>,
+    call: Call,
     transaction: Option<RetainedTransaction>,
     acknowledged: bool,
 ) -> anyhow::Result<Vec<u8>> {
     use abi::operation::*;
+    let code = call.code;
     if acknowledged {
         if code == STOP {
             if let Some(consumer) = &instance.consumer {
@@ -2162,7 +2211,11 @@ async fn execute(
         }
         return Ok(Vec::new());
     }
-    if !matches!(code, STOP | DELETE_OWNED_RESOURCES | DISPOSE) {
+    if code == APPLY {
+        return management::execute_apply(instance, call).await;
+    }
+    let input = &call.input;
+    if !matches!(code, STOP | DISPOSE) {
         if let Some(coordinator) = &instance.coordinator {
             coordinator.check_active()?;
         }
@@ -2172,7 +2225,7 @@ async fn execute(
             .control_handler
             .as_ref()
             .expect("validated")
-            .on_message(wire::decode(&input)?, instance.control.clone())
+            .on_message(wire::decode(input)?, instance.control.clone())
             .await?;
         return Ok(Vec::new());
     }
@@ -2190,17 +2243,8 @@ async fn execute(
                 .await?,
         );
     }
-    if matches!(
-        code,
-        INITIALIZE | STOP | PAUSE_PROCESSING | APPLY_UPDATE | DELETE_OWNED_RESOURCES | DISPOSE
-    ) {
-        instance.administration.wait_for_independent_calls().await?;
-        if let Some(schema) = &instance.source_schema {
-            schema.wait_quiescent().await?;
-        }
-        if let Some(reads) = &instance.output_reads {
-            reads.wait_quiescent().await?;
-        }
+    if matches!(code, INITIALIZE | STOP | PAUSE | DISPOSE) {
+        quiesce(&instance).await?;
     }
     let mut component = instance.component.lock().await;
     if !matches!(
@@ -2209,10 +2253,8 @@ async fn execute(
             | START
             | STOP
             | DISPOSE
-            | PAUSE_PROCESSING
-            | RESUME_PROCESSING
-            | APPLY_UPDATE
-            | DELETE_OWNED_RESOURCES
+            | PAUSE
+            | RESUME
             | BIND_INPUTS
             | BOOTSTRAP_INPUT
             | BOOTSTRAP_COMPLETE
@@ -2227,7 +2269,9 @@ async fn execute(
     }
     match code {
         INITIALIZE => {
-            component.base_mut().initialize().await?;
+            let scope = call.scope();
+            let context = crate::lifecycle::InitializeContext::new(scope.clone());
+            run_hook(&scope, component.base_mut().initialize(&context)).await?;
             instance.administration.state()?.initialization = Initialization::Complete;
             instance.administration.activate_independent()?;
         }
@@ -2256,21 +2300,26 @@ async fn execute(
             if let Some(coordinator) = &instance.coordinator {
                 coordinator.starting()?;
             }
+            let scope = call.scope();
+            let credentials = call
+                .context
+                .as_ref()
+                .and_then(|context| context.credentials.clone());
+            let mut context = crate::lifecycle::StartContext::new(scope.clone(), credentials);
+            let started = run_hook(&scope, component.base_mut().start(&mut context)).await;
+            drop(context);
             if instance.activation_credentials_bound {
-                let credentials: crate::ActivationCredentials = wire::decode(&input)
-                    .map_err(|_| anyhow::anyhow!("invalid activation credential payload"))?;
-                credentials.validate()?;
-                component
-                    .base_mut()
-                    .start_with_credentials(credentials)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("native activation with credentials failed"))?;
+                started.map_err(|error| {
+                    match error.downcast::<crate::lifecycle::LifecycleError>() {
+                        Ok(error) => anyhow::Error::from(crate::lifecycle::LifecycleError::new(
+                            error.kind(),
+                            anyhow::anyhow!("native activation with credentials failed"),
+                        )),
+                        Err(_) => anyhow::anyhow!("native activation with credentials failed"),
+                    }
+                })?;
             } else {
-                anyhow::ensure!(
-                    input.is_empty(),
-                    "unbound native START requires an empty payload"
-                );
-                component.base_mut().start().await?;
+                started?;
             }
             let bootstrapping = instance.factory.capabilities.quiescent_bootstrap.is_some()
                 || instance.factory.capabilities.durable_bootstrap.is_some();
@@ -2315,7 +2364,14 @@ async fn execute(
             }
             let stop_hook_complete = instance.administration.state()?.stop_hook_complete;
             if !stop_hook_complete {
-                component.base_mut().stop().await?;
+                let scope = call.scope();
+                let mode = call
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.stop_mode)
+                    .expect("validated stop mode");
+                let context = crate::lifecycle::StopContext::new(scope.clone(), mode);
+                run_hook(&scope, component.base_mut().stop(&context)).await?;
                 instance.administration.state()?.stop_hook_complete = true;
             }
             if let Some(consumer) = &instance.consumer {
@@ -2335,20 +2391,32 @@ async fn execute(
             if let Some(consumer) = &instance.consumer {
                 consumer.clear()?;
             }
-            component.base_mut().dispose().await?;
+            let scope = call.scope();
+            let request = call
+                .context
+                .as_ref()
+                .and_then(|context| context.dispose)
+                .expect("validated dispose request");
+            let context = crate::lifecycle::DisposeContext::new(
+                scope.clone(),
+                request.reason,
+                request.intent,
+                request.attempt,
+            )?;
+            run_hook(&scope, component.base_mut().dispose(&context)).await?;
             instance.administration.state()?.disposed = true;
         }
-        DELETE_OWNED_RESOURCES => {
-            component.base_mut().delete_owned_resources().await?;
-            instance.administration.state()?.deletion_complete = true;
-        }
-        PAUSE_PROCESSING => {
-            component.base_mut().pause_processing().await?;
+        PAUSE => {
+            let scope = call.scope();
+            let context = crate::lifecycle::PauseContext::new(scope.clone());
+            run_hook(&scope, component.base_mut().pause(&context)).await?;
             instance.administration.state()?.processing = Processing::Paused;
             instance.administration.activate_independent()?;
         }
-        RESUME_PROCESSING => {
-            component.base_mut().resume_processing().await?;
+        RESUME => {
+            let scope = call.scope();
+            let context = crate::lifecycle::ResumeContext::new(scope.clone());
+            run_hook(&scope, component.base_mut().resume(&context)).await?;
             if let Some(schema) = &instance.source_schema {
                 schema.activate()?;
             }
@@ -2358,67 +2426,8 @@ async fn execute(
             instance.administration.activate_independent()?;
             instance.administration.state()?.processing = Processing::Running;
         }
-        APPLY_UPDATE => {
-            let (update, attempted, configuration) = {
-                let state = instance.administration.state()?;
-                let pending = state
-                    .update
-                    .as_ref()
-                    .context("missing accepted native update")?;
-                (
-                    pending.request.clone(),
-                    pending.attempted,
-                    state.configuration.clone(),
-                )
-            };
-            if !attempted {
-                anyhow::ensure!(
-                    component.base().configuration()? == configuration,
-                    "native component configuration changed outside the approved update"
-                );
-            }
-            instance
-                .administration
-                .state()?
-                .update
-                .as_mut()
-                .expect("accepted update")
-                .attempted = true;
-            component.base_mut().apply_update(&update).await?;
-            instance
-                .factory
-                .validate_instance(component.base().descriptor(), &update.request.proposed.id)?;
-            let configuration = component.base().configuration()?;
-            instance.factory.configuration.validate(&configuration)?;
-            let matches = match factory_configuration_details(&instance.factory_state) {
-                Some(details) => details.equivalent_with_defaults(
-                    &instance.factory.configuration,
-                    &configuration,
-                    &update.request.proposed.configuration,
-                )?,
-                None => configuration == update.request.proposed.configuration,
-            };
-            anyhow::ensure!(
-                matches,
-                "native apply_update did not expose the approved proposed configuration"
-            );
-            let queries = output_reads::updated_queries(
-                &instance.factory,
-                component.base().descriptor(),
-                instance.output_reads.as_deref(),
-                component.base().output_readers(),
-            )?;
-            let mut state = instance.administration.state()?;
-            if let Some(reads) = &instance.output_reads {
-                reads.publish_queries(queries)?;
-            }
-            state.request = update.request.proposed.clone();
-            state.configuration = configuration;
-            state.update = None;
-            state.applied = Some(update);
-        }
         BIND_INPUTS => {
-            let bindings: Vec<drasi_computation_contracts::InputBinding> = wire::decode(&input)?;
+            let bindings: Vec<drasi_computation_contracts::InputBinding> = wire::decode(input)?;
             for binding in &bindings {
                 anyhow::ensure!(
                     instance.metadata.descriptor.ports().iter().any(|port| {
@@ -2434,7 +2443,7 @@ async fn execute(
                 instance.bootstrapping.load(Ordering::Acquire),
                 "native transformer is not initializing"
             );
-            let input = wire::decode::<wire::Envelope>(&input)?.into_input(&instance.codec)?;
+            let input = wire::decode::<wire::Envelope>(input)?.into_input(&instance.codec)?;
             anyhow::ensure!(
                 instance
                     .factory
@@ -2462,7 +2471,7 @@ async fn execute(
                 drasi_computation_contracts::BootstrapCompletion::try_from(wire::decode::<
                     crate::bootstrap::Completed,
                 >(
-                    &input
+                    input
                 )?)?
             } else {
                 anyhow::ensure!(
@@ -2527,7 +2536,7 @@ async fn execute(
             let outputs = match code {
                 TRANSFORM => {
                     let input =
-                        wire::decode::<wire::Envelope>(&input)?.into_input(&instance.codec)?;
+                        wire::decode::<wire::Envelope>(input)?.into_input(&instance.codec)?;
                     wire::check_port(
                         &instance.metadata.descriptor,
                         &input.port,
@@ -2592,7 +2601,7 @@ async fn execute(
             });
         }
         DELIVERY_COMPLETED => {
-            let outputs: Vec<wire::Envelope> = wire::decode(&input)?;
+            let outputs: Vec<wire::Envelope> = wire::decode(input)?;
             let outputs = outputs
                 .into_iter()
                 .map(|output| output.into_output(&instance.codec))
@@ -2614,7 +2623,7 @@ async fn execute(
             let Component::Sink(sink) = &mut *component else {
                 anyhow::bail!("batching requires an ordinary native sink");
             };
-            let batch: Vec<wire::Envelope> = wire::decode(&input)?;
+            let batch: Vec<wire::Envelope> = wire::decode(input)?;
             anyhow::ensure!(
                 batch.len() <= 1024,
                 "native sink batch input limit exceeded"
@@ -2643,7 +2652,7 @@ async fn execute(
                     "native consumer operations require their negotiated delivery service"
                 );
             };
-            let input = wire::decode::<wire::Envelope>(&input)?.into_input(&instance.codec)?;
+            let input = wire::decode::<wire::Envelope>(input)?.into_input(&instance.codec)?;
             wire::check_port(
                 &instance.metadata.descriptor,
                 &input.port,
@@ -2678,7 +2687,7 @@ async fn execute(
             let Component::Transactional(step) = &*component else {
                 unreachable!("validated role")
             };
-            let input = instance.codec.decode(&input)?;
+            let input = instance.codec.decode(input)?;
             anyhow::ensure!(
                 input.changes().schema() == step.transaction_input_schema().descriptor(),
                 "native transaction input schema mismatch"

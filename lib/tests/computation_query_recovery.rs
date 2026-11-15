@@ -95,9 +95,13 @@ async fn query_retains_bootstrap_cleanup_across_cancelled_and_timed_out_stop() {
     .await
     .expect("query")
     .with_bootstrap(bootstrap.clone());
-    query.start().await.expect_err("failed snapshot");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect_err("failed snapshot");
     {
-        let stop = query.stop();
+        let stop_context = lifecycle_contexts::stop();
+        let stop = query.stop(&stop_context);
         tokio::pin!(stop);
         tokio::select! {
             result = &mut stop => panic!("unfinished cleanup returned: {result:?}"),
@@ -105,17 +109,23 @@ async fn query_retains_bootstrap_cleanup_across_cancelled_and_timed_out_stop() {
         }
     }
     assert!(bootstrap.worker.read().await.is_some());
-    let error = query.stop().await.expect_err("worker still owns cleanup");
+    let error = query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect_err("worker still owns cleanup");
     assert!(error
         .downcast_ref::<drasi_lib::context::workers::WorkerCleanupError>()
         .is_some());
     assert!(bootstrap.worker.read().await.is_some());
     assert!(bootstrap.snapshot().await.is_err());
     bootstrap.release.notify_one();
-    query.stop().await.expect("joined snapshot worker");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("joined snapshot worker");
     assert!(bootstrap.worker.read().await.is_none());
     query
-        .delete_owned_resources()
+        .dispose(&lifecycle_contexts::erase())
         .await
         .expect("deprovision after cleanup");
     assert_eq!(bootstrap.stops.load(Ordering::SeqCst), 4);
@@ -162,7 +172,10 @@ async fn invalid_bootstrap_watermarks_fail_before_reading_or_publishing_snapshot
         .await
         .expect("construct")
         .with_bootstrap(Arc::new(InvalidWatermarks { duplicate }));
-        let error = query.start().await.expect_err("invalid watermark");
+        let error = query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect_err("invalid watermark");
         assert!(error.to_string().contains(if duplicate {
             "duplicate"
         } else {
@@ -174,7 +187,10 @@ async fn invalid_bootstrap_watermarks_fail_before_reading_or_publishing_snapshot
             .expect("snapshot")
             .rows
             .is_empty());
-        query.stop().await.expect("cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
 }
 
@@ -268,7 +284,10 @@ async fn bootstrap_is_separate_from_creation_and_filters_covered_live_input() {
         0,
         "construction does not run bootstrap"
     );
-    query.start().await.expect("bootstrap");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("bootstrap");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(query.results().snapshot().expect("snapshot").rows.len(), 1);
     assert_eq!(
@@ -292,14 +311,17 @@ async fn bootstrap_is_separate_from_creation_and_filters_covered_live_input() {
         .expect("new live event");
     assert_eq!(output.len(), 1);
     assert_eq!(output[0].envelope.system().sequence(), 1);
-    query.stop().await.expect("stop");
-    query.start().await.expect("healthy restart");
+    query.stop(&lifecycle_contexts::stop()).await.expect("stop");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("healthy restart");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
         "retained healthy instance is not re-bootstrapped"
     );
-    query.stop().await.expect("stop");
+    query.stop(&lifecycle_contexts::stop()).await.expect("stop");
 }
 
 #[derive(Default)]
@@ -356,12 +378,7 @@ impl ComputationComponent for RecoverySink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -397,7 +414,7 @@ async fn checkpointed_batches_record_each_handled_prefix_and_deduplicate_replay(
         Arc::new(AtomicUsize::new(0)),
     )
     .await;
-    producer.start().await.unwrap();
+    producer.start(&lifecycle_contexts::start()).await.unwrap();
     let mut inputs = Vec::new();
     for (sequence, name) in [(2, "Alicia"), (3, "Carol")] {
         let outputs = producer
@@ -440,7 +457,7 @@ async fn checkpointed_batches_record_each_handled_prefix_and_deduplicate_replay(
     );
     sink.handle_batch(retry).await.unwrap();
     assert_eq!(state.handled.load(Ordering::SeqCst), 2);
-    producer.stop().await.unwrap();
+    producer.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[async_trait]
@@ -481,7 +498,10 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         Arc::new(AtomicUsize::new(0)),
     )
     .await;
-    query.start().await.expect("bootstrap query");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("bootstrap query");
     let progress = Arc::new(MemoryConsumerProgress::default());
     let state = Arc::new(ConsumerState::default());
     state.fail_snapshot.store(true, Ordering::SeqCst);
@@ -493,7 +513,10 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         progress.clone(),
         ConsumerRecoveryPolicy::Strict,
     );
-    replay.start().await.expect("replay start");
+    replay
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("replay start");
     let initial = replay
         .on_wakeup()
         .await
@@ -517,8 +540,14 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
             .expect("checkpoint"),
         None
     );
-    replay.stop().await.expect("stop failed startup");
-    replay.start().await.expect("retry snapshot");
+    replay
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop failed startup");
+    replay
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("retry snapshot");
     let initial = replay
         .on_wakeup()
         .await
@@ -599,7 +628,10 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         })
     );
     assert_eq!(state.snapshots.load(Ordering::SeqCst), 1);
-    query.stop().await.expect("stop query");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop query");
 }
 
 #[tokio::test]
@@ -612,7 +644,10 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
         Arc::new(AtomicUsize::new(0)),
     )
     .await;
-    query.start().await.expect("start");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     for sequence in 2..=5 {
         query
             .transform(InputEnvelope {
@@ -645,7 +680,10 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
             .await
             .expect("prior handled checkpoint");
         let mut replay = replay(query.results(), progress.clone(), policy);
-        replay.start().await.expect("start replay");
+        replay
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start replay");
         let output = replay.on_wakeup().await;
         match policy {
             ConsumerRecoveryPolicy::Strict => assert!(output.is_err()),
@@ -677,7 +715,7 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
             })
         );
     }
-    query.stop().await.expect("stop");
+    query.stop(&lifecycle_contexts::stop()).await.expect("stop");
 }
 
 #[tokio::test]
@@ -746,12 +784,7 @@ impl ComputationComponent for LiveSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSource for LiveSource {
@@ -773,12 +806,7 @@ impl ComputationComponent for LateBindingSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -801,12 +829,7 @@ impl ComputationComponent for LateBindingSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -1314,7 +1337,7 @@ mod persistent {
         );
         query.stop().await.expect("release reconstructed owner");
         query
-            .delete_owned_resources()
+            .dispose(&lifecycle_contexts::erase())
             .await
             .expect("reopen and clear incomplete state");
         query
@@ -1722,7 +1745,7 @@ mod persistent {
             published.push(generation);
             query.stop().await.expect("stop");
             query
-                .delete_owned_resources()
+                .dispose(&lifecycle_contexts::erase())
                 .await
                 .expect("delete owned resources");
         }
@@ -2081,5 +2104,47 @@ mod persistent {
             .shutdown()
             .await
             .expect("cleanup");
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -88,10 +90,25 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }
@@ -439,7 +456,7 @@ async fn shared_replay_rejects_volatile_actual_owners_before_opening_a_socket() 
         )
         .await?
         .with_source_progress(owner.clone())?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         queries.push(query);
     }
     let mut settings = config(9, MySqlOutput::Transactions);
@@ -454,11 +471,14 @@ async fn shared_replay_rejects_volatile_actual_owners_before_opening_a_socket() 
         settings,
         group("graph", &owners),
     )?;
-    let error = source.start().await.expect_err("persistent-only replay");
+    let error = source
+        .start(&lifecycle_ctx::start())
+        .await
+        .expect_err("persistent-only replay");
     assert!(error.to_string().contains("persistent"), "{error:#}");
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     for query in &mut queries {
-        query.stop().await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
 }
@@ -484,8 +504,8 @@ async fn a_query_rejects_a_same_named_bootstrap_reader_substitute_before_databas
     let mut query = query_for(actual[0].clone(), indexes(path.path())?)
         .await?
         .with_bootstrap(snapshot);
-    let started = query.start().await;
-    let stopped = query.stop().await;
+    let started = query.start(&lifecycle_ctx::start()).await;
+    let stopped = query.stop(&lifecycle_ctx::stop()).await;
     let failure = started.expect_err("same name cannot substitute the actual owner");
     anyhow::ensure!(
         failure.to_string().contains("actual progress owner"),
@@ -746,9 +766,9 @@ async fn replay_different_owners(add_member: bool) -> Result<()> {
         )?;
         let seeded = async {
             for query in &mut actual {
-                query.start().await?;
+                query.start(&lifecycle_ctx::start()).await?;
             }
-            seed.start().await?;
+            seed.start(&lifecycle_ctx::start()).await?;
             database
                 .admin
                 .execute("INSERT INTO items VALUES (1,'first')")
@@ -778,11 +798,11 @@ async fn replay_different_owners(add_member: bool) -> Result<()> {
         if let Err(error) = seeded {
             failures.push(error);
         }
-        if let Err(error) = seed.stop().await {
+        if let Err(error) = seed.stop(&lifecycle_ctx::stop()).await {
             failures.push(error);
         }
         for query in &mut actual {
-            if let Err(error) = query.stop().await {
+            if let Err(error) = query.stop(&lifecycle_ctx::stop()).await {
                 failures.push(error);
             }
         }
@@ -980,14 +1000,29 @@ impl ComputationComponent for SourceGate {
     fn recovery_contract(&self) -> ComponentRecovery {
         self.inner.recovery_contract()
     }
-    async fn start(&mut self) -> Result<()> {
-        self.inner.start().await?;
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
+        self.inner.start(&lifecycle_ctx::start()).await?;
         self.ready.notify_one();
         self.release.notified().await;
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.inner.stop().await
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        self.inner.stop(&lifecycle_ctx::stop()).await
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
+        Ok(())
     }
 }
 #[async_trait]
@@ -1228,21 +1263,21 @@ async fn an_actual_stopped_member_fences_live_replication_until_awaited_cleanup(
     )?;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         for query in &mut queries {
-            query.start().await?;
+            query.start(&lifecycle_ctx::start()).await?;
         }
-        source.start().await?;
-        queries[1].stop().await?;
+        source.start(&lifecycle_ctx::start()).await?;
+        queries[1].stop(&lifecycle_ctx::stop()).await?;
         let failure = next(&mut source)
             .await
             .expect_err("stopped owner must fence the source");
         anyhow::ensure!(failure.to_string().contains("ready"), "{failure:#}");
         anyhow::ensure!(
-            source.start().await.is_err(),
+            source.start(&lifecycle_ctx::start()).await.is_err(),
             "failed source restarted without cleanup"
         );
-        source.stop().await?;
-        queries[1].start().await?;
-        source.start().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        queries[1].start(&lifecycle_ctx::start()).await?;
+        source.start(&lifecycle_ctx::start()).await?;
         database
             .admin
             .execute("INSERT INTO items VALUES (1,'after cleanup')")
@@ -1261,11 +1296,11 @@ async fn an_actual_stopped_member_fences_live_replication_until_awaited_cleanup(
     .context("MySQL live member fencing deadline")
     .and_then(|result| result);
     let mut failures: Vec<_> = result.err().into_iter().collect();
-    if let Err(error) = source.stop().await {
+    if let Err(error) = source.stop(&lifecycle_ctx::stop()).await {
         failures.push(error);
     }
     for query in &mut queries {
-        if let Err(error) = query.stop().await {
+        if let Err(error) = query.stop(&lifecycle_ctx::stop()).await {
             failures.push(error);
         }
     }

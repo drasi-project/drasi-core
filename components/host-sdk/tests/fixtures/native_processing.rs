@@ -38,7 +38,7 @@ impl sdk::Factory for Factory {
             completion: None,
             capabilities: sdk::Capabilities {
                 indexed_processing: true,
-                delete_owned_resources: true,
+                erases_owned_state: true,
                 ..Default::default()
             },
         }
@@ -85,24 +85,55 @@ impl sdk::NativeComponent for Transformer {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.configuration.clone())
     }
-    fn supports_delete_owned_resources(&self) -> bool {
-        true
-    }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        self.processing
-            .run(|context| async move {
-                context
-                    .delete_element(&ElementReference::new("source", "1"))
-                    .await?;
-                Ok(())
-            })
-            .await
+    async fn dispose(
+        &mut self,
+        ctx: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        if !ctx.erases_owned_state() {
+            return Ok(());
+        }
+        let result: anyhow::Result<()> = async {
+            self.processing
+                .run(|context| async move {
+                    context
+                        .delete_element(&ElementReference::new("source", "1"))
+                        .await?;
+                    Ok(())
+                })
+                .await
+        }
+        .await;
+        Ok(result?)
+    }
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
     }
 }
 

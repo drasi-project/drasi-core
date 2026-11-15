@@ -90,14 +90,32 @@ impl ComputationComponent for Fixture {
         Ok(serde_json::json!({"secret": "must-not-appear-in-conflicts"}))
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         anyhow::ensure!(!self.fail, "private-failure-details");
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -471,7 +489,7 @@ async fn running_and_stopped_renames_preserve_object_wiring_progress_and_node_uu
             let sink = control.component_handle_by_id(&id(B)).expect("component identity fixture");
             source.wait_started().await.expect("component identity fixture");
             sink.wait_started().await.expect("component identity fixture");
-            topology_source.start().await.expect("component identity fixture");
+            topology_source.start(&lifecycle_contexts::start()).await.expect("component identity fixture");
             let before_projection = projection(&mut topology_source).await;
             let before = control.desired_snapshot();
             let binding = control.observed().relationships[&edge].generation;
@@ -557,9 +575,51 @@ async fn running_and_stopped_renames_preserve_object_wiring_progress_and_node_uu
             let decoded: GraphConfigurationSnapshot = serde_json::from_str(&serde_json::to_string(&snapshot).expect("component identity fixture")).expect("component identity fixture");
             assert_eq!(decoded.topology, snapshot.topology);
             assert_eq!(decoded.topology.components.iter().find(|node| node.descriptor.id() == &id(A)).expect("component identity fixture").name, name("saved-orders"));
-            topology_source.stop().await.expect("component identity fixture");
+            topology_source.stop(&lifecycle_contexts::stop()).await.expect("component identity fixture");
             control.cancel();
         });
         assert!(matches!(result, Err(GraphError::Cancelled)));
     }).await.expect("component identity fixture");
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

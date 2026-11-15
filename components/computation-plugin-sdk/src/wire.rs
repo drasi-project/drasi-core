@@ -151,7 +151,7 @@ pub struct UpdateRequest {
 /// Approved plugin-authored intent for a retained object. The caller must first
 /// validate actual data boundaries and storage/downstream requirements; this
 /// payload and the factory's metadata cannot establish them. Encoded as bounded
-/// named MessagePack when passed to the mutable APPLY_UPDATE operation.
+/// named MessagePack when passed to the management APPLY operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyUpdateRequest {
@@ -159,6 +159,9 @@ pub struct ApplyUpdateRequest {
     pub operation_id: String,
     pub request: UpdateRequest,
     pub plan: ComponentUpdatePlan,
+    /// The accepted assessment's fingerprint; re-checked before apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,8 +275,7 @@ mod tests {
     use drasi_computation_contracts::{GraphChangeCodec, StreamId};
 
     #[test]
-    fn envelope_operation_uses_borrowed_binary_payload_and_current_wire_version() {
-        assert_eq!(abi::WIRE_VERSION, BinaryEnvelopeCodec::VERSION);
+    fn envelope_operation_uses_borrowed_binary_payload() {
         let codec = codec(&[GraphChangeCodec::schema()]).unwrap();
         let output = OutputEnvelope {
             port: PortId::try_new("out").unwrap(),
@@ -352,5 +354,129 @@ mod tests {
         assert!(decode::<bool>(&bytes).is_err());
         assert!(decode::<Vec<Envelope<'_>>>(&[0xdd, 255, 255, 255, 255]).is_err());
         assert!(decode::<serde_bytes::ByteBuf>(&[0xc6, 255, 255, 255, 255]).is_err());
+    }
+}
+
+/// Lifecycle operation payload: the context of INITIALIZE, START, PAUSE,
+/// RESUME, STOP, DISPOSE and the management APPLY operation. Encoded as
+/// bounded named MessagePack. Unknown optional fields are ignored; any entry in
+/// `required` that this SDK does not understand rejects the operation.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct LifecycleRequest {
+    pub version: u32,
+    pub operation_id: String,
+    pub component_id: String,
+    pub generation: u64,
+    /// Milliseconds the host waits from issuing the operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<String>,
+    /// START only, and only for activation-credential factories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<crate::ActivationCredentials>,
+    /// STOP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_mode: Option<crate::lifecycle::StopMode>,
+    /// DISPOSE only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispose: Option<DisposeRequest>,
+    /// APPLY only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<ApplyUpdateRequest>,
+}
+
+impl std::fmt::Debug for LifecycleRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LifecycleRequest")
+            .field("operation_id", &self.operation_id)
+            .field("component_id", &self.component_id)
+            .field("generation", &self.generation)
+            .field(
+                "credentials",
+                &self.credentials.as_ref().map(|_| "<redacted>"),
+            )
+            .field("stop_mode", &self.stop_mode)
+            .field("dispose", &self.dispose)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisposeRequest {
+    pub reason: crate::lifecycle::DisposeReason,
+    pub intent: crate::lifecycle::StateIntent,
+    pub attempt: u32,
+}
+
+impl LifecycleRequest {
+    pub const VERSION: u32 = 1;
+
+    pub fn new(
+        operation_id: impl Into<String>,
+        component_id: impl Into<String>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            operation_id: operation_id.into(),
+            component_id: component_id.into(),
+            generation,
+            deadline_ms: None,
+            required: Vec::new(),
+            credentials: None,
+            stop_mode: None,
+            dispose: None,
+            update: None,
+        }
+    }
+
+    pub fn with_deadline(mut self, deadline: Option<std::time::Duration>) -> Self {
+        self.deadline_ms = deadline.map(|value| value.as_millis().min(u64::MAX as u128) as u64);
+        self
+    }
+
+    pub fn with_stop_mode(mut self, mode: crate::lifecycle::StopMode) -> Self {
+        self.stop_mode = Some(mode);
+        self
+    }
+
+    pub fn with_dispose(
+        mut self,
+        reason: crate::lifecycle::DisposeReason,
+        intent: crate::lifecycle::StateIntent,
+        attempt: u32,
+    ) -> Self {
+        self.dispose = Some(DisposeRequest {
+            reason,
+            intent,
+            attempt,
+        });
+        self
+    }
+
+    pub fn with_credentials(mut self, credentials: crate::ActivationCredentials) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    pub fn with_update(mut self, update: ApplyUpdateRequest) -> Self {
+        self.update = Some(update);
+        self
+    }
+
+    /// The shared scope, with the deadline measured from now.
+    pub fn scope(
+        &self,
+        cancellation: crate::lifecycle::CancellationToken,
+    ) -> crate::lifecycle::OperationScope {
+        crate::lifecycle::OperationScope::new(
+            self.operation_id.as_str(),
+            self.component_id.as_str(),
+            self.generation,
+            self.deadline_ms
+                .map(|ms| tokio::time::Instant::now() + std::time::Duration::from_millis(ms)),
+            cancellation,
+        )
     }
 }

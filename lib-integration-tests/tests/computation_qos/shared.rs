@@ -469,12 +469,7 @@ impl ComputationComponent for SharedSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -497,12 +492,7 @@ impl ComputationComponent for SharedSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]

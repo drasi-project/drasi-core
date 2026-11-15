@@ -63,7 +63,10 @@ impl ComputationComponent for Member {
         self.bound = true;
     }
 
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         assert!(
             self.bound,
             "mandatory control binding precedes initialization"
@@ -80,7 +83,10 @@ impl ComputationComponent for Member {
         Ok(())
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.calls.record("start");
         anyhow::ensure!(
             !self.calls.fail_start.load(Ordering::Acquire),
@@ -89,13 +95,22 @@ impl ComputationComponent for Member {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.calls.record("stop");
         anyhow::ensure!(!self.calls.fail_stop.load(Ordering::Acquire), "stop failed");
         Ok(())
     }
 
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         self.calls.record("dispose");
         anyhow::ensure!(
             !self.calls.fail_dispose.load(Ordering::Acquire),
@@ -105,12 +120,18 @@ impl ComputationComponent for Member {
         Ok(())
     }
 
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+    async fn pause(
+        &mut self,
+        _context: &drasi_lib::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
         self.calls.record("pause");
         Ok(())
     }
 
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+    async fn resume(
+        &mut self,
+        _context: &drasi_lib::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
         self.calls.record("resume");
         Ok(())
     }

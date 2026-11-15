@@ -482,12 +482,7 @@ impl ComputationComponent for QueryResultsOutlet {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 #[async_trait::async_trait]
 impl EnvelopeSink for QueryResultsOutlet {
@@ -893,7 +888,7 @@ mod tests {
             Arc::new(drasi_core::computation::InMemoryComputationProvider),
         )
         .await?;
-        query.start().await?;
+        query.start(&lifecycle_contexts::start()).await?;
         let provider = Arc::new(PausedQueryReader {
             reader: super::super::query_output::QueryOutputProvider::new(
                 &query.results(),
@@ -964,7 +959,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), subscription.receive_after_head())
                 .await??;
         assert_eq!(QueryChangeCodec::query_sequence(&delivered)?, 1);
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
         Ok(())
     }
 
@@ -986,7 +981,7 @@ mod tests {
             catalog.publish(first_output(&mut query).await?),
         )
         .await??;
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
         Ok(())
     }
 
@@ -1014,7 +1009,7 @@ mod tests {
             )?);
         assert_eq!(provider.reader.query_head()?.1, generation);
         assert!(api.validate_subscription(&head).await.is_err());
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
         Ok(())
     }
 
@@ -1059,7 +1054,7 @@ mod tests {
                 .await,
             Err(crate::queries::FetchError::TimedOut)
         ));
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
         Ok(())
     }
 
@@ -1097,7 +1092,7 @@ mod tests {
             .await?
             .with_query_configuration(config)?
             .with_result_catalog(&catalog)?;
-            query.start().await?;
+            query.start(&lifecycle_contexts::start()).await?;
             let input = |sequence, name: &str| -> anyhow::Result<InputEnvelope> {
                 Ok(InputEnvelope {
                     port: PortId::try_new("in")?,
@@ -1142,7 +1137,7 @@ mod tests {
                     .await??;
             assert_eq!(received.system().sequence(), 100);
             assert_eq!(QueryChangeCodec::query_sequence(&received)?, 2);
-            query.stop().await?;
+            query.stop(&lifecycle_contexts::stop()).await?;
         }
         Ok(())
     }
@@ -1213,8 +1208,8 @@ mod tests {
             before
         );
         assert_eq!(catalog.0.state.lock().unwrap().delivery[&id].capacity, 8);
-        first.stop().await.unwrap();
-        replacement.stop().await.unwrap();
+        first.stop(&lifecycle_contexts::stop()).await.unwrap();
+        replacement.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 
     #[tokio::test]
@@ -1303,7 +1298,7 @@ mod tests {
                     .expect("fixture UUID")
             )
             .is_err());
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(query);
         assert!(catalog
             .output_is_persistent(
@@ -1335,7 +1330,7 @@ mod tests {
         .unwrap()
         .with_result_catalog(&catalog)
         .unwrap();
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         for sequence in 1..=2 {
             query
                 .transform(InputEnvelope {
@@ -1412,7 +1407,7 @@ mod tests {
                 .len(),
             1
         );
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 
     #[tokio::test]
@@ -1444,7 +1439,7 @@ mod tests {
         let owner = query.output_owner();
         owner.state.write().unwrap().generation = 7;
         assert_eq!(reader.generation(), 7);
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(query);
         assert!(catalog
             .output_generation_reader(
@@ -1460,5 +1455,47 @@ mod tests {
         }));
         assert!(poisoned.is_err());
         assert_eq!(reader.generation(), 7);
+    }
+
+    #[allow(dead_code)]
+    mod lifecycle_contexts {
+        use crate::computation::v1::{
+            CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+            PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+        };
+
+        fn scope() -> OperationScope {
+            OperationScope::new("test", "component", 1, None, CancellationToken::new())
+        }
+
+        pub fn initialize() -> InitializeContext {
+            InitializeContext::new(scope())
+        }
+
+        pub fn start() -> StartContext {
+            StartContext::new(scope())
+        }
+
+        pub fn pause() -> PauseContext {
+            PauseContext::new(scope())
+        }
+
+        pub fn resume() -> ResumeContext {
+            ResumeContext::new(scope())
+        }
+
+        pub fn stop() -> StopContext {
+            StopContext::new(scope(), StopMode::Drain)
+        }
+
+        pub fn dispose() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+                .expect("shutdown preserves state")
+        }
+
+        pub fn erase() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+                .expect("removal may erase state")
+        }
     }
 }

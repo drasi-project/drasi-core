@@ -4,6 +4,8 @@
 //! Standalone CW-81 contract, not the mixed SQLite/query/non-query CW-82 profile.
 //! Run `make build-test-plugins` before this target.
 
+#[path = "common/hooks.rs"]
+mod hooks;
 use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -138,7 +140,9 @@ async fn create(
         },
         &NativeProcessingResource::new(provider).with_scheduling_clock(clock),
     )?;
-    component.initialize().await?;
+    component
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
     Ok(component)
 }
 
@@ -285,7 +289,7 @@ async fn lifecycle(loaded: bool) -> Result<()> {
         false,
     )
     .await?;
-    component.start().await?;
+    component.start(&crate::hooks::start_ctx()).await?;
     assert!(component.continue_transform().await?.is_empty());
     let original = input("one", "request", 7, 1)?;
     assert!(component.transform(original.clone()).await?.is_empty());
@@ -324,7 +328,7 @@ async fn lifecycle(loaded: bool) -> Result<()> {
             .has_pending()
             .await?
     );
-    component.stop().await?;
+    component.stop(&crate::hooks::stop_ctx()).await?;
     drop(component);
     let state = stored(directory.path()).await?;
     assert_eq!(state.completed, 1);
@@ -346,10 +350,10 @@ async fn failed_operations(loaded: bool) -> Result<()> {
         false,
     )
     .await?;
-    component.start().await?;
+    component.start(&crate::hooks::start_ctx()).await?;
     component.continue_transform().await?;
     assert!(component.transform(original.clone()).await.is_err());
-    component.stop().await?;
+    component.stop(&crate::hooks::stop_ctx()).await?;
     drop(component);
     let state = stored(directory.path()).await?;
     assert!(state.element.is_none());
@@ -364,12 +368,12 @@ async fn failed_operations(loaded: bool) -> Result<()> {
         true,
     )
     .await?;
-    component.start().await?;
+    component.start(&crate::hooks::start_ctx()).await?;
     component.continue_transform().await?;
     component.transform(original.clone()).await?;
     clock.advance_to(2000);
     assert!(component.on_wakeup().await.is_err());
-    component.stop().await?;
+    component.stop(&crate::hooks::stop_ctx()).await?;
     drop(component);
     let state = stored(directory.path()).await?;
     assert_eq!(state.next_due, Some(2000));
@@ -378,14 +382,14 @@ async fn failed_operations(loaded: bool) -> Result<()> {
     assert!(state.outputs.is_empty());
 
     let mut component = create(loaded, provider(directory.path())?, clock, false, false).await?;
-    component.start().await?;
+    component.start(&crate::hooks::start_ctx()).await?;
     component.continue_transform().await?;
     let output = component.on_wakeup().await?;
     assert_eq!(output.len(), 1);
     assert_output(&output[0], &original.envelope, 2000, 1)?;
     component.delivery_completed(&output).await?;
     assert!(component.on_wakeup().await?.is_empty());
-    component.stop().await?;
+    component.stop(&crate::hooks::stop_ctx()).await?;
     drop(component);
     assert_eq!(stored(directory.path()).await?.completed, 1);
     Ok(())
@@ -450,7 +454,7 @@ async fn commit_boundary(loaded: bool) -> Result<()> {
         signals: signals.clone(),
     });
     let mut component = create(loaded, provider, clock.clone(), false, false).await?;
-    component.start().await?;
+    component.start(&crate::hooks::start_ctx()).await?;
     component.continue_transform().await?;
     let wakeup = component.wakeup_source().context("scheduled wakeup")?;
     let original = input("one", "request", 7, 1)?;
@@ -480,7 +484,7 @@ async fn commit_boundary(loaded: bool) -> Result<()> {
     assert_eq!(output.len(), 1);
     assert_output(&output[0], &original.envelope, 2000, 1)?;
     component.delivery_completed(&output).await?;
-    component.stop().await?;
+    component.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -544,12 +548,7 @@ impl ComputationComponent for Source {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSource for Source {
@@ -569,12 +568,7 @@ impl ComputationComponent for Capture {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSink for Capture {

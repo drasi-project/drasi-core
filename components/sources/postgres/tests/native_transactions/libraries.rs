@@ -546,12 +546,15 @@ async fn native_bootstrap_rejects_a_same_named_but_different_actual_owner() -> R
         .await?
         .with_recovery_scope(INSTANCE)?
         .with_bootstrap(snapshot);
-    let failure = query.start().await.expect_err("different actual owner");
+    let failure = query
+        .start(&lifecycle_ctx::start())
+        .await
+        .expect_err("different actual owner");
     assert!(
         format!("{failure:#}").contains("actual progress owner"),
         "{failure:#}"
     );
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     assert!(expected.snapshot().checkpoints.is_empty());
     let slots: i64 = database
         .client()
@@ -579,9 +582,9 @@ async fn native_storedproc_resumes_partial_batches_and_deduplicates_destination_
     let directory = tempfile::tempdir()?;
     let owner = progress();
     let mut query = query(&directory.path().join("query"), owner.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(database.config.clone(), owner)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     database
         .client()
         .batch_execute("INSERT INTO person VALUES(1, 'one'), (2, 'two')")
@@ -613,24 +616,24 @@ async fn native_storedproc_resumes_partial_batches_and_deduplicates_destination_
     };
     let path = directory.path().join("consumer");
     let mut consumer = sink(&plugins.sink, &database, &path, "native-postgres").await?;
-    consumer.initialize().await?;
-    consumer.start().await?;
+    consumer.initialize(&lifecycle_ctx::initialize()).await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     assert!(consumer.handle(input()).await.is_err());
     assert_eq!(count(&database).await?, 1);
     assert_eq!(consumer.progress().await?[0].completed_operations, 1);
-    consumer.stop().await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(consumer);
     database
         .client()
         .batch_execute("UPDATE failure_gate SET enabled=false")
         .await?;
     let mut consumer = sink(&plugins.sink, &database, &path, "native-postgres").await?;
-    consumer.initialize().await?;
-    consumer.start().await?;
+    consumer.initialize(&lifecycle_ctx::initialize()).await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     consumer.handle(input()).await?;
     assert_eq!(count(&database).await?, 2);
     assert_eq!(consumer.progress().await?[0].completed_operations, 2);
-    consumer.stop().await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(consumer);
 
     // A fresh local receipt owner models recovery after a lost local response;
@@ -642,19 +645,19 @@ async fn native_storedproc_resumes_partial_batches_and_deduplicates_destination_
         "native-postgres",
     )
     .await?;
-    duplicate.initialize().await?;
-    duplicate.start().await?;
+    duplicate.initialize(&lifecycle_ctx::initialize()).await?;
+    duplicate.start(&lifecycle_ctx::start()).await?;
     duplicate.handle(input()).await?;
     assert_eq!(
         count(&database).await?,
         2,
         "committed destination effects must not repeat"
     );
-    duplicate.stop().await?;
+    duplicate.stop(&lifecycle_ctx::stop()).await?;
     drop(duplicate);
     query.delivery_completed(&outputs).await?;
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -665,9 +668,9 @@ async fn captured(
 ) -> Result<(ContinuousQueryTransformer, Vec<OutputEnvelope>)> {
     let owner = progress();
     let mut query = query(path, owner.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(database.config.clone(), owner)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     database.client().batch_execute(statement).await?;
     let group = next(&mut source).await?;
     let outputs = query
@@ -676,7 +679,7 @@ async fn captured(
             envelope: group.envelope,
         })
         .await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok((query, outputs))
 }
 
@@ -715,8 +718,8 @@ async fn native_storedproc_retries_only_rolled_back_retryable_sql_outcomes() -> 
         "native-postgres",
     )
     .await?;
-    consumer.initialize().await?;
-    consumer.start().await?;
+    consumer.initialize(&lifecycle_ctx::initialize()).await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     consumer
         .handle(InputEnvelope {
             port: PortId::try_new("in")?,
@@ -734,10 +737,10 @@ async fn native_storedproc_retries_only_rolled_back_retryable_sql_outcomes() -> 
         "the host must preserve the native handler's retry classification"
     );
     assert_eq!(consumer.progress().await?[0].completed_operations, 1);
-    consumer.stop().await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(consumer);
     query.delivery_completed(&outputs).await?;
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -783,8 +786,8 @@ async fn native_storedproc_cancellation_rolls_back_and_requires_joined_cleanup()
             sink_inputs()?,
         )
         .await?;
-    consumer.initialize().await?;
-    consumer.start().await?;
+    consumer.initialize(&lifecycle_ctx::initialize()).await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     tokio::time::timeout(TIMEOUT, async {
         tokio::select! {
             result = consumer.handle(input()) => anyhow::bail!("delivery completed before cancellation: {result:?}"),
@@ -808,10 +811,10 @@ async fn native_storedproc_cancellation_rolls_back_and_requires_joined_cleanup()
     );
     assert_eq!(consumer.progress().await?[0].completed_operations, 0);
     assert!(
-        consumer.start().await.is_err(),
+        consumer.start(&lifecycle_ctx::start()).await.is_err(),
         "cancellation must not authorize replacement"
     );
-    consumer.stop().await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(consumer);
     tls::retired(&database).await?;
     assert_eq!(
@@ -831,14 +834,14 @@ async fn native_storedproc_cancellation_rolls_back_and_requires_joined_cleanup()
         )
         .await?;
     let mut consumer = sink(&plugins.sink, &database, &path, "native-postgres").await?;
-    consumer.initialize().await?;
-    consumer.start().await?;
+    consumer.initialize(&lifecycle_ctx::initialize()).await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     consumer.handle(input()).await?;
     assert_eq!(count(&database).await?, 1);
-    consumer.stop().await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(consumer);
     query.delivery_completed(&outputs).await?;
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -945,14 +948,14 @@ async fn native_bootstrap_cancellation_preserves_intent_and_reset_replaces_only_
             }));
         tokio::time::timeout(TIMEOUT, async {
             tokio::select! {
-                result = query.start() => anyhow::bail!("snapshot completed before cancellation: {result:?}"),
+                result = query.start(lifecycle_ctx::held(lifecycle_ctx::start())) => anyhow::bail!("snapshot completed before cancellation: {result:?}"),
                 _ = prepared.notified() => Result::<()>::Ok(()),
             }
         }).await??;
         assert!(owner.snapshot().checkpoints.is_empty());
         assert!(!owner.snapshot().bootstrap_complete);
         abandoned = snapshot::managed_slot(&database).await?;
-        query.stop().await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     tls::retired(&database).await?;
     database
@@ -966,14 +969,14 @@ async fn native_bootstrap_cancellation_preserves_intent_and_reset_replaces_only_
             .with_recovery_scope(INSTANCE)?
             .with_bootstrap(bootstrap(&plugins, &database, owner)?);
         let error = query
-            .start()
+            .start(&lifecycle_ctx::start())
             .await
             .expect_err("strict recovery retains incomplete initialization");
         assert!(matches!(
             error.downcast_ref::<QueryRecoveryError>(),
             Some(QueryRecoveryError::IncompleteBootstrap)
         ));
-        query.stop().await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
         assert_eq!(snapshot::managed_slot(&database).await?, abandoned);
     }
     {
@@ -986,14 +989,14 @@ async fn native_bootstrap_cancellation_preserves_intent_and_reset_replaces_only_
         .await?
         .with_recovery_scope(INSTANCE)?
         .with_bootstrap(bootstrap(&plugins, &database, owner.clone())?);
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         assert_ne!(snapshot::managed_slot(&database).await?, abandoned);
         assert_eq!(
             rows(&query),
             vec![json!({"id":1,"name":"after interruption"})]
         );
         assert!(owner.snapshot().bootstrap_complete);
-        query.stop().await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     let external: bool = database
         .client()
@@ -1031,19 +1034,22 @@ async fn native_bootstrap_commits_exact_snapshot_before_concurrent_wal() -> Resu
             timestamps: timestamps.clone(),
         }));
     let (started, written) = tokio::time::timeout(TIMEOUT, async {
-        tokio::join!(query.start(), async {
-            prepared.notified().await;
-            database
-                .client()
-                .batch_execute(
-                    "BEGIN; UPDATE person SET name='during' WHERE id=1;
+        tokio::join!(
+            query.start(lifecycle_ctx::held(lifecycle_ctx::start())),
+            async {
+                prepared.notified().await;
+                database
+                    .client()
+                    .batch_execute(
+                        "BEGIN; UPDATE person SET name='during' WHERE id=1;
                  DELETE FROM person WHERE id=2; INSERT INTO person VALUES(3,'live'); COMMIT;",
-                )
-                .await?;
-            assert!(owner.snapshot().checkpoints.is_empty());
-            release.notify_one();
-            Result::<()>::Ok(())
-        })
+                    )
+                    .await?;
+                assert!(owner.snapshot().checkpoints.is_empty());
+                release.notify_one();
+                Result::<()>::Ok(())
+            }
+        )
     })
     .await?;
     started?;
@@ -1061,7 +1067,7 @@ async fn native_bootstrap_commits_exact_snapshot_before_concurrent_wal() -> Resu
         database.config.clone(),
         owner,
     )?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let group = next(&mut source).await?;
     let changes = SourceTransactionCodec::decode(&group.envelope, limits(16))?.into_changes();
     let latest_initial = *timestamps
@@ -1087,7 +1093,7 @@ async fn native_bootstrap_commits_exact_snapshot_before_concurrent_wal() -> Resu
             json!({"id":3,"name":"live"})
         ]
     );
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }

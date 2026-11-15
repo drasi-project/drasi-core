@@ -53,12 +53,7 @@ impl ComputationComponent for IdleLiveInput {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -390,8 +385,8 @@ async fn provider_scope_and_required_binding_are_checked() -> Result<()> {
         ComponentId::try_new("05ac6525-9b54-521d-8682-fed41a5a102b")?,
         configuration.clone(),
     )?;
-    unbound.initialize().await?;
-    assert!(unbound.start().await.is_err());
+    unbound.initialize(&crate::hooks::initialize_ctx()).await?;
+    assert!(unbound.start(&crate::hooks::start_ctx()).await.is_err());
     assert!(fixture
         .factory
         .create_component_with_bootstrap(
@@ -402,7 +397,7 @@ async fn provider_scope_and_required_binding_are_checked() -> Result<()> {
         )
         .is_err());
     assert!(!path.exists());
-    unbound.stop().await?;
+    unbound.stop(&crate::hooks::stop_ctx()).await?;
     fixture.core.shutdown().await?;
     Ok(())
 }
@@ -480,11 +475,14 @@ async fn quiescent_consumer_rejects_handover_metadata_instead_of_discarding_it()
             },
             Arc::new(NativeBootstrapResource(provider.clone())),
         )?;
-        query.initialize().await?;
-        assert!(query.start().await.is_err(), "handover mode {mode}");
+        query.initialize(&crate::hooks::initialize_ctx()).await?;
+        assert!(
+            query.start(&crate::hooks::start_ctx()).await.is_err(),
+            "handover mode {mode}"
+        );
         assert!(provider.stopped.load(Ordering::Acquire));
         assert!(snapshot_reader(&query)?.snapshot().await.is_err());
-        query.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
     }
     Ok(())
 }

@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use chrono::Datelike;
 use drasi_source_postgres::native::PostgresSnapshot;
@@ -171,9 +173,9 @@ async fn postgres_verified_tls_streams_initial_and_live_state_and_recovers() -> 
             if let Some(snapshot) = snapshot {
                 query = query.with_bootstrap(snapshot);
             }
-            query.start().await?;
+            query.start(&lifecycle_ctx::start()).await?;
             assert_eq!(rows(&query).len(), usize::from(initialize));
-            source.start().await?;
+            source.start(&lifecycle_ctx::start()).await?;
             let sessions = database
                 .client()
                 .query(
@@ -190,8 +192,8 @@ async fn postgres_verified_tls_streams_initial_and_live_state_and_recovers() -> 
                 .await?;
             apply(&mut query, next(&mut source).await?).await?;
             assert_eq!(rows(&query).len(), usize::from(initialize) + 1);
-            source.stop().await?;
-            query.stop().await?;
+            source.stop(&lifecycle_ctx::stop()).await?;
+            query.stop(&lifecycle_ctx::stop()).await?;
         }
         retired(&database).await?;
         database
@@ -206,12 +208,12 @@ async fn postgres_verified_tls_streams_initial_and_live_state_and_recovers() -> 
             if let Some(snapshot) = snapshot {
                 query = query.with_bootstrap(snapshot);
             }
-            query.start().await?;
-            source.start().await?;
+            query.start(&lifecycle_ctx::start()).await?;
+            source.start(&lifecycle_ctx::start()).await?;
             apply(&mut query, next(&mut source).await?).await?;
             assert_eq!(rows(&query).len(), usize::from(initialize) + 2);
-            source.stop().await?;
-            query.stop().await?;
+            source.stop(&lifecycle_ctx::stop()).await?;
+            query.stop(&lifecycle_ctx::stop()).await?;
         }
         retired(&database).await?;
         database.shutdown().await?;
@@ -228,7 +230,7 @@ async fn postgres_tls_rejects_untrusted_wrong_host_and_invalid_ca_without_progre
     let path = tempfile::tempdir()?;
     let owner = progress();
     let mut query = query(path.path(), owner.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     for mode in [SslMode::Prefer, SslMode::Require] {
         for (host, ca) in [
             ("localhost", None),
@@ -241,12 +243,15 @@ async fn postgres_tls_rejects_untrusted_wrong_host_and_invalid_ca_without_progre
             config.connection.host = host.into();
             config.tls_ca_pem = ca;
             let mut source = source(config, owner.clone())?;
-            let error = source.start().await.expect_err("invalid TLS identity");
+            let error = source
+                .start(&lifecycle_ctx::start())
+                .await
+                .expect_err("invalid TLS identity");
             anyhow::ensure!(
                 error.downcast_ref::<native_tls::Error>().is_some(),
                 "{error:#}"
             );
-            source.stop().await?;
+            source.stop(&lifecycle_ctx::stop()).await?;
             assert!(owner.snapshot().checkpoints.is_empty());
             assert!(rows(&query).is_empty());
             retired(&database).await?;
@@ -267,7 +272,7 @@ async fn postgres_tls_rejects_untrusted_wrong_host_and_invalid_ca_without_progre
             .tls_ca_pem
             .is_none()
     );
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -279,20 +284,23 @@ async fn postgres_tls_rejects_expired_certificates_without_plaintext_retry() -> 
     let path = tempfile::tempdir()?;
     let owner = progress();
     let mut query = query(path.path(), owner.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     for mode in [SslMode::Prefer, SslMode::Require] {
         let mut config = database.config.clone();
         config.connection.ssl_mode = mode;
         let mut source = source(config, owner.clone())?;
-        let error = source.start().await.expect_err("expired certificate");
+        let error = source
+            .start(&lifecycle_ctx::start())
+            .await
+            .expect_err("expired certificate");
         anyhow::ensure!(
             error.downcast_ref::<native_tls::Error>().is_some(),
             "{error:#}"
         );
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
         assert!(owner.snapshot().checkpoints.is_empty());
         retired(&database).await?;
     }
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }

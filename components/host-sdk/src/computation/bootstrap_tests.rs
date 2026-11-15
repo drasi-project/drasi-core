@@ -459,11 +459,15 @@ async fn native_bootstrap_non_ready_query_reset_reprepares_static_and_dynamic() 
             .await?
             .with_bootstrap(bootstrap)
             .with_source_progress(owner.clone())?;
-            query.start().await?;
+            query
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             assert_eq!(query.results().snapshot()?.rows.len(), 2);
             assert!(owner.snapshot().bootstrap_complete);
             assert!(!owner.snapshot().persistent);
-            query.stop().await?;
+            query
+                .stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
         }
     }
     Ok(())
@@ -540,12 +544,17 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
     .await?
     .with_bootstrap(bootstrap)
     .with_source_progress(progress())?;
-    let error = query.start().await.unwrap_err();
+    let error = query
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap_err();
     assert!(
         error.to_string().contains("actual progress owner"),
         "{error:#}"
     );
-    query.stop().await?;
+    query
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -602,7 +611,9 @@ async fn native_bootstrap_real_library_commits_snapshot_and_recovers_without_res
             Some(owner.clone()),
         )?;
         let mut query = persisted_query(directory.path(), owner.clone(), bootstrap).await?;
-        query.start().await?;
+        query
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         let rows = query.results().snapshot()?.rows;
         assert_eq!(
             rows.len(),
@@ -624,7 +635,9 @@ async fn native_bootstrap_real_library_commits_snapshot_and_recovers_without_res
                 .sequence,
             u64::MAX
         );
-        query.stop().await?;
+        query
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
     Ok(())
 }
@@ -645,7 +658,8 @@ async fn native_bootstrap_real_library_preserves_initialization_intent_after_can
         let mut query = persisted_query(directory.path(), owner.clone(), bootstrap.clone()).await?;
         if mode == "pending" {
             {
-                let start = query.start();
+                let start_context = crate::computation::test_hooks::start_ctx();
+                let start = query.start(&start_context);
                 tokio::pin!(start);
                 tokio::select! {
                     result = &mut start => panic!("pending snapshot unexpectedly completed: {result:?}"),
@@ -656,10 +670,14 @@ async fn native_bootstrap_real_library_preserves_initialization_intent_after_can
             }
             assert!(!owner.snapshot().bootstrap_complete);
         } else {
-            query.start().await?;
+            query
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             assert_eq!(query.results().snapshot()?.rows.len(), 3);
         }
-        query.stop().await?;
+        query
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
     Ok(())
 }
@@ -794,9 +812,13 @@ async fn native_bootstrap_recipe_uses_declared_owners_and_unresolved_secrets() -
     }
     let directory = tempfile::tempdir()?;
     let mut query = persisted_query(directory.path(), owner, provider.clone()).await?;
-    query.start().await?;
+    query
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert_eq!(query.results().snapshot()?.rows.len(), 3);
-    query.stop().await?;
+    query
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     let id = specification.id.clone();
     let service = super::plugin()
         .factories()

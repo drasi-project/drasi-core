@@ -46,7 +46,7 @@ impl sdk::Factory for Factory {
                 .collect(),
             completion: None,
             capabilities: sdk::Capabilities {
-                delete_owned_resources: true,
+                erases_owned_state: true,
                 ..Default::default()
             },
         }
@@ -87,24 +87,54 @@ impl sdk::NativeComponent for Transformer {
         Ok(self.configuration.clone())
     }
 
-    fn supports_delete_owned_resources(&self) -> bool {
-        true
-    }
-
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
 
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        match std::fs::remove_file(&self.state_file) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).context("remove fixture-owned state"),
+    async fn dispose(
+        &mut self,
+        ctx: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        if !ctx.erases_owned_state() {
+            return Ok(());
         }
+        let result: anyhow::Result<()> = async {
+            match std::fs::remove_file(&self.state_file) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error).context("remove fixture-owned state"),
+            }
+        }
+        .await;
+        Ok(result?)
+    }
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
     }
 }
 

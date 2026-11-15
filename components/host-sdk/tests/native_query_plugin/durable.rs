@@ -147,8 +147,8 @@ async fn restart_receipt() -> Result<()> {
         1,
     )?;
     let mut query = create(path, QUERY, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.has_pending_emissions());
     assert!(query.continue_transform().await?.is_empty());
     assert!(!query.has_pending_emissions());
@@ -156,12 +156,12 @@ async fn restart_receipt() -> Result<()> {
     aggregate(&first, Some(0.0), 10.0, 1)?;
     let producer =
         GraphProducerProgress::from_envelope(&first[0].envelope)?.context("first producer")?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create(path, QUERY, 2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(
         query.has_pending_emissions(),
         "startup must expose pending replay before input"
@@ -194,12 +194,12 @@ async fn restart_receipt() -> Result<()> {
     aggregate(&updated, Some(10.0), 12.0, 2)?;
     assert_eq!(updated[0].envelope.system().sequence(), 3);
     query.delivery_completed(&updated).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create(path, QUERY, 3)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(
         query.continue_transform().await?.is_empty(),
         "confirmed output must not replay"
@@ -215,7 +215,7 @@ async fn restart_receipt() -> Result<()> {
     aggregate(&next, Some(12.0), 15.0, 3)?;
     assert_eq!(next[0].envelope.system().sequence(), 4);
     query.delivery_completed(&next).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -233,8 +233,8 @@ async fn indexed_state_progress_and_pending_output_survive_reopen_multi_thread()
 async fn indexed_deprovision_clears_owned_rows_progress_and_bootstrap_state() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     query
         .bootstrap_state()
         .expect("bootstrap state")
@@ -253,20 +253,22 @@ async fn indexed_deprovision_clears_owned_rows_progress_and_bootstrap_state() ->
         .identity()
         .clone();
     assert!(
-        query.delete_owned_resources().await.is_err(),
+        query.dispose(&crate::hooks::erase_ctx()).await.is_err(),
         "running work cannot be deleted"
     );
-    query.stop().await?;
-    query.delete_owned_resources().await?;
-    query.delete_owned_resources().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
+    query.dispose(&crate::hooks::erase_ctx()).await?;
+    query.dispose(&crate::hooks::erase_ctx()).await?;
     assert!(
-        query.start().await.is_err(),
+        query.start(&crate::hooks::start_ctx()).await.is_err(),
         "a deleted instance cannot reactivate"
     );
     drop(query);
     let mut recreated = create(directory.path(), QUERY, 2)?;
-    recreated.initialize().await?;
-    recreated.start().await?;
+    recreated
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
+    recreated.start(&crate::hooks::start_ctx()).await?;
     assert!(recreated
         .bootstrap_state()
         .expect("bootstrap state")
@@ -296,7 +298,7 @@ async fn indexed_deprovision_clears_owned_rows_progress_and_bootstrap_state() ->
         &producer
     );
     recreated.delivery_completed(&output).await?;
-    recreated.stop().await?;
+    recreated.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -305,7 +307,7 @@ async fn indexed_preparation_exposes_actual_recovery_evidence_before_activation(
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
     let unprepared = query.recovery_contract();
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.prepare_processing().await?;
     let prepared = query.recovery_contract();
     assert_ne!(prepared, unprepared);
@@ -325,7 +327,7 @@ async fn indexed_preparation_exposes_actual_recovery_evidence_before_activation(
             .is_err(),
         "preparation admitted indexed work before activation"
     );
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(query.recovery_contract(), prepared);
     let output = query
         .transform(input(
@@ -337,10 +339,10 @@ async fn indexed_preparation_exposes_actual_recovery_evidence_before_activation(
         .await?;
     aggregate(&output, Some(0.0), 10.0, 1)?;
     query.delivery_completed(&output).await?;
-    query.stop().await?;
-    query.start().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(query.recovery_contract(), prepared);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -349,8 +351,8 @@ async fn indexed_reopen_rejects_changed_configuration_without_erasing_state() ->
     let directory = tempfile::tempdir()?;
     let path = directory.path();
     let mut query = create(path, QUERY, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -360,23 +362,23 @@ async fn indexed_reopen_rejects_changed_configuration_without_erasing_state() ->
         )?)
         .await?;
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
     let mut changed = create(path, "MATCH (n:Item) RETURN count(n) AS total", 2)?;
-    changed.initialize().await?;
+    changed.initialize(&crate::hooks::initialize_ctx()).await?;
     let error = changed
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("configuration mismatch must not reuse indexes");
     assert!(
         format!("{error:#}").contains("configuration changed"),
         "{error:#}"
     );
-    changed.stop().await?;
+    changed.stop(&crate::hooks::stop_ctx()).await?;
     drop(changed);
     let mut query = create(path, QUERY, 3)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Replace {
@@ -387,7 +389,7 @@ async fn indexed_reopen_rejects_changed_configuration_without_erasing_state() ->
         .await?;
     aggregate(&output, Some(10.0), 12.0, 2)?;
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -395,8 +397,8 @@ async fn indexed_reopen_rejects_changed_configuration_without_erasing_state() ->
 async fn indexed_confirmation_cannot_discard_a_different_pending_output() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -410,11 +412,11 @@ async fn indexed_confirmation_cannot_discard_a_different_pending_output() -> Res
         envelope: output[0].envelope.reemit(999)?,
     }];
     assert!(query.delivery_completed(&wrong).await.is_err());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
     let mut query = create(directory.path(), QUERY, 2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let progress = query
         .committed_input_progress()?
         .context("reopened progress view")?;
@@ -428,7 +430,7 @@ async fn indexed_confirmation_cannot_discard_a_different_pending_output() -> Res
     let output = query.continue_transform().await?;
     aggregate(&output, Some(0.0), 10.0, 1)?;
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -440,9 +442,9 @@ async fn indexed_persistence_rejects_unqualified_storage() -> Result<()> {
         scope(1),
         Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
-    query.initialize().await?;
-    assert!(query.start().await.is_err());
-    query.stop().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    assert!(query.start(&crate::hooks::start_ctx()).await.is_err());
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -455,8 +457,8 @@ async fn indexed_commit_exit_child() -> Result<()> {
         return non_atomic::exit_child(&path, phase.to_str().context("invalid crash phase")?).await;
     }
     let mut query = create(&path, QUERY, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -597,8 +599,8 @@ async fn process_exit_and_graph_replay() -> Result<()> {
     assert_eq!(delivered[0].envelope.system().sequence(), 2);
 
     let mut query = create(directory.path(), QUERY, 2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(
         query.continue_transform().await?.is_empty(),
         "graph delivery confirmation was not persisted"
@@ -633,7 +635,7 @@ async fn process_exit_and_graph_replay() -> Result<()> {
         .await?;
     aggregate(&updated, Some(10.0), 12.0, 2)?;
     query.delivery_completed(&updated).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 

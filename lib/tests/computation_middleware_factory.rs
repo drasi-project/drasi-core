@@ -106,12 +106,7 @@ impl ComputationComponent for Source {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -131,12 +126,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -409,8 +399,14 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
     )
     .await
     .expect("query");
-    transformer.start().await.expect("start transformer");
-    query.start().await.expect("start query");
+    transformer
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start transformer");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start query");
 
     let mut expanded = transformer
         .transform(raw_source_input(77, false))
@@ -481,6 +477,54 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
         .expect("duplicate raw source position")
         .is_empty());
     assert_eq!(query.results().snapshot().expect("snapshot").rows.len(), 3);
-    transformer.stop().await.expect("stop transformer");
-    query.stop().await.expect("stop query");
+    transformer
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop transformer");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop query");
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

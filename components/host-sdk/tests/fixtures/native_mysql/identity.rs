@@ -88,10 +88,10 @@ pub(super) async fn rotation(
     };
     let proof =
         async {
-            sink.start().await?;
+            sink.start(&crate::hooks::start_ctx()).await?;
             assert_eq!(provider.state()?.contexts.len(), 1);
             sink.handle(input()).await?;
-            sink.stop().await?;
+            sink.stop(&crate::hooks::stop_ctx()).await?;
             assert_eq!(sink.configuration()?, declared);
             database
                 .sql(
@@ -103,10 +103,10 @@ pub(super) async fn rotation(
                 username: "native_identity".into(),
                 token: "second-auth".into(),
             });
-            sink.start().await?;
+            sink.start(&crate::hooks::start_ctx()).await?;
             assert_eq!(provider.state()?.contexts.len(), 2);
             sink.handle(input()).await?;
-            sink.stop().await?;
+            sink.stop(&crate::hooks::stop_ctx()).await?;
             assert_eq!(sink.configuration()?, declared);
 
             for rejected in [
@@ -127,11 +127,11 @@ pub(super) async fn rotation(
             ] {
                 provider.state()?.next = rejected;
                 assert!(
-                    sink.start().await.is_err(),
+                    sink.start(&crate::hooks::start_ctx()).await.is_err(),
                     "failed identity must not reuse old auth"
                 );
                 assert!(sink.handle(input()).await.is_err());
-                sink.stop().await?;
+                sink.stop(&crate::hooks::stop_ctx()).await?;
                 assert_eq!(sink.configuration()?, declared);
 
                 let reads = provider.state()?.contexts.len();
@@ -143,8 +143,8 @@ pub(super) async fn rotation(
                 )?;
                 assert_eq!(provider.state()?.contexts.len(), reads);
                 let original = fallback.configuration()?;
-                let start = fallback.start().await;
-                let stopped = fallback.stop().await;
+                let start = fallback.start(&crate::hooks::start_ctx()).await;
+                let stopped = fallback.stop(&crate::hooks::stop_ctx()).await;
                 assert!(
                     start.is_err(),
                     "bound identity must override valid root literals"
@@ -157,9 +157,9 @@ pub(super) async fn rotation(
                 username: "native_identity".into(),
                 password: "second-auth".into(),
             });
-            sink.start().await?;
+            sink.start(&crate::hooks::start_ctx()).await?;
             sink.handle(input()).await?;
-            sink.stop().await?;
+            sink.stop(&crate::hooks::stop_ctx()).await?;
             assert_eq!(sink.configuration()?, declared);
             assert_eq!(provider.state()?.contexts.len(), 11);
             let expected = HashMap::from([
@@ -188,6 +188,6 @@ pub(super) async fn rotation(
             Ok(())
         }
         .await;
-    let stopped = sink.stop().await;
+    let stopped = sink.stop(&crate::hooks::stop_ctx()).await;
     combine("native MySQL activation credentials", [proof, stopped])
 }

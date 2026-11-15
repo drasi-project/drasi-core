@@ -124,25 +124,63 @@ impl sdk::NativeComponent for Handler {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.configuration.clone())
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        if let Some(path) = self.configuration["path"].as_str() {
-            let connection = rusqlite::Connection::open(path)?;
-            connection.execute_batch(
-                "CREATE TABLE IF NOT EXISTS effects(id TEXT PRIMARY KEY, operation INTEGER);
+    async fn start(
+        &mut self,
+        _ctx: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            if let Some(path) = self.configuration["path"].as_str() {
+                let connection = rusqlite::Connection::open(path)?;
+                connection.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS effects(id TEXT PRIMARY KEY, operation INTEGER);
                  CREATE TABLE IF NOT EXISTS attempts(id TEXT, operation INTEGER);",
-            )?;
+                )?;
+                *self
+                    .connection
+                    .get_mut()
+                    .map_err(|_| anyhow::anyhow!("fixture poisoned"))? = Some(connection);
+            }
+            Ok(())
+        }
+        .await;
+        Ok(result?)
+    }
+    async fn stop(
+        &mut self,
+        _ctx: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
             *self
                 .connection
                 .get_mut()
-                .map_err(|_| anyhow::anyhow!("fixture poisoned"))? = Some(connection);
+                .map_err(|_| anyhow::anyhow!("fixture poisoned"))? = None;
+            Ok(())
         }
+        .await;
+        Ok(result?)
+    }
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        *self
-            .connection
-            .get_mut()
-            .map_err(|_| anyhow::anyhow!("fixture poisoned"))? = None;
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn dispose(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
 }

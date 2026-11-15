@@ -77,8 +77,8 @@ async fn composite_bootstrap() -> Result<()> {
          INSERT INTO Customers VALUES(7,'Ada');",
     )?;
     let mut loading = query(&left, &right, &indexes, 1, &sources)?;
-    loading.initialize().await?;
-    loading.start().await?;
+    loading.initialize(&crate::hooks::initialize_ctx()).await?;
+    loading.start(&crate::hooks::start_ctx()).await?;
     joined(&reader(&loading)?.snapshot().await?)?;
     assert!(
         loading
@@ -95,13 +95,13 @@ async fn composite_bootstrap() -> Result<()> {
         .snapshot()
         .checkpoints
         .is_empty());
-    loading.stop().await?;
+    loading.stop(&crate::hooks::stop_ctx()).await?;
     drop(loading);
     let mut restored = query(&left, &right, &indexes, 2, &sources)?;
-    restored.initialize().await?;
-    restored.start().await?;
+    restored.initialize(&crate::hooks::initialize_ctx()).await?;
+    restored.start(&crate::hooks::start_ctx()).await?;
     joined(&reader(&restored)?.snapshot().await?)?;
-    restored.stop().await?;
+    restored.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 

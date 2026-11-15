@@ -183,8 +183,14 @@ async fn computation_topology_is_queryable_as_typed_graph_changes() {
         language: ComputationQueryLanguage::Cypher, output_stream: stream("query"),
         outbox_capacity: NonZeroUsize::new(16).expect("capacity"),
     }, Arc::new(drasi_core::computation::InMemoryComputationProvider)).await.expect("query");
-    query.start().await.expect("start query");
-    source.start().await.expect("start topology source");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start query");
+    source
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start topology source");
     for _ in 0..6 {
         let event = source
             .next()
@@ -211,8 +217,14 @@ async fn computation_topology_is_queryable_as_typed_graph_changes() {
         ids,
         BTreeSet::from([component(77).to_string(), component(101).to_string()])
     );
-    source.stop().await.expect("stop source");
-    query.stop().await.expect("stop query");
+    source
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop source");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop query");
 }
 
 #[tokio::test]
@@ -266,8 +278,14 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
     )
     .await
     .expect("query");
-    query.start().await.expect("query start");
-    source.start().await.expect("topology start");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("query start");
+    source
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("topology start");
     let topology = inspector.topology();
     let initial_events = 1
         + topology.nodes.len()
@@ -327,8 +345,14 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
         inspector.history(0).is_err(),
         "evicted history must not look complete"
     );
-    source.stop().await.expect("topology stop");
-    query.stop().await.expect("query stop");
+    source
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("topology stop");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("query stop");
     drasi.shutdown().await.expect("shutdown");
 }
 
@@ -348,4 +372,46 @@ async fn apply_topology(drasi: &DrasiLib, edit: impl FnOnce(&mut DesiredTopology
         .await
         .expect("reconciliation");
     assert!(status.applied && status.error.is_none(), "{status:?}");
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

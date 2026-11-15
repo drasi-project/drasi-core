@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle_ctx;
 use drasi_index_rocksdb::{
     computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
 };
@@ -87,7 +88,7 @@ async fn cancelled_worker_retains_one_client() -> Result<()> {
     .with_source_progress(first)?
     .with_bootstrap(snapshot.clone());
     {
-        let start = query.start();
+        let start = query.start(lifecycle_ctx::held(lifecycle_ctx::start()));
         tokio::pin!(start);
         tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
@@ -150,11 +151,11 @@ async fn cancelled_worker_retains_one_client() -> Result<()> {
         }
     })
     .await??;
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     assert!(!snapshots.inner.owns_worker().await);
     assert!(!snapshots.inner.has_active_run()?);
     let mut replacement = replacement()?;
-    replacement.stop().await?;
+    replacement.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 

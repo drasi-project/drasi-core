@@ -256,32 +256,37 @@ impl ComputationComponent for NativeConsumerProxy {
     fn requires_readiness_confirmation(&self) -> bool {
         self.component.requires_readiness_confirmation()
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
-        self.component.initialize().await
+    async fn initialize(&mut self, context: &InitializeContext) -> anyhow::Result<()> {
+        self.component.initialize(context).await
     }
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+    async fn pause(&mut self, context: &PauseContext) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.running && !self.cleanup_required,
             "native consumer cannot pause with incomplete work"
         );
-        self.component.pause_processing().await
+        self.component.pause(context).await
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+    async fn resume(&mut self, context: &ResumeContext) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.running && !self.cleanup_required,
             "native consumer cannot resume with incomplete work"
         );
-        self.component.resume_processing().await
+        self.component.resume(context).await
     }
-    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !self.cleanup_required && !self.disposing,
-            "native consumer update requires completed delivery and cleanup"
-        );
-        self.component.apply_update(context).await?;
-        self.validate_mode()
+    fn management(&self) -> Option<&dyn ComponentManagement> {
+        self.component
+            .management()
+            .is_some()
+            .then_some(self as &dyn ComponentManagement)
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    fn management_mut(&mut self) -> Option<&mut dyn ComponentManagement> {
+        if self.component.management().is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+    async fn start(&mut self, context: &StartContext) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.running && !self.cleanup_required && !self.disposing,
             "native consumer requires completed cleanup before starting"
@@ -290,21 +295,21 @@ impl ComputationComponent for NativeConsumerProxy {
         self.reopen().await?;
         self.runner.as_mut().expect("opened").progress().await?;
         self.validate_mode()?;
-        self.component.start().await?;
+        self.component.start(context).await?;
         self.validate_mode()?;
         self.running = true;
         self.cleanup_required = false;
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, context: &StopContext) -> anyhow::Result<()> {
         self.running = false;
         self.cleanup_required = true;
-        self.component.stop().await?;
+        self.component.stop(context).await?;
         self.close_delivery().await?;
         self.cleanup_required = false;
         Ok(())
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(&mut self, context: &DisposeContext) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.running && (!self.cleanup_required || self.disposing),
             "native consumer disposal requires completed cleanup"
@@ -312,9 +317,43 @@ impl ComputationComponent for NativeConsumerProxy {
         self.disposing = true;
         self.cleanup_required = true;
         self.close_delivery().await?;
-        self.component.dispose().await?;
+        self.component.dispose(context).await?;
         self.cleanup_required = false;
         Ok(())
+    }
+}
+#[async_trait]
+impl ComponentManagement for NativeConsumerProxy {
+    fn assess(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<Option<Assessment>> {
+        match self.component.management() {
+            Some(management) => management.assess(current, proposed),
+            None => Ok(None),
+        }
+    }
+    async fn apply(
+        &mut self,
+        context: &ApplyContext,
+        update: ComponentUpdateContext,
+    ) -> std::result::Result<(), ApplyError> {
+        if self.cleanup_required || self.disposing {
+            return Err(ApplyError::Failed(anyhow::anyhow!(
+                "native consumer update requires completed delivery and cleanup"
+            )));
+        }
+        self.component
+            .management_mut()
+            .ok_or_else(|| {
+                ApplyError::Failed(anyhow::anyhow!(
+                    "native component does not export management"
+                ))
+            })?
+            .apply(context, update)
+            .await?;
+        self.validate_mode().map_err(ApplyError::Damaged)
     }
 }
 #[async_trait]
@@ -542,7 +581,9 @@ mod tests {
             options(),
         )
         .await?;
-        consumer.start().await?;
+        consumer
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         let input = batch()?;
         let identity = consumer.runner.as_ref().unwrap().batch_identity(&input)?;
         let mut forged = serde_json::to_value(&identity)?;
@@ -627,7 +668,9 @@ mod tests {
         .is_err());
         DeliveryHandler::handle(&mut second, local.item(0)?).await?;
         second.finish()?;
-        consumer.stop().await?;
+        consumer
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         Ok(())
     }
 
@@ -646,7 +689,9 @@ mod tests {
             options(),
         )
         .await?;
-        consumer.start().await?;
+        consumer
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         let input = batch()?;
         let identity = consumer.runner.as_ref().unwrap().batch_identity(&input)?;
         let remote = consumer.component.inner.clone();
@@ -687,8 +732,12 @@ mod tests {
         )
         .await
         .is_err());
-        consumer.stop().await?;
-        consumer.start().await?;
+        consumer
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
+        consumer
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         let mut replacement = Batch::begin(
             remote,
             consumer.extension,
@@ -699,7 +748,9 @@ mod tests {
         .await?;
         assert!(replacement.generation > batch.generation);
         replacement.finish()?;
-        consumer.stop().await?;
+        consumer
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         Ok(())
     }
 }

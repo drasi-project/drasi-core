@@ -3,6 +3,8 @@
 
 //! Requires Podman and the three separately rebuilt native MySQL libraries.
 
+#[path = "common/hooks.rs"]
+mod hooks;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_core::computation::{ComputationIndexProvider, InMemoryComputationProvider};
@@ -113,12 +115,7 @@ impl ComputationComponent for Capture {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSink for Capture {
@@ -273,12 +270,19 @@ async fn family(dynamic: bool) -> Result<()> {
         consumers.clone(),
     )?;
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), unready.start())
-            .await
-            .is_err(),
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            unready.start(&crate::hooks::start_ctx())
+        )
+        .await
+        .is_err(),
         "uninitialized real owners must fence startup"
     );
-    tokio::time::timeout(Duration::from_secs(5), unready.stop()).await??;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        unready.stop(&crate::hooks::stop_ctx()),
+    )
+    .await??;
     assert_eq!(
         database.sql("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER='root' AND ID<>CONNECTION_ID()").await?,
         "0",
@@ -325,10 +329,10 @@ async fn family(dynamic: bool) -> Result<()> {
     .with_recovery_scope(INSTANCE)?
     .with_bootstrap(substitute_provider);
     let rejected = invalid
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("same name is not owner identity");
-    invalid.stop().await?;
+    invalid.stop(&crate::hooks::stop_ctx()).await?;
     assert!(
         format!("{rejected:#}").contains("actual progress owner"),
         "{rejected:#}"
@@ -609,7 +613,7 @@ async fn procedure_lifecycle(
         id("held-procedure"),
         configuration("CALL wait_effect({{param output.alias}})", 50),
     )?;
-    sink.start().await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     let mut pending = Box::pin(sink.handle(input()));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -635,15 +639,15 @@ async fn procedure_lifecycle(
         "pending CALL must not be replaced"
     );
     assert!(
-        sink.stop().await.is_err(),
+        sink.stop(&crate::hooks::stop_ctx()).await.is_err(),
         "short stop must retain CALL ownership"
     );
     assert!(
-        sink.start().await.is_err(),
+        sink.start(&crate::hooks::start_ctx()).await.is_err(),
         "pending cleanup cannot authorize restart"
     );
     tokio::time::sleep(Duration::from_millis(1100)).await;
-    sink.stop().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
     assert_eq!(
         database
             .sql("SELECT COUNT(*) FROM audit WHERE operation='wait'")
@@ -655,13 +659,13 @@ async fn procedure_lifecycle(
         id("failed-procedure"),
         configuration("CALL fail_effect({{param output.alias}})", 5000),
     )?;
-    failed.start().await?;
+    failed.start(&crate::hooks::start_ctx()).await?;
     assert!(failed.handle(input()).await.is_err());
     assert!(
         failed.handle(input()).await.is_err(),
         "submitted failed CALL is not retried"
     );
-    failed.stop().await?;
+    failed.stop(&crate::hooks::stop_ctx()).await?;
     assert_eq!(
         database
             .sql("SELECT COUNT(*) FROM audit WHERE operation='failed'")

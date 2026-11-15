@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use drasi_computation_contracts::{ComponentId, PortDirection};
 use drasi_computation_plugin_sdk::{ActivationCredentials, ExportedPlugin, NativeComponent};
@@ -62,19 +64,21 @@ async fn activation_credentials_are_explicit_transient_and_not_constructor_io() 
     assert_eq!(original["settings"]["user"], "");
     assert_eq!(original["settings"]["password"], "");
     assert!(
-        sink.start().await.is_err(),
+        sink.start(&mut lifecycle_ctx::start()).await.is_err(),
         "bound startup cannot fall back to literals"
     );
     assert!(sink
-        .start_with_credentials(ActivationCredentials::Token {
-            username: String::new(),
-            token: "transient-only".into(),
-        })
+        .start(&mut lifecycle_ctx::start_with(
+            ActivationCredentials::Token {
+                username: String::new(),
+                token: "transient-only".into(),
+            }
+        ))
         .await
         .is_err());
     assert_eq!(sink.configuration()?, original);
     assert!(!sink.configuration()?.to_string().contains("transient-only"));
-    sink.stop().await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 

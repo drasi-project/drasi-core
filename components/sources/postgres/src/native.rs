@@ -7,7 +7,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_computation_bootstrap_postgres::NativeBootstrapProvider;
-use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
+use drasi_computation_plugin_sdk::{lifecycle as native_lifecycle, NativeComponent, NativeSource};
 use drasi_computation_source_postgres::PostgresTransactionSource as NativePostgresSource;
 use drasi_core::interface::StorageDurability;
 use drasi_lib::computation::v1::{
@@ -107,11 +107,28 @@ impl ComputationComponent for PostgresTransactionSource {
     fn configuration(&self) -> Result<serde_json::Value> {
         self.inner.configuration()
     }
-    async fn start(&mut self) -> Result<()> {
-        self.inner.start().await
+    async fn start(&mut self, context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
+        let mut native = native_lifecycle::StartContext::new(context.scope().clone(), None);
+        Ok(self.inner.start(&mut native).await?)
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.inner.stop().await
+    async fn stop(&mut self, context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        let native = native_lifecycle::StopContext::new(context.scope().clone(), context.mode());
+        Ok(self.inner.stop(&native).await?)
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
+        Ok(())
     }
 }
 

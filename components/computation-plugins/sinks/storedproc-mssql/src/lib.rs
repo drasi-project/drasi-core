@@ -8,6 +8,10 @@ use drasi_computation_contracts::{
     GraphChangeCodec, ImplementationIdentity, InputBinding, InputEnvelope, OutputAliases,
     PipeRequirements, PortDescriptor, PortDirection, PortId, SinkCompletion, SinkOutputs,
 };
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{
     ActivationCredentialContext, ActivationCredentials, Capabilities, Component, ConfigSchema,
     ConfigType, ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
@@ -308,18 +312,38 @@ impl NativeComponent for MsSqlStoredProcSink {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({"settings":self.config}))
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
+        match ctx.take_credentials() {
+            Some(credentials) => Ok(self.start_with_credentials(credentials).await?),
+            None => Ok(self.start_activation().await?),
+        }
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl MsSqlStoredProcSink {
+    async fn start_activation(&mut self) -> Result<()> {
         ensure!(
             !self.identity_bound,
             "SQL Server provider-bound activation cannot fall back to literal credentials"
         );
         self.activate(self.config.connection.clone()).await
     }
-    async fn start_with_credentials(&mut self, credentials: ActivationCredentials) -> Result<()> {
-        let connection = self.authenticated_connection(credentials)?;
-        self.activate(connection).await
-    }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_activation(&mut self) -> Result<()> {
         self.work
             .stop(Duration::from_millis(self.config.shutdown_timeout_ms))
             .await?;
@@ -327,6 +351,10 @@ impl NativeComponent for MsSqlStoredProcSink {
         self.interrupted = false;
         self.active_connection = None;
         Ok(())
+    }
+    async fn start_with_credentials(&mut self, credentials: ActivationCredentials) -> Result<()> {
+        let connection = self.authenticated_connection(credentials)?;
+        self.activate(connection).await
     }
 }
 #[async_trait]
@@ -531,7 +559,7 @@ mod tests {
             &inputs(),
         )?;
         let declared = sink.configuration()?;
-        assert!(sink.start().await.is_err());
+        assert!(sink.start(&mut lifecycle_ctx::start()).await.is_err());
         for credentials in [
             ActivationCredentials::UsernamePassword {
                 username: "provider-user".into(),
@@ -560,7 +588,7 @@ mod tests {
             .is_err());
         assert!(sink.active_connection.is_none());
         assert_eq!(sink.configuration()?, declared);
-        sink.stop().await?;
+        sink.stop(&lifecycle_ctx::stop()).await?;
         Ok(())
     }
 
@@ -597,5 +625,50 @@ mod tests {
         assert_eq!(context.port, 1433);
         assert!(MsSqlStoredProcFactory.supports_activation_credentials());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod lifecycle_ctx {
+    use drasi_computation_plugin_sdk::lifecycle::{
+        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
+        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
+        StopMode, UpdateBoundary,
+    };
+
+    pub(crate) fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+    pub(crate) fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+    pub(crate) fn start() -> StartContext {
+        StartContext::new(scope(), None)
+    }
+    pub(crate) fn start_with(
+        credentials: drasi_computation_plugin_sdk::ActivationCredentials,
+    ) -> StartContext {
+        StartContext::new(scope(), Some(credentials))
+    }
+    pub(crate) fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+    pub(crate) fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+    pub(crate) fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+    pub(crate) fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
+        ApplyContext::new(scope(), boundary)
     }
 }

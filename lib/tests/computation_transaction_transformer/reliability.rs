@@ -89,12 +89,7 @@ impl ComputationComponent for Source {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> TestResult<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> TestResult<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSource for Source {

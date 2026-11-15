@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use async_trait::async_trait;
 
@@ -127,23 +129,23 @@ async fn group_replay() -> Result<()> {
     assert!(source.recovery_progress().is_none());
     let mut one = consumer(directory.path(), first, "first/out").await?;
     let mut two = consumer(directory.path(), second, "second/out").await?;
-    one.start().await?;
-    two.start().await?;
-    source.start().await?;
+    one.start(&lifecycle_ctx::start()).await?;
+    two.start(&lifecycle_ctx::start()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
     source.handle().execute_batch(
         "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'first')",
     ).await?;
     let original = next(&mut source).await?;
     apply(&mut one, original.clone()).await?;
     source.handle().query("SELECT id FROM items").await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?.0, 1);
     assert_eq!(
         journal_state(directory.path())?.1,
         0,
         "slow consumer must retain the record"
     );
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let replay = next(&mut source).await?;
     assert_eq!(
         replay.envelope.system().source_position(),
@@ -154,10 +156,10 @@ async fn group_replay() -> Result<()> {
     apply(&mut two, replay).await?;
     assert_eq!(rows(&one), rows(&two));
     source.handle().query("SELECT id FROM items").await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
-    one.stop().await?;
-    two.stop().await?;
+    one.stop(&lifecycle_ctx::stop()).await?;
+    two.stop(&lifecycle_ctx::stop()).await?;
     drop(source);
     drop(one);
     drop(two);
@@ -166,15 +168,15 @@ async fn group_replay() -> Result<()> {
     let second = owner(SECOND_ID);
     let mut one = consumer(directory.path(), first.clone(), "first/out").await?;
     let mut two = consumer(directory.path(), second.clone(), "second/out").await?;
-    one.start().await?;
-    two.start().await?;
+    one.start(&lifecycle_ctx::start()).await?;
+    two.start(&lifecycle_ctx::start()).await?;
     let mut source = SqliteSource::new_replayable_with_consumers(
         id(SOURCE_ID),
         stream("changes"),
         config(directory.path()),
         group(&[first, second]),
     )?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     assert!(timeout(Duration::from_millis(30), source.next())
         .await
         .is_err());
@@ -187,9 +189,9 @@ async fn group_replay() -> Result<()> {
     apply(&mut two, update).await?;
     assert_eq!(rows(&one), [serde_json::json!({"id":1,"value":"reopened"})]);
     assert_eq!(rows(&one), rows(&two));
-    source.stop().await?;
-    one.stop().await?;
-    two.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    one.stop(&lifecycle_ctx::stop()).await?;
+    two.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -224,11 +226,11 @@ async fn coordinated_membership() -> Result<()> {
         .await?
         .with_bootstrap(snapshots.for_consumer(&id(SECOND_ID))?);
     assert!(source.handle().query("SELECT 1").await.is_err());
-    one.start().await?;
+    one.start(&lifecycle_ctx::start()).await?;
     assert_eq!(rows(&one).len(), 4);
     snapshots.for_consumer(&id(FIRST_ID))?.stop().await?;
     assert!(source.handle().query("SELECT 1").await.is_err());
-    two.start().await?;
+    two.start(&lifecycle_ctx::start()).await?;
     assert_eq!(rows(&one), rows(&two));
     for owner in [&first, &second] {
         let state = owner.snapshot();
@@ -239,7 +241,7 @@ async fn coordinated_membership() -> Result<()> {
         assert_eq!(position.sequence, 0);
         assert!(position.source_position.is_some() && state.persistent && state.bootstrap_complete);
     }
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     source
         .handle()
         .execute_batch(
@@ -249,10 +251,10 @@ async fn coordinated_membership() -> Result<()> {
     let transaction = next(&mut source).await?;
     apply(&mut one, transaction).await?;
     source.handle().query("SELECT id FROM items").await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?.1, 0);
-    one.stop().await?;
-    two.stop().await?;
+    one.stop(&lifecycle_ctx::stop()).await?;
+    two.stop(&lifecycle_ctx::stop()).await?;
     drop(source);
     drop(one);
     drop(two);
@@ -277,7 +279,7 @@ async fn coordinated_membership() -> Result<()> {
         .await?
         .with_bootstrap(snapshots.for_consumer(&id(THIRD_ID))?);
     // A newly enrolled query may initialize before the older members restart.
-    three.start().await?;
+    three.start(&lifecycle_ctx::start()).await?;
     assert_eq!(rows(&three).len(), 5);
     assert_eq!(
         third.snapshot().checkpoints[&SourceProgressKey::Source(
@@ -287,11 +289,11 @@ async fn coordinated_membership() -> Result<()> {
             .sequence,
         1
     );
-    one.start().await?;
-    two.start().await?;
+    one.start(&lifecycle_ctx::start()).await?;
+    two.start(&lifecycle_ctx::start()).await?;
     assert_eq!(rows(&one).len(), 5);
     assert_eq!(rows(&two).len(), 4);
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let replay = next(&mut source).await?;
     assert!(apply(&mut one, replay.clone()).await?.is_empty());
     apply(&mut two, replay.clone()).await?;
@@ -299,11 +301,11 @@ async fn coordinated_membership() -> Result<()> {
     assert_eq!(rows(&one), rows(&two));
     assert_eq!(rows(&one), rows(&three));
     source.handle().query("SELECT id FROM items").await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
-    one.stop().await?;
-    two.stop().await?;
-    three.stop().await?;
+    one.stop(&lifecycle_ctx::stop()).await?;
+    two.stop(&lifecycle_ctx::stop()).await?;
+    three.stop(&lifecycle_ctx::stop()).await?;
     drop(source);
     drop(one);
     drop(two);
@@ -324,9 +326,9 @@ async fn coordinated_membership() -> Result<()> {
     let mut three = consumer(directory.path(), third, "third/out")
         .await?
         .with_bootstrap(snapshots.for_consumer(&id(THIRD_ID))?);
-    one.start().await?;
-    three.start().await?;
-    source.start().await?;
+    one.start(&lifecycle_ctx::start()).await?;
+    three.start(&lifecycle_ctx::start()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
     source
         .handle()
         .execute("DELETE FROM items WHERE id=5")
@@ -337,10 +339,10 @@ async fn coordinated_membership() -> Result<()> {
     assert_eq!(rows(&one).len(), 4);
     assert_eq!(rows(&one), rows(&three));
     source.handle().query("SELECT id FROM items").await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (2, 2, 0));
-    one.stop().await?;
-    three.stop().await?;
+    one.stop(&lifecycle_ctx::stop()).await?;
+    three.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -577,8 +579,8 @@ async fn conservative_guards() -> Result<()> {
     let second = owner(SECOND_ID);
     let mut one = consumer(directory.path(), first.clone(), "first/out").await?;
     let mut two = consumer(directory.path(), second.clone(), "second/out").await?;
-    one.start().await?;
-    two.start().await?;
+    one.start(&lifecycle_ctx::start()).await?;
+    two.start(&lifecycle_ctx::start()).await?;
     let mut settings = config(directory.path());
     settings
         .replay
@@ -591,7 +593,7 @@ async fn conservative_guards() -> Result<()> {
         settings.clone(),
         group(&[first.clone(), second.clone()]),
     )?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     source.handle().execute_batch(
         "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'first')",
     ).await?;
@@ -606,7 +608,7 @@ async fn conservative_guards() -> Result<()> {
         source.handle().query("SELECT id FROM items").await?.len(),
         1
     );
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?.1, 0);
     let mut removed = SqliteSource::new_replayable_with_consumers(
         id(SOURCE_ID),
@@ -615,21 +617,21 @@ async fn conservative_guards() -> Result<()> {
         group(std::slice::from_ref(&first)),
     )?;
     assert!(removed
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .expect_err("slow member removal")
         .to_string()
         .contains(&format!("cannot remove consumer {SECOND_ID}")));
-    removed.stop().await?;
-    source.start().await?;
+    removed.stop(&lifecycle_ctx::stop()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let replay = next(&mut source).await?;
     apply(&mut two, replay).await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
 
     let third = owner(THIRD_ID);
     let mut three = consumer(directory.path(), third.clone(), "third/out").await?;
-    three.start().await?;
+    three.start(&lifecycle_ctx::start()).await?;
     let mut late = SqliteSource::new_replayable_with_consumers(
         id(SOURCE_ID),
         stream("changes"),
@@ -637,33 +639,33 @@ async fn conservative_guards() -> Result<()> {
         group(&[first.clone(), second.clone(), third]),
     )?;
     assert!(
-        late.start().await.is_err(),
+        late.start(&lifecycle_ctx::start()).await.is_err(),
         "late replay cannot fabricate a cursor for retired history"
     );
-    late.stop().await?;
+    late.stop(&lifecycle_ctx::stop()).await?;
     let mut single =
         SqliteSource::new_replayable(id(SOURCE_ID), stream("changes"), settings, first)?;
     assert!(
-        single.start().await.is_err(),
+        single.start(&lifecycle_ctx::start()).await.is_err(),
         "shared state cannot become single-owner state"
     );
-    single.stop().await?;
-    one.stop().await?;
-    two.stop().await?;
-    three.stop().await?;
+    single.stop(&lifecycle_ctx::stop()).await?;
+    one.stop(&lifecycle_ctx::stop()).await?;
+    two.stop(&lifecycle_ctx::stop()).await?;
+    three.stop(&lifecycle_ctx::stop()).await?;
 
     let single_directory = tempfile::tempdir()?;
     let first = owner(FIRST_ID);
     let mut one = consumer(single_directory.path(), first.clone(), "first/out").await?;
-    one.start().await?;
+    one.start(&lifecycle_ctx::start()).await?;
     let mut single = SqliteSource::new_replayable(
         id(SOURCE_ID),
         stream("changes"),
         config(single_directory.path()),
         first.clone(),
     )?;
-    single.start().await?;
-    single.stop().await?;
+    single.start(&lifecycle_ctx::start()).await?;
+    single.stop(&lifecycle_ctx::stop()).await?;
     let mut shared = SqliteSource::new_replayable_with_consumers(
         id(SOURCE_ID),
         stream("changes"),
@@ -671,11 +673,11 @@ async fn conservative_guards() -> Result<()> {
         group(&[first]),
     )?;
     assert!(
-        shared.start().await.is_err(),
+        shared.start(&lifecycle_ctx::start()).await.is_err(),
         "single-owner state cannot become shared state"
     );
-    shared.stop().await?;
-    one.stop().await?;
+    shared.stop(&lifecycle_ctx::stop()).await?;
+    one.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -686,22 +688,22 @@ async fn member_failures() -> Result<()> {
         let second = owner(SECOND_ID);
         let mut one = consumer(directory.path(), first.clone(), "first/out").await?;
         let mut two = consumer(directory.path(), second.clone(), "second/out").await?;
-        one.start().await?;
-        two.start().await?;
+        one.start(&lifecycle_ctx::start()).await?;
+        two.start(&lifecycle_ctx::start()).await?;
         let mut source = SqliteSource::new_replayable_with_consumers(
             id(SOURCE_ID),
             stream("changes"),
             config(directory.path()),
             group(&[first, second.clone()]),
         )?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         source.handle().execute_batch(
             "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'retained')",
         ).await?;
         let retained = next(&mut source).await?;
         let generation = second.snapshot().reset_generation;
         if reset {
-            two.stop().await?;
+            two.stop(&lifecycle_ctx::stop()).await?;
             drop(two);
             two = consumer_with_text(
                 directory.path(),
@@ -713,10 +715,10 @@ async fn member_failures() -> Result<()> {
             .await?
             // This retained, committed transaction is the entire one-row database.
             .with_bootstrap(Arc::new(RetainedInitialSnapshot(retained.envelope)));
-            two.start().await?;
+            two.start(&lifecycle_ctx::start()).await?;
             assert!(second.snapshot().reset_generation > generation);
         } else {
-            two.stop().await?;
+            two.stop(&lifecycle_ctx::stop()).await?;
         }
         let error = next(&mut source)
             .await
@@ -727,11 +729,11 @@ async fn member_failures() -> Result<()> {
             .execute("INSERT INTO items VALUES(2,'unadmitted')")
             .await
             .is_err());
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
         assert_eq!(journal_state(directory.path())?.0, 1);
         assert_eq!(journal_state(directory.path())?.1, 0);
-        one.stop().await?;
-        two.stop().await?;
+        one.stop(&lifecycle_ctx::stop()).await?;
+        two.stop(&lifecycle_ctx::stop()).await?;
     }
     let directory = tempfile::tempdir()?;
     let volatile = owner(VOLATILE_ID);
@@ -754,16 +756,16 @@ async fn member_failures() -> Result<()> {
         config(directory.path()),
         group(&[volatile]),
     )?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     assert!(source
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .expect_err("volatile group owner")
         .to_string()
         .contains("persistent"));
     assert!(!directory.path().join("source.db").exists());
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -800,7 +802,7 @@ async fn interrupted_initialization() -> Result<()> {
             .with_bootstrap(snapshots.for_consumer(&id(SECOND_ID))?);
         if phase < 2 {
             let error = one
-                .start()
+                .start(&lifecycle_ctx::start())
                 .await
                 .expect_err("partial initialization must not become success");
             if phase == 1 {
@@ -812,10 +814,13 @@ async fn interrupted_initialization() -> Result<()> {
             assert!(!first.snapshot().bootstrap_complete);
             assert!(source.handle().execute("DELETE FROM items").await.is_err());
         } else {
-            tokio::try_join!(one.start(), two.start())?;
+            tokio::try_join!(
+                one.start(lifecycle_ctx::held(lifecycle_ctx::start())),
+                two.start(lifecycle_ctx::held(lifecycle_ctx::start()))
+            )?;
             assert_eq!(rows(&one).len(), 2);
             assert_eq!(rows(&one), rows(&two));
-            source.start().await?;
+            source.start(&lifecycle_ctx::start()).await?;
             source
                 .handle()
                 .execute("UPDATE items SET value='recovered' WHERE id=2")
@@ -825,9 +830,9 @@ async fn interrupted_initialization() -> Result<()> {
             apply(&mut two, transaction).await?;
             assert_eq!(rows(&one), rows(&two));
         }
-        source.stop().await?;
-        one.stop().await?;
-        two.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        one.stop(&lifecycle_ctx::stop()).await?;
+        two.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
 }

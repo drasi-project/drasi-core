@@ -202,8 +202,8 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
     drop(control);
     let mut source = BridgeSource::new(source_config, GRAPH.into(), None, Some(server))?;
     let mut sink = BridgeSink::new(sink_config.clone(), GRAPH.into(), None, Some(client))?;
-    source.start().await?;
-    sink.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
+    sink.start(&lifecycle_ctx::start()).await?;
     let input = graph_input(77, 18)?;
     sink.handle(super::input(input.clone())).await?;
     assert_eq!(sink.control().status().await?.accepted, 1);
@@ -218,7 +218,7 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
             .await?
             .drained
     );
-    sink.stop().await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
 
     let mut plaintext = tokio::net::TcpStream::connect(data_address).await?;
     plaintext
@@ -237,7 +237,7 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
     let (roots, chain, key, _) = material(&directory, "client")?;
     let wrong = Arc::new(TlsResource::client(roots, chain, key, [0; 32])?);
     let mut rejected = BridgeSink::new(sink_config, GRAPH.into(), None, Some(wrong))?;
-    rejected.start().await?;
+    rejected.start(&lifecycle_ctx::start()).await?;
     let error = rejected
         .handle(super::input(graph_input(78, 19)?))
         .await
@@ -247,7 +247,7 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
         ErrorCode::Incompatible
     );
     assert_eq!(source.status().accepted, 1);
-    rejected.stop().await?;
-    source.stop().await?;
+    rejected.stop(&lifecycle_ctx::stop()).await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }

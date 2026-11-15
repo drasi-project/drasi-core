@@ -153,12 +153,7 @@ impl sdk::NativeComponent for Sink {
     fn configuration(&self) -> anyhow::Result<Value> {
         Ok(json!({"snapshots": self.snapshots, "handled": self.handled}))
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_computation_plugin_sdk::passive_lifecycle!();
 }
 #[async_trait]
 impl sdk::NativeSink for Sink {
@@ -212,8 +207,10 @@ async fn native_snapshot_replacement_is_registered_per_input_and_reaches_the_han
         ComponentId::try_new("1fc4ace9-ce11-5939-badc-9f2589586b5c")?,
         json!({}),
     )?;
-    sink.initialize().await?;
-    sink.start().await?;
+    sink.initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    sink.start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let (a, b) = (PortId::try_new("a")?, PortId::try_new("b")?);
     assert!(sink.snapshot_consumer(&b).is_none());
     sink.snapshot_consumer(&a)
@@ -238,7 +235,8 @@ async fn native_snapshot_replacement_is_registered_per_input_and_reaches_the_han
     let state = sink.configuration()?;
     assert_eq!(state["snapshots"], 1);
     assert_eq!(state["handled"], 1);
-    sink.stop().await?;
+    sink.stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 

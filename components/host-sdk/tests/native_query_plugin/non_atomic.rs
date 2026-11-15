@@ -68,8 +68,8 @@ async fn restart_and_delete() -> Result<()> {
         1,
     )?;
     let mut first = query(directory.path(), 1)?;
-    first.initialize().await?;
-    first.start().await?;
+    first.initialize(&crate::hooks::initialize_ctx()).await?;
+    first.start(&crate::hooks::start_ctx()).await?;
     assert!(first.continue_transform().await?.is_empty());
     let pending = first.transform(original.clone()).await?;
     aggregate(&pending, Some(0.0), 5.0, 1)?;
@@ -82,12 +82,12 @@ async fn restart_and_delete() -> Result<()> {
             .sequence,
         1,
     );
-    first.stop().await?;
+    first.stop(&crate::hooks::stop_ctx()).await?;
     drop(first);
 
     let mut reopened = query(directory.path(), 2)?;
-    reopened.initialize().await?;
-    reopened.start().await?;
+    reopened.initialize(&crate::hooks::initialize_ctx()).await?;
+    reopened.start(&crate::hooks::start_ctx()).await?;
     let replayed = reopened.continue_transform().await?;
     aggregate(&replayed, Some(0.0), 5.0, 1)?;
     assert!(replayed[0].envelope.system().sequence() > pending[0].envelope.system().sequence());
@@ -112,15 +112,15 @@ async fn restart_and_delete() -> Result<()> {
     assert_eq!(snapshot.cursor().sequence(), 2);
     assert_eq!(generation, 0);
     assert_eq!(snapshot.records().len(), 1);
-    reopened.stop().await?;
-    reopened.delete_owned_resources().await?;
+    reopened.stop(&crate::hooks::stop_ctx()).await?;
+    reopened.dispose(&crate::hooks::erase_ctx()).await?;
     drop(output);
     drop(readers);
     drop(reopened);
 
     let mut fresh = query(directory.path(), 3)?;
-    fresh.initialize().await?;
-    fresh.start().await?;
+    fresh.initialize(&crate::hooks::initialize_ctx()).await?;
+    fresh.start(&crate::hooks::start_ctx()).await?;
     assert!(fresh.continue_transform().await?.is_empty());
     let readers = fresh.output_readers();
     let (snapshot, generation) = readers.ports()[&PortId::try_new("out")?]
@@ -134,7 +134,7 @@ async fn restart_and_delete() -> Result<()> {
         generation, 1,
         "deletion must advance the numeric output generation"
     );
-    fresh.stop().await?;
+    fresh.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -152,8 +152,8 @@ async fn non_atomic_query_restarts_replays_and_deletes_multi_thread() -> Result<
 async fn non_atomic_query_validates_input_before_marking_evaluation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut first = query(directory.path(), 1)?;
-    first.initialize().await?;
-    first.start().await?;
+    first.initialize(&crate::hooks::initialize_ctx()).await?;
+    first.start(&crate::hooks::start_ctx()).await?;
     let mut invalid = input(
         SourceChange::Insert {
             element: item(5, 1),
@@ -169,11 +169,11 @@ async fn non_atomic_query_validates_input_before_marking_evaluation() -> Result<
     )?;
     GraphProducerProgress::annotate(&mut invalid.envelope, &producer, 1)?;
     assert!(first.transform(invalid).await.is_err());
-    first.stop().await?;
+    first.stop(&crate::hooks::stop_ctx()).await?;
     drop(first);
     let mut reopened = query(directory.path(), 2)?;
-    reopened.initialize().await?;
-    reopened.start().await?;
+    reopened.initialize(&crate::hooks::initialize_ctx()).await?;
+    reopened.start(&crate::hooks::start_ctx()).await?;
     assert!(reopened.continue_transform().await?.is_empty());
     let outputs = reopened
         .transform(input(
@@ -185,7 +185,7 @@ async fn non_atomic_query_validates_input_before_marking_evaluation() -> Result<
         .await?;
     aggregate(&outputs, Some(0.0), 7.0, 1)?;
     reopened.delivery_completed(&outputs).await?;
-    reopened.stop().await?;
+    reopened.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -197,8 +197,8 @@ async fn independent_output_recovery() -> Result<()> {
     let create =
         |generation, recovery| split_query(&database, provider.clone(), generation, recovery);
     let mut first = create(1, "strict")?;
-    first.initialize().await?;
-    first.start().await?;
+    first.initialize(&crate::hooks::initialize_ctx()).await?;
+    first.start(&crate::hooks::start_ctx()).await?;
     assert!(first.continue_transform().await?.is_empty());
     let progress = first
         .committed_input_progress()?
@@ -227,22 +227,24 @@ async fn independent_output_recovery() -> Result<()> {
         .snapshot()
         .await
         .is_err());
-    first.stop().await?;
+    first.stop(&crate::hooks::stop_ctx()).await?;
     drop(first);
 
     let mut strict = create(2, "strict")?;
-    strict.initialize().await?;
+    strict.initialize(&crate::hooks::initialize_ctx()).await?;
     let failed = strict
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("partial publication cannot be adopted");
     assert!(format!("{failed:#}").contains("publication is incomplete"));
-    strict.stop().await?;
+    strict.stop(&crate::hooks::stop_ctx()).await?;
     drop(strict);
 
     let mut recovered = create(3, "auto_reset")?;
-    recovered.initialize().await?;
-    recovered.start().await?;
+    recovered
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
+    recovered.start(&crate::hooks::start_ctx()).await?;
     assert!(recovered.continue_transform().await?.is_empty());
     let readers = recovered.output_readers();
     let (snapshot, generation) = readers.ports()[&PortId::try_new("out")?]
@@ -259,12 +261,12 @@ async fn independent_output_recovery() -> Result<()> {
     );
     assert_eq!(provider.independently_committed_output().await?, None);
     drop(readers);
-    recovered.stop().await?;
+    recovered.stop(&crate::hooks::stop_ctx()).await?;
     drop(recovered);
 
     let mut reopened = create(4, "auto_reset")?;
-    reopened.initialize().await?;
-    reopened.start().await?;
+    reopened.initialize(&crate::hooks::initialize_ctx()).await?;
+    reopened.start(&crate::hooks::start_ctx()).await?;
     let readers = reopened.output_readers();
     let (snapshot, generation) = readers.ports()[&PortId::try_new("out")?]
         .query()
@@ -277,8 +279,8 @@ async fn independent_output_recovery() -> Result<()> {
         "completed reset must not be repeated on restart"
     );
     drop(readers);
-    reopened.stop().await?;
-    reopened.delete_owned_resources().await?;
+    reopened.stop(&crate::hooks::stop_ctx()).await?;
+    reopened.dispose(&crate::hooks::erase_ctx()).await?;
     drop(reopened);
     assert_eq!(
         rusqlite::Connection::open(database)?.query_row(
@@ -308,16 +310,16 @@ pub(super) async fn exit_child(root: &Path, phase: &str) -> Result<()> {
     match phase {
         "output" => {
             let mut query = split_query(&database, provider.clone(), 1, "strict")?;
-            query.initialize().await?;
-            query.start().await?;
+            query.initialize(&crate::hooks::initialize_ctx()).await?;
+            query.start(&crate::hooks::start_ctx()).await?;
             provider.exit_after_output_commit();
             query.transform(live_input()?).await?;
         }
         "reset" => {
             provider.exit_after_output_clear();
             let mut query = split_query(&database, provider, 2, "auto_reset")?;
-            query.initialize().await?;
-            query.start().await?;
+            query.initialize(&crate::hooks::initialize_ctx()).await?;
+            query.start(&crate::hooks::start_ctx()).await?;
         }
         _ => anyhow::bail!("unknown non-atomic crash phase"),
     }
@@ -351,18 +353,20 @@ async fn process_exit_recovery() -> Result<()> {
         );
         let provider = Arc::new(SplitOutputProvider::new(&directory.path().join("query"))?);
         let mut strict = split_query(&database, provider, 3, "strict")?;
-        strict.initialize().await?;
+        strict.initialize(&crate::hooks::initialize_ctx()).await?;
         assert!(
-            strict.start().await.is_err(),
+            strict.start(&crate::hooks::start_ctx()).await.is_err(),
             "unfinished {phase} cannot be adopted"
         );
-        strict.stop().await?;
+        strict.stop(&crate::hooks::stop_ctx()).await?;
     }
     for generation in 4..=5 {
         let provider = Arc::new(SplitOutputProvider::new(&directory.path().join("query"))?);
         let mut recovered = split_query(&database, provider, generation, "auto_reset")?;
-        recovered.initialize().await?;
-        recovered.start().await?;
+        recovered
+            .initialize(&crate::hooks::initialize_ctx())
+            .await?;
+        recovered.start(&crate::hooks::start_ctx()).await?;
         let readers = recovered.output_readers();
         let (snapshot, reset_generation) = readers.ports()[&PortId::try_new("out")?]
             .query()
@@ -379,7 +383,7 @@ async fn process_exit_recovery() -> Result<()> {
             reset_generation, 2,
             "interrupted reset must retain its generation"
         );
-        recovered.stop().await?;
+        recovered.stop(&crate::hooks::stop_ctx()).await?;
     }
     Ok(())
 }

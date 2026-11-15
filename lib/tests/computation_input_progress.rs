@@ -60,15 +60,27 @@ impl<T: ComputationComponent> ComputationComponent for Tracked<T> {
         contract
     }
 
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         if let Some(consumers) = &self.consumers {
             consumers.read_only().wait_ready().await?;
         }
-        self.inner.start().await
+        self.inner.start(context).await
     }
 
-    async fn stop(&mut self) -> Result<()> {
-        self.inner.stop().await
+    async fn stop(&mut self, context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        self.inner.stop(context).await
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
+        Ok(())
     }
 }
 
@@ -166,12 +178,7 @@ impl ComputationComponent for BatchSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -452,12 +459,7 @@ impl ComputationComponent for Continued {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -622,10 +624,28 @@ fn invalid_volatile_input_roles_scopes_and_double_publication_are_rejected() {
                     contract
                 }
             }
-            async fn start(&mut self) -> Result<()> {
+            async fn start(
+                &mut self,
+                _context: &drasi_lib::computation::v1::StartContext,
+            ) -> Result<()> {
                 panic!("invalid owner cannot start")
             }
-            async fn stop(&mut self) -> Result<()> {
+            async fn stop(
+                &mut self,
+                _context: &drasi_lib::computation::v1::StopContext,
+            ) -> Result<()> {
+                Ok(())
+            }
+            drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+            drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+            drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+            async fn dispose(
+                &mut self,
+                context: &drasi_lib::computation::v1::DisposeContext,
+            ) -> anyhow::Result<()> {
+                if context.erases_owned_state() {
+                    anyhow::bail!("this component does not support permanent state removal");
+                }
                 Ok(())
             }
         }
@@ -698,12 +718,24 @@ impl ComputationComponent for InterruptedSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
         self.entered.send("stop").await?;
         self.stopping.notified().await;
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -867,12 +899,7 @@ mod query_row_provenance {
                 fn descriptor(&self) -> &ComponentDescriptor {
                     &self.descriptor
                 }
-                async fn start(&mut self) -> Result<()> {
-                    Ok(())
-                }
-                async fn stop(&mut self) -> Result<()> {
-                    Ok(())
-                }
+                drasi_lib::passive_component_lifecycle!();
             }
         };
     }
@@ -936,7 +963,7 @@ mod query_row_provenance {
             Arc::new(InMemoryComputationProvider),
         )
         .await?;
-        query.start().await?;
+        query.start(&lifecycle_contexts::start()).await?;
         let outputs = query
             .transform(InputEnvelope {
                 port: port("in"),
@@ -957,7 +984,7 @@ mod query_row_provenance {
                 )?,
             })
             .await?;
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
         anyhow::ensure!(outputs.len() == 1, "one actual query output");
         Ok(outputs)
     }
@@ -974,12 +1001,7 @@ mod query_row_provenance {
         fn recovery_contract(&self) -> ComponentRecovery {
             ComponentRecovery::stateless()
         }
-        async fn start(&mut self) -> Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl Transformer for Relay {
@@ -1189,5 +1211,47 @@ mod query_row_provenance {
             );
         }
         Ok(())
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

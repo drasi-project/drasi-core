@@ -61,12 +61,7 @@ impl ComputationComponent for LegacyReactionSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 
 #[async_trait]

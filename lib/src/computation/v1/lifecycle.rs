@@ -274,6 +274,15 @@ pub(crate) fn operation_failure_disposition(error: &anyhow::Error) -> FailureDis
         return FailureDisposition::Terminal;
     }
     for cause in error.chain().take(32) {
+        if let Some(error) = cause.downcast_ref::<super::LifecycleError>() {
+            use super::LifecycleErrorKind;
+            return match error.kind() {
+                LifecycleErrorKind::Retryable | LifecycleErrorKind::Cancelled => {
+                    FailureDisposition::Retryable
+                }
+                _ => FailureDisposition::Terminal,
+            };
+        }
         if let Some(error) = cause.downcast_ref::<ComponentOperationError>() {
             return error.disposition;
         }

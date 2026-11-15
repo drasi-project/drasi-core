@@ -103,7 +103,7 @@ async fn open(
     query = query
         .with_recovery_scope("instance")?
         .with_delivery_tracking();
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     Ok((query, provider))
 }
 
@@ -136,7 +136,7 @@ async fn close(
     mut query: ContinuousQueryTransformer,
     provider: Arc<LegacyIndexProviderAdapter>,
 ) -> anyhow::Result<()> {
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     drop(query);
     provider.shutdown().await
 }
@@ -295,7 +295,7 @@ async fn incomplete_storage_preserves_current_state() -> anyhow::Result<()> {
             .await;
             let error = match result {
                 Ok(mut query) => query
-                    .start()
+                    .start(&lifecycle_contexts::start())
                     .await
                     .expect_err("incomplete storage must fail startup"),
                 Err(error) => error,
@@ -455,4 +455,46 @@ async fn reset_marker_requires_current_generation_without_rewriting_state() -> a
         vec![(1, bytes)]
     );
     close(query, provider).await
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use crate::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

@@ -442,12 +442,7 @@ impl ComputationComponent for FixtureSource {
     fn output_readers(&self) -> OutputReaders {
         self.readers.clone()
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -470,12 +465,7 @@ impl ComputationComponent for FixtureTransformer {
     fn output_readers(&self) -> OutputReaders {
         self.readers.clone()
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -492,12 +482,7 @@ impl ComputationComponent for FixtureSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -1001,12 +986,7 @@ impl ComputationComponent for ChangingRegistration {
             self.changed.readers.clone()
         }
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 
 #[async_trait]

@@ -36,7 +36,7 @@ fn scheduled_process_worker() -> Result<()> {
             signals: signals.clone(),
         });
         let mut component = create(loaded, provider, clock, false, false).await?;
-        component.start().await?;
+        component.start(&crate::hooks::start_ctx()).await?;
         assert!(component.continue_transform().await?.is_empty());
         signals.exit.store(
             if phase.ends_with("before") { 1 } else { 2 },
@@ -128,7 +128,7 @@ async fn restart_contract(loaded: bool, flavor: &str) -> Result<()> {
         false,
     )
     .await?;
-    component.start().await?;
+    component.start(&crate::hooks::start_ctx()).await?;
     let replay = component.continue_transform().await?;
     assert_eq!(replay.len(), 1);
     assert_output(&replay[0], &original.envelope, 2000, 1)?;
@@ -138,11 +138,11 @@ async fn restart_contract(loaded: bool, flavor: &str) -> Result<()> {
         "replay preserves the exact committed logical identity"
     );
     assert!(replay[0].envelope.system().sequence() > committed.system().sequence());
-    component.stop().await?;
+    component.stop(&crate::hooks::stop_ctx()).await?;
     drop(component);
 
     let mut component = create(loaded, provider(directory.path())?, clock, false, false).await?;
-    component.start().await?;
+    component.start(&crate::hooks::start_ctx()).await?;
     let replay_again = component.continue_transform().await?;
     assert_eq!(replay_again.len(), 1);
     assert_eq!(
@@ -151,7 +151,7 @@ async fn restart_contract(loaded: bool, flavor: &str) -> Result<()> {
     );
     component.delivery_completed(&replay_again).await?;
     assert!(component.on_wakeup().await?.is_empty());
-    component.stop().await?;
+    component.stop(&crate::hooks::stop_ctx()).await?;
     drop(component);
     let final_state = stored(directory.path()).await?;
     assert_eq!(
@@ -169,13 +169,13 @@ async fn restart_contract(loaded: bool, flavor: &str) -> Result<()> {
         false,
     )
     .await?;
-    component.start().await?;
+    component.start(&crate::hooks::start_ctx()).await?;
     assert!(
         component.continue_transform().await?.is_empty(),
         "confirmed output must not replay"
     );
     assert!(component.on_wakeup().await?.is_empty());
-    component.stop().await?;
+    component.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 

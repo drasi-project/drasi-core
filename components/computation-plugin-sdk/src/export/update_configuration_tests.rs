@@ -2,9 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle::{
+    ApplyContext, ApplyError, Assessment, DisposeReason, StateIntent, StopMode, UpdateBoundary,
+};
 use crate::{
-    ApplyUpdateRequest, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
-    ConfigDefinition, ConfigOption, ConfigType, UpdateRequest,
+    ApplyUpdateRequest, ComponentUpdateData, ComponentUpdateMode, ConfigDefinition, ConfigOption,
+    ConfigType, NativeManagement, UpdateRequest,
 };
 use abi::operation::*;
 use async_trait::async_trait;
@@ -74,6 +77,7 @@ impl Factory for TestFactory {
             completion: None,
             capabilities: crate::Capabilities {
                 update_modes: vec![ComponentUpdateMode::InPlace],
+                management: true,
                 ..Default::default()
             },
         }
@@ -84,11 +88,8 @@ impl Factory for TestFactory {
     fn supports_update_planning(&self) -> bool {
         true
     }
-    fn plan_update(&self, _: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
-        Ok(ComponentUpdatePlan {
-            mode: ComponentUpdateMode::InPlace,
-            data: ComponentUpdateData::Preserve,
-        })
+    fn assess(&self, _: &UpdateRequest) -> anyhow::Result<Assessment> {
+        Ok(in_place())
     }
     fn create(
         &self,
@@ -102,6 +103,10 @@ impl Factory for TestFactory {
         }))
         .into())
     }
+}
+
+fn in_place() -> Assessment {
+    Assessment::supported(UpdateBoundary::Pause, ComponentUpdateData::Preserve)
 }
 
 struct ParsedCounter {
@@ -118,11 +123,28 @@ impl ComputationComponent for ParsedCounter {
     fn configuration(&self) -> anyhow::Result<Value> {
         Ok(self.configuration.clone())
     }
-    fn supports_apply_update(&self) -> bool {
-        true
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        Some(self)
     }
-    async fn apply_update(&mut self, update: &ApplyUpdateRequest) -> anyhow::Result<()> {
+    crate::passive_lifecycle!();
+}
+
+#[async_trait]
+impl NativeManagement for ParsedCounter {
+    fn assess(&self, _: &UpdateRequest) -> anyhow::Result<Assessment> {
+        Ok(in_place())
+    }
+    async fn apply(
+        &mut self,
+        _: &ApplyContext,
+        update: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError> {
         self.shared.received.lock().unwrap().push(update.clone());
+        if self.shared.fail_next.swap(false, Ordering::AcqRel) {
+            return Err(ApplyError::Failed(anyhow::anyhow!(
+                "injected update failure before configuration mutation"
+            )));
+        }
         self.configuration = self
             .shared
             .reported
@@ -130,9 +152,6 @@ impl ComputationComponent for ParsedCounter {
             .unwrap()
             .clone()
             .unwrap_or_else(|| parsed(&update.request.proposed.configuration));
-        if self.shared.fail_next.swap(false, Ordering::AcqRel) {
-            anyhow::bail!("injected update failure after configuration mutation");
-        }
         if self.shared.pend_next.swap(false, Ordering::AcqRel) {
             std::future::pending::<()>().await;
         }
@@ -147,7 +166,10 @@ impl EnvelopeSource for ParsedCounter {
     }
 }
 
+const ID: &str = "ad06fe65-63a2-43f9-ae52-7a14af5b294d";
+
 struct Fixture {
+    management: *const abi::management::PluginManagementV1,
     factory: abi::FactoryHandle,
     component: abi::ComponentHandle,
     request: CreateRequest,
@@ -168,7 +190,7 @@ impl Fixture {
             vec![GraphChangeCodec::schema()],
         )?)?;
         let request = CreateRequest {
-            id: ComponentId::try_new("ad06fe65-63a2-43f9-ae52-7a14af5b294d")?,
+            id: ComponentId::try_new(ID)?,
             implementation: exported.state.definition.metadata.factories[0]
                 .implementation
                 .clone(),
@@ -202,6 +224,7 @@ impl Fixture {
             ))?;
         }
         Ok(Self {
+            management: exported.management(),
             factory,
             component,
             request,
@@ -223,15 +246,42 @@ impl Fixture {
         }
     }
 
+    fn context(code: u32) -> wire::LifecycleRequest {
+        let context = wire::LifecycleRequest::new("lifecycle-operation", ID, 1);
+        match code {
+            STOP => context.with_stop_mode(StopMode::Drain),
+            DISPOSE => context.with_dispose(DisposeReason::Shutdown, StateIntent::Preserve, 1),
+            _ => context,
+        }
+    }
+
     async fn run(&self, code: u32) -> anyhow::Result<()> {
-        assert!(self.begin(code, &[])?.await?.is_empty());
+        let context = wire::encode(&Self::context(code))?;
+        assert!(self.begin(code, &context)?.await?.is_empty());
         Ok(())
+    }
+
+    fn begin_apply(
+        &self,
+        update: &ApplyUpdateRequest,
+    ) -> Result<transport::OperationFuture, Failure> {
+        let context = Self::context(APPLY).with_update(update.clone());
+        let input = wire::encode(&context).map_err(Failure::from)?;
+        let mut operation = abi::OperationHandle::null();
+        unsafe {
+            transport::take_status((*self.management).apply.unwrap()(
+                self.component.state,
+                BorrowedBytes::new(&input),
+                &mut operation,
+            ))?;
+            transport::OperationFuture::new(operation)
+        }
     }
 
     async fn activate_paused(&self) -> anyhow::Result<()> {
         self.run(INITIALIZE).await?;
         self.run(START).await?;
-        self.run(PAUSE_PROCESSING).await
+        self.run(PAUSE).await
     }
 
     fn approved(&self) -> anyhow::Result<ApplyUpdateRequest> {
@@ -248,9 +298,9 @@ impl Fixture {
     ) -> anyhow::Result<ApplyUpdateRequest> {
         let request = UpdateRequest { current, proposed };
         let bytes = serde_json::to_vec(&request)?;
-        let plan = unsafe {
+        let assessment: Assessment = unsafe {
             serde_json::from_slice(&transport::take_reply((*self.factory.vtable)
-                .plan_update
+                .assess
                 .unwrap()(
                 self.factory.state,
                 BorrowedBytes::new(&bytes),
@@ -259,15 +309,13 @@ impl Fixture {
         Ok(ApplyUpdateRequest {
             operation_id: operation_id.into(),
             request,
-            plan,
+            plan: assessment.plan().context("unsupported update")?,
+            fingerprint: assessment.fingerprint().map(str::to_owned),
         })
     }
 
     async fn apply(&self, update: &ApplyUpdateRequest) -> anyhow::Result<()> {
-        assert!(self
-            .begin(APPLY_UPDATE, &wire::encode(update)?)?
-            .await?
-            .is_empty());
+        assert!(self.begin_apply(update)?.await?.is_empty());
         Ok(())
     }
 
@@ -312,7 +360,7 @@ async fn omitted_defaults() -> anyhow::Result<()> {
         *fixture.shared.received.lock().unwrap(),
         vec![update.clone()]
     );
-    fixture.run(RESUME_PROCESSING).await?;
+    fixture.run(RESUME).await?;
     fixture.apply(&update).await?;
     assert_eq!(fixture.shared.received.lock().unwrap().len(), 1);
 
@@ -327,7 +375,7 @@ async fn omitted_defaults() -> anyhow::Result<()> {
     let mut proposed = current.clone();
     proposed.configuration["interval_ms"] = json!(30);
     let next = fixture.plan(current, proposed, "next-interval-update")?;
-    fixture.run(PAUSE_PROCESSING).await?;
+    fixture.run(PAUSE).await?;
     fixture.apply(&next).await?;
     assert_eq!(
         *fixture.shared.received.lock().unwrap(),
@@ -382,14 +430,20 @@ async fn defaults_are_compared_on_both_sides_without_replacing_explicit_nondefau
             .unwrap_err()
             .to_string()
             .contains("proposed configuration"));
-        assert!(fixture.run(RESUME_PROCESSING).await.is_err());
+        assert!(fixture.run(RESUME).await.is_err());
         *fixture.shared.reported.lock().unwrap() = None;
+        assert!(
+            fixture.apply(&update).await.is_err(),
+            "an apply that exposed the wrong configuration requires disposal"
+        );
+        assert_eq!(fixture.shared.received.lock().unwrap().len(), 1);
+        fixture.dispose().await?;
+
+        let fixture = Fixture::new(true, false)?;
+        fixture.activate_paused().await?;
         fixture.apply(&update).await?;
         assert_eq!(fixture.configuration()?["step"], 7);
-        assert_eq!(
-            *fixture.shared.received.lock().unwrap(),
-            vec![update.clone(), update]
-        );
+        assert_eq!(*fixture.shared.received.lock().unwrap(), vec![update]);
         fixture.dispose().await?;
     }
     Ok(())
@@ -426,51 +480,62 @@ async fn comparison_rejects_unpublished_defaults_extra_fields_and_changed_values
             .unwrap_err()
             .to_string()
             .contains("proposed configuration"));
-        assert!(fixture.run(RESUME_PROCESSING).await.is_err());
+        assert!(fixture.run(RESUME).await.is_err());
         fixture.dispose().await?;
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn failed_and_cancelled_updates_retry_the_exact_raw_intent_with_defaults(
+async fn failed_updates_retry_the_exact_raw_intent_and_cancelled_updates_require_disposal(
 ) -> anyhow::Result<()> {
     for cancelled in [false, true] {
         let fixture = Fixture::new(true, false)?;
         fixture.activate_paused().await?;
         let update = fixture.approved()?;
-        if cancelled {
-            fixture.shared.pend_next.store(true, Ordering::Release);
-            let mut operation = fixture.begin(APPLY_UPDATE, &wire::encode(&update)?)?;
-            assert!(futures_util::poll!(&mut operation).is_pending());
-            operation.cancel()?;
-            assert_eq!(operation.await.unwrap_err().code, abi::status::CANCELLED);
-        } else {
-            fixture.shared.fail_next.store(true, Ordering::Release);
-            assert!(fixture
-                .apply(&update)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("injected update failure"));
-        }
-        assert_eq!(
-            fixture.configuration()?,
-            parsed(&update.request.proposed.configuration)
-        );
-        assert!(fixture.run(RESUME_PROCESSING).await.is_err());
         let mut rewritten = update.clone();
         rewritten.request.proposed.configuration =
             parsed(&rewritten.request.proposed.configuration);
-        assert!(fixture.apply(&rewritten).await.is_err());
-        assert_eq!(fixture.shared.received.lock().unwrap().len(), 1);
-        fixture.apply(&update).await?;
-        fixture.run(RESUME_PROCESSING).await?;
-        fixture.apply(&update).await?;
-        assert_eq!(
-            *fixture.shared.received.lock().unwrap(),
-            vec![update.clone(), update]
-        );
+        if cancelled {
+            fixture.shared.pend_next.store(true, Ordering::Release);
+            let mut operation = fixture.begin_apply(&update)?;
+            assert!(futures_util::poll!(&mut operation).is_pending());
+            operation.cancel()?;
+            assert_eq!(operation.await.unwrap_err().code, abi::status::CANCELLED);
+            assert_eq!(
+                fixture.configuration()?,
+                parsed(&update.request.proposed.configuration),
+                "an interrupted apply is not rolled back"
+            );
+            assert!(fixture.run(RESUME).await.is_err());
+            assert!(fixture.apply(&rewritten).await.is_err());
+            assert!(
+                fixture.apply(&update).await.is_err(),
+                "an interrupted apply requires stop and dispose"
+            );
+            assert_eq!(*fixture.shared.received.lock().unwrap(), vec![update]);
+        } else {
+            fixture.shared.fail_next.store(true, Ordering::Release);
+            let failure = fixture.begin_apply(&update)?.await.unwrap_err();
+            assert!(failure.message.contains("injected update failure"));
+            assert_eq!(failure.data, Some(json!({"apply": "failed"})));
+            assert_eq!(
+                fixture.configuration()?,
+                parsed(&fixture.request.configuration),
+                "a failed apply leaves the object unchanged"
+            );
+            fixture.apply(&update).await?;
+            fixture.run(RESUME).await?;
+            fixture.apply(&update).await?;
+            assert!(
+                fixture.apply(&rewritten).await.is_err(),
+                "default equivalence must not rewrite operation receipts"
+            );
+            assert_eq!(
+                *fixture.shared.received.lock().unwrap(),
+                vec![update.clone(), update]
+            );
+        }
         fixture.dispose().await?;
     }
     Ok(())

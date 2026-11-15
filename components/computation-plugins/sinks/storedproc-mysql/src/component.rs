@@ -7,6 +7,10 @@ use async_trait::async_trait;
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, InputBinding, InputEnvelope, PortDescriptor, SinkCompletion,
 };
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{ActivationCredentials, NativeComponent, NativeSink};
 use drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink as Sink;
 
@@ -46,16 +50,40 @@ impl NativeComponent for MySqlStoredProcSink {
     fn configuration(&self) -> Result<serde_json::Value> {
         self.0.configuration()
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
+        match ctx.take_credentials() {
+            Some(credentials) => Ok(self.start_with_credentials(credentials).await?),
+            None => Ok(self.start_activation().await?),
+        }
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl MySqlStoredProcSink {
+    async fn start_activation(&mut self) -> Result<()> {
         self.0.start().await
+    }
+    async fn stop_activation(&mut self) -> Result<()> {
+        self.0.stop().await
     }
     async fn start_with_credentials(&mut self, credentials: ActivationCredentials) -> Result<()> {
         credentials.validate()?;
         let (username, password) = credentials.into_auth_pair();
         self.0.start_with_credentials(username, password).await
-    }
-    async fn stop(&mut self) -> Result<()> {
-        self.0.stop().await
     }
 }
 #[async_trait]

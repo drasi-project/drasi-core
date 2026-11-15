@@ -8,6 +8,10 @@ use drasi_computation_contracts::{
     GraphProducerIdentity, GraphProducerProgress, InputEnvelope, OutputEnvelope, OutputReaders,
     PortId, StreamId,
 };
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{NativeComponent, NativeTransformer};
 use drasi_core_types::models::{SourceChange, SourceMiddlewareConfig};
 use serde::{Deserialize, Serialize};
@@ -183,7 +187,10 @@ impl NativeComponent for Middleware {
             self.output.clone(),
         )
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
         if self.configuration.bootstrap {
             self.identity = GraphProducerIdentity::volatile(
                 self.identity.construction_scope().to_owned(),
@@ -195,17 +202,29 @@ impl NativeComponent for Middleware {
             self.failed.store(false, Ordering::Release);
             self.output.reset(self.identity.clone())?;
         }
-        anyhow::ensure!(
-            !self.failed.load(Ordering::Acquire),
-            "middleware transformer must be reconstructed after failed or cancelled processing"
-        );
+        if self.failed.load(Ordering::Acquire) {
+            return Err(anyhow::anyhow!(
+                "middleware transformer must be reconstructed after failed or cancelled processing"
+            )
+            .into());
+        }
         self.running = true;
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    // Transformation is driven by the host; there are no independent workers.
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
         self.running = false;
         self.output.stop()?;
         Ok(())
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
     }
 }
 

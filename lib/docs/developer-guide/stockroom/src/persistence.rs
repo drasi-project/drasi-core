@@ -171,13 +171,26 @@ impl ComputationComponent for DurableAlerts {
     fn recovery_contract(&self) -> ComponentRecovery {
         self.contract.clone()
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         saved_reorders(&mut *self.runner.lock().await).await?;
         Ok(())
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         self.runner.lock().await.shutdown().await
     }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    drasi_lib::passive_component_lifecycle!(@hook stop, StopContext);
 }
 
 #[async_trait]

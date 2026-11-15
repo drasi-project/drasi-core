@@ -901,13 +901,22 @@ macro_rules! component_lifecycle {
             fn descriptor(&self) -> &ComponentDescriptor {
                 &self.lifecycle.descriptor
             }
-            async fn start(&mut self) -> anyhow::Result<()> {
+            async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> anyhow::Result<()> {
                 self.lifecycle.start()
             }
-            async fn stop(&mut self) -> anyhow::Result<()> {
+            async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> anyhow::Result<()> {
                 self.lifecycle.stop()
             }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(&mut self, context: &drasi_lib::computation::v1::DisposeContext) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
         }
+        Ok(())
+    }
+}
     };
 }
 
@@ -1022,9 +1031,9 @@ async fn external_stateful_components_are_object_safe_and_support_zero_one_many_
     let observed = Arc::new(AtomicUsize::new(0));
     let mut sink = custom_sink(SinkCompletion::Handled, observed.clone());
     assert!(source.next().await.is_err());
-    source.start().await.unwrap();
-    transform.start().await.unwrap();
-    sink.start().await.unwrap();
+    source.start(&lifecycle_contexts::start()).await.unwrap();
+    transform.start(&lifecycle_contexts::start()).await.unwrap();
+    sink.start(&lifecycle_contexts::start()).await.unwrap();
     assert_eq!(
         transform.descriptor().id(),
         &fixture_support::component_id(2)
@@ -1057,9 +1066,9 @@ async fn external_stateful_components_are_object_safe_and_support_zero_one_many_
     }
     assert!(source.next().await.unwrap().is_none());
     assert_eq!(observed.load(Ordering::SeqCst), 3);
-    source.stop().await.unwrap();
-    transform.stop().await.unwrap();
-    sink.stop().await.unwrap();
+    source.stop(&lifecycle_contexts::stop()).await.unwrap();
+    transform.stop(&lifecycle_contexts::stop()).await.unwrap();
+    sink.stop(&lifecycle_contexts::stop()).await.unwrap();
     assert!(sink
         .handle(InputEnvelope {
             port: PortId::try_new("in").unwrap(),
@@ -1098,8 +1107,8 @@ async fn accepted_sink_never_upgrades_to_handled_even_with_ack_capable_pipe() {
         assert!(validate_sink_completion(handled.completion(), &requirements).is_ok());
     }
     assert!(validate_sink_completion(accepted.completion(), &PipeRequirements::default()).is_ok());
-    accepted.start().await.unwrap();
-    handled.start().await.unwrap();
+    accepted.start(&lifecycle_contexts::start()).await.unwrap();
+    handled.start(&lifecycle_contexts::start()).await.unwrap();
     for sink in [&mut accepted, &mut handled] {
         sink.handle(InputEnvelope {
             port: PortId::try_new("in").unwrap(),
@@ -1107,7 +1116,7 @@ async fn accepted_sink_never_upgrades_to_handled_even_with_ack_capable_pipe() {
         })
         .await
         .unwrap();
-        sink.stop().await.unwrap();
+        sink.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
     assert_eq!(accepted.completion(), SinkCompletion::Accepted);
     assert_eq!(handled.completion(), SinkCompletion::Handled);
@@ -1309,4 +1318,46 @@ fn public_data_and_trait_objects_are_send_and_sync() {
     assert_send_sync::<dyn EnvelopeSender>();
     assert_send_sync::<dyn EnvelopeReceiver>();
     assert_send_sync::<dyn Acknowledgement>();
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

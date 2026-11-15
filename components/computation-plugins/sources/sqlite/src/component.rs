@@ -8,6 +8,10 @@ use drasi_computation_contracts::{
     OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId, SourceProgressView,
     SourceSchemaReader, SourceTransactionCodec, StreamId,
 };
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext as LifecycleStartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{
     NativeComponent, NativeConsumerProgress, NativeSource, NativeSourceProgress,
 };
@@ -201,7 +205,28 @@ impl NativeComponent for SqliteSource {
     fn input_position_policy(&self) -> Option<Arc<InputPositionPolicy>> {
         self.policy.clone()
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut LifecycleStartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl SqliteSource {
+    async fn start_activation(&mut self) -> Result<()> {
         anyhow::ensure!(
             !self.cleanup_required,
             "native SQLite source requires awaited cleanup before restart"
@@ -283,7 +308,7 @@ impl NativeComponent for SqliteSource {
         }
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_activation(&mut self) -> Result<()> {
         self.runtime.stop().await?;
         self.cleanup_required = false;
         Ok(())

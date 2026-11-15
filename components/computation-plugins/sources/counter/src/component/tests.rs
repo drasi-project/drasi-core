@@ -4,8 +4,29 @@
 use super::*;
 use crate::CounterFactory;
 use drasi_computation_contracts::ComponentId;
+use drasi_computation_plugin_sdk::lifecycle::{
+    CancellationToken, DisposeReason, OperationScope, StateIntent, StopMode,
+};
 use drasi_computation_plugin_sdk::{CreateRequest, Factory};
 use serde_json::json;
+
+fn scope() -> OperationScope {
+    OperationScope::new("test", "component", 1, None, CancellationToken::new())
+}
+fn stop_context() -> StopContext {
+    StopContext::new(scope(), StopMode::Drain)
+}
+fn dispose_context() -> anyhow::Result<DisposeContext> {
+    Ok(DisposeContext::new(
+        scope(),
+        DisposeReason::Shutdown,
+        StateIntent::Preserve,
+        1,
+    )?)
+}
+fn apply_context() -> ApplyContext {
+    ApplyContext::new(scope(), ComponentUpdateMode::InPlace.into())
+}
 
 fn request(configuration: serde_json::Value) -> anyhow::Result<CreateRequest> {
     let metadata = CounterFactory.metadata();
@@ -44,15 +65,18 @@ async fn interval_update_retains_identity_sequence_and_emitted_values() -> anyho
         current: current.clone(),
         proposed,
     };
-    let plan = CounterFactory.plan_update(&update)?;
+    let plan = CounterFactory
+        .assess(&update)?
+        .plan()
+        .ok_or_else(|| anyhow::anyhow!("counter update unsupported"))?;
     assert_eq!(plan.mode, ComponentUpdateMode::InPlace);
     assert_eq!(plan.data, ComponentUpdateData::Preserve);
     let (mut counter, control) = Counter::new(
         CounterFactory.metadata().descriptor(current.id.clone())?,
         current.configuration.clone(),
     )?;
-    counter.initialize().await?;
-    counter.start().await?;
+    counter.initialize(&InitializeContext::new(scope())).await?;
+    counter.start(&mut StartContext::new(scope(), None)).await?;
     let first = counter
         .next()
         .await?
@@ -60,16 +84,20 @@ async fn interval_update_retains_identity_sequence_and_emitted_values() -> anyho
     assert_eq!(value(&first)?, 10);
     assert_eq!(first.envelope.system().sequence(), 1);
     assert_eq!(counter.emitted, 1);
-    counter.pause_processing().await?;
+    counter.pause(&PauseContext::new(scope())).await?;
     control.0.send_replace(true);
     counter
-        .apply_update(&ApplyUpdateRequest {
-            operation_id: "change-interval".into(),
-            request: update,
-            plan,
-        })
+        .apply(
+            &apply_context(),
+            &ApplyUpdateRequest {
+                operation_id: "change-interval".into(),
+                request: update,
+                plan,
+                fingerprint: None,
+            },
+        )
         .await?;
-    counter.resume_processing().await?;
+    counter.resume(&ResumeContext::new(scope())).await?;
     assert!(*counter.paused.borrow());
     control.0.send_replace(false);
     assert_eq!(counter.descriptor.id(), &current.id);
@@ -81,8 +109,8 @@ async fn interval_update_retains_identity_sequence_and_emitted_values() -> anyho
     assert_eq!(value(&second)?, 11);
     assert_eq!(second.envelope.system().sequence(), 2);
     assert_eq!(counter.emitted, 2);
-    counter.stop().await?;
-    counter.start().await?;
+    counter.stop(&stop_context()).await?;
+    counter.start(&mut StartContext::new(scope(), None)).await?;
     let third = counter
         .next()
         .await?
@@ -90,8 +118,8 @@ async fn interval_update_retains_identity_sequence_and_emitted_values() -> anyho
     assert_eq!(value(&third)?, 12);
     assert_eq!(third.envelope.system().sequence(), 3);
     assert!(counter.next().await?.is_none());
-    counter.stop().await?;
-    counter.dispose().await?;
+    counter.stop(&stop_context()).await?;
+    counter.dispose(&dispose_context()?).await?;
     Ok(())
 }
 
@@ -109,7 +137,7 @@ fn factory_rejects_changes_outside_its_supported_update_contract() -> anyhow::Re
         proposed.configuration[field] = replacement;
         assert!(
             CounterFactory
-                .plan_update(&UpdateRequest {
+                .assess(&UpdateRequest {
                     current: current.clone(),
                     proposed,
                 })
@@ -120,7 +148,7 @@ fn factory_rejects_changes_outside_its_supported_update_contract() -> anyhow::Re
     let mut proposed = current.clone();
     proposed.id = ComponentId::generate();
     assert!(CounterFactory
-        .plan_update(&UpdateRequest { current, proposed })
+        .assess(&UpdateRequest { current, proposed })
         .is_err());
     Ok(())
 }
@@ -134,8 +162,8 @@ async fn stale_or_forged_update_does_not_change_the_counter() -> anyhow::Result<
         CounterFactory.metadata().descriptor(current.id.clone())?,
         current.configuration.clone(),
     )?;
-    counter.initialize().await?;
-    counter.start().await?;
+    counter.initialize(&InitializeContext::new(scope())).await?;
+    counter.start(&mut StartContext::new(scope(), None)).await?;
     let mut update = ApplyUpdateRequest {
         operation_id: "unsupported-reset".into(),
         request: UpdateRequest { current, proposed },
@@ -143,15 +171,16 @@ async fn stale_or_forged_update_does_not_change_the_counter() -> anyhow::Result<
             mode: ComponentUpdateMode::InPlace,
             data: ComponentUpdateData::Rebootstrap,
         },
+        fingerprint: None,
     };
-    assert!(counter.apply_update(&update).await.is_err());
+    assert!(counter.apply(&apply_context(), &update).await.is_err());
     assert_eq!(counter.configuration.interval_ms, 0);
     update.plan.data = ComponentUpdateData::Preserve;
     update.request.current.configuration["count"] = json!(50);
     update.request.proposed.configuration["count"] = json!(50);
-    assert!(counter.apply_update(&update).await.is_err());
+    assert!(counter.apply(&apply_context(), &update).await.is_err());
     assert_eq!(counter.configuration.count, 10);
-    counter.stop().await?;
-    counter.dispose().await?;
+    counter.stop(&stop_context()).await?;
+    counter.dispose(&dispose_context()?).await?;
     Ok(())
 }

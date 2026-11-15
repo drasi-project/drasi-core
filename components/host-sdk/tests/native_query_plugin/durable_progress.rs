@@ -42,7 +42,7 @@ async fn shared_ordinary_progress() -> Result<()> {
         provider(directory.path())?,
         Some(owner.clone()),
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     assert!(Arc::ptr_eq(
         &owner,
         &query.processing_progress_owner().context("actual owner")?
@@ -59,7 +59,7 @@ async fn shared_ordinary_progress() -> Result<()> {
             .is_err(),
         "a second constructor cannot claim this actual progress resource"
     );
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let first = query
         .transform(ordinary_input(5, 20, 10, &[0, 255, 5])?)
         .await?;
@@ -94,7 +94,7 @@ async fn shared_ordinary_progress() -> Result<()> {
     aggregate(&next, Some(10.0), 12.0, 2)?;
     query.delivery_completed(&next).await?;
     assert_eq!(owner.snapshot().transport_sequences[&stream], 50);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
     let mut query = factory()?.create_component_with_processing_owner(
         component_id()?,
@@ -103,8 +103,8 @@ async fn shared_ordinary_progress() -> Result<()> {
         provider(directory.path())?,
         Some(owner.clone()),
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 6);
     assert_eq!(owner.snapshot().transport_sequences[&stream], 50);
     let next = query
@@ -112,7 +112,7 @@ async fn shared_ordinary_progress() -> Result<()> {
         .await?;
     aggregate(&next, Some(12.0), 15.0, 3)?;
     query.delivery_completed(&next).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -130,9 +130,9 @@ async fn loaded_query_reuses_ordinary_source_progress_multi_thread() -> Result<(
 async fn loaded_query_reuses_core_persistent_producer_gap_checks() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     let owner = query.processing_progress_owner().context("actual owner")?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let identity = GraphProducerIdentity::new(
         GRAPH.into(),
         GRAPH.into(),
@@ -163,11 +163,11 @@ async fn loaded_query_reuses_core_persistent_producer_gap_checks() -> Result<()>
     assert!(format!("{error:#}").contains("gap"));
     let key = SourceProgressKey::Stream(identity.stream().clone());
     assert_eq!(owner.snapshot().checkpoints[&key].sequence, 1);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
     let mut query = create(directory.path(), QUERY, 2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let mut next = input(
         SourceChange::Replace {
             element: item(2, 2),
@@ -178,7 +178,7 @@ async fn loaded_query_reuses_core_persistent_producer_gap_checks() -> Result<()>
     let output = query.transform(next).await?;
     aggregate(&output, Some(1.0), 2.0, 2)?;
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -196,9 +196,9 @@ async fn loaded_query_complete_transaction_mode_requires_framed_input() -> Resul
         scope(1),
         provider(directory.path())?,
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     let owner = query.processing_progress_owner().context("actual owner")?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query
         .transform(input(
             SourceChange::Replace {
@@ -209,7 +209,7 @@ async fn loaded_query_complete_transaction_mode_requires_framed_input() -> Resul
         .await
         .is_err());
     assert!(owner.snapshot().checkpoints.is_empty());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -247,7 +247,7 @@ async fn actual_loaded_progress() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let text = "MATCH (n:Item) RETURN abs(n.value) AS value";
     let mut query = create(directory.path(), text, 1)?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     let view = query
         .committed_input_progress()?
         .context("actual indexed progress reader")?;
@@ -255,7 +255,7 @@ async fn actual_loaded_progress() -> Result<()> {
     assert_eq!(view.graph_id(), GRAPH);
     assert_eq!(view.component_id(), &component_id()?);
     assert!(!view.snapshot()?.recovered);
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let ready = view.wait_ready().await?;
     assert!(ready.recovered && ready.persistent && ready.admitting && ready.bootstrap_complete);
     assert!(ready.checkpoints.is_empty());
@@ -295,15 +295,15 @@ async fn actual_loaded_progress() -> Result<()> {
     let failed = view.snapshot()?;
     assert!(!failed.ready && !failed.admitting && failed.failure.is_some());
     assert_eq!(failed.checkpoints, current.checkpoints);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     assert!(view.snapshot().is_err());
     drop(query);
     let mut query = create(directory.path(), text, 2)?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     let restored = query
         .committed_input_progress()?
         .context("restored progress")?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let recovered = restored.wait_ready().await?;
     assert_eq!(recovered.checkpoints, current.checkpoints);
     assert_eq!(recovered.transport_sequences, current.transport_sequences);
@@ -337,7 +337,7 @@ async fn actual_loaded_progress() -> Result<()> {
         "outer component failure must fence its progress view"
     );
     assert_eq!(rejected.checkpoints[&key].sequence, 1);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     assert!(restored.snapshot().is_err());
     Ok(())
 }
@@ -366,10 +366,10 @@ async fn volatile_query_does_not_acquire_a_committed_progress_view() -> Result<(
         ComponentId::try_new("a4e18a8d-c209-5e45-8f98-663600681e28")?,
         json!({"query":QUERY, "volatile":true}),
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     assert!(query.committed_input_progress()?.is_none());
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.committed_input_progress()?.is_none());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }

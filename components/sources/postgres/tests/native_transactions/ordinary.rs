@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use drasi_computation_plugin_sdk::{
     NativeComponent as PluginComponent, NativeSource as PluginSource,
@@ -26,10 +28,25 @@ impl ComputationComponent for Ingress {
     fn configuration(&self) -> Result<Value> {
         Ok(json!({}))
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }
@@ -402,7 +419,7 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
         )
         .await?
         .with_source_progress(progress.clone())?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         let mut source = drasi_computation_source_postgres::PostgresTransactionSource::rows(
             component_id(77),
             StreamId::try_new("changes")?,
@@ -416,7 +433,7 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
                 ..Default::default()
             },
         )?;
-        source.start().await?;
+        source.start(&mut lifecycle_ctx::native_start()).await?;
         if !restart {
             database
                 .client()
@@ -451,8 +468,8 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
             assert!(!position.complete());
             assert_eq!(database.feedback().await?, database.config.start_lsn);
         }
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::native_stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     database.shutdown().await
 }
@@ -477,7 +494,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
     )
     .await?
     .with_source_progress(progress.clone())?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = drasi_computation_source_postgres::PostgresTransactionSource::rows(
         component_id(77),
         StreamId::try_new("changes")?,
@@ -492,7 +509,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
             reconnect_delay_ms: 100,
         },
     )?;
-    source.start().await?;
+    source.start(&mut lifecycle_ctx::native_start()).await?;
     database
         .client()
         .batch_execute("INSERT INTO person VALUES(1,'one'),(2,'two'),(3,'three')")
@@ -593,8 +610,8 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
     )?;
     assert!(position.complete());
     database.wait_feedback(position.feedback_lsn()).await?;
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::native_stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -1008,11 +1025,11 @@ async fn temporary_exported_snapshot_preserves_configured_slot_and_imported_read
     let path = tempfile::tempdir()?;
     let progress = progress();
     let mut query = query(path.path(), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut settings = database.config.clone();
     settings.start_lsn = boundary;
     let mut source = super::source(settings, progress)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let next = super::next(&mut source).await?;
     let changes = SourceTransactionCodec::decode(&next.envelope, limits(16))?.into_changes();
     assert_eq!(
@@ -1020,7 +1037,7 @@ async fn temporary_exported_snapshot_preserves_configured_slot_and_imported_read
         2,
         "configured slot must retain exactly the post-snapshot transaction"
     );
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }

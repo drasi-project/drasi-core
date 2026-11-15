@@ -1,6 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
 
 use async_trait::async_trait;
@@ -72,7 +76,28 @@ impl NativeComponent for Capture {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::to_value(&self.configuration)?)
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl Capture {
+    async fn start_activation(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(self.file.is_none(), "capture already started");
         self.file = Some(
             tokio::fs::OpenOptions::new()
@@ -85,7 +110,7 @@ impl NativeComponent for Capture {
         );
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop_activation(&mut self) -> anyhow::Result<()> {
         if let Some(file) = &mut self.file {
             file.flush().await?;
         }

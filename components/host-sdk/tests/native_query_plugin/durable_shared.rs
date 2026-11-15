@@ -18,11 +18,24 @@ impl ComputationComponent for ReleasedSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         self.source.descriptor()
     }
-    async fn start(&mut self) -> Result<()> {
-        self.source.start().await
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
+        self.source.start(&crate::hooks::start_ctx()).await
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.source.stop().await
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        self.source.stop(&crate::hooks::stop_ctx()).await
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
+        Ok(())
     }
 }
 
@@ -63,11 +76,24 @@ impl ComputationComponent for HeldSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         self.sink.descriptor()
     }
-    async fn start(&mut self) -> Result<()> {
-        self.sink.start().await
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
+        self.sink.start(&crate::hooks::start_ctx()).await
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.sink.stop().await
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        self.sink.stop(&crate::hooks::stop_ctx()).await
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
+        Ok(())
     }
 }
 

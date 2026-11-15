@@ -519,7 +519,7 @@ async fn native_owned_adapter_checks_query_durability_not_only_its_state_store()
     .unwrap()
     .with_result_catalog(&catalog)
     .unwrap();
-    query.start().await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     let query_id = query.descriptor().id().clone();
     let mut reaction = ProbeReaction::new(
         reaction_id(),
@@ -543,15 +543,18 @@ async fn native_owned_adapter_checks_query_durability_not_only_its_state_store()
         host.clone(),
     )
     .unwrap();
-    let error = adapter.start().await.unwrap_err();
+    let error = adapter
+        .start(&lifecycle_contexts::start())
+        .await
+        .unwrap_err();
     assert!(format!("{error:#}").contains("volatile"), "{error:#}");
     assert_eq!(probe.starts.load(Ordering::SeqCst), 0);
     assert!(checkpoint(state.as_ref(), &reaction_id(), &query_id)
         .await
         .is_none());
-    adapter.stop().await.unwrap();
+    adapter.stop(&lifecycle_contexts::stop()).await.unwrap();
     host.shutdown().await.unwrap();
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -930,5 +933,47 @@ async fn ordinary_auto_skip_recovers_a_query_configuration_reset_but_strict_reje
             assert!(probe.snapshots.lock().unwrap().is_empty());
         }
         fixture.core.shutdown().await.unwrap();
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

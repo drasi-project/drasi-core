@@ -7,6 +7,8 @@
 //! an independently written `SnapshotProvider` fixture; nothing pretends that a
 //! live-only source has a snapshot.
 
+#[path = "common/hooks.rs"]
+mod hooks;
 #[path = "fixtures/native_sink_inputs.rs"]
 mod sink_inputs;
 
@@ -201,12 +203,7 @@ impl ComputationComponent for FixtureSource {
     fn output_readers(&self) -> OutputReaders {
         self.readers.clone()
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -229,12 +226,7 @@ impl ComputationComponent for FixtureTransformer {
     fn output_readers(&self) -> OutputReaders {
         self.readers.clone()
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -251,12 +243,7 @@ impl ComputationComponent for FixtureSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -431,8 +418,8 @@ async fn start_sink(
         catalogue,
         sink_inputs::inputs_for(&sink_configuration),
     )?;
-    sink.initialize().await?;
-    sink.start().await?;
+    sink.initialize(&crate::hooks::initialize_ctx()).await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     Ok(sink)
 }
 
@@ -619,7 +606,7 @@ async fn source_transformer_and_second_port_snapshots_use_one_generic_path() -> 
         world.main.ready.store(true, Ordering::Release);
         assert_eq!(get(&client, sse_port, "main").await?.status(), 200);
 
-        sink.stop().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -649,7 +636,7 @@ async fn snapshot_readers_are_bounded_and_a_sink_without_the_capability_answers_
         world.main.release.notify_one();
         assert_eq!(first.await??.status(), 200);
         assert_eq!(get(&client, sse_port, "main").await?.status(), 200);
-        sink.stop().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
 
         // Without the capability bound there is no snapshot, and no empty one.
         let bare_port = free_port()?;
@@ -659,10 +646,10 @@ async fn snapshot_readers_are_bounded_and_a_sink_without_the_capability_answers_
             component_id("unbound"),
             json!({"outputs": {"main": binding("multi", "out")}, "host": "127.0.0.1", "port": bare_port}),
         )?;
-        unbound.initialize().await?;
-        unbound.start().await?;
+        unbound.initialize(&crate::hooks::initialize_ctx()).await?;
+        unbound.start(&crate::hooks::start_ctx()).await?;
         assert_eq!(get(&client, bare_port, "main").await?.status(), 501);
-        unbound.stop().await?;
+        unbound.stop(&crate::hooks::stop_ctx()).await?;
         Ok::<_, anyhow::Error>(())
     }
     .await;

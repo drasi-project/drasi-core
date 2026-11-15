@@ -105,7 +105,10 @@ async fn ordinary_rocks_plugin_proves_atomic_output_and_recovers_in_an_isolated_
         )
         .await
         .expect("construct");
-        query.start().await.expect("start");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         assert_eq!(
             query.transform(input()).await.expect("query")[0]
                 .envelope
@@ -113,7 +116,10 @@ async fn ordinary_rocks_plugin_proves_atomic_output_and_recovers_in_an_isolated_
                 .sequence(),
             1
         );
-        query.stop().await.expect("quiesce");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("quiesce");
     }
     {
         let mut query = ContinuousQueryTransformer::new_with_options(
@@ -123,14 +129,17 @@ async fn ordinary_rocks_plugin_proves_atomic_output_and_recovers_in_an_isolated_
         )
         .await
         .expect("reopen");
-        query.start().await.expect("recover");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("recover");
         assert_eq!(query.results().snapshot().expect("snapshot").rows.len(), 1);
         assert!(query
             .transform(input())
             .await
             .expect("source checkpoint dedup")
             .is_empty());
-        query.stop().await.expect("stop");
+        query.stop(&lifecycle_contexts::stop()).await.expect("stop");
     }
     let legacy = plugin
         .create_indexes(
@@ -218,9 +227,15 @@ async fn compatibility_failure_before_any_output_leaves_a_durable_pre_evaluation
         )
         .await
         .expect("construct");
-        query.start().await.expect("start");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         assert!(query.transform(input()).await.is_err());
-        query.stop().await.expect("cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
     let mut query =
         ContinuousQueryTransformer::new_with_options(definition(text), adapter.clone(), options())
@@ -228,13 +243,16 @@ async fn compatibility_failure_before_any_output_leaves_a_durable_pre_evaluation
             .expect("reopen");
     assert!(matches!(
         query
-            .start()
+            .start(&lifecycle_contexts::start())
             .await
             .expect_err("uncertain legacy core cannot silently resume")
             .downcast_ref::<QueryRecoveryError>(),
         Some(QueryRecoveryError::PendingPublication)
     ));
-    query.stop().await.expect("cleanup");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
     adapter.shutdown().await.expect("provider cleanup");
 }
 
@@ -260,8 +278,14 @@ async fn scoped_legacy_backend_keeps_same_named_queries_in_different_instances_i
             ContinuousQueryTransformer::new_with_options(definition(text), two.clone(), options())
                 .await
                 .expect("second query");
-        first.start().await.expect("first start");
-        second.start().await.expect("second start");
+        first
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("first start");
+        second
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("second start");
         first.transform(input()).await.expect("first input");
         assert_eq!(
             first.results().snapshot().expect("first rows").rows.len(),
@@ -281,9 +305,57 @@ async fn scoped_legacy_backend_keeps_same_named_queries_in_different_instances_i
                 .len(),
             1
         );
-        first.stop().await.expect("first stop");
-        second.stop().await.expect("second stop");
+        first
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("first stop");
+        second
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("second stop");
     }
     one.shutdown().await.expect("first shutdown");
     two.shutdown().await.expect("second shutdown");
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

@@ -59,7 +59,9 @@ fn component_id(value: u128) -> ComponentId {
 async fn initialized_component(
     mut component: NativeComponentProxy,
 ) -> anyhow::Result<NativeComponentProxy> {
-    component.initialize().await?;
+    component
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
     Ok(component)
 }
 
@@ -205,17 +207,51 @@ impl sdk::NativeComponent for TestComponent {
         configuration["seen"] = json!(self.seen);
         Ok(configuration)
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        if self.configuration["panic_start"] == true {
-            panic!("requested start panic");
+    async fn start(
+        &mut self,
+        _ctx: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            if self.configuration["panic_start"] == true {
+                panic!("requested start panic");
+            }
+            anyhow::ensure!(
+                self.configuration["fail_start"] != true,
+                "requested start failure"
+            );
+            Ok(())
         }
-        anyhow::ensure!(
-            self.configuration["fail_start"] != true,
-            "requested start failure"
-        );
+        .await;
+        Ok(result?)
+    }
+    async fn stop(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn dispose(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
 }
@@ -397,13 +433,17 @@ async fn statically_linked_components_retain_their_definition_after_registration
     )?)
     .await?;
     drop(factory);
-    source.start().await?;
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     for sequence in [1, 2] {
         let output = source.next().await?.expect("configured source output");
         assert_eq!(output.envelope.system().sequence(), sequence);
     }
     assert!(source.next().await?.is_none());
-    source.stop().await?;
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -455,9 +495,15 @@ async fn native_start_data_and_configuration_panics_require_a_new_instance() {
         .await
         .unwrap();
         let error = if mode == "panic_start" {
-            source.start().await.unwrap_err()
+            source
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .unwrap_err()
         } else {
-            source.start().await.unwrap();
+            source
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .unwrap();
             if mode == "panic_next" {
                 source.next().await.unwrap_err()
             } else {
@@ -471,9 +517,17 @@ async fn native_start_data_and_configuration_panics_require_a_new_instance() {
             "{mode}: {error:#}"
         );
         for _ in 0..2 {
-            source.stop().await.unwrap();
+            source
+                .stop(&crate::computation::test_hooks::stop_ctx())
+                .await
+                .unwrap();
             assert_eq!(
-                panic_code(&source.start().await.unwrap_err()),
+                panic_code(
+                    &source
+                        .start(&crate::computation::test_hooks::start_ctx())
+                        .await
+                        .unwrap_err()
+                ),
                 abi::status::PANICKED
             );
             assert_eq!(
@@ -495,9 +549,15 @@ async fn native_start_data_and_configuration_panics_require_a_new_instance() {
         )
         .await
         .unwrap();
-        replacement.start().await.unwrap();
+        replacement
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await
+            .unwrap();
         assert!(replacement.next().await.unwrap().is_some());
-        replacement.stop().await.unwrap();
+        replacement
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await
+            .unwrap();
     }
 }
 
@@ -514,7 +574,10 @@ async fn native_control_panic_wakes_pending_data_and_cannot_be_cleared_by_stop()
     )
     .await
     .unwrap();
-    source.start().await.unwrap();
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap();
     source.next().await.unwrap().unwrap();
     let inner = source.inner.clone();
     let mut pending = Box::pin(source.next());
@@ -544,9 +607,17 @@ async fn native_control_panic_wakes_pending_data_and_cannot_be_cleared_by_stop()
         .unwrap()
         .unwrap_err();
     assert_eq!(panic_code(&error), abi::status::PANICKED);
-    source.stop().await.unwrap();
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .unwrap();
     assert_eq!(
-        panic_code(&source.start().await.unwrap_err()),
+        panic_code(
+            &source
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .unwrap_err()
+        ),
         abi::status::PANICKED
     );
 }
@@ -591,9 +662,17 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
         source.next().await.is_err(),
         "data before successful start is not accepted"
     );
-    source.start().await.unwrap();
-    transformer.start().await.unwrap();
-    sink.start().await.unwrap();
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap();
+    transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap();
+    sink.start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap();
     for sequence in 1..=2 {
         let original = source.next().await.unwrap().unwrap();
         let outputs = transformer
@@ -620,9 +699,17 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
     assert!(source.next().await.unwrap().is_none());
     assert_eq!(source.configuration().unwrap()["seen"], 2);
     assert_eq!(sink.configuration().unwrap()["seen"], 2);
-    source.stop().await.unwrap();
-    transformer.stop().await.unwrap();
-    sink.stop().await.unwrap();
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .unwrap();
+    transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .unwrap();
+    sink.stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .unwrap();
     let mut service = initialized_component(
         plugin.factories()[3]
             .create_component(
@@ -633,12 +720,24 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
     )
     .await
     .unwrap();
-    service.start().await.unwrap();
+    service
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap();
     service.run().await.unwrap();
-    service.pause_processing().await.unwrap();
-    service.resume_processing().await.unwrap();
+    service
+        .pause(&crate::computation::test_hooks::pause_ctx())
+        .await
+        .unwrap();
+    service
+        .resume(&crate::computation::test_hooks::resume_ctx())
+        .await
+        .unwrap();
     assert_eq!(service.configuration().unwrap()["seen"], 1);
-    service.stop().await.unwrap();
+    service
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -667,7 +766,10 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
     )
     .await
     .unwrap();
-    assert!(failing.start().await.is_err());
+    assert!(failing
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     assert!(failing.next().await.is_err());
     let mut blocked = initialized_component(
         source
@@ -679,14 +781,20 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
     )
     .await
     .unwrap();
-    blocked.start().await.unwrap();
+    blocked
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(10), blocked.next())
             .await
             .is_err()
     );
     assert_eq!(blocked.configuration().unwrap()["seen"], 0);
-    blocked.stop().await.unwrap();
+    blocked
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .unwrap();
     let original = envelope(
         &ComponentId::try_new("9cce4786-2942-5ef4-b472-1d795da86139").unwrap(),
         1,
@@ -733,7 +841,10 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
     )
     .await
     .unwrap();
-    transformer.start().await.unwrap();
+    transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap();
     assert!(transformer
         .transform(InputEnvelope {
             port: PortId::try_new("in").unwrap(),
@@ -741,7 +852,10 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
         })
         .await
         .is_err());
-    transformer.stop().await.unwrap();
+    transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -757,7 +871,9 @@ async fn deferred_native_operation_owns_input_after_the_begin_call_returns() {
     )
     .await
     .unwrap();
-    sink.start().await.unwrap();
+    sink.start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .unwrap();
     let input = InputEnvelope {
         port: PortId::try_new("in").unwrap(),
         envelope: envelope(
@@ -775,7 +891,9 @@ async fn deferred_native_operation_owns_input_after_the_begin_call_returns() {
     drop(bytes);
     assert!(operation.await.unwrap().is_empty());
     assert_eq!(sink.configuration().unwrap()["seen"], 1);
-    sink.stop().await.unwrap();
+    sink.stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .unwrap();
 }
 
 struct NotifyingSink {
@@ -791,12 +909,7 @@ impl ComputationComponent for NotifyingSink {
     fn bind_control(&mut self, control: ComponentControl) {
         self.control = Some(control);
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSink for NotifyingSink {

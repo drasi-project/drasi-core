@@ -49,6 +49,7 @@ impl NativePlugin {
                 || Some(exported.output_reads()),
                 || Some(exported.output_follow()),
                 || Some(exported.processing()),
+                || Some(exported.management()),
             )
         }
     }
@@ -360,6 +361,7 @@ impl NativePlugin {
                 || None,
                 || None,
                 || None,
+                || None,
             )
         }
     }
@@ -390,8 +392,10 @@ impl NativePlugin {
         output_reads: impl FnOnce() -> Option<*const abi::output_reads::PluginOutputReadsV2>,
         output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV2>,
         processing: impl FnOnce() -> Option<*const abi::processing::PluginProcessingV1>,
+        management: impl FnOnce() -> Option<*const abi::management::PluginManagementV1>,
     ) -> anyhow::Result<Arc<Self>> {
         let manifest = unsafe { read_metadata(metadata())? };
+        let management = unsafe { read_management(management(), &manifest)? };
         let output_reads = unsafe { read_output_reads(output_reads(), &manifest)? };
         let output_follow = unsafe { read_output_follow(output_follow(), &manifest)? };
         let processing = unsafe { read_processing(processing(), &manifest)? };
@@ -579,6 +583,7 @@ impl NativePlugin {
                 .with_output_reads(output_reads)
                 .with_output_follow(output_follow)
                 .with_processing(processing)?
+                .with_management(management)
                 .with_configuration_details(configurations.remove(&metadata.implementation))
             }));
         }
@@ -723,6 +728,10 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         unsafe { library.get::<abi::processing::ProcessingFn>(abi::processing::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let management =
+        unsafe { library.get::<abi::management::ManagementFn>(abi::management::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
@@ -739,6 +748,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         && output_reads.is_none()
         && output_follow.is_none()
         && processing.is_none()
+        && management.is_none()
     {
         return Ok(None);
     }
@@ -768,6 +778,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
             || output_reads.map(|entry| entry()),
             || output_follow.map(|entry| entry()),
             || processing.map(|entry| entry()),
+            || management.map(|entry| entry()),
         )?
     }))
 }
@@ -965,6 +976,35 @@ unsafe fn read_output_follow(
     Ok(table)
 }
 
+/// The extension is required exactly when some factory declares management.
+unsafe fn read_management(
+    entry: Option<*const abi::management::PluginManagementV1>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<Option<abi::management::PluginManagementV1>> {
+    let table = entry
+        .map(|entry| -> anyhow::Result<_> {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::management::VERSION
+                    && table.reserved == 0
+                    && table.assess.is_some()
+                    && table.apply.is_some(),
+                "incompatible or incomplete native management extension"
+            );
+            Ok(table)
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        table.is_some()
+            || !manifest
+                .factories
+                .iter()
+                .any(|factory| factory.capabilities.management),
+        "native factory declares management without the negotiated extension"
+    );
+    Ok(table)
+}
+
 unsafe fn read_processing(
     entry: Option<*const abi::processing::PluginProcessingV1>,
     manifest: &PluginMetadata,
@@ -1153,6 +1193,10 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         unsafe { library.get::<abi::processing::ProcessingFn>(abi::processing::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let management =
+        unsafe { library.get::<abi::management::ManagementFn>(abi::management::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && !has_entry
         && activation_credentials.is_none()
@@ -1169,6 +1213,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && output_reads.is_none()
         && output_follow.is_none()
         && processing.is_none()
+        && management.is_none()
     {
         return Ok(None);
     }
@@ -1190,6 +1235,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     unsafe { read_output_reads(output_reads.map(|entry| entry()), &manifest)? };
     unsafe { read_output_follow(output_follow.map(|entry| entry()), &manifest)? };
     unsafe { read_processing(processing.map(|entry| entry()), &manifest)? };
+    unsafe { read_management(management.map(|entry| entry()), &manifest)? };
     let bootstrap = unsafe { read_bootstrap(bootstrap.map(|entry| entry()))? };
     anyhow::ensure!(
         !manifest.factories.is_empty() || bootstrap.is_some(),

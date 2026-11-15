@@ -2,9 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle::{
+    ApplyContext, ApplyError, Assessment, DisposeContext, DisposeReason, InitializeContext,
+    LifecycleResult, PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    UpdateBoundary,
+};
 use crate::{
     ApplyUpdateRequest, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
-    UpdateRequest,
+    NativeManagement, UpdateRequest,
 };
 use abi::operation::*;
 use async_trait::async_trait;
@@ -28,6 +33,8 @@ enum Fault {
     Error,
     Pending,
     Panic,
+    /// Only meaningful for `apply`: the object cannot continue.
+    Damaged,
 }
 
 #[derive(Default)]
@@ -39,6 +46,8 @@ struct ProbeState {
     activations: Arc<AtomicUsize>,
     readers: Arc<AtomicUsize>,
     skip_configuration_update: AtomicBool,
+    /// Overrides the live instance assessment to model drift after approval.
+    live_assessment: Mutex<Option<Assessment>>,
 }
 
 impl ProbeState {
@@ -62,7 +71,7 @@ impl ProbeState {
 
     async fn call(&self, hook: &'static str) -> anyhow::Result<()> {
         match self.enter(hook) {
-            Some(Fault::Error) => anyhow::bail!("injected {hook} failure"),
+            Some(Fault::Error | Fault::Damaged) => anyhow::bail!("injected {hook} failure"),
             Some(Fault::Pending) => std::future::pending().await,
             Some(Fault::Panic) => panic!("injected {hook} panic"),
             None => Ok(()),
@@ -201,7 +210,12 @@ impl Factory for ProbeFactory {
                 } else {
                     Vec::new()
                 },
-                delete_owned_resources: self.options.deletion,
+                erases_owned_state: self.options.deletion,
+                management: self
+                    .options
+                    .modes
+                    .iter()
+                    .any(|mode| *mode != ComponentUpdateMode::Recreate),
                 update_modes: self.options.modes.clone(),
                 ..Default::default()
             },
@@ -216,13 +230,15 @@ impl Factory for ProbeFactory {
         self.options.credentials
     }
 
-    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
         assert!(request.current.update_directive.is_none());
         assert!(request.proposed.update_directive.is_none());
         assert!(!request.current.activation_credentials_bound);
         assert!(!request.proposed.activation_credentials_bound);
         match self.state.enter("plan") {
-            Some(Fault::Error | Fault::Pending) => anyhow::bail!("injected planner failure"),
+            Some(Fault::Error | Fault::Pending | Fault::Damaged) => {
+                anyhow::bail!("injected planner failure")
+            }
             Some(Fault::Panic) => panic!("injected planner panic"),
             None => {}
         }
@@ -230,7 +246,7 @@ impl Factory for ProbeFactory {
             request.proposed.configuration["value"].as_i64().unwrap() >= 0,
             "unsupported negative value"
         );
-        Ok(self.options.plan)
+        Ok(Assessment::from(self.options.plan))
     }
 
     fn consumer_mode(&self) -> Option<crate::ConsumerMode> {
@@ -256,6 +272,7 @@ impl Factory for ProbeFactory {
                 descriptor,
                 configuration: request.configuration.clone(),
                 apply: self.options.apply,
+                plan: self.options.plan,
             }))
             .into());
         }
@@ -288,10 +305,12 @@ impl Factory for ProbeFactory {
     }
 }
 
+/// Owns no lifecycle work; its management, when exported, is a no-op.
 struct Defaults {
     descriptor: ComponentDescriptor,
     configuration: serde_json::Value,
     apply: bool,
+    plan: ComponentUpdatePlan,
 }
 
 #[async_trait]
@@ -302,8 +321,23 @@ impl ComputationComponent for Defaults {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.configuration.clone())
     }
-    fn supports_apply_update(&self) -> bool {
-        self.apply
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        if self.apply {
+            Some(self)
+        } else {
+            None
+        }
+    }
+    crate::passive_lifecycle!();
+}
+
+#[async_trait]
+impl NativeManagement for Defaults {
+    fn assess(&self, _: &UpdateRequest) -> anyhow::Result<Assessment> {
+        Ok(Assessment::from(self.plan))
+    }
+    async fn apply(&mut self, _: &ApplyContext, _: &ApplyUpdateRequest) -> Result<(), ApplyError> {
+        Ok(())
     }
 }
 
@@ -336,11 +370,12 @@ impl ComputationComponent for Probe {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.configuration.clone())
     }
-    fn supports_apply_update(&self) -> bool {
-        self.options.apply
-    }
-    fn supports_delete_owned_resources(&self) -> bool {
-        self.options.deletion
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        if self.options.apply {
+            Some(self)
+        } else {
+            None
+        }
     }
 
     fn output_readers(&self) -> OutputReaders {
@@ -354,12 +389,15 @@ impl ComputationComponent for Probe {
         }
     }
 
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(&mut self, _: &InitializeContext) -> LifecycleResult {
         self.instance_resource = Some(Resource::new(self.state.instances.clone()));
-        self.state.call("initialize").await
+        Ok(self.state.call("initialize").await?)
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
+        if let Some(credentials) = ctx.take_credentials() {
+            credentials.validate()?;
+        }
         let resource = Resource::new(self.state.activations.clone());
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let worker = tokio::spawn(async move {
@@ -370,60 +408,92 @@ impl ComputationComponent for Probe {
             stop: Some(stop),
             handle: worker,
         });
-        self.state.call("start").await
+        Ok(self.state.call("start").await?)
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult {
+        assert_eq!(ctx.mode(), StopMode::Drain);
         self.state.call("stop").await?;
         if let Some(worker) = &mut self.worker {
             if let Some(stop) = worker.stop.take() {
                 let _ = stop.send(());
             }
-            (&mut worker.handle).await?;
+            (&mut worker.handle).await.map_err(anyhow::Error::from)?;
         }
         self.worker = None;
         Ok(())
     }
 
-    async fn start_with_credentials(
-        &mut self,
-        credentials: crate::ActivationCredentials,
-    ) -> anyhow::Result<()> {
-        credentials.validate()?;
-        self.start().await
-    }
-
-    async fn dispose(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.worker.is_none(),
-            "activation worker has not been joined"
-        );
-        anyhow::ensure!(
-            self.state.readers.load(Ordering::SeqCst) == 0,
-            "independent work is still using instance resources"
-        );
+    async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult {
+        if ctx.erases_owned_state() {
+            if self.worker.is_some() {
+                return Err(anyhow::anyhow!("erasure raced activation cleanup").into());
+            }
+            self.state.call("delete").await?;
+        }
+        if self.worker.is_some() {
+            return Err(anyhow::anyhow!("activation worker has not been joined").into());
+        }
+        if self.state.readers.load(Ordering::SeqCst) != 0 {
+            return Err(
+                anyhow::anyhow!("independent work is still using instance resources").into(),
+            );
+        }
         self.state.call("dispose").await?;
         self.instance_resource = None;
         Ok(())
     }
 
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
-        self.state.call("pause").await
+    async fn pause(&mut self, _: &PauseContext) -> LifecycleResult {
+        Ok(self.state.call("pause").await?)
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
-        self.state.call("resume").await
+    async fn resume(&mut self, _: &ResumeContext) -> LifecycleResult {
+        Ok(self.state.call("resume").await?)
+    }
+}
+
+#[async_trait]
+impl NativeManagement for Probe {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        assert!(!request.current.activation_credentials_bound);
+        assert!(!request.proposed.activation_credentials_bound);
+        anyhow::ensure!(
+            request.proposed.configuration["value"].as_i64().unwrap() >= 0,
+            "unsupported negative value"
+        );
+        Ok(self
+            .state
+            .live_assessment
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| Assessment::from(self.options.plan)))
     }
 
-    async fn apply_update(&mut self, update: &ApplyUpdateRequest) -> anyhow::Result<()> {
+    async fn apply(
+        &mut self,
+        ctx: &ApplyContext,
+        update: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError> {
+        assert_eq!(ctx.boundary(), UpdateBoundary::from(update.plan.mode));
+        let previous = self.configuration.clone();
         if !self.state.skip_configuration_update.load(Ordering::Acquire) {
             self.configuration = update.request.proposed.configuration.clone();
         }
-        self.state.call("apply").await
-    }
-
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.worker.is_none(), "deletion raced activation cleanup");
-        self.state.call("delete").await
+        match self.state.enter("apply") {
+            Some(Fault::Error) => {
+                self.configuration = previous;
+                Err(ApplyError::Failed(anyhow::anyhow!(
+                    "injected apply failure"
+                )))
+            }
+            Some(Fault::Damaged) => Err(ApplyError::Damaged(anyhow::anyhow!(
+                "injected apply damage"
+            ))),
+            Some(Fault::Pending) => std::future::pending().await,
+            Some(Fault::Panic) => panic!("injected apply panic"),
+            None => Ok(()),
+        }
     }
 }
 
@@ -611,6 +681,16 @@ impl Harness {
         self.create_bytes(&bytes)
     }
 
+    fn component(&self, handle: abi::ComponentHandle) -> RawComponent {
+        RawComponent(
+            handle,
+            Contexts {
+                component_id: ID.into(),
+                management: self.exported.management(),
+            },
+        )
+    }
+
     fn create_bytes(&self, bytes: &[u8]) -> anyhow::Result<RawComponent> {
         let mut component = abi::ComponentHandle::null();
         unsafe {
@@ -630,7 +710,7 @@ impl Harness {
             }
             result?;
         }
-        Ok(RawComponent(component))
+        Ok(self.component(component))
     }
 
     fn request(&self, value: i64) -> UpdateRequest {
@@ -644,26 +724,35 @@ impl Harness {
 
     fn plan_bytes(&self, bytes: BorrowedBytes) -> Result<transport::ReceivedBytes, Failure> {
         unsafe {
-            transport::take_reply((*self.factory.vtable).plan_update.unwrap()(
+            transport::take_reply((*self.factory.vtable).assess.unwrap()(
                 self.factory.state,
                 bytes,
             ))
         }
     }
 
-    fn plan(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
         Ok(serde_json::from_slice(&self.plan_bytes(
             BorrowedBytes::new(&serde_json::to_vec(request)?),
         )?)?)
     }
 
+    fn plan(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+        self.assess(request)?
+            .plan()
+            .context("factory assessment does not support the update")
+    }
+
     fn approved(&self) -> anyhow::Result<ApplyUpdateRequest> {
         let request = self.request(2);
-        let plan = self.plan(&request)?;
+        let assessment = self.assess(&request)?;
         Ok(ApplyUpdateRequest {
             operation_id: "update-1".into(),
             request,
-            plan,
+            plan: assessment
+                .plan()
+                .context("factory assessment does not support the update")?,
+            fingerprint: assessment.fingerprint().map(str::to_owned),
         })
     }
 }
@@ -674,14 +763,53 @@ impl Drop for Harness {
     }
 }
 
-struct RawComponent(abi::ComponentHandle);
+/// What the host supplies with every lifecycle operation of one component.
+struct Contexts {
+    component_id: String,
+    management: *const abi::management::PluginManagementV1,
+}
+
+struct RawComponent(abi::ComponentHandle, Contexts);
 
 impl RawComponent {
+    /// A minimal valid context for `code`; START carries no credentials.
+    fn context(&self, code: u32) -> wire::LifecycleRequest {
+        let context = wire::LifecycleRequest::new("lifecycle-operation", &self.1.component_id, 1);
+        match code {
+            STOP => context.with_stop_mode(StopMode::Drain),
+            DISPOSE => context.with_dispose(DisposeReason::Shutdown, StateIntent::Preserve, 1),
+            _ => context,
+        }
+    }
+
+    fn dispose_context(&self, reason: DisposeReason, intent: StateIntent, attempt: u32) -> Vec<u8> {
+        let mut context = self.context(DISPOSE);
+        context.dispose = None;
+        wire::encode(&context.with_dispose(reason, intent, attempt)).unwrap()
+    }
+
+    /// Lifecycle operations with an empty payload receive `context(code)`.
     fn begin(&self, code: u32, input: &[u8]) -> Result<transport::OperationFuture, Failure> {
         self.begin_with_transaction(code, input, std::ptr::null())
     }
 
     fn begin_with_transaction(
+        &self,
+        code: u32,
+        input: &[u8],
+        transaction: *const abi::Transaction,
+    ) -> Result<transport::OperationFuture, Failure> {
+        let context;
+        let input = if input.is_empty() && is_lifecycle(code) && code != APPLY {
+            context = wire::encode(&self.context(code)).map_err(Failure::from)?;
+            &context[..]
+        } else {
+            input
+        };
+        self.begin_raw(code, input, transaction)
+    }
+
+    fn begin_raw(
         &self,
         code: u32,
         input: &[u8],
@@ -705,10 +833,53 @@ impl RawComponent {
         }
     }
 
-    async fn call(&self, code: u32, input: &[u8]) -> Result<transport::ReceivedBytes, Failure> {
-        tokio::time::timeout(Duration::from_secs(5), self.begin(code, input)?)
+    /// APPLY through the management table with exactly `input`.
+    fn begin_management(&self, input: &[u8]) -> Result<transport::OperationFuture, Failure> {
+        let mut operation = abi::OperationHandle::null();
+        unsafe {
+            let status = (*self.1.management).apply.unwrap()(
+                self.0.state,
+                BorrowedBytes::new(input),
+                &mut operation,
+            );
+            let result = transport::take_status(status);
+            if result.is_err() {
+                assert!(operation.state.is_null() && operation.vtable.is_null());
+            }
+            result?;
+            transport::OperationFuture::new(operation)
+        }
+    }
+
+    fn begin_apply(
+        &self,
+        update: &ApplyUpdateRequest,
+    ) -> Result<transport::OperationFuture, Failure> {
+        let context = self.context(APPLY).with_update(update.clone());
+        self.begin_management(&wire::encode(&context).map_err(Failure::from)?)
+    }
+
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment, Failure> {
+        let input = serde_json::to_vec(request).map_err(anyhow::Error::from)?;
+        let reply = unsafe {
+            transport::take_reply((*self.1.management).assess.unwrap()(
+                self.0.state,
+                BorrowedBytes::new(&input),
+            ))?
+        };
+        Ok(serde_json::from_slice(&reply).map_err(anyhow::Error::from)?)
+    }
+
+    async fn settle(
+        operation: Result<transport::OperationFuture, Failure>,
+    ) -> Result<transport::ReceivedBytes, Failure> {
+        tokio::time::timeout(Duration::from_secs(5), operation?)
             .await
             .expect("native operation must settle")
+    }
+
+    async fn call(&self, code: u32, input: &[u8]) -> Result<transport::ReceivedBytes, Failure> {
+        Self::settle(self.begin(code, input)).await
     }
 
     async fn run(&self, code: u32) -> anyhow::Result<()> {
@@ -728,11 +899,15 @@ impl RawComponent {
         }
     }
 
+    async fn try_apply(
+        &self,
+        update: &ApplyUpdateRequest,
+    ) -> Result<transport::ReceivedBytes, Failure> {
+        Self::settle(self.begin_apply(update)).await
+    }
+
     async fn apply(&self, update: &ApplyUpdateRequest) -> anyhow::Result<()> {
-        assert!(self
-            .call(APPLY_UPDATE, &wire::encode(update)?)
-            .await?
-            .is_empty());
+        assert!(self.try_apply(update).await?.is_empty());
         Ok(())
     }
 
@@ -744,7 +919,7 @@ impl RawComponent {
                 operation.cancel()?;
                 assert_eq!(operation.await.unwrap_err().code, abi::status::CANCELLED);
             }
-            Fault::Error => assert_eq!(
+            Fault::Error | Fault::Damaged => assert_eq!(
                 self.call(code, &[]).await.unwrap_err().code,
                 abi::status::FAILED
             ),
@@ -977,12 +1152,10 @@ async fn borrowed_transact_preserves_lifecycle_fences_busy_revocation_and_cancel
             "pause" | "resume" => {
                 component.run(INITIALIZE).await?;
                 component.run(START).await?;
-                component.run(PAUSE_PROCESSING).await?;
+                component.run(PAUSE).await?;
                 if phase == "resume" {
                     harness.state.fail("resume", Fault::Pending);
-                    component
-                        .interrupted(RESUME_PROCESSING, Fault::Pending)
-                        .await?;
+                    component.interrupted(RESUME, Fault::Pending).await?;
                 }
             }
             "dispose" => component.run(DISPOSE).await?,
@@ -993,10 +1166,10 @@ async fn borrowed_transact_preserves_lifecycle_fences_busy_revocation_and_cancel
             "update" => {
                 component.run(INITIALIZE).await?;
                 component.run(START).await?;
-                component.run(PAUSE_PROCESSING).await?;
+                component.run(PAUSE).await?;
                 let update = harness.approved()?;
                 harness.state.fail("apply", Fault::Pending);
-                let mut work = component.begin(APPLY_UPDATE, &wire::encode(&update)?)?;
+                let mut work = component.begin_apply(&update)?;
                 assert!(futures_util::poll!(&mut work).is_pending());
                 work.cancel()?;
                 assert_eq!(work.await.unwrap_err().code, abi::status::CANCELLED);
@@ -1106,12 +1279,12 @@ async fn lifecycle_cycles() -> anyhow::Result<()> {
         component.run(START).await?;
         component.run(START).await?;
         if cycle == 0 {
-            component.run(PAUSE_PROCESSING).await?;
-            component.run(PAUSE_PROCESSING).await?;
+            component.run(PAUSE).await?;
+            component.run(PAUSE).await?;
             assert!(component.begin(NEXT, &[]).is_err());
             assert_eq!(harness.state.activations.load(Ordering::SeqCst), 1);
-            component.run(RESUME_PROCESSING).await?;
-            component.run(RESUME_PROCESSING).await?;
+            component.run(RESUME).await?;
+            component.run(RESUME).await?;
         }
         component.run(STOP).await?;
         component.run(STOP).await?;
@@ -1161,21 +1334,12 @@ async fn defaults_and_disposal_without_activation_are_real_exported_operations(
     })?;
     let component = harness.create()?;
     for code in [
-        INITIALIZE,
-        INITIALIZE,
-        START,
-        START,
-        PAUSE_PROCESSING,
-        RESUME_PROCESSING,
-        STOP,
-        STOP,
-        DISPOSE,
-        DISPOSE,
+        INITIALIZE, INITIALIZE, START, START, PAUSE, RESUME, STOP, STOP, DISPOSE, DISPOSE,
     ] {
         component.run(code).await?;
     }
     assert_eq!(
-        component.begin(APPLY_UPDATE, &[]).err().unwrap().code,
+        component.begin_management(&[]).err().unwrap().code,
         abi::status::UNSUPPORTED
     );
     for initialized in [false, true] {
@@ -1198,6 +1362,88 @@ async fn defaults_and_disposal_without_activation_are_real_exported_operations(
         harness.state.count("dispose"),
         0,
         "synchronous release never substitutes for disposal"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn lifecycle_operations_require_a_matching_context_before_any_hook() -> anyhow::Result<()> {
+    let harness = Harness::new(Options::update(ComponentUpdateMode::InPlace))?;
+    let component = harness.create()?;
+    let protocol = |code: u32, input: Vec<u8>| {
+        assert_eq!(
+            component
+                .begin_raw(code, &input, std::ptr::null())
+                .err()
+                .expect("malformed lifecycle context must be rejected")
+                .code,
+            abi::status::PROTOCOL,
+            "operation {code}"
+        );
+    };
+    protocol(INITIALIZE, Vec::new());
+    protocol(INITIALIZE, b"not a context".to_vec());
+    protocol(
+        INITIALIZE,
+        wire::encode(&wire::LifecycleRequest::new(
+            "lifecycle-operation",
+            OTHER_ID,
+            1,
+        ))?,
+    );
+    protocol(
+        INITIALIZE,
+        wire::encode(
+            &component
+                .context(INITIALIZE)
+                .with_stop_mode(StopMode::Drain),
+        )?,
+    );
+    assert_eq!(harness.state.count("initialize"), 0);
+    component.run(INITIALIZE).await?;
+    protocol(
+        START,
+        wire::encode(&component.context(START).with_credentials(
+            crate::ActivationCredentials::Token {
+                username: "test-user".into(),
+                token: "test-credential".into(),
+            },
+        ))?,
+    );
+    component.run(START).await?;
+    protocol(STOP, wire::encode(&component.context(PAUSE))?);
+    component.run(PAUSE).await?;
+    let update = harness.approved()?;
+    protocol(
+        APPLY,
+        wire::encode(&component.context(APPLY).with_update(update.clone()))?,
+    );
+    assert_eq!(
+        component
+            .begin_management(&wire::encode(&component.context(APPLY))?)
+            .err()
+            .unwrap()
+            .code,
+        abi::status::PROTOCOL
+    );
+    assert_eq!(harness.state.count("apply"), 0);
+    component.apply(&update).await?;
+    component.run(RESUME).await?;
+    component.run(STOP).await?;
+    component.run(DISPOSE).await?;
+    assert_eq!(
+        *harness.state.calls.lock().unwrap(),
+        vec![
+            "create",
+            "initialize",
+            "start",
+            "pause",
+            "plan",
+            "apply",
+            "resume",
+            "stop",
+            "dispose"
+        ]
     );
     Ok(())
 }
@@ -1256,7 +1502,7 @@ async fn partial_start_and_cleanup_failures_keep_the_worker_owned_until_retry() 
             component.run(STOP).await?;
             assert_eq!(harness.state.activations.load(Ordering::SeqCst), 0);
             component.run(START).await?;
-            component.run(PAUSE_PROCESSING).await?;
+            component.run(PAUSE).await?;
             component.run(STOP).await?;
             assert_eq!(
                 harness.state.count("resume"),
@@ -1279,14 +1525,14 @@ async fn incomplete_disposal_pause_and_resume_are_retryable_not_restarts() -> an
         component.run(INITIALIZE).await?;
         component.run(START).await?;
         harness.state.fail("pause", fault);
-        component.interrupted(PAUSE_PROCESSING, fault).await?;
+        component.interrupted(PAUSE, fault).await?;
         assert!(component.begin(NEXT, &[]).is_err());
-        assert!(component.begin(RESUME_PROCESSING, &[]).is_err());
-        component.run(PAUSE_PROCESSING).await?;
+        assert!(component.begin(RESUME, &[]).is_err());
+        component.run(PAUSE).await?;
         harness.state.fail("resume", fault);
-        component.interrupted(RESUME_PROCESSING, fault).await?;
+        component.interrupted(RESUME, fault).await?;
         assert!(component.begin(NEXT, &[]).is_err());
-        component.run(RESUME_PROCESSING).await?;
+        component.run(RESUME).await?;
         component.run(STOP).await?;
         harness.state.fail("dispose", fault);
         component.interrupted(DISPOSE, fault).await?;
@@ -1314,12 +1560,14 @@ async fn retained_updates() -> anyhow::Result<()> {
         let component = harness.create()?;
         component.run(INITIALIZE).await?;
         component.run(START).await?;
-        assert!(component
-            .begin(APPLY_UPDATE, &wire::encode(&update)?)
-            .is_err());
+        assert_eq!(
+            component.assess(&update.request)?,
+            Assessment::from(update.plan)
+        );
+        assert!(component.begin_apply(&update).is_err());
         component
             .run(if mode == ComponentUpdateMode::InPlace {
-                PAUSE_PROCESSING
+                PAUSE
             } else {
                 STOP
             })
@@ -1331,7 +1579,7 @@ async fn retained_updates() -> anyhow::Result<()> {
         );
         component
             .run(if mode == ComponentUpdateMode::InPlace {
-                RESUME_PROCESSING
+                RESUME
             } else {
                 START
             })
@@ -1361,27 +1609,57 @@ async fn retained_updates_cross_the_real_abi_multi_thread() -> anyhow::Result<()
 }
 
 #[tokio::test]
-async fn interrupted_updates_keep_explicit_intent_without_panic_quarantine_or_rollback(
+async fn failed_updates_leave_the_object_unchanged_and_may_be_retried() -> anyhow::Result<()> {
+    let harness = Harness::new(Options::update(ComponentUpdateMode::Restart))?;
+    let component = harness.create()?;
+    component.run(INITIALIZE).await?;
+    let update = harness.approved()?;
+    harness.state.fail("apply", Fault::Error);
+    let failure = component.try_apply(&update).await.unwrap_err();
+    assert_eq!(failure.code, abi::status::FAILED);
+    assert_eq!(failure.data, Some(serde_json::json!({"apply": "failed"})));
+    assert_eq!(component.configuration()?, harness.request.configuration);
+    component.run(START).await?;
+    component.run(STOP).await?;
+    component.apply(&update).await?;
+    component.apply(&update).await?;
+    assert_eq!(harness.state.count("apply"), 2);
+    assert_eq!(
+        component.configuration()?,
+        update.request.proposed.configuration
+    );
+    component.run(START).await?;
+    component.run(STOP).await?;
+    component.run(DISPOSE).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupted_and_damaging_updates_keep_explicit_intent_without_rollback(
 ) -> anyhow::Result<()> {
-    for fault in [Fault::Error, Fault::Pending] {
+    for fault in [Fault::Pending, Fault::Damaged] {
         let harness = Harness::new(Options::update(ComponentUpdateMode::Restart))?;
         let component = harness.create()?;
         component.run(INITIALIZE).await?;
         let update = harness.approved()?;
         harness.state.fail("apply", fault);
-        let mut operation = component.begin(APPLY_UPDATE, &wire::encode(&update)?)?;
+        let mut operation = component.begin_apply(&update)?;
         if matches!(fault, Fault::Pending) {
             assert!(futures_util::poll!(&mut operation).is_pending());
             operation.cancel()?;
             assert_eq!(operation.await.unwrap_err().code, abi::status::CANCELLED);
         } else {
-            assert_eq!(operation.await.unwrap_err().code, abi::status::FAILED);
+            let failure = operation.await.unwrap_err();
+            assert_eq!(failure.code, abi::status::FAILED);
+            assert_eq!(failure.data, Some(serde_json::json!({"apply": "damaged"})));
         }
-        assert_eq!(
-            component.configuration()?,
-            update.request.proposed.configuration,
-            "partial mutation is not rolled back"
-        );
+        if matches!(fault, Fault::Pending) {
+            assert_eq!(
+                component.configuration()?,
+                update.request.proposed.configuration,
+                "partial mutation is not rolled back"
+            );
+        }
         assert!(component.begin(START, &[]).is_err());
         component.run(STOP).await?;
         assert!(
@@ -1391,13 +1669,54 @@ async fn interrupted_updates_keep_explicit_intent_without_panic_quarantine_or_ro
         let mut conflicting = update.clone();
         conflicting.operation_id = "other-update".into();
         assert!(component.apply(&conflicting).await.is_err());
-        component.apply(&update).await?;
-        component.apply(&update).await?;
-        assert_eq!(harness.state.count("apply"), 2);
-        component.run(START).await?;
+        assert!(
+            component.apply(&update).await.is_err(),
+            "an attempted apply that did not complete requires stop and dispose"
+        );
+        assert_eq!(harness.state.count("apply"), 1);
         component.run(STOP).await?;
         component.run(DISPOSE).await?;
+        assert_eq!(harness.state.count("dispose"), 1);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_reassessment_drift_refuses_the_update_without_mutation() -> anyhow::Result<()> {
+    let harness = Harness::new(Options {
+        modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Restart],
+        ..Options::update(ComponentUpdateMode::Restart)
+    })?;
+    let component = harness.create()?;
+    component.run(INITIALIZE).await?;
+    let update = harness.approved()?;
+    *harness.state.live_assessment.lock().unwrap() = Some(Assessment::supported(
+        UpdateBoundary::Pause,
+        ComponentUpdateData::Preserve,
+    ));
+    assert_eq!(
+        component.assess(&update.request)?.plan().unwrap().mode,
+        ComponentUpdateMode::InPlace
+    );
+    let failure = component.try_apply(&update).await.unwrap_err();
+    assert_eq!(failure.code, abi::status::FAILED);
+    assert_eq!(
+        failure.data,
+        Some(serde_json::json!({"apply": "refused", "nowRequires": "pause"}))
+    );
+    *harness.state.live_assessment.lock().unwrap() =
+        Some(Assessment::unsupported("live facts changed"));
+    let failure = component.try_apply(&update).await.unwrap_err();
+    assert_eq!(
+        failure.data,
+        Some(serde_json::json!({"apply": "refused", "nowRequires": null}))
+    );
+    assert_eq!(harness.state.count("apply"), 0);
+    assert_eq!(component.configuration()?, harness.request.configuration);
+    *harness.state.live_assessment.lock().unwrap() = None;
+    component.apply(&update).await?;
+    assert_eq!(harness.state.count("apply"), 1);
+    component.run(DISPOSE).await?;
     Ok(())
 }
 
@@ -1412,7 +1731,7 @@ async fn accepted_unpolled_start_stop_dispose_and_update_remain_fenced() -> anyh
     assert!(component.begin(START, &[]).is_err());
     component.run(STOP).await?;
     let update = harness.approved()?;
-    drop(component.begin(APPLY_UPDATE, &wire::encode(&update)?)?);
+    drop(component.begin_apply(&update)?);
     assert!(component.begin(START, &[]).is_err());
     component.apply(&update).await?;
     assert_eq!(harness.state.count("apply"), 1);
@@ -1432,14 +1751,12 @@ async fn no_op_or_wrong_configuration_apply_is_not_reported_as_success() -> anyh
     let component = harness.create()?;
     component.run(INITIALIZE).await?;
     let update = harness.approved()?;
-    assert_eq!(
-        component
-            .call(APPLY_UPDATE, &wire::encode(&update)?)
-            .await
-            .unwrap_err()
-            .code,
-        abi::status::UNSUPPORTED
-    );
+    assert!(component
+        .apply(&update)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("proposed configuration"));
     assert!(component.begin(START, &[]).is_err());
     component.run(DISPOSE).await?;
 
@@ -1462,7 +1779,12 @@ async fn no_op_or_wrong_configuration_apply_is_not_reported_as_success() -> anyh
         .state
         .skip_configuration_update
         .store(false, Ordering::Release);
-    component.apply(&update).await?;
+    assert!(
+        component.apply(&update).await.is_err(),
+        "a mismatched apply already ran; only stop and dispose remain"
+    );
+    assert!(component.begin(START, &[]).is_err());
+    assert_eq!(harness.state.count("apply"), 1);
     component.run(DISPOSE).await?;
     Ok(())
 }
@@ -1507,11 +1829,7 @@ async fn metadata_planners_and_retained_hooks_must_match_without_requiring_recre
     let update = harness.approved()?;
     assert_eq!(update.plan.mode, ComponentUpdateMode::Recreate);
     assert_eq!(
-        component
-            .begin(APPLY_UPDATE, &wire::encode(&update)?)
-            .err()
-            .unwrap()
-            .code,
+        component.begin_apply(&update).err().unwrap().code,
         abi::status::UNSUPPORTED
     );
     component.run(DISPOSE).await?;
@@ -1754,9 +2072,9 @@ async fn wakeups_remain_independent_and_service_run_is_not_a_lifecycle_alias() -
     component.run(INITIALIZE).await?;
     component.run(START).await?;
     component.run(RUN).await?;
-    component.run(PAUSE_PROCESSING).await?;
+    component.run(PAUSE).await?;
     assert!(component.begin(RUN, &[]).is_err());
-    component.run(RESUME_PROCESSING).await?;
+    component.run(RESUME).await?;
     component.run(STOP).await?;
     component.run(DISPOSE).await?;
     assert_eq!(
@@ -1776,7 +2094,7 @@ async fn wakeups_remain_independent_and_service_run_is_not_a_lifecycle_alias() -
 }
 
 #[tokio::test]
-async fn explicit_deletion_must_complete_before_disposal_and_is_never_an_update_side_effect(
+async fn erasing_disposal_is_explicit_retried_with_fixed_intent_and_never_an_update_side_effect(
 ) -> anyhow::Result<()> {
     for fault in [Fault::Error, Fault::Pending] {
         let harness = Harness::new(Options {
@@ -1784,22 +2102,81 @@ async fn explicit_deletion_must_complete_before_disposal_and_is_never_an_update_
             ..Options::update(ComponentUpdateMode::Restart)
         })?;
         let component = harness.create()?;
+        let erase = |attempt| {
+            component.dispose_context(DisposeReason::Removal, StateIntent::Erase, attempt)
+        };
         component.run(INITIALIZE).await?;
         component.apply(&harness.approved()?).await?;
         assert_eq!(harness.state.count("delete"), 0);
         component.run(START).await?;
-        assert!(component.begin(DELETE_OWNED_RESOURCES, &[]).is_err());
+        assert!(component.begin(DISPOSE, &erase(1)).is_err());
         component.run(STOP).await?;
+        for (reason, attempt) in [
+            (DisposeReason::Shutdown, 1),
+            (DisposeReason::InitializationFailure, 1),
+            (DisposeReason::Removal, 0),
+        ] {
+            assert_eq!(
+                component
+                    .begin(
+                        DISPOSE,
+                        &component.dispose_context(reason, StateIntent::Erase, attempt)
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
+                abi::status::PROTOCOL
+            );
+        }
         harness.state.fail("delete", fault);
-        component.interrupted(DELETE_OWNED_RESOURCES, fault).await?;
-        assert!(component.begin(DISPOSE, &[]).is_err());
+        match fault {
+            Fault::Pending => {
+                let mut operation = component.begin(DISPOSE, &erase(1))?;
+                assert!(futures_util::poll!(&mut operation).is_pending());
+                operation.cancel()?;
+                assert_eq!(operation.await.unwrap_err().code, abi::status::CANCELLED);
+            }
+            _ => assert_eq!(
+                component.call(DISPOSE, &erase(1)).await.unwrap_err().code,
+                abi::status::FAILED
+            ),
+        }
+        assert_eq!(
+            component.begin(DISPOSE, &[]).err().unwrap().code,
+            abi::status::PROTOCOL,
+            "a retry must repeat the fixed reason and state intent"
+        );
         assert!(component.begin(START, &[]).is_err());
-        component.run(DELETE_OWNED_RESOURCES).await?;
-        component.run(DELETE_OWNED_RESOURCES).await?;
-        component.run(DISPOSE).await?;
+        assert!(component.call(DISPOSE, &erase(2)).await?.is_empty());
+        assert!(component.call(DISPOSE, &erase(3)).await?.is_empty());
         assert_eq!(harness.state.count("delete"), 2);
         assert_eq!(harness.state.count("dispose"), 1);
     }
+
+    let harness = Harness::new(Options::update(ComponentUpdateMode::Restart))?;
+    let component = harness.create()?;
+    component.run(INITIALIZE).await?;
+    assert_eq!(
+        component
+            .begin(
+                DISPOSE,
+                &component.dispose_context(DisposeReason::Removal, StateIntent::Erase, 1)
+            )
+            .err()
+            .unwrap()
+            .code,
+        abi::status::UNSUPPORTED,
+        "erasure requires the declared capability"
+    );
+    assert!(component
+        .call(
+            DISPOSE,
+            &component.dispose_context(DisposeReason::Removal, StateIntent::Preserve, 1)
+        )
+        .await?
+        .is_empty());
+    assert_eq!(harness.state.count("delete"), 0);
+    assert_eq!(harness.state.count("dispose"), 1);
     Ok(())
 }
 
@@ -1929,17 +2306,27 @@ async fn credential_bound_updates_recheck_the_same_description_only_factory_plan
         assert!(!description.current.activation_credentials_bound);
         assert!(description.current.update_directive.is_none());
         component.run(INITIALIZE).await?;
+        assert_eq!(
+            component.assess(&update.request)?,
+            Assessment::from(update.plan)
+        );
         harness.state.fail("apply", Fault::Error);
         assert!(component.apply(&update).await.is_err());
         component.apply(&update).await?;
-        assert!(component.begin(START, &[]).is_err());
+        assert_eq!(
+            component.begin(START, &[]).err().unwrap().code,
+            abi::status::PROTOCOL,
+            "a credential-bound START must carry credentials"
+        );
         component
             .call(
                 START,
-                &wire::encode(&crate::ActivationCredentials::Token {
-                    username: "test-user".into(),
-                    token: "test-credential".into(),
-                })?,
+                &wire::encode(&component.context(START).with_credentials(
+                    crate::ActivationCredentials::Token {
+                        username: "test-user".into(),
+                        token: "test-credential".into(),
+                    },
+                ))?,
             )
             .await?;
         assert_eq!(

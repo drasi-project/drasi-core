@@ -3,3 +3,5 @@
 
 #[path = "fixtures/native_sqlite/host_components.rs"]
 mod components;
+#[path = "common/hooks.rs"]
+mod hooks;

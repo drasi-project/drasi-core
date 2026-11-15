@@ -130,27 +130,59 @@ store owner's records; ordinary import DTOs have no restoration authority.
 
 ## Object lifecycle and assessed updates
 
-Object lifetime is distinct from activation. Native components implement optional
-async, fallible `initialize`, `start`, `stop` and `dispose` hooks. Ordinary
-Source/Reaction implementations first bind their required runtime context through
-`bind_runtime_context(context)`; their optional `initialize()` takes no arguments.
-Initialization runs once per actual object, after binding and before first start.
-Normal stop/start retains that initialized object. Final retirement calls
-`dispose`, including after partial initialization. Failed cleanup retains its
-actual owner and blocks conflicting activation.
+Object lifetime is distinct from activation. Native graph components implement
+six required async lifecycle hooks, each with a typed context:
+`initialize(&InitializeContext)`, `start(&StartContext)`, `pause(&PauseContext)`,
+`resume(&ResumeContext)`, `stop(&StopContext)` and `dispose(&DisposeContext)`.
+There are no no-op defaults; components that own no instance or activation work
+opt in with `passive_component_lifecycle!`. Every context exposes the operation
+scope, deadline and cancellation token. Deadlines are cooperative: expiry is
+neither completion nor rollback. Ordinary Source/Reaction implementations first
+bind their required runtime context through `bind_runtime_context(context)`;
+their optional `initialize()` takes no arguments.
+Initialization runs once per actual object, after binding and before first start;
+a failed initialization is followed only by
+`Dispose(InitializationFailure, Preserve)`. Normal stop/start retains that
+initialized object. `StopContext::mode()` selects `Drain` or `Abort`. Final
+retirement calls `dispose` with a `DisposeReason` (`Shutdown`, `Removal`,
+`Replacement` or `InitializationFailure`) and a `StateIntent`, including after
+partial initialization. Failed cleanup retains its actual owner and blocks
+conflicting activation; a failed dispose is retried with the same reason and
+intent.
 
-`pause_processing`/`resume_processing` are temporary processing boundaries, not
-aliases for stop/start. Borrowed adapters do not take lifecycle ownership.
-Explicit destructive removal orders stop, `delete_owned_resources`, dispose and
-final release. Disposal, update and ordinary shutdown do not delete stored state.
+Native `pause`/`resume` are temporary processing boundaries, not aliases for
+stop/start. A component that cannot pause returns `unsupported`; it never
+succeeds as a no-op. Ordinary Source/Reaction adapters use
+`pause_processing`/`resume_processing`. Borrowed adapters do not take lifecycle
+ownership. Explicit destructive removal stops the component, then disposes it
+with `StateIntent::Erase`: dispose erases state the generation owns first, and
+that erasure must be idempotent because a failed dispose is retried. Shutdown and
+initialization-failure disposal always preserve state. Disposal, update and
+ordinary shutdown do not delete stored state.
 
-Managed updates require a registered factory's pure `plan_update` assessment:
-`InPlace`, `Restart` or `Recreate`, with explicit `Preserve`, `Rebootstrap` or `Reset` data
-semantics. The default is unsupported. Retained objects execute `apply_update`;
-reconstruction uses the factory with an owner-issued `ComponentUpdateDirective`.
-There is no opaque-object or replacement-callback update API. Source/reaction
-update façades accept `OrdinaryComponentRecord`; native definitions use
-`apply_configuration`. Memory-only constructor callbacks remain creation inputs.
+Updates are separate from the lifecycle. A proposed change is first assessed,
+then applied at the boundary the graph establishes. Assessment is pure and
+returns `Assessment::Supported { boundary, data, .. }` or
+`Assessment::Unsupported`. `UpdateBoundary::Pause`, `Stop` and `Replace` are
+stored as `ComponentUpdateMode::InPlace`, `Restart` and `Recreate`, with explicit
+`Preserve`, `Rebootstrap` or `Reset` data semantics. A live idle object may
+assess through its optional `ComponentManagement` (`management()`); returning
+`None` defers to the registered factory's pure `plan_update`, which is also used
+for replacement and for unconstructed components. The default is unsupported.
+
+Retained objects execute `ComponentManagement::apply(&ApplyContext,
+ComponentUpdateContext)` at the accepted Pause or Stop boundary. Before applying,
+the graph re-assesses the live object and refuses the update if it is now
+unsupported or requires a stronger boundary. Apply returns `ApplyError::Refused`
+(optionally with `now_requires`) or `Failed`, both of which leave the object
+unchanged and may be retried, or `Damaged`, which quarantines the component: it
+is stopped with `Abort`, disposed and left failed rather than replaced
+automatically. An interrupted or cancelled apply is never retried on the same
+object. Replacement uses the factory with an owner-issued
+`ComponentUpdateDirective`. There is no opaque-object or replacement-callback
+update API. Source/reaction update façades accept `OrdinaryComponentRecord`;
+native definitions use `apply_configuration`. Memory-only constructor callbacks
+remain creation inputs.
 
 `AcceptanceReceipt.updates` retains accepted plans and operation IDs.
 `CommittedConfiguration.pending_updates` records unfinished execution, including

@@ -289,8 +289,11 @@ impl Harness {
             .unwrap()
             .with_result_catalog(&catalog)
             .unwrap();
-            query.initialize().await.unwrap();
-            query.start().await.unwrap();
+            query
+                .initialize(&lifecycle_contexts::initialize())
+                .await
+                .unwrap();
+            query.start(&lifecycle_contexts::start()).await.unwrap();
             queries.insert(id.to_string(), query);
         }
         Self {
@@ -395,7 +398,7 @@ impl Harness {
     async fn shutdown(mut self, host: &ReactionPluginHost) {
         host.shutdown().await.unwrap();
         for query in self.queries.values_mut() {
-            query.stop().await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
         }
     }
 }
@@ -1039,4 +1042,46 @@ async fn auto_reset_bootstrap_snapshot_failure_propagates_without_advancing_chec
         0
     );
     harness.shutdown(&host).await;
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use crate::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

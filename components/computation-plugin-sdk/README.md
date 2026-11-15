@@ -1,11 +1,12 @@
 # Native ComputationGraph plugin SDK
 
 This is a separate plugin family, not a replacement or layout change to the
-Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **3.0.0**
-with native **wire version 3**, independent of workspace package versions.
+Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **4.0.0**
+with native **wire version 4**, independent of workspace package versions.
 Ordinary Source/Reaction/Bootstrap ABI **0.19.0** is independently versioned.
-Rebuild plugins with the matching SDK; earlier native and ordinary binaries
-are incompatible. Unknown native wire versions reject.
+Hosts accept native plugins with the same ABI major and an older or equal
+minor, and reject a newer minor or another major. Unknown native wire versions
+reject.
 
 ## Authoring
 
@@ -79,7 +80,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "3.0.0"
+abi-version = "4.0.0"
 kind = "example-native"
 ```
 
@@ -110,29 +111,80 @@ and does not itself establish durability or validate a producer identity.
 
 ### Object lifetime, activation and temporary pauses
 
-Every `NativeComponent` has zero-argument, async, fallible `initialize`, `start`,
-`stop`, `dispose`, `pause_processing` and `resume_processing` hooks, all with
-successful no-op defaults. Framework context and services are bound at
-construction, independently of these optional developer hooks.
+Every `NativeComponent` implements six required async hooks, each returning
+`LifecycleResult` and taking a typed context from `drasi_computation_plugin_sdk::lifecycle`:
 
-The normal order is `create → initialize → (start → stop)* → dispose → release`.
+```rust,ignore
+use async_trait::async_trait;
+use drasi_computation_plugin_sdk::{lifecycle::*, NativeComponent};
+
+#[async_trait]
+impl NativeComponent for MySource {
+    fn descriptor(&self) -> &ComponentDescriptor { &self.descriptor }
+    async fn initialize(&mut self, ctx: &InitializeContext) -> LifecycleResult { nothing_to_do() }
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
+        self.activation = Some(ctx.activation_scope());
+        Ok(())
+    }
+    async fn pause(&mut self, ctx: &PauseContext) -> LifecycleResult {
+        unsupported("workers cannot be gated")
+    }
+    async fn resume(&mut self, ctx: &ResumeContext) -> LifecycleResult { nothing_to_do() }
+    async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult {
+        if let Some(mut scope) = self.activation.take() {
+            scope.stop(ctx.mode()).await?;
+        }
+        Ok(())
+    }
+    async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult {
+        if ctx.erases_owned_state() {
+            self.erase_owned_state().await?; // idempotent
+        }
+        Ok(())
+    }
+}
+```
+
+There are no no-op defaults. A component that owns no instance or activation
+work opts in explicitly with `passive_lifecycle!()` inside its `#[async_trait]`
+impl; it must not run independent workers that produce output while paused.
+Every context exposes `scope()` (operation ID, component ID, generation),
+`deadline()` and `cancellation()`. Deadlines are cooperative: expiry is neither
+completion nor rollback, so check the token and return promptly. Framework
+context and services are bound at construction, independently of these hooks.
+`StartContext` carries activation credentials when the factory declares them and
+`activation_scope()` creates an `ActivationScope` whose `PauseGate` workers can
+observe pause; `StopContext::mode()` is `Drain` or `Abort`. Return
+`LifecycleError::retryable`, `terminal`, `unsupported` or `cancelled` to classify
+failures; a plain `anyhow::Error` is terminal.
+
+The normal order is
+`create → initialize → (start → [pause → resume]* → stop)* → dispose → release`.
 Call `INITIALIZE` explicitly before the first `START`; successful initialization
-is once per constructed object, not once per UUID. Stop retains instance-lifetime
-resources for restart. Disposal is final, includes partially initialized and
-never-started objects, and must be awaited before ABI release. Release/`Drop`
-only releases references; it never invokes or acknowledges asynchronous disposal.
+is once per constructed object, not once per UUID. Failed initialization is
+followed only by `Dispose(InitializationFailure, Preserve)`. Stop retains
+instance-lifetime resources for restart. Disposal is final, includes partially
+initialized and never-started objects, and must be awaited before ABI release.
+Its context carries a `DisposeReason` (`Shutdown`, `Removal`, `Replacement`,
+`InitializationFailure`), a `StateIntent` and an attempt number.
+Release/`Drop` only releases references; it never invokes or acknowledges
+asynchronous disposal.
 
 Successful duplicate lifecycle requests acknowledge completion without repeating
 hooks. Failed or cancelled initialization cannot be retried on the same object;
 dispose it and construct a new one. Partial start requires successful stop.
 Failed/cancelled stop or disposal retains the cleanup obligation and fences
-restart; retry the cleanup rather than treating cancellation as rollback.
+restart; retry the cleanup rather than treating cancellation as rollback. A
+retried dispose repeats the same reason and intent.
 
-Temporary pause/resume retains activation and does not call start/stop.
-Stopping a paused component does not resume it first. `NativeService::run` remains
-a processing operation, not a lifecycle alias. Components with their own workers
-must implement the real pause/join/resource behavior required by their plans;
-no-op defaults do not prove draining, persistence or external-effect completion.
+Temporary pause/resume retains activation and does not call start/stop. A
+component that cannot actually settle its independent work returns
+`unsupported` from `pause`; it never succeeds as a no-op. Stopping a paused
+component does not resume it first. `NativeService::run` remains a processing
+operation, not a lifecycle alias. Components with their own workers must
+implement the real pause/join/resource behavior required by their plans;
+successful passive hooks do not prove draining, persistence or external-effect
+completion.
 The exporter uses the existing owned operation machinery, fences independent
 calls/readers and awaits their settlement before conflicting cleanup. A retained,
 unpolled operation still has an owner; hosts must poll or cancel/release it.
@@ -140,34 +192,62 @@ The local operation wrapper serializes foreign poll, cancellation and release.
 A cancellation handle may be used from another thread, but cannot destroy a
 future while its foreign poll is still executing.
 
-### Plugin-owned update planning and execution
+### Plugin-owned update assessment and application
 
-Declare unique supported strategies in `Capabilities::update_modes` (empty by
-default), return `true` from `Factory::supports_update_planning()`, and implement
-the synchronous `Factory::plan_update(&UpdateRequest) -> Result<ComponentUpdatePlan>`.
+Updates are separate from the lifecycle: a change is assessed, then applied at
+the boundary the host establishes. Declare unique supported boundaries in
+`Capabilities::update_modes` (empty by default), return `true` from
+`Factory::supports_update_planning()`, and implement the factory planner
+`Factory::assess(&UpdateRequest) -> anyhow::Result<Assessment>`.
 `UpdateRequest { current, proposed }` contains two `CreateRequest` descriptions for
-the same UUID, scope, implementation and configuration version. Planning is pure
+the same UUID, scope, implementation and configuration version. Assessment is pure
 configuration inspection: no I/O, construction, activation or mutable external
-state. Unsupported changes are errors, never an implicit reconstruction policy.
+state. Return `Assessment::unsupported(reason)` for changes the factory cannot
+safely describe; a failure to assess is an error, never an implicit replacement.
 The factory callback uses JSON bounded to 1 MiB.
 
-The shared plan has `mode: InPlace | Restart | Recreate` and
-`data: Preserve | Rebootstrap`. Metadata and a returned plan do **not** establish
-snapshot/live handover, downstream reset or storage guarantees. Core owns those
-checks and must reject a plan it cannot safely execute.
+`Assessment::supported(boundary, data)` names an `UpdateBoundary` of `Pause`,
+`Stop` or `Replace`, stored in metadata and plans as `ComponentUpdateMode`
+`InPlace`, `Restart` or `Recreate`, and `data: Preserve | Rebootstrap`. Metadata
+and an assessment do **not** establish snapshot/live handover, downstream reset
+or storage guarantees. Core owns those checks and must reject a plan it cannot
+safely execute.
 
-InPlace and Restart declarations require
-`NativeComponent::supports_apply_update() == true` and an implementation of
-`async fn apply_update(&mut self, update: &ApplyUpdateRequest) -> Result<()>`.
-The default is explicitly unsupported, not successful no-op. A Recreate-only
-factory does not need this hook. `ApplyUpdateRequest` carries a stable
-`operation_id`, the `UpdateRequest` and the approved `plan`, using bounded named
-MessagePack. The exporter rechecks the pure planner and the object's current
-identity/configuration, rejects forged/undeclared plans, and never executes
-Recreate through an instance apply operation.
+Pause and Stop boundaries require `Capabilities::management` and instance
+management: return `Some(self)` from `NativeComponent::management()` and
+implement `NativeManagement`:
 
-InPlace requires a successfully paused activation; Restart requires completed
-stop on the initialized object. Fixed ports, registered capabilities and
+```rust,ignore
+#[async_trait]
+impl NativeManagement for MySource {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        Ok(Assessment::supported(UpdateBoundary::Pause, ComponentUpdateData::Preserve))
+    }
+    async fn apply(
+        &mut self,
+        ctx: &ApplyContext,
+        update: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError> {
+        self.reconfigure(&update.request.proposed.configuration)
+            .map_err(ApplyError::Failed)
+    }
+}
+```
+
+`management` is declared exactly when `update_modes` names Pause or Stop, and
+its presence is fixed for the object's lifetime. A Replace-only factory needs no
+management. The instance `assess` uses live facts but is side-effect free; the
+host falls back to the factory planner when no management exists.
+`ApplyUpdateRequest` carries a stable `operation_id`, the `UpdateRequest`, the
+accepted `plan` and optional assessment `fingerprint`, inside the APPLY
+operation's MessagePack `LifecycleRequest`. Before calling `apply`, the exporter
+validates the request, rejects forged/undeclared plans, never executes Replace
+through an instance apply, and re-assesses the locked instance: a different
+outcome returns `ApplyError::Refused` with `now_requires` and leaves the object
+unchanged. `ApplyContext::boundary()` reports the established boundary.
+
+Pause requires a successfully paused activation; Stop requires completed stop on
+the initialized object. Fixed ports, registered capabilities and
 construction-time bindings cannot change on a retained object. On success,
 `configuration()` must expose the proposed configuration, allowing omitted fields
 to expose the factory's published literal defaults. The SDK compares both sides
@@ -175,14 +255,16 @@ using only those top-level defaults: it never overwrites explicit values, merges
 nested objects, discards extra fields or infers defaults from descriptions.
 Without published defaults, equality remains exact. Accepted definitions, update
 requests and receipts retain their original spelling; only comparison accounts
-for defaults. An incomplete update
-retains its exact operation identity and request; retry that same intent or
-complete stop/disposal. Stop alone does not clear an incomplete update, and an
-ordinary update failure is not a panic quarantine. Repeating the last successfully
-completed intent acknowledges it without a second mutation. Successful updates
-still need the appropriate resume/start; they never initialize/dispose the object.
+for defaults. `ApplyError::Refused` and `Failed` must leave the object unchanged
+and may be retried with the same operation identity; `Damaged` retires the
+object, which the host stops with `Abort`, disposes and leaves failed rather than
+replacing automatically. An interrupted or cancelled apply is never retried on
+the same object: only Stop and Dispose remain admissible. Repeating the last
+successfully completed intent acknowledges it without a second mutation.
+Successful updates still need the appropriate resume/start; they never
+initialize/dispose the object.
 
-After successful `APPLY_UPDATE`, re-inspect `InstanceMetadata`: `queries` reflects
+After a successful APPLY, re-inspect `InstanceMetadata`: `queries` reflects
 the current descriptions from the same registered query reader objects, including
 an updated outbox capacity. Descriptor, ports, capabilities and provider `Arc`
 identities remain fixed; replacing a reader on a retained object is rejected.
@@ -217,21 +299,22 @@ and validating actual data safety. A previous creation directive is not a new
 planning authorization. Rebootstrap still requires Core's actual
 snapshot/live/downstream proofs, not just this envelope or a declared mode.
 
-### Explicit permanent resource deletion
+### Explicit permanent state erasure
 
 Any native role owning removable state/resources can set
-`Capabilities::delete_owned_resources`, return `true` from
-`NativeComponent::supports_delete_owned_resources()` and implement
-`NativeComponent::delete_owned_resources()`. Metadata and implementation must
-agree. This permission never covers borrowed/shared host resources.
+`Capabilities::erases_owned_state` and honour `StateIntent::Erase` in `dispose`.
+Without that declaration the host only requests `StateIntent::Preserve`. Erasure
+never covers borrowed/shared host resources; `DisposeContext` keeps the
+component's processing and state services open for its duration.
 
-Only an explicit permanent-removal request invokes deletion. The order is
-successful stop, `delete_owned_resources`, dispose, then release; an object never
-activated needs no stop. Ordinary stop, disposal and updates do not imply
-deletion. Once deletion is accepted the object is permanently fenced from normal
-work. Failure/cancellation may leave partially deleted state: retry the deletion
-on its retained owner. Disposal cannot bypass incomplete deletion. Completed
-deletion is acknowledged without repeating the hook.
+Only an explicit permanent-removal request erases: the host stops the component,
+then calls `dispose` with `DisposeReason::Removal` and `StateIntent::Erase`; an
+object never activated needs no stop. Shutdown and initialization-failure
+disposal must preserve, and ordinary stop, replacement and updates do not imply
+erasure. Erase owned state first inside `dispose`, then release instance
+resources. Failure/cancellation may leave partially erased state; the retained
+owner is disposed again with the same reason and intent, so erasure must be
+idempotent. Completed disposal is acknowledged without repeating the hook.
 
 ## Quiescent provider-driven transformer initialization
 
@@ -286,7 +369,7 @@ the metadata schema and enforce their conditional requirements in construction.
 annotation. The separately negotiated versioned creation envelope sets it for
 existing factory callbacks, including progress and coordinated-source creation.
 Ordinary Rust request literals set it to `false`; the base request encoding,
-base ABI 2.0.0 layouts, and wire version 2 remain unchanged.
+base ABI 4.0.0 layouts, and wire version 4 remain unchanged.
 
 Implement `NativeComponent::start_with_credentials(ActivationCredentials)` for
 the bound path. It runs **inside the normal START operation**, with the same
@@ -307,8 +390,8 @@ cancellation-safe under the existing operation-ownership contract.
 ## Configuration descriptions
 
 The optional `configuration-v1` entry point publishes field descriptions, defaults,
-integer limits and allowed values without changing the frozen ABI 2.0 metadata or
-wire version 2. A matching-wire plugin may omit the extension; the host does not
+integer limits and allowed values without changing the frozen ABI 4.0 metadata or
+wire version 4. A matching-wire plugin may omit the extension; the host does not
 invent missing descriptions. A present but malformed extension is an error,
 including during metadata-only discovery.
 
@@ -343,7 +426,7 @@ source processing lock. Reads must remain possible while `next()` is pending.
 This is data-schema discovery, not the factory's configuration schema.
 
 The optional `source_schema_v1` extension carries a bounded MessagePack
-`Option<SourceSchema>` without changing ABI 2.0.0 or envelope wire version 2.
+`Option<SourceSchema>` without changing ABI 4.0.0 or envelope wire version 4.
 The SDK permits one schema read per source at a time, limits replies to 1 MiB
 and reads to 30 seconds, and rejects results from stopped or replaced
 activations. Cancellation releases the read slot. Actual failures remain errors;
@@ -598,7 +681,7 @@ The SDK has one explicitly owned, process-lifetime Tokio I/O runtime per binary.
 It enters that runtime while the host polls plugin futures so timer/socket drivers
 work without borrowing the host's Tokio internals. It never spawns graph execution
 or processing futures. If a component starts auxiliary I/O workers, it must own
-their cancellation/join lifetime and implement stop/pause_processing accordingly. Transaction
+their cancellation/join lifetime and implement stop/pause accordingly. Transaction
 participants must not start workers. Host and plugin task-locals never cross the ABI.
 
 All buffer/handle frees run in their producer. Rust `Future`, trait-object, `Arc`,
@@ -620,7 +703,7 @@ hot-unload promise. Native plugins are trusted in-process code, not a sandbox.
 
 ## Envelopes and schemas
 
-Metadata and configuration are UTF-8 JSON. Native wire version 2 uses named
+Metadata and configuration are UTF-8 JSON. Native wire version 4 uses named
 MessagePack records and bulk MessagePack binary buffers, not JSON envelopes or
 per-byte integer arrays. Its binary envelope format is also 2.
 `BinaryEnvelopeCodec` encodes the full schema descriptor, typed images, sequence,
@@ -737,7 +820,7 @@ The same participant also works when the host container uses `SharedStorageGroup
 and shared QoS outputs. Its state, the container's input progress/retained output
 and the selected journal appends then commit together. The host reserves pipe
 capacity before invoking the participant. No new ABI interface or storage handle
-crosses the boundary: ABI 2.0 transaction participants use their existing
+crosses the boundary: ABI 4.0 transaction participants use their existing
 revocable mailbox. This does not give standalone native transformers output
 tracking, make separate stores atomic, or deduplicate external effects.
 
@@ -985,8 +1068,8 @@ service. It has its own exact header, version, reserved fields and read-only
 observation callback. The SDK rejects a base table for a scheduling factory,
 an unexpected scheduling table for an ordinary factory, and malformed or
 unsupported extension versions. Transaction requests still use the same
-revocable mailbox, with no plugin commit method. Base ABI 2.0.0 layouts,
-envelope wire version 2 and the independent legacy plugin ABI are unchanged.
+revocable mailbox, with no plugin commit method. Base ABI 4.0.0 layouts,
+envelope wire version 4 and the independent legacy plugin ABI are unchanged.
 
 The stateful delayed-emission transformer in
 [`host-sdk/tests/fixtures/native_scheduling.rs`](../host-sdk/tests/fixtures/native_scheduling.rs)
@@ -1003,7 +1086,7 @@ combinations or the mixed SQLite/query/non-query CW-82 application.
 ## Optional host-owned consumer completion
 
 The independently negotiated `drasi_computation_plugin_consumer_v1` extension
-leaves base ABI 2.0 and wire 2 unchanged. Declare `Factory::consumer_mode()` as
+leaves base ABI 4.0 and wire 4 unchanged. Declare `Factory::consumer_mode()` as
 `External` or `Transactional`, with a handled, non-snapshot sink descriptor.
 Return `Component::Consumer` for a `NativeComponent + DeliveryHandler`, or
 `Component::TransactionalConsumer` for a `NativeTransactionalConsumer`. Ordinary
@@ -1053,7 +1136,7 @@ mode and actual storage guarantees. None of these services adds a graph executor
 ## Optional graph-owned source admission
 
 The export macro also supplies the separately versioned service-v1 symbol.
-Base ABI 2.0 metadata and tables are unchanged; matching-ABI binaries without the symbol
+Base ABI 4.0 metadata and tables are unchanged; matching-ABI binaries without the symbol
 remain loadable for fast mode. Declare `Factory::supports_source_admission()`
 only for a single-output source, and implement `create_with_admission`.
 Without a bound service, retain the existing `create` behavior.
@@ -1089,7 +1172,7 @@ external effects.
 
 The independent `drasi_computation_plugin_recovery_v1` symbol negotiates
 `Factory::supports_source_progress()` and `create_with_progress`. It does not
-extend service-v1, strict base metadata, ABI **2.0.0**, or wire version **2**.
+extend service-v1, strict base metadata, ABI **4.0.0**, or wire version **4**.
 Old hosts ignore the symbol; new hosts still load old binaries without granting
 this service. Missing, malformed or unsupported requested services fail explicitly.
 
@@ -1175,7 +1258,7 @@ reject, and the host validates the complete factory catalogue at load time.
 Metadata-only inspection validates the advertised extension table without
 calling the plugin entry point; catalogue discovery happens during loading.
 This adds no component role and does
-not change base metadata, ABI **2.0.0**, wire **2**, or existing optional tables.
+not change base metadata, ABI **4.0.0**, wire **4**, or existing optional tables.
 The Host SDK exposes the negotiated `NativePlugin::bootstrap_factories()`.
 Plugin-side factories return `NativeBootstrapProvider`; only the host-side
 `NativeBootstrapFactory::create_provider` returns a real

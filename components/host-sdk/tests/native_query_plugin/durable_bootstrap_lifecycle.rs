@@ -132,13 +132,14 @@ async fn interrupted_after_row() -> Result<()> {
             gate: gate.clone(),
         })),
     )?;
-    loading.initialize().await?;
+    loading.initialize(&crate::hooks::initialize_ctx()).await?;
     let snapshot = reader(&loading)?;
     let progress = loading
         .processing_progress_owner()
         .context("missing progress owner")?;
     {
-        let start = loading.start();
+        let start_context = crate::hooks::start_ctx();
+        let start = loading.start(&start_context);
         tokio::pin!(start);
         tokio::select! {
             result = &mut start => anyhow::bail!("bootstrap completed before its second row: {result:?}"),
@@ -154,35 +155,36 @@ async fn interrupted_after_row() -> Result<()> {
                 && !progress.snapshot().bootstrap_complete
         );
     }
+    assert!(tokio::time::timeout(
+        Duration::from_millis(20),
+        loading.stop(&crate::hooks::stop_ctx())
+    )
+    .await
+    .is_err());
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), loading.stop())
-            .await
-            .is_err()
-    );
-    assert!(
-        loading.start().await.is_err(),
+        loading.start(&crate::hooks::start_ctx()).await.is_err(),
         "unfinished cleanup allowed another initialization"
     );
     assert!(provider.freeze_for_retirement().is_err());
     gate.release_cleanup();
-    loading.stop().await?;
+    loading.stop(&crate::hooks::stop_ctx()).await?;
     provider.freeze_for_retirement()?.resume();
     drop(loading);
 
     let mut strict = file_query(&database, &indexes, 2)?;
-    strict.initialize().await?;
+    strict.initialize(&crate::hooks::initialize_ctx()).await?;
     let failure = strict
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("Strict must not adopt partial initialization");
     assert!(format!("{failure:#}").contains("incomplete"));
-    strict.stop().await?;
+    strict.stop(&crate::hooks::stop_ctx()).await?;
     drop(strict);
 
     gate.release();
     let mut resumed = query(&indexes, TEXT, 3, Some(file_provider(&database, 3)?))?;
-    resumed.initialize().await?;
-    resumed.start().await?;
+    resumed.initialize(&crate::hooks::initialize_ctx()).await?;
+    resumed.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(total(&reader(&resumed)?.snapshot().await?)?, 30.0);
     let progress = resumed
         .processing_progress_owner()
@@ -191,7 +193,7 @@ async fn interrupted_after_row() -> Result<()> {
     assert_eq!(progress.reset_generation, 1);
     assert!(progress.bootstrap_complete && progress.ready && progress.checkpoints.is_empty());
     assert!(resumed.continue_transform().await?.is_empty());
-    resumed.stop().await?;
+    resumed.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -212,37 +214,39 @@ async fn indexed_bootstrap_auto_reset_requires_provider_and_changes_output_epoch
     let indexes = directory.path().join("indexes");
     sqlite::create_database(&database)?;
     let mut original = file_query(&database, &indexes, 1)?;
-    original.initialize().await?;
-    original.start().await?;
+    original.initialize(&crate::hooks::initialize_ctx()).await?;
+    original.start(&crate::hooks::start_ctx()).await?;
     let producer = reader(&original)?
         .snapshot()
         .await?
         .cursor()
         .producer()
         .clone();
-    original.stop().await?;
+    original.stop(&crate::hooks::stop_ctx()).await?;
     drop(original);
     let text = "MATCH (n:items) RETURN sum(n.amount * 2) AS total";
     let mut unbound = query(&indexes, text, 2, None)?;
-    unbound.initialize().await?;
-    assert!(unbound.start().await.is_err());
+    unbound.initialize(&crate::hooks::initialize_ctx()).await?;
+    assert!(unbound.start(&crate::hooks::start_ctx()).await.is_err());
     drop(unbound);
     let mut unchanged = file_query(&database, &indexes, 3)?;
-    unchanged.initialize().await?;
-    unchanged.start().await?;
+    unchanged
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
+    unchanged.start(&crate::hooks::start_ctx()).await?;
     let snapshot = reader(&unchanged)?.snapshot().await?;
     assert_eq!(total(&snapshot)?, 30.0);
     assert_eq!(snapshot.cursor().producer(), &producer);
-    unchanged.stop().await?;
+    unchanged.stop(&crate::hooks::stop_ctx()).await?;
     drop(unchanged);
     let mut reset = query(&indexes, text, 4, Some(file_provider(&database, 4)?))?;
-    reset.initialize().await?;
-    reset.start().await?;
+    reset.initialize(&crate::hooks::initialize_ctx()).await?;
+    reset.start(&crate::hooks::start_ctx()).await?;
     let snapshot = reader(&reset)?.snapshot().await?;
     assert_eq!(total(&snapshot)?, 60.0);
     assert_ne!(snapshot.cursor().producer(), &producer);
     assert_eq!(snapshot.cursor().sequence(), 0);
-    reset.stop().await?;
+    reset.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -253,15 +257,15 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
     let indexes = directory.path().join("indexes");
     sqlite::create_database(&database)?;
     let mut original = file_query(&database, &indexes, 1)?;
-    original.initialize().await?;
-    original.start().await?;
+    original.initialize(&crate::hooks::initialize_ctx()).await?;
+    original.start(&crate::hooks::start_ctx()).await?;
     let producer = reader(&original)?
         .snapshot()
         .await?
         .cursor()
         .producer()
         .clone();
-    original.stop().await?;
+    original.stop(&crate::hooks::stop_ctx()).await?;
     drop(original);
     rusqlite::Connection::open(&database)?.execute("UPDATE items SET amount=11 WHERE id=1", [])?;
     let gate = Gate::new(false);
@@ -273,7 +277,7 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
         scope(2),
         super::super::provider(&indexes)?,
     )?;
-    strict.initialize().await?;
+    strict.initialize(&crate::hooks::initialize_ctx()).await?;
     strict.bind_bootstrap(Arc::new(NativeBootstrapResource(Arc::new(
         PausedProvider {
             inner: file_provider(&database, 2)?,
@@ -281,11 +285,11 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
         },
     ))))?;
     let failure = strict
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("Strict must not replace a completed projection");
     assert!(format!("{failure:#}").contains("Strict"));
-    strict.stop().await?;
+    strict.stop(&crate::hooks::stop_ctx()).await?;
     drop(strict);
     let mut reset = query(
         &indexes,
@@ -296,8 +300,8 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
             gate,
         })),
     )?;
-    reset.initialize().await?;
-    reset.start().await?;
+    reset.initialize(&crate::hooks::initialize_ctx()).await?;
+    reset.start(&crate::hooks::start_ctx()).await?;
     let snapshot = reader(&reset)?.snapshot().await?;
     assert_eq!(total(&snapshot)?, 31.0);
     assert_ne!(snapshot.cursor().producer(), &producer);
@@ -309,7 +313,7 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
             .reset_generation,
         1
     );
-    reset.stop().await?;
+    reset.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -320,8 +324,8 @@ async fn indexed_bootstrap_auto_reset_preserves_unconfirmed_output() -> Result<(
     let indexes = directory.path().join("indexes");
     sqlite::create_database(&database)?;
     let mut original = file_query(&database, &indexes, 1)?;
-    original.initialize().await?;
-    original.start().await?;
+    original.initialize(&crate::hooks::initialize_ctx()).await?;
+    original.start(&crate::hooks::start_ctx()).await?;
     let output = original
         .transform(input(
             SourceChange::Insert {
@@ -338,7 +342,7 @@ async fn indexed_bootstrap_auto_reset_preserves_unconfirmed_output() -> Result<(
         )?)
         .await?;
     aggregate(&output, Some(30.0), 35.0, 1)?;
-    original.stop().await?;
+    original.stop(&crate::hooks::stop_ctx()).await?;
     drop(original);
     let mut reset = query(
         &indexes,
@@ -346,17 +350,17 @@ async fn indexed_bootstrap_auto_reset_preserves_unconfirmed_output() -> Result<(
         2,
         Some(file_provider(&database, 2)?),
     )?;
-    reset.initialize().await?;
+    reset.initialize(&crate::hooks::initialize_ctx()).await?;
     let failure = reset
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("AutoReset must not discard pending output");
     assert!(format!("{failure:#}").contains("unconfirmed output"));
-    reset.stop().await?;
+    reset.stop(&crate::hooks::stop_ctx()).await?;
     drop(reset);
     let mut retained = file_query(&database, &indexes, 3)?;
-    retained.initialize().await?;
-    retained.start().await?;
+    retained.initialize(&crate::hooks::initialize_ctx()).await?;
+    retained.start(&crate::hooks::start_ctx()).await?;
     let replayed = retained.continue_transform().await?;
     aggregate(&replayed, Some(30.0), 35.0, 1)?;
     assert_eq!(
@@ -365,6 +369,6 @@ async fn indexed_bootstrap_auto_reset_preserves_unconfirmed_output() -> Result<(
     );
     retained.delivery_completed(&replayed).await?;
     assert_eq!(total(&reader(&retained)?.snapshot().await?)?, 35.0);
-    retained.stop().await?;
+    retained.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }

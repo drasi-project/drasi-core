@@ -491,6 +491,7 @@ impl Model {
                             | "partialeq_numeric"
                             | "from_integer"
                             | "query_configuration_methods"
+                            | "scoped_context"
                     ) {
                         if value.mac.path.is_ident("query_configuration_methods") {
                             syn::parse2::<syn::Ident>(value.mac.tokens.clone())?;

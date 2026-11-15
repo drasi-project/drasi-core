@@ -75,7 +75,7 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
     )
     .await?
     .with_delivery_tracking();
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     let mut receiver = pipe.pipe.take_receiver()?;
     for expected in [1, 2] {
         let delivery = receiver.receive().await?.unwrap();
@@ -96,7 +96,7 @@ async fn backwards_timestamps_do_not_skip_unprocessed_source_changes() -> Result
         query.delivery_completed(&output).await?;
     }
     assert_eq!(query.results().snapshot()?.rows.len(), 2);
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     queue.shutdown().await?;
     Ok(())
 }
@@ -268,4 +268,46 @@ async fn wal_subscription_recovers_without_a_native_cursor_and_reports_real_gaps
     ));
     base.stop_common().await?;
     Ok(())
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

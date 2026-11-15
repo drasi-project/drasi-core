@@ -4,6 +4,8 @@
 //! Build `drasi-computation-transformer-view --features dynamic-plugin` first.
 //! This test loads the real library; it has no Rust dependency on the view crate.
 
+#[path = "common/hooks.rs"]
+mod hooks;
 #[path = "fixtures/native_sink_inputs.rs"]
 mod native_inputs;
 
@@ -153,7 +155,7 @@ async fn loaded_view_case() -> Result<()> {
     let capabilities = &factory.metadata().capabilities;
     assert_eq!(capabilities.output_snapshots, vec![PortId::try_new("out")?]);
     assert_eq!(capabilities.output_progress, Some(OutputProgress::Origin));
-    assert!(capabilities.delete_owned_resources);
+    assert!(capabilities.erases_owned_state);
     assert!(!capabilities.transactional);
     assert!(!capabilities.durable_output);
     assert!(capabilities.output_replays.is_empty());
@@ -189,8 +191,8 @@ async fn loaded_view_case() -> Result<()> {
         snapshots.snapshot().await,
         Err(OutputReadError::NotReady(_))
     ));
-    view.initialize().await?;
-    view.start().await?;
+    view.initialize(&crate::hooks::initialize_ctx()).await?;
+    view.start(&crate::hooks::start_ctx()).await?;
     assert_snapshot(&snapshots.snapshot().await?, &[], 0)?;
 
     let full_input = node(
@@ -277,13 +279,13 @@ async fn loaded_view_case() -> Result<()> {
             effective_from: 3,
         },
     };
-    view.stop().await?;
+    view.stop(&crate::hooks::stop_ctx()).await?;
     assert!(matches!(
         snapshots.snapshot().await,
         Err(OutputReadError::NotReady(_))
     ));
     assert!(view.transform(input(deletion.clone(), 3)?).await.is_err());
-    view.start().await?;
+    view.start(&crate::hooks::start_ctx()).await?;
     let resumed = snapshots.snapshot().await?;
     assert_snapshot(&resumed, &next_rows, 2)?;
     assert_eq!(resumed.cursor(), second.cursor());
@@ -315,20 +317,20 @@ async fn loaded_view_case() -> Result<()> {
     .await?;
     let retained = snapshots.snapshot().await?;
     assert_eq!(retained.records().len(), 2);
-    assert!(view.delete_owned_resources().await.is_err());
+    assert!(view.dispose(&crate::hooks::erase_ctx()).await.is_err());
     assert_eq!(snapshots.snapshot().await?.cursor(), retained.cursor());
-    view.stop().await?;
+    view.stop(&crate::hooks::stop_ctx()).await?;
     assert!(matches!(
         snapshots.snapshot().await,
         Err(OutputReadError::NotReady(_))
     ));
-    view.delete_owned_resources().await?;
-    view.delete_owned_resources().await?;
+    view.dispose(&crate::hooks::erase_ctx()).await?;
+    view.dispose(&crate::hooks::erase_ctx()).await?;
     assert!(matches!(
         snapshots.snapshot().await,
         Err(OutputReadError::Retired)
     ));
-    assert!(view.start().await.is_err());
+    assert!(view.start(&crate::hooks::start_ctx()).await.is_err());
     assert!(view
         .transform(input(
             SourceChange::Insert {
@@ -338,7 +340,7 @@ async fn loaded_view_case() -> Result<()> {
         )?)
         .await
         .is_err());
-    view.dispose().await?;
+    view.dispose(&crate::hooks::dispose_ctx()).await?;
     drop(view);
     assert!(matches!(
         snapshots.snapshot().await,
@@ -347,14 +349,14 @@ async fn loaded_view_case() -> Result<()> {
 
     let mut fresh = native_inputs::create(factory, ComponentId::try_new(VIEW_ID)?, configuration)?;
     let fresh_snapshots = snapshot_provider(&fresh)?;
-    fresh.initialize().await?;
-    fresh.start().await?;
+    fresh.initialize(&crate::hooks::initialize_ctx()).await?;
+    fresh.start(&crate::hooks::start_ctx()).await?;
     let cold = fresh_snapshots.snapshot().await?;
     assert_snapshot(&cold, &[], 0)?;
     assert_ne!(cold.cursor().epoch(), first_cursor.epoch());
-    fresh.stop().await?;
-    fresh.delete_owned_resources().await?;
-    fresh.dispose().await?;
+    fresh.stop(&crate::hooks::stop_ctx()).await?;
+    fresh.dispose(&crate::hooks::erase_ctx()).await?;
+    fresh.dispose(&crate::hooks::dispose_ctx()).await?;
     Ok(())
 }
 

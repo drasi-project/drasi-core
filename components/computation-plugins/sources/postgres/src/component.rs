@@ -13,6 +13,10 @@ use drasi_computation_contracts::{
     SourceProgressSnapshot, SourceProgressUpdates, SourceProgressView, SourceTransactionCodec,
     SourceTransactionError, StreamId,
 };
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{NativeComponent, NativeConsumerProgress, NativeSource};
 use drasi_core_types::interface::StorageDurability;
 use drasi_postgres_common::replication::rows::{row_checkpoint, row_live_config, row_position};
@@ -601,7 +605,28 @@ impl NativeComponent for PostgresTransactionSource {
         }
         Ok(value)
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl PostgresTransactionSource {
+    async fn start_activation(&mut self) -> Result<()> {
         anyhow::ensure!(
             !self.cleanup_required,
             "PostgreSQL source requires awaited cleanup before restart"
@@ -654,7 +679,7 @@ impl NativeComponent for PostgresTransactionSource {
         .await?;
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_activation(&mut self) -> Result<()> {
         self.shutdown.send_replace(true);
         self.join(true).await?;
         self.receiver = None;

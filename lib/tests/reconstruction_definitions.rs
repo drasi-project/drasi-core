@@ -22,12 +22,7 @@ impl ComputationComponent for Inspectable {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(json!({"setting":"inspectable, not a reconstruction recipe"}))
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]

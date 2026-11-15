@@ -2,6 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::{Configuration, MsSqlConfig};
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 mod processing;
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
@@ -222,7 +226,28 @@ impl NativeComponent for MsSqlSource {
     fn input_position_policy(&self) -> Option<Arc<InputPositionPolicy>> {
         Some(self.policy.clone())
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
+
+impl MsSqlSource {
+    async fn start_activation(&mut self) -> Result<()> {
         ensure!(
             !self.cleanup,
             "SQL Server source requires successful stop before restart"
@@ -232,7 +257,7 @@ impl NativeComponent for MsSqlSource {
         self.generation.fetch_add(1, AtomicOrdering::AcqRel);
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_activation(&mut self) -> Result<()> {
         if self.generation.load(AtomicOrdering::Acquire) % 2 == 1 {
             self.generation.fetch_add(1, AtomicOrdering::AcqRel);
         }
@@ -257,6 +282,7 @@ impl Drop for MsSqlSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle_ctx;
     use drasi_computation_contracts::{
         ConsumerProgressProvider, ConsumerProgressUpdates, SourceProgressSnapshot,
     };
@@ -410,24 +436,24 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("retired"));
-        source.start().await?;
-        assert!(source.start().await.is_err());
-        source.stop().await?;
+        source.start(&mut lifecycle_ctx::start()).await?;
+        assert!(source.start(&mut lifecycle_ctx::start()).await.is_err());
+        source.stop(&lifecycle_ctx::stop()).await?;
         assert!(first
             .describe_schema()
             .await
             .unwrap_err()
             .to_string()
             .contains("retired"));
-        source.start().await?;
-        source.stop().await?;
+        source.start(&mut lifecycle_ctx::start()).await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
         Ok(())
     }
     #[tokio::test]
     async fn retained_schema_reader_is_fenced_when_source_is_dropped() -> Result<()> {
         let mut source = fixture()?;
         let reader = source.source_schema_reader().context("schema reader")?;
-        source.start().await?;
+        source.start(&mut lifecycle_ctx::start()).await?;
         drop(source);
         assert!(reader
             .describe_schema()

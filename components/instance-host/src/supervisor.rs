@@ -1177,7 +1177,11 @@ impl ComputationComponent for SupervisorService {
         self.control = Some(control);
     }
 
-    async fn start(&mut self) -> Result<()> {
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn start(&mut self, _context: &StartContext) -> Result<()> {
         self.supervisor
             .action(
                 &self.registration.component,
@@ -1192,7 +1196,20 @@ impl ComputationComponent for SupervisorService {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &StopContext) -> Result<()> {
+        self.stop_child().await
+    }
+
+    async fn dispose(&mut self, context: &DisposeContext) -> Result<()> {
+        if context.erases_owned_state() {
+            self.stop_child().await?;
+        }
+        Ok(())
+    }
+}
+
+impl SupervisorService {
+    async fn stop_child(&mut self) -> Result<()> {
         if self.supervisor.0.shared.closing.load(Ordering::Acquire) {
             let mut observed = self.registration.observed.clone();
             observed
@@ -1210,10 +1227,6 @@ impl ComputationComponent for SupervisorService {
             )
             .await?;
         Ok(())
-    }
-
-    async fn delete_owned_resources(&mut self) -> Result<()> {
-        self.stop().await
     }
 }
 

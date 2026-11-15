@@ -144,7 +144,10 @@ impl ComputationComponent for BridgeSink {
         Ok(serde_json::to_value(&self.config)?)
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.started && self.state.is_none() && self.failed_cleanup.is_none(),
             "bridge sink requires completed cleanup before restart"
@@ -185,7 +188,10 @@ impl ComputationComponent for BridgeSink {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.started = false;
         self.client.invalidate().await;
         if let Some(state) = &self.state {
@@ -201,6 +207,21 @@ impl ComputationComponent for BridgeSink {
             self.egress_control.unbind(epoch)?;
             self.control_epoch = None;
         }
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }

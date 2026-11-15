@@ -69,7 +69,7 @@ async fn semantics() -> Result<()> {
                     },
                     provider,
                 )?;
-                query.initialize().await?;
+                query.initialize(&crate::hooks::initialize_ctx()).await?;
                 let reader = query
                     .output_readers()
                     .ports()

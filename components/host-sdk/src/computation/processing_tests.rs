@@ -949,8 +949,12 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
             super::consumer_tests::scope(),
             provider.clone(),
         )?;
-        component.initialize().await?;
-        component.start().await?;
+        component
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        component
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         let input = InputEnvelope {
             port: PortId::try_new("in")?,
             envelope: super::envelope(
@@ -960,7 +964,9 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
         };
         let result = component.transform(input).await;
         assert_eq!(result.is_err(), fail);
-        component.stop().await?;
+        component
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
     let owner = ComputationTransaction::try_new(
         provider
@@ -994,12 +1000,25 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
         super::consumer_tests::scope(),
         provider.clone(),
     )?;
-    component.initialize().await?;
-    component.start().await?;
-    component.stop().await?;
-    component.delete_owned_resources().await?;
-    component.delete_owned_resources().await?;
-    assert!(component.start().await.is_err());
+    component
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    component
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    component
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
+    component
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
+    component
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
+    assert!(component
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     let owner = ComputationTransaction::try_new(
         provider
             .create_indexes(
@@ -1052,12 +1071,7 @@ impl ComputationComponent for OneSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -1080,12 +1094,7 @@ impl ComputationComponent for OneSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]

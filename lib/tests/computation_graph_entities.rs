@@ -104,13 +104,31 @@ impl ComputationComponent for IdleService {
         &self.descriptor
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.running = true;
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.running = false;
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -866,7 +884,10 @@ async fn ordinary_source_query_reaction_subscriptions_are_first_class_pipe_nodes
         }
         let mut source =
             ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
-        source.start().await.expect("start topology source");
+        source
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
         let mut subscription_keys = BTreeSet::new();
@@ -1048,7 +1069,10 @@ async fn ordinary_source_query_reaction_subscriptions_are_first_class_pipe_nodes
         assert_eq!(label_count(&elements, "INPUT_TO_PIPE"), 2);
         assert_eq!(label_count(&elements, "OUTPUT_FROM_PIPE"), 2);
         assert_eq!(label_count(&elements, "FLOWS_TO"), 1);
-        source.stop().await.expect("stop topology source");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop topology source");
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
@@ -1166,7 +1190,10 @@ async fn ordinary_runtime_kinds_and_descriptor_provenance_are_projected() {
 
     let mut source =
         ComputationTopologySource::new(component(733), stream("topology"), graph.inspector());
-    source.start().await.expect("start topology source");
+    source
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start topology source");
     let mut elements = BTreeMap::new();
     apply(&mut elements, &drain(&mut source).await);
     for (id, _, expected_kind, known_plugin) in cases {
@@ -1207,7 +1234,10 @@ async fn ordinary_runtime_kinds_and_descriptor_provenance_are_projected() {
     ] {
         assert!(!format!("{elements:?}").contains(marker), "leaked {marker}");
     }
-    source.stop().await.expect("stop topology source");
+    source
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop topology source");
 }
 
 #[test]
@@ -1401,7 +1431,10 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
         );
         let mut source =
             ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
-        source.start().await.expect("start topology source");
+        source
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
         assert_eq!(label_count(&elements, "ComputationPlugin"), 0);
@@ -1545,7 +1578,10 @@ async fn late_host_plugin_observations_update_topology_without_mutating_descript
             &ElementValue::Null
         );
         assert_eq!(kind_count(&topology, GraphEntityKind::Pipe), 0);
-        source.stop().await.expect("stop topology source");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop topology source");
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
@@ -1682,7 +1718,10 @@ async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration()
     assert_eq!(kind_count(&topology, GraphEntityKind::Plugin), 0);
     let mut source =
         ComputationTopologySource::new(component(733), stream("topology"), graph.inspector());
-    source.start().await.expect("start topology source");
+    source
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start topology source");
     let mut elements = BTreeMap::new();
     apply(&mut elements, &drain(&mut source).await);
     for node in elements
@@ -1704,7 +1743,10 @@ async fn semantic_kinds_do_not_interpret_arbitrary_or_unresolved_configuration()
     ] {
         assert!(!format!("{elements:?}").contains(marker), "leaked {marker}");
     }
-    source.stop().await.expect("stop topology source");
+    source
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop topology source");
 }
 
 #[test]
@@ -1927,7 +1969,10 @@ async fn attached_provider_observations_are_queryable_without_invented_provenanc
         control.deployment_report().await.expect("deployment");
         let mut source =
             ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
-        source.start().await.expect("start topology source");
+        source
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
         let generation = control
@@ -2002,7 +2047,10 @@ async fn attached_provider_observations_are_queryable_without_invented_provenanc
             assert!(!format!("{elements:?}").contains(marker), "leaked {marker}");
         }
         assert_eq!(label_count(&elements, "ComputationPlugin"), 0);
-        source.stop().await.expect("stop topology source");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop topology source");
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
@@ -2090,7 +2138,10 @@ async fn internal_subscription_adjacency_is_not_a_native_pipe() {
         assert!(topology.nodes.contains_key(&native_pipe));
         let mut source =
             ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
-        source.start().await.expect("start topology source");
+        source
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
         let keys: BTreeSet<_> = elements
@@ -2168,7 +2219,10 @@ async fn internal_subscription_adjacency_is_not_a_native_pipe() {
             .links
             .iter()
             .any(|link| link.kind == GraphEntityLinkKind::ControlConnection));
-        source.stop().await.expect("stop topology source");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop topology source");
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
@@ -2389,7 +2443,10 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
         );
         let mut source =
             ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
-        source.start().await.expect("start topology source");
+        source
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
         assert_eq!(label_count(&elements, "ComputationPlugin"), 2);
@@ -2507,7 +2564,10 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
         assert!(topology
             .nodes
             .contains_key(&GraphEntityId::Component(component(732))));
-        source.stop().await.expect("stop topology source");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop topology source");
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
@@ -2706,7 +2766,10 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
         control.deployment_report().await.expect("deploy");
         let mut source =
             ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
-        source.start().await.expect("start topology source");
+        source
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
         assert_eq!(label_count(&elements, "ComputationPipe"), 1);
@@ -2811,7 +2874,10 @@ async fn pipe_nodes_survive_unbinding_and_keep_missing_endpoint_declarations() {
             elements[&pipe_id.key()].get_property("fromComponent"),
             &ElementValue::String(Arc::from(component(77).as_str()))
         );
-        source.stop().await.expect("stop topology source");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop topology source");
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
@@ -2903,7 +2969,10 @@ async fn graph_as_data_exposes_provenance_but_not_configuration_secrets_or_failu
         }));
         let mut source =
             ComputationTopologySource::new(component(733), stream("topology"), inspector.clone());
-        source.start().await.expect("start topology source");
+        source
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start topology source");
         let mut elements = BTreeMap::new();
         apply(&mut elements, &drain(&mut source).await);
         for marker in [
@@ -2939,8 +3008,53 @@ async fn graph_as_data_exposes_provenance_but_not_configuration_secrets_or_failu
             &ElementValue::String(Arc::from("Creation"))
         );
         assert_eq!(label_count(&elements, "ComputationPlugin"), 1);
-        source.stop().await.expect("stop topology source");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop topology source");
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

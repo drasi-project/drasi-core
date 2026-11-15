@@ -160,7 +160,9 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
                 if retained { "retained" } else { "valid" },
                 progress.clone(),
             )?;
-            proxy.initialize().await?;
+            proxy
+                .initialize(&crate::computation::test_hooks::initialize_ctx())
+                .await?;
             let recovery = if retained {
                 ComponentRecovery::admitted(StorageDurability::LOCAL_PROCESS_RESTART)
             } else {
@@ -181,19 +183,25 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
             );
             assert!(proxy.recovery_progress().is_none());
             closed(&control(&proxy, "snapshot", Value::Null).await.unwrap_err());
-            proxy.start().await?;
+            proxy
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             control(
                 &proxy,
                 "expect",
                 fixture::snapshot_json(&progress.read_only().snapshot()?)?,
             )
             .await?;
-            first.start().await?;
+            first
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             let partial = progress.read_only().snapshot()?;
             assert!(partial.consumers[&id(451)].ready);
             assert!(!partial.consumers[&id(768)].ready && !partial.ready());
             control(&proxy, "expect", fixture::snapshot_json(&partial)?).await?;
-            second.start().await?;
+            second
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             let input = super::envelope(&id(749), 1);
             let outputs = first
                 .transform(InputEnvelope {
@@ -225,13 +233,17 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
             let bytes = command("wait", Value::Null)?;
             let mut pending = Box::pin(remote.unit(abi::operation::CONTROL, &bytes));
             assert!(poll!(pending.as_mut()).is_pending());
-            proxy.stop().await?;
+            proxy
+                .stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
             closed(
                 &tokio::time::timeout(Duration::from_secs(1), pending)
                     .await?
                     .unwrap_err(),
             );
-            proxy.start().await?;
+            proxy
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             closed(
                 &control(&proxy, "old-snapshot", Value::Null)
                     .await
@@ -253,8 +265,12 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
                     .await
                     .unwrap_err(),
             );
-            first.stop().await?;
-            second.stop().await?;
+            first
+                .stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
+            second
+                .stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
         }
     }
     Ok(())
@@ -278,11 +294,21 @@ async fn consumer_progress_rejects_missing_substituted_conflicting_and_mutating_
         }
         for mode in ["mutate-reader", "mutate-retention", "mutate-policy"] {
             let mut proxy = create(&factory, mode, progress.clone())?;
-            proxy.initialize().await?;
-            assert!(proxy.start().await.is_err());
+            proxy
+                .initialize(&crate::computation::test_hooks::initialize_ctx())
+                .await?;
+            assert!(proxy
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .is_err());
             closed(&control(&proxy, "snapshot", Value::Null).await.unwrap_err());
-            assert!(proxy.start().await.is_err());
-            proxy.stop().await?;
+            assert!(proxy
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .is_err());
+            proxy
+                .stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
         }
         assert!(factory
             .create_component_with_consumer_progress(
@@ -330,33 +356,54 @@ async fn failed_and_cancelled_lifecycle_requires_successful_cleanup(
         "stop-pending-once",
     ] {
         let mut proxy = create(&factory, mode, owners())?;
-        proxy.initialize().await?;
+        proxy
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         if mode == "start-pending-once" {
-            let mut start = Box::pin(proxy.start());
+            let start_context = crate::computation::test_hooks::start_ctx();
+            let mut start = Box::pin(proxy.start(&start_context));
             assert!(poll!(start.as_mut()).is_pending());
             drop(start);
         } else if mode == "start-fail-once" {
-            assert!(proxy.start().await.is_err());
+            assert!(proxy
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .is_err());
         } else {
-            proxy.start().await?;
+            proxy
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             if mode == "stop-pending-once" {
-                let mut stop = Box::pin(proxy.stop());
+                let stop_context = crate::computation::test_hooks::stop_ctx();
+                let mut stop = Box::pin(proxy.stop(&stop_context));
                 assert!(poll!(stop.as_mut()).is_pending());
                 drop(stop);
             } else {
-                assert!(proxy.stop().await.is_err());
+                assert!(proxy
+                    .stop(&crate::computation::test_hooks::stop_ctx())
+                    .await
+                    .is_err());
             }
         }
         closed(&control(&proxy, "snapshot", Value::Null).await.unwrap_err());
         assert!(
-            proxy.start().await.is_err(),
+            proxy
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .is_err(),
             "{mode} must not hide incomplete cleanup"
         );
-        proxy.stop().await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         if mode == "stop-pending-once" {
-            proxy.stop().await?;
+            proxy
+                .stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
         }
-        proxy.start().await?;
+        proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         if mode == "stop-pending-once" {
             control(
                 &proxy,
@@ -366,15 +413,22 @@ async fn failed_and_cancelled_lifecycle_requires_successful_cleanup(
             .await?;
         }
         control(&proxy, "snapshot", Value::Null).await?;
-        proxy.stop().await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
     let mut proxy = create(&factory, "wait-recovered", owners())?;
-    proxy.initialize().await?;
-    let mut start = Box::pin(proxy.start());
+    proxy
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    let start_context = crate::computation::test_hooks::start_ctx();
+    let mut start = Box::pin(proxy.start(&start_context));
     assert!(poll!(start.as_mut()).is_pending());
     drop(start);
     closed(&control(&proxy, "snapshot", Value::Null).await.unwrap_err());
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -458,12 +512,7 @@ fn consumer_progress_input_policy_cannot_be_exported_without_its_required_bindin
         fn input_position_policy(&self) -> Option<Arc<InputPositionPolicy>> {
             Some(self.policy.clone())
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_computation_plugin_sdk::passive_lifecycle!();
     }
     #[async_trait]
     impl sdk::NativeSource for Source {
@@ -523,12 +572,7 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl EnvelopeSink for Drain {
@@ -854,12 +898,16 @@ async fn standalone_transaction_capable_factories_keep_volatile_handling_separat
             owner.clone(),
             None,
         )?;
-        component.initialize().await?;
+        component
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         assert_eq!(
             component.recovery_contract(),
             ComponentRecovery::default().with_volatile_input_progress(owner.clone()),
         );
-        component.start().await?;
+        component
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         let output = component
             .transform(InputEnvelope {
                 port: PortId::try_new("in")?,
@@ -873,7 +921,9 @@ async fn standalone_transaction_capable_factories_keep_volatile_handling_separat
             .await?;
         assert_eq!(output.len(), 1);
         component.delivery_completed(&output).await?;
-        component.stop().await?;
+        component
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert!(!owner.snapshot().ready && owner.snapshot().checkpoints.is_empty());
         assert!(
             component.into_transactional().is_err(),
@@ -917,12 +967,31 @@ mod graph_fanout {
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
+        async fn start(
+            &mut self,
+            _context: &drasi_lib::computation::v1::StartContext,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn stop(&mut self) -> anyhow::Result<()> {
+        async fn stop(
+            &mut self,
+            _context: &drasi_lib::computation::v1::StopContext,
+        ) -> anyhow::Result<()> {
             self.receiver.close();
             self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+        drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+        drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+        async fn dispose(
+            &mut self,
+            context: &drasi_lib::computation::v1::DisposeContext,
+        ) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                !context.erases_owned_state(),
+                "this component does not support permanent state removal"
+            );
             Ok(())
         }
     }
@@ -946,12 +1015,31 @@ mod graph_fanout {
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
+        async fn start(
+            &mut self,
+            _context: &drasi_lib::computation::v1::StartContext,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn stop(&mut self) -> anyhow::Result<()> {
+        async fn stop(
+            &mut self,
+            _context: &drasi_lib::computation::v1::StopContext,
+        ) -> anyhow::Result<()> {
             self.sender.take();
             self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+        drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+        drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+        async fn dispose(
+            &mut self,
+            context: &drasi_lib::computation::v1::DisposeContext,
+        ) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                !context.erases_owned_state(),
+                "this component does not support permanent state removal"
+            );
             Ok(())
         }
     }
@@ -1459,17 +1547,21 @@ mod graph_fanout {
                     owner.clone(),
                     None,
                 )?;
-            sink.initialize().await?;
+            sink.initialize(&crate::computation::test_hooks::initialize_ctx())
+                .await?;
             assert!(sink.recovery_contract().replay_retention().is_none());
-            sink.start().await?;
+            sink.start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             sink.handle(InputEnvelope {
                 port: PortId::try_new("in")?,
                 envelope: input(1)?,
             })
             .await?;
-            sink.stop().await?;
+            sink.stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
             assert_eq!(sdk::progress::encode_snapshot(&owner.snapshot())?, before);
-            sink.start().await?;
+            sink.start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             sink.inner
                 .unit(
                     abi::operation::CONTROL,
@@ -1481,7 +1573,8 @@ mod graph_fanout {
                     )?,
                 )
                 .await?;
-            sink.stop().await?;
+            sink.stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
         }
         Ok(())
     }

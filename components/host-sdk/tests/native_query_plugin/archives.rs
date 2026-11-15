@@ -56,8 +56,8 @@ async fn history_reopen() -> Result<()> {
         .map(|value| item(value, value as u64 * 1000))
         .collect();
     let mut query = make(1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     for (index, element) in versions.iter().enumerate() {
         let output = query
             .transform(input(
@@ -94,12 +94,12 @@ async fn history_reopen() -> Result<()> {
         ),
     ]);
     assert_eq!(snapshot(&query).await?, expected);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = make(2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(snapshot(&query).await?, expected);
     let output = query
         .transform(input(
@@ -113,7 +113,7 @@ async fn history_reopen() -> Result<()> {
     let mut expected = expected;
     expected.insert("value".into(), VariableValue::from(json!(4)));
     assert_eq!(snapshot(&query).await?, expected);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -131,8 +131,8 @@ async fn shared_query_archives_point_and_range_reopen_multi_thread() -> Result<(
 async fn shared_query_archives_require_actual_provider_support() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), HISTORY, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let error = query
         .transform(input(
             SourceChange::Insert {
@@ -144,6 +144,6 @@ async fn shared_query_archives_require_actual_provider_support() -> Result<()> {
         .expect_err("an archive-disabled provider must not produce empty history");
     let detail = format!("{error:#}").to_ascii_lowercase();
     assert!(detail.contains("archive"), "{error:#}");
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }

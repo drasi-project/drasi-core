@@ -10,6 +10,8 @@ mod coverage;
 mod credentials;
 #[path = "fixtures/native_mssql/database.rs"]
 mod database;
+#[path = "common/hooks.rs"]
+mod hooks;
 #[path = "fixtures/native_sink_inputs.rs"]
 mod sink_inputs;
 

@@ -77,12 +77,7 @@ impl sdk::NativeComponent for Source {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_computation_plugin_sdk::passive_lifecycle!();
 }
 #[async_trait]
 impl sdk::NativeSource for Source {
@@ -124,12 +119,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSink for Sink {

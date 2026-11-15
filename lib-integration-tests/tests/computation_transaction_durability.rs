@@ -54,12 +54,7 @@ impl ComputationComponent for ArithmeticStep {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -184,7 +179,7 @@ fn storage(root: &Path) -> Arc<dyn ComputationIndexProvider> {
 
 async fn transaction(root: &Path, crash_before_commit: bool) -> Result<TransactionTransformer> {
     let mut subject = transaction_unstarted(root, crash_before_commit).await?;
-    subject.start().await?;
+    subject.start(&lifecycle_contexts::start()).await?;
     Ok(subject)
 }
 
@@ -249,7 +244,7 @@ fn input(sequence: u64, value: i64) -> Result<InputEnvelope> {
 
 async fn query(root: &Path, name: &str, id: ComponentId) -> Result<ContinuousQueryTransformer> {
     let mut subject = query_unstarted(root, name, id).await?;
-    subject.start().await?;
+    subject.start(&lifecycle_contexts::start()).await?;
     Ok(subject)
 }
 
@@ -283,12 +278,7 @@ impl ComputationComponent for ReplaySource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -316,12 +306,7 @@ impl ComputationComponent for CrashSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -524,7 +509,7 @@ async fn connected_pipeline(root: &Path, boundary: &str, crash: bool) -> Result<
     let mut restored = query(root, "connected-query", query_id).await?;
     assert_eq!(rows(&restored)?, [(20, 1, 1), (24, 2, 2), (28, 3, 3)]);
     assert!(!restored.has_pending_emissions());
-    restored.stop().await?;
+    restored.stop(&lifecycle_contexts::stop()).await?;
     let trace = std::fs::read_to_string(root.join("steps.log"))?;
     for committed in ["first:1", "second:1"] {
         assert_eq!(
@@ -538,7 +523,9 @@ async fn connected_pipeline(root: &Path, boundary: &str, crash: bool) -> Result<
     let mut restored_transaction = transaction(root, false).await?;
     let duplicate = restored_transaction.transform(input(3, 5)?).await?;
     restored_transaction.delivery_completed(&duplicate).await?;
-    restored_transaction.stop().await?;
+    restored_transaction
+        .stop(&lifecycle_contexts::stop())
+        .await?;
     assert_eq!(
         std::fs::read_to_string(root.join("steps.log"))?,
         trace,
@@ -722,9 +709,9 @@ async fn transaction_crash_worker() -> Result<()> {
         std::fs::read_to_string(root.join("steps.log"))?,
         format!("{trace}first:2\nsecond:2\n")
     );
-    subject.stop().await?;
-    first.stop().await?;
-    second.stop().await?;
+    subject.stop(&lifecycle_contexts::stop()).await?;
+    first.stop(&lifecycle_contexts::stop()).await?;
+    second.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -779,4 +766,46 @@ async fn process_crashes_preserve_transaction_atomicity_and_partial_fanout_recov
         }
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

@@ -1271,30 +1271,51 @@ impl ComputationComponent for ReactionPluginAdapter {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.host.initialize_component().await
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            self.erase_owned_state().await?;
+        }
         self.host.shutdown().await
     }
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
         self.host.pause_processing().await
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
         self.host.resume_processing().await
     }
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
+        self.host.start_component().await
+    }
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
+        self.host.stop().await
+    }
+}
+
+impl ReactionPluginAdapter {
+    async fn erase_owned_state(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.host.owned,
             "borrowed reaction state must be removed by its owner"
         );
         self.host.reaction()?.delete_owned_resources().await
-    }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        self.host.start_component().await
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        self.host.stop().await
     }
 }
 #[async_trait]
@@ -1518,7 +1539,7 @@ mod tests {
         .unwrap()
         .with_result_catalog(&catalog)
         .unwrap();
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         let results = query.output_owner();
         let projector = results.snapshot().unwrap().projector;
         let view = snapshot_view(projector.clone(), 10_000);
@@ -1599,7 +1620,7 @@ mod tests {
                 status: ComponentStatus::Error
             })
         ));
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 
     struct UncheckedRowValidator;
@@ -1713,6 +1734,48 @@ mod tests {
                     Err(FetchError::OutboxGap(_))
                 ));
             }
+        }
+    }
+
+    #[allow(dead_code)]
+    mod lifecycle_contexts {
+        use crate::computation::v1::{
+            CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+            PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+        };
+
+        fn scope() -> OperationScope {
+            OperationScope::new("test", "component", 1, None, CancellationToken::new())
+        }
+
+        pub fn initialize() -> InitializeContext {
+            InitializeContext::new(scope())
+        }
+
+        pub fn start() -> StartContext {
+            StartContext::new(scope())
+        }
+
+        pub fn pause() -> PauseContext {
+            PauseContext::new(scope())
+        }
+
+        pub fn resume() -> ResumeContext {
+            ResumeContext::new(scope())
+        }
+
+        pub fn stop() -> StopContext {
+            StopContext::new(scope(), StopMode::Drain)
+        }
+
+        pub fn dispose() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+                .expect("shutdown preserves state")
+        }
+
+        pub fn erase() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+                .expect("removal may erase state")
         }
     }
 }

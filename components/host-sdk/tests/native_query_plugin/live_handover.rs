@@ -26,14 +26,29 @@ impl ComputationComponent for ObservedQuery {
             self.snapshots.clone(),
         )
     }
-    async fn initialize(&mut self) -> Result<()> {
-        self.inner.initialize().await
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> Result<()> {
+        self.inner.initialize(&crate::hooks::initialize_ctx()).await
     }
-    async fn start(&mut self) -> Result<()> {
-        self.inner.start().await
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
+        self.inner.start(&crate::hooks::start_ctx()).await
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.inner.stop().await
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        self.inner.stop(&crate::hooks::stop_ctx()).await
+    }
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
+        Ok(())
     }
 }
 

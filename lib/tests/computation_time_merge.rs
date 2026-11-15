@@ -82,7 +82,10 @@ fn input(envelope: ChangeEnvelope) -> InputEnvelope {
 
 async fn open(definition: SourceTimeMergeDefinition) -> SourceTimeMergeTransformer {
     let mut merger = SourceTimeMergeTransformer::new(definition, schema()).expect("valid merger");
-    merger.start().await.expect("start merger");
+    merger
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start merger");
     merger
 }
 
@@ -326,10 +329,10 @@ async fn default_policy_holds_late_input_until_explicit_stopped_discard() {
         merger.discard_held_event().await.is_err(),
         "administrative action requires stop"
     );
-    merger.stop().await.unwrap();
-    assert!(merger.start().await.is_err());
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
+    assert!(merger.start(&lifecycle_contexts::start()).await.is_err());
     merger.discard_held_event().await.unwrap();
-    merger.start().await.unwrap();
+    merger.start(&lifecycle_contexts::start()).await.unwrap();
     assert!(
         merger.transform(input(late)).await.unwrap().is_empty(),
         "held discard retained its receipt"
@@ -500,15 +503,15 @@ async fn confirmation_is_exact_and_restart_replays_without_resequencing_logical_
     merger.transform(input(event("a", 1, 10))).await.unwrap();
     tokio::time::advance(Duration::from_millis(1000)).await;
     let batch = merger.on_wakeup().await.unwrap();
-    merger.start().await.unwrap(); // Idempotent start must not clear the in-flight obligation.
+    merger.start(&lifecycle_contexts::start()).await.unwrap(); // Idempotent start must not clear the in-flight obligation.
     assert!(merger.delivery_completed(&[]).await.is_err());
     let wrong = vec![OutputEnvelope {
         port: port("late"),
         envelope: batch[0].envelope.clone(),
     }];
     assert!(merger.delivery_completed(&wrong).await.is_err());
-    merger.stop().await.unwrap();
-    merger.start().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
+    merger.start(&lifecycle_contexts::start()).await.unwrap();
     let replay = merger.continue_transform().await.unwrap();
     assert_eq!(logical(&replay[0]), logical(&batch[0]));
     assert!(replay[0].envelope.system().sequence() > batch[0].envelope.system().sequence());
@@ -684,7 +687,7 @@ async fn downstream_query_uses_merger_progress_not_reordered_source_sequences() 
     use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
     let mut merger =
         SourceTimeMergeTransformer::new(definition(), GraphChangeCodec::schema()).unwrap();
-    merger.start().await.unwrap();
+    merger.start(&lifecycle_contexts::start()).await.unwrap();
     for (source, sequence, timestamp) in [("a", 1, 90), ("a", 2, 10), ("b", 1, 80), ("b", 2, 20)] {
         let envelope = GraphChangeCodec::encode_source_event(
             Arc::new(SourceEventWrapper {
@@ -734,7 +737,7 @@ async fn downstream_query_uses_merger_progress_not_reordered_source_sequences() 
     )
     .await
     .unwrap();
-    query.start().await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     for (index, output) in outputs.into_iter().enumerate() {
         assert!(GraphChangeCodec::source_metadata(&output.envelope)
             .unwrap()
@@ -743,8 +746,8 @@ async fn downstream_query_uses_merger_progress_not_reordered_source_sequences() 
         query.delivery_completed(&results).await.unwrap();
         assert_eq!(query.results().snapshot().unwrap().rows.len(), index + 1);
     }
-    query.stop().await.unwrap();
-    merger.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 struct QuietSource {
@@ -757,12 +760,7 @@ impl ComputationComponent for QuietSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait::async_trait]
@@ -785,12 +783,7 @@ impl ComputationComponent for BlockedSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait::async_trait]
@@ -1028,7 +1021,7 @@ async fn volatile_producer_incarnation_changes_are_not_new_input() {
 async fn query_controls_are_not_source_changes() {
     let mut merger =
         SourceTimeMergeTransformer::new(definition(), GraphChangeCodec::schema()).unwrap();
-    merger.start().await.unwrap();
+    merger.start(&lifecycle_contexts::start()).await.unwrap();
     let notification = GraphChangeCodec::encode_futures_due(stream("a"), 1, time(10)).unwrap();
     assert!(merger.transform(input(notification)).await.is_err());
     assert_eq!(merger.subscribe().borrow().buffered_events, 0);
@@ -1037,7 +1030,7 @@ async fn query_controls_are_not_source_changes() {
 #[tokio::test]
 async fn producer_sequence_inputs_are_rejected_and_event_time_inputs_keep_ordering() {
     let mut merger = SourceTimeMergeTransformer::new(definition(), schema()).unwrap();
-    merger.start().await.unwrap();
+    merger.start(&lifecycle_contexts::start()).await.unwrap();
     let source = event("a", 1, 10);
     let sequenced = ChangeEnvelope::new(
         source.id().clone(),
@@ -1062,7 +1055,7 @@ async fn source_idle_grace_starts_at_activation_not_construction() {
     config.idle_timeout_ms = Some(100);
     let mut merger = SourceTimeMergeTransformer::new(config, schema()).unwrap();
     tokio::time::advance(Duration::from_secs(10)).await;
-    merger.start().await.unwrap();
+    merger.start(&lifecycle_contexts::start()).await.unwrap();
     assert!(merger
         .transform(input(event("a", 1, 10)))
         .await
@@ -1073,4 +1066,46 @@ async fn source_idle_grace_starts_at_activation_not_construction() {
         !merger.has_pending_emissions(),
         "b gets its full startup idle grace"
     );
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

@@ -1342,7 +1342,10 @@ impl ComputationComponent for ContinuousQueryTransformer {
         Ok(configuration)
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.results.begin_activation()?;
         if let Some(scheduling) = &self.scheduling {
             scheduling.stopped();
@@ -1418,11 +1421,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
         Ok(())
     }
 
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        self.delete_owned_state().await
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         #[cfg(feature = "test-support")]
         self.test_session.take();
         self.draining_futures = false;
@@ -1451,6 +1450,43 @@ impl ComputationComponent for ContinuousQueryTransformer {
             query.quiesce().await?;
         }
         Ok(())
+    }
+
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            self.erase_owned_state().await?;
+        }
+        Ok(())
+    }
+}
+
+impl ContinuousQueryTransformer {
+    async fn erase_owned_state(&mut self) -> anyhow::Result<()> {
+        self.delete_owned_state().await
     }
 }
 

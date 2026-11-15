@@ -112,11 +112,24 @@ impl ComputationComponent for ReleasedSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
-    async fn start(&mut self) -> Result<()> {
-        self.inner.start().await
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
+        self.inner.start(&crate::hooks::start_ctx()).await
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.inner.stop().await
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        self.inner.stop(&crate::hooks::stop_ctx()).await
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
+        Ok(())
     }
 }
 
@@ -277,17 +290,22 @@ async fn separately_loaded_transformer_removes_only_its_owned_state_case() -> Re
 
     let mut transformer =
         factory.create_component(id("stateful"), json!({"state_file": state_file}))?;
-    transformer.initialize().await?;
-    transformer.start().await?;
-    assert!(transformer.delete_owned_resources().await.is_err());
+    transformer
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
+    transformer.start(&crate::hooks::start_ctx()).await?;
+    assert!(transformer
+        .dispose(&crate::hooks::erase_ctx())
+        .await
+        .is_err());
     assert!(state_file.exists());
-    transformer.stop().await?;
+    transformer.stop(&crate::hooks::stop_ctx()).await?;
     assert!(state_file.exists(), "ordinary stop must preserve state");
-    transformer.delete_owned_resources().await?;
+    transformer.dispose(&crate::hooks::erase_ctx()).await?;
     assert!(!state_file.exists());
     assert_eq!(std::fs::read(&unrelated)?, b"unrelated");
-    transformer.delete_owned_resources().await?;
-    assert!(transformer.start().await.is_err());
+    transformer.dispose(&crate::hooks::erase_ctx()).await?;
+    assert!(transformer.start(&crate::hooks::start_ctx()).await.is_err());
     Ok(())
 }
 

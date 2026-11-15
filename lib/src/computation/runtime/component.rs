@@ -178,7 +178,10 @@ impl ComputationComponent for Service {
     fn requires_readiness_confirmation(&self) -> bool {
         true
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.instance
             .component
             .construct(self.generation)
@@ -190,33 +193,83 @@ impl ComputationComponent for Service {
             .instrument(self.instance.span.clone())
             .await
     }
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
         self.instance
             .component
             .pause_processing()
             .instrument(self.instance.span.clone())
             .await
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
         self.instance
             .component
             .resume_processing()
             .instrument(self.instance.span.clone())
             .await
     }
-    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
-        let current = match context.current.configuration.get("definition") {
-            Some(ConfigurationValue::Literal(value)) => serde_json::from_value(value.clone())?,
-            _ => anyhow::bail!("runtime update has no registered current definition"),
+    fn management(&self) -> Option<&dyn crate::computation::v1::ComponentManagement> {
+        Some(self)
+    }
+    fn management_mut(&mut self) -> Option<&mut dyn crate::computation::v1::ComponentManagement> {
+        Some(self)
+    }
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
+        self.instance
+            .component
+            .start()
+            .instrument(self.instance.span.clone())
+            .await
+    }
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
+        self.instance
+            .component
+            .stop()
+            .instrument(self.instance.span.clone())
+            .await
+    }
+
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
+        Ok(())
+    }
+}
+#[async_trait]
+impl crate::computation::v1::ComponentManagement for Service {
+    async fn apply(
+        &mut self,
+        _apply: &crate::computation::v1::ApplyContext,
+        context: ComponentUpdateContext,
+    ) -> std::result::Result<(), crate::computation::v1::ApplyError> {
+        let decode = || -> anyhow::Result<_> {
+            let current = match context.current.configuration.get("definition") {
+                Some(ConfigurationValue::Literal(value)) => serde_json::from_value(value.clone())?,
+                _ => anyhow::bail!("runtime update has no registered current definition"),
+            };
+            let proposed = serde_json::from_value(
+                context
+                    .proposed
+                    .configuration()
+                    .get("definition")
+                    .ok_or_else(|| anyhow::anyhow!("runtime update has no proposed definition"))?
+                    .clone(),
+            )?;
+            Ok((current, proposed))
         };
-        let proposed = serde_json::from_value(
-            context
-                .proposed
-                .configuration()
-                .get("definition")
-                .ok_or_else(|| anyhow::anyhow!("runtime update has no proposed definition"))?
-                .clone(),
-        )?;
+        let (current, proposed) = decode()?;
         self.instance
             .component
             .apply_update(crate::management::OrdinaryComponentUpdateContext {
@@ -228,20 +281,7 @@ impl ComputationComponent for Service {
             })
             .instrument(self.instance.span.clone())
             .await
-    }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        self.instance
-            .component
-            .start()
-            .instrument(self.instance.span.clone())
-            .await
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        self.instance
-            .component
-            .stop()
-            .instrument(self.instance.span.clone())
-            .await
+            .map_err(crate::computation::v1::ApplyError::Failed)
     }
 }
 #[async_trait]

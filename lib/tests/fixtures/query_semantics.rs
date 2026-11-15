@@ -97,7 +97,7 @@ impl Case {
         query: &mut dyn Transformer,
         reader: Arc<dyn SnapshotProvider>,
     ) -> Result<()> {
-        query.start().await?;
+        query.start(&lifecycle_contexts::start()).await?;
         let outcome = async {
             for (index, step) in self.steps.iter().enumerate() {
                 let output = query.transform(step.input.clone()).await?;
@@ -162,7 +162,7 @@ impl Case {
             Ok(())
         }
         .await;
-        let cleanup = query.stop().await;
+        let cleanup = query.stop(&lifecycle_contexts::stop()).await;
         outcome.with_context(|| format!("query semantics case {}", self.config.name))?;
         cleanup
     }
@@ -458,4 +458,46 @@ pub fn ordered_batch() -> Result<Case> {
             ]),
         }],
     })
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

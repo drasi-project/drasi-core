@@ -64,7 +64,7 @@ fn create(configuration: Value) -> Result<View> {
 
 async fn start(configuration: Value) -> Result<View> {
     let mut view = create(configuration)?;
-    view.start().await?;
+    view.start(&mut lifecycle_ctx::start()).await?;
     Ok(view)
 }
 
@@ -954,7 +954,7 @@ async fn lifecycle_retains_same_instance_state_but_never_claims_reconstruction_r
         Err(OutputReadError::NotReady(_))
     ));
     assert!(view.transform(input(&[], 1)?).await.is_err());
-    view.start().await?;
+    view.start(&mut lifecycle_ctx::start()).await?;
     let expected = row("input", 1, json!({"value": 7}));
     emit(
         &mut view,
@@ -967,14 +967,14 @@ async fn lifecycle_retains_same_instance_state_but_never_claims_reconstruction_r
     assert_eq!(before.cursor().producer().construction_scope(), "instance");
     assert_eq!(before.cursor().producer().graph_id(), "graph");
     assert!(!before.cursor().producer().persistent());
-    assert!(view.delete_owned_resources().await.is_err());
-    view.stop().await?;
+    assert!(view.dispose(&lifecycle_ctx::erase()).await.is_err());
+    view.stop(&lifecycle_ctx::stop()).await?;
     assert!(matches!(
         snapshot_reader.snapshot().await,
         Err(OutputReadError::NotReady(_))
     ));
     assert!(view.transform(input(&[], 2)?).await.is_err());
-    view.start().await?;
+    view.start(&mut lifecycle_ctx::start()).await?;
     assert_eq!(before.cursor(), snapshot_reader.snapshot().await?.cursor());
     assert_rows(&view, &[expected]).await?;
     let fresh = start(identity_configuration()).await?;
@@ -983,10 +983,10 @@ async fn lifecycle_retains_same_instance_state_but_never_claims_reconstruction_r
         before.cursor().epoch(),
         reader(&fresh)?.snapshot().await?.cursor().epoch()
     );
-    view.stop().await?;
-    view.delete_owned_resources().await?;
-    view.delete_owned_resources().await?;
-    assert!(view.start().await.is_err());
+    view.stop(&lifecycle_ctx::stop()).await?;
+    view.dispose(&lifecycle_ctx::erase()).await?;
+    view.dispose(&lifecycle_ctx::erase()).await?;
+    assert!(view.start(&mut lifecycle_ctx::start()).await.is_err());
     assert!(matches!(
         snapshot_reader.snapshot().await,
         Err(OutputReadError::Retired)
@@ -1081,7 +1081,7 @@ async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Resul
         metadata.capabilities.output_snapshots,
         vec![PortId::try_new("out")?]
     );
-    assert!(metadata.capabilities.delete_owned_resources);
+    assert!(metadata.capabilities.erases_owned_state);
     assert!(!metadata.capabilities.transactional);
     assert!(!metadata.capabilities.durable_output);
     assert!(!metadata.capabilities.indexed_processing);
@@ -1105,15 +1105,14 @@ async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Resul
     let Component::Transformer(mut transformer) = created.component else {
         anyhow::bail!("view factory returned a different role")
     };
-    assert!(transformer.supports_delete_owned_resources());
     assert_eq!(transformer.configuration()?, request.configuration);
     let readers = transformer.output_readers();
     readers.validate(transformer.descriptor())?;
     assert!(readers.ports()[&PortId::try_new("out")?].replay().is_none());
     assert!(transformer.resume_delivery().is_err());
-    transformer.start().await?;
-    transformer.stop().await?;
-    transformer.delete_owned_resources().await?;
+    transformer.start(&mut lifecycle_ctx::start()).await?;
+    transformer.stop(&lifecycle_ctx::stop()).await?;
+    transformer.dispose(&lifecycle_ctx::erase()).await?;
     let exported = ExportedPlugin::new(crate::plugin()?)?;
     assert!(!exported.metadata().is_null());
     Ok(())
@@ -1336,4 +1335,43 @@ async fn mapping_failure_rolls_back_all_staged_inputs_and_output_associations() 
         .await
         .is_err());
     assert_rows(&view, &[]).await
+}
+
+#[allow(dead_code)]
+pub(crate) mod lifecycle_ctx {
+    use drasi_computation_plugin_sdk::lifecycle::{
+        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
+        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
+        StopMode, UpdateBoundary,
+    };
+
+    pub(crate) fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+    pub(crate) fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+    pub(crate) fn start() -> StartContext {
+        StartContext::new(scope(), None)
+    }
+    pub(crate) fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+    pub(crate) fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+    pub(crate) fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+    pub(crate) fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
+        ApplyContext::new(scope(), boundary)
+    }
 }

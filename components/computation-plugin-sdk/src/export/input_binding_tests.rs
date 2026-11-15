@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle::{DisposeReason, StateIntent, StopMode};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity,
@@ -86,13 +87,7 @@ impl ComputationComponent for TestTransformer {
         Ok(())
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_lifecycle!();
 }
 
 #[async_trait]
@@ -100,6 +95,20 @@ impl Transformer for TestTransformer {
     async fn transform(&mut self, _: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
         Ok(Vec::new())
     }
+}
+
+const ID: &str = "5e5157b1-10c8-4ad3-908e-b30a502ef1b4";
+
+fn context(code: u32) -> Vec<u8> {
+    let context = wire::LifecycleRequest::new("lifecycle-operation", ID, 1);
+    wire::encode(&match code {
+        abi::operation::STOP => context.with_stop_mode(StopMode::Drain),
+        abi::operation::DISPOSE => {
+            context.with_dispose(DisposeReason::Shutdown, StateIntent::Preserve, 1)
+        }
+        _ => context,
+    })
+    .unwrap()
 }
 
 struct RawComponent(abi::ComponentHandle);
@@ -141,7 +150,7 @@ fn raw_component(factory: TestFactory) -> anyhow::Result<RawComponent> {
     )?)?;
     let metadata = &exported.state.definition.metadata.factories[0];
     let request = wire::encode(&CreateRequest {
-        id: ComponentId::try_new("5e5157b1-10c8-4ad3-908e-b30a502ef1b4")?,
+        id: ComponentId::try_new(ID)?,
         implementation: metadata.implementation.clone(),
         configuration_version: 1,
         configuration: serde_json::json!({}),
@@ -199,8 +208,15 @@ async fn binding_updates_work_before_start_and_during_processing() -> anyhow::Re
     component
         .run(abi::operation::BIND_INPUTS, &wire::encode(&first)?)
         .await?;
-    component.run(abi::operation::INITIALIZE, &[]).await?;
-    component.run(abi::operation::START, &[]).await?;
+    component
+        .run(
+            abi::operation::INITIALIZE,
+            &context(abi::operation::INITIALIZE),
+        )
+        .await?;
+    component
+        .run(abi::operation::START, &context(abi::operation::START))
+        .await?;
     for _ in 0..2 {
         component
             .run(abi::operation::BIND_INPUTS, &wire::encode(&second)?)
@@ -222,7 +238,9 @@ async fn binding_updates_work_before_start_and_during_processing() -> anyhow::Re
         .run(abi::operation::BIND_INPUTS, b"not messagepack")
         .await
         .is_err());
-    component.run(abi::operation::STOP, &[]).await?;
+    component
+        .run(abi::operation::STOP, &context(abi::operation::STOP))
+        .await?;
     component
         .run(abi::operation::BIND_INPUTS, &wire::encode(&first)?)
         .await?;
@@ -230,7 +248,9 @@ async fn binding_updates_work_before_start_and_during_processing() -> anyhow::Re
         *seen.lock().unwrap(),
         vec![first.clone(), second.clone(), second, first]
     );
-    component.run(abi::operation::DISPOSE, &[]).await?;
+    component
+        .run(abi::operation::DISPOSE, &context(abi::operation::DISPOSE))
+        .await?;
     Ok(())
 }
 

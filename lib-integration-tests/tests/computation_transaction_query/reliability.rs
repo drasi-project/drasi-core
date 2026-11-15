@@ -38,7 +38,7 @@ async fn joined_query(
     .await?
     .with_delivery_tracking()
     .with_source_progress(progress)?;
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     Ok(query)
 }
 
@@ -175,7 +175,7 @@ async fn mixed_source_recovery() -> Result<()> {
             last.insert(source, input);
         }
         if cycle % 8 == 7 {
-            query.stop().await?;
+            query.stop(&lifecycle_contexts::stop()).await?;
             drop(query);
             query = joined_query(directory.path(), progress.clone()).await?;
             assert_joined(&query, &orders, &customers)?;
@@ -195,7 +195,7 @@ async fn mixed_source_recovery() -> Result<()> {
         }
     }
     assert_eq!((admitted, skipped), (32, 96));
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -209,4 +209,46 @@ async fn mixed_source_join_aggregates_and_checkpoints_survive_reordered_updates_
 async fn mixed_source_join_aggregates_and_checkpoints_survive_reordered_updates_multi_thread(
 ) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(60), mixed_source_recovery()).await?
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

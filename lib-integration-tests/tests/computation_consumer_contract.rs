@@ -115,12 +115,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -156,7 +151,7 @@ async fn producer(capacity: usize) -> Result<ContinuousQueryTransformer> {
         Arc::new(InMemoryComputationProvider),
     )
     .await?;
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     Ok(query)
 }
 
@@ -223,8 +218,8 @@ async fn consumer(
     if policy == ConsumerRecoveryPolicy::AutoSkipGap {
         sink = sink.allow_skipped_resets();
     }
-    replay.start().await?;
-    sink.start().await?;
+    replay.start(&lifecycle_contexts::start()).await?;
+    sink.start(&lifecycle_contexts::start()).await?;
     Ok((replay, sink))
 }
 
@@ -276,9 +271,9 @@ async fn recreated_volatile_query_cannot_reuse_a_consumers_same_numbered_checkpo
                 .sequence,
             1
         );
-        replay.stop().await?;
-        sink.stop().await?;
-        old_query.stop().await?;
+        replay.stop(&lifecycle_contexts::stop()).await?;
+        sink.stop(&lifecycle_contexts::stop()).await?;
+        old_query.stop(&lifecycle_contexts::stop()).await?;
         drop((replay, sink, old_query));
 
         let mut replacement = producer(8).await?;
@@ -342,9 +337,9 @@ async fn recreated_volatile_query_cannot_reuse_a_consumers_same_numbered_checkpo
                 next_sequence
             );
         }
-        replay.stop().await?;
-        sink.stop().await?;
-        replacement.stop().await?;
+        replay.stop(&lifecycle_contexts::stop()).await?;
+        sink.stop(&lifecycle_contexts::stop()).await?;
+        replacement.stop(&lifecycle_contexts::stop()).await?;
     }
     Ok(())
 }
@@ -410,9 +405,9 @@ async fn live_sequence_gaps_recover_or_apply_the_explicit_policy_before_advancin
                 assert!(replay.transform(input(third)).await?.is_empty());
                 assert_eq!(applied.calls.lock().expect("calls").len(), count);
             }
-            replay.stop().await?;
-            sink.stop().await?;
-            query.stop().await?;
+            replay.stop(&lifecycle_contexts::stop()).await?;
+            sink.stop(&lifecycle_contexts::stop()).await?;
+            query.stop(&lifecycle_contexts::stop()).await?;
         }
     }
     Ok(())
@@ -453,9 +448,9 @@ async fn checkpointed_sink_rejects_an_unexplained_live_gap_without_running_the_h
             .sequence,
         1
     );
-    replay.stop().await?;
-    sink.stop().await?;
-    query.stop().await?;
+    replay.stop(&lifecycle_contexts::stop()).await?;
+    sink.stop(&lifecycle_contexts::stop()).await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -494,10 +489,10 @@ async fn failed_gap_replay_does_not_checkpoint_the_unhandled_suffix() -> Result<
         1
     );
 
-    replay.stop().await?;
-    sink.stop().await?;
-    replay.start().await?;
-    sink.start().await?;
+    replay.stop(&lifecycle_contexts::stop()).await?;
+    sink.stop(&lifecycle_contexts::stop()).await?;
+    replay.start(&lifecycle_contexts::start()).await?;
+    sink.start(&lifecycle_contexts::start()).await?;
     deliver(&mut sink, replay.on_wakeup().await?).await?;
     assert_eq!(applied.names(), ["Alice", "Bob", "Charlie"]);
     assert_eq!(
@@ -511,8 +506,50 @@ async fn failed_gap_replay_does_not_checkpoint_the_unhandled_suffix() -> Result<
             .sequence,
         3
     );
-    replay.stop().await?;
-    sink.stop().await?;
-    query.stop().await?;
+    replay.stop(&lifecycle_contexts::stop()).await?;
+    sink.stop(&lifecycle_contexts::stop()).await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

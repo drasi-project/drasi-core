@@ -99,7 +99,7 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
             "default_template":{"added":{"template":add("N'default'")},"deleted":{"template":delete}}
         }}),
     )?;
-    sink.start().await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
     let proof = async {
         for (index,query) in ["source.q","other.q","unmatched"].into_iter().enumerate() {
             sink.handle(added(query,index as u64+1,data.clone())?).await?;
@@ -140,7 +140,7 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
             "partial input executed before the complete batch rendered");
         Ok::<_,anyhow::Error>(())
     }.await;
-    let cleanup = sink.stop().await;
+    let cleanup = sink.stop(&crate::hooks::stop_ctx()).await;
     proof?;
     cleanup?;
 
@@ -152,7 +152,7 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
             "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.BindScalars {{param after.flag}},{{param after.signed}},{{param after.floating}},{{param (json after.payload)}}")}}
         }}),
     )?;
-    scalar.start().await?;
+    scalar.start(&crate::hooks::start_ctx()).await?;
     let proof = async {
         scalar.handle(added("scalars",1,json!({
             "flag":true,"signed":i64::MIN,"floating":1.25,"payload":[null,{"unicode":"雪"}],
@@ -165,7 +165,7 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
             "array JSON parameter changed");
         Ok::<_,anyhow::Error>(())
     }.await;
-    let cleanup = scalar.stop().await;
+    let cleanup = scalar.stop(&crate::hooks::stop_ctx()).await;
     proof?;
     cleanup?;
 
@@ -177,7 +177,7 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
             "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.PartialFailure {{param after.id}}")}}
         }}),
     )?;
-    failing.start().await?;
+    failing.start(&crate::hooks::start_ctx()).await?;
     ensure!(
         failing
             .handle(input(
@@ -211,7 +211,7 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
     );
     ensure!(db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.Effects WHERE operation=N'BEFORE-ERROR' AND id=91")?=="1",
         "executed failing procedure was lost or blindly retried");
-    failing.stop().await?;
+    failing.stop(&crate::hooks::stop_ctx()).await?;
     db.remove()
 }
 
@@ -230,7 +230,7 @@ pub(super) async fn retained_work(dynamic: bool) -> Result<()> {
                 "shutdown_timeout_ms":50,"default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.DelayedEffect {{param after.id}}")}}
             }}),
         )?;
-        sink.start().await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         let proof = async {
             let mut handle = Box::pin(sink.handle(added("q",1,json!({"id":row}))?));
             let entered = format!("SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE operation=N'ENTERED' AND id={row}");
@@ -242,7 +242,7 @@ pub(super) async fn retained_work(dynamic: bool) -> Result<()> {
                 ensure!(tokio::time::timeout(Duration::from_secs(3),&mut handle).await?.is_err(),"command timeout reported success");
             }
             drop(handle);
-            let failed = tokio::time::timeout(Duration::from_secs(2),sink.stop()).await?;
+            let failed = tokio::time::timeout(Duration::from_secs(2),sink.stop(&crate::hooks::stop_ctx())).await?;
             ensure!(failed.is_err(),"stop reported success while procedure was still waiting");
             ensure!(db.sql(&format!("SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE operation=N'COMPLETED' AND id={row}"))?=="0",
                 "test did not retain an incomplete server-side effect");
@@ -253,7 +253,7 @@ pub(super) async fn retained_work(dynamic: bool) -> Result<()> {
         db.wait_sql(&format!("SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE operation=N'COMPLETED' AND id={row}"),"1").await?;
         let cleanup = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                match sink.stop().await {
+                match sink.stop(&crate::hooks::stop_ctx()).await {
                     Ok(()) => return Ok::<_, anyhow::Error>(()),
                     Err(error) if format!("{error:#}").contains("timed out") => {
                         tokio::time::sleep(Duration::from_millis(50)).await

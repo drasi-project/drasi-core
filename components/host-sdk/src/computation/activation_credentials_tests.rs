@@ -142,22 +142,32 @@ async fn refresh_and_failure_matrix() -> anyhow::Result<()> {
             configuration.clone(),
             provider.resource(),
         )?;
-        proxy.initialize().await?;
+        proxy
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         assert_eq!(provider.reads.load(Ordering::SeqCst), 0);
         assert_eq!((fixture.probe)(fixture::CONSTRUCTED), 1);
         assert_eq!(proxy.configuration()?, configuration);
-        proxy.start().await?;
+        proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         assert_eq!((fixture.probe)(fixture::LAST_SECRET), 1);
         assert_eq!((fixture.probe)(fixture::LAST_KIND), 1);
-        proxy.stop().await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         *provider.value.lock().unwrap() = Credentials::Token {
             username: "provider-user".into(),
             token: "second-secret".into(),
         };
-        proxy.start().await?;
+        proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         assert_eq!((fixture.probe)(fixture::LAST_SECRET), 2);
         assert_eq!((fixture.probe)(fixture::LAST_KIND), 2);
-        proxy.stop().await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!(provider.reads.load(Ordering::SeqCst), 2);
         assert_eq!((fixture.probe)(fixture::CONSTRUCTED), 1);
         assert_eq!(proxy.configuration()?, configuration);
@@ -173,7 +183,10 @@ async fn refresh_and_failure_matrix() -> anyhow::Result<()> {
                 ])));
 
         provider.failed.store(true, Ordering::SeqCst);
-        let error = proxy.start().await.unwrap_err();
+        let error = proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await
+            .unwrap_err();
         assert!(!format!("{error:#}").contains("first-secret"));
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 2);
         assert_eq!((fixture.probe)(fixture::LITERAL), 0);
@@ -183,7 +196,10 @@ async fn refresh_and_failure_matrix() -> anyhow::Result<()> {
             key_pem: "secret-key".into(),
             username: None,
         };
-        let error = proxy.start().await.unwrap_err();
+        let error = proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("certificate"));
         assert!(!format!("{error:#}").contains("secret-key"));
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 2);
@@ -191,19 +207,34 @@ async fn refresh_and_failure_matrix() -> anyhow::Result<()> {
             username: "provider-user".into(),
             token: "x".repeat(sdk::activation_credentials::MAX_CREDENTIAL_FIELD_BYTES + 1),
         };
-        assert!(proxy.start().await.is_err());
+        assert!(proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await
+            .is_err());
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 2);
-        proxy.stop().await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
 
         let mut literal = configuration.clone();
         literal["user"] = json!("literal-user");
         literal["password"] = json!("literal-password");
         let mut literal_proxy = factory.create_component(id(), literal.clone())?;
-        literal_proxy.initialize().await?;
-        literal_proxy.start().await?;
-        literal_proxy.stop().await?;
-        literal_proxy.start().await?;
-        literal_proxy.stop().await?;
+        literal_proxy
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        literal_proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        literal_proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
+        literal_proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        literal_proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!((fixture.probe)(fixture::LITERAL), 2);
         assert_eq!(literal_proxy.configuration()?, literal);
         assert!(factory
@@ -230,21 +261,25 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             provider.resource(),
         )?;
-        old.initialize().await?;
-        let mut start = Box::pin(old.start());
+        old.initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        let start_context = crate::computation::test_hooks::start_ctx();
+        let mut start = Box::pin(old.start(&start_context));
         assert!(poll!(start.as_mut()).is_pending());
         assert_eq!(provider.active.load(Ordering::SeqCst), 1);
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 0);
         drop(start);
         assert_eq!(provider.active.load(Ordering::SeqCst), 0);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(10), old.start())
-                .await
-                .is_err()
-        );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            old.start(&crate::computation::test_hooks::start_ctx())
+        )
+        .await
+        .is_err());
         assert_eq!(provider.active.load(Ordering::SeqCst), 0);
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 0);
-        old.stop().await?;
+        old.stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         drop(old);
         provider.pending.store(false, Ordering::SeqCst);
         *provider.value.lock().unwrap() = Credentials::Token {
@@ -256,65 +291,110 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             provider.resource(),
         )?;
-        replacement.initialize().await?;
-        replacement.start().await?;
+        replacement
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        replacement
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 1);
         assert_eq!((fixture.probe)(fixture::LAST_SECRET), 2);
-        replacement.stop().await?;
+        replacement
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
 
         let mut configuration = fixture::configuration();
         configuration["mode"] = json!("pending");
         let mut pending =
             factory.create_component_with_identity(id(), configuration, provider.resource())?;
-        pending.initialize().await?;
+        pending
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         let inner = pending.inner.clone();
-        let mut start = Box::pin(pending.start());
+        let start_context = crate::computation::test_hooks::start_ctx();
+        let mut start = Box::pin(pending.start(&start_context));
         assert!(poll!(start.as_mut()).is_pending());
         assert_eq!((fixture.probe)(fixture::IN_FLIGHT), 1);
+        let stop_request = sdk::wire::encode(
+            &sdk::wire::LifecycleRequest::new("busy-stop", id().to_string(), 1)
+                .with_stop_mode(sdk::lifecycle::StopMode::Drain),
+        )?;
         let busy = inner
-            .begin(sdk::abi::operation::STOP, &[], None)
+            .begin(sdk::abi::operation::STOP, &stop_request, None)
             .err()
             .unwrap();
         assert!(format!("{busy:#}").contains("already active"));
         drop(start);
         assert_eq!((fixture.probe)(fixture::IN_FLIGHT), 0);
-        pending.stop().await?;
+        pending
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!((fixture.probe)(fixture::COMPLETED), 1);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(10), pending.start())
-                .await
-                .is_err()
-        );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            pending.start(&crate::computation::test_hooks::start_ctx())
+        )
+        .await
+        .is_err());
         assert_eq!((fixture.probe)(fixture::IN_FLIGHT), 0);
-        pending.stop().await?;
+        pending
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         let mut replacement = factory.create_component_with_identity(
             id(),
             fixture::configuration(),
             provider.resource(),
         )?;
-        replacement.initialize().await?;
-        replacement.start().await?;
-        replacement.stop().await?;
+        replacement
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        replacement
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        replacement
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!((fixture.probe)(fixture::COMPLETED), 2);
 
         let mut configuration = fixture::configuration();
         configuration["mode"] = json!("failure");
         let mut failed =
             factory.create_component_with_identity(id(), configuration, provider.resource())?;
-        failed.initialize().await?;
-        let error = failed.start().await.unwrap_err();
+        failed
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        let error = failed
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await
+            .unwrap_err();
         assert!(!format!("{error:#}").contains("second-secret"));
-        failed.stop().await?;
+        failed
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         let mut configuration = fixture::configuration();
         configuration["mode"] = json!("panic");
         let mut panicked =
             factory.create_component_with_identity(id(), configuration, provider.resource())?;
-        panicked.initialize().await?;
-        assert!(format!("{:#}", panicked.start().await.unwrap_err()).contains("panicked"));
+        panicked
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        assert!(format!(
+            "{:#}",
+            panicked
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .unwrap_err()
+        )
+        .contains("panicked"));
         assert_eq!((fixture.probe)(fixture::IN_FLIGHT), 0);
-        panicked.stop().await?;
+        panicked
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert!(
-            panicked.start().await.is_err(),
+            panicked
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .is_err(),
             "a panic must quarantine the original native instance"
         );
 
@@ -323,7 +403,9 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             provider.resource(),
         )?;
-        malformed.initialize().await?;
+        malformed
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         let before = (fixture.probe)(fixture::AUTHENTICATED);
         for payload in [
             vec![0; sdk::activation_credentials::MAX_CREDENTIAL_PAYLOAD_BYTES + 1],
@@ -339,8 +421,12 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
             assert!(!format!("{error:#}").contains("do-not-leak-certificate"));
             assert_eq!((fixture.probe)(fixture::AUTHENTICATED), before);
         }
-        malformed.start().await?;
-        malformed.stop().await?;
+        malformed
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        malformed
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
     Ok(())
 }
@@ -369,12 +455,7 @@ impl ComputationComponent for PendingSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSource for PendingSource {
@@ -565,22 +646,37 @@ async fn configured_identity_matrix() -> anyhow::Result<()> {
             .get::<NativeIdentityResource>()?;
         let mut proxy =
             factory.create_component_with_identity(id(), fixture::configuration(), resource)?;
-        proxy.initialize().await?;
+        proxy
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         assert_eq!(creations.load(Ordering::SeqCst), 0);
         assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
-        proxy.start().await?;
-        proxy.stop().await?;
+        proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         *secrets.value.lock().unwrap() = "second-secret".into();
-        proxy.start().await?;
-        proxy.stop().await?;
+        proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!(creations.load(Ordering::SeqCst), 2);
         assert_eq!(secrets.reads.load(Ordering::SeqCst), 2);
         assert_eq!((fixture.probe)(fixture::LAST_SECRET), 2);
         failed.store(true, Ordering::SeqCst);
-        let error = proxy.start().await.unwrap_err();
+        let error = proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await
+            .unwrap_err();
         assert!(!format!("{error:#}").contains("secret-must-not-leak"));
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 2);
-        proxy.stop().await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
 
         let configuration: NativeIdentityConfig =
             serde_json::from_value(json!({"provider":recipe["provider"]}))?;
@@ -598,9 +694,15 @@ async fn configured_identity_matrix() -> anyhow::Result<()> {
             fixture::configuration(),
             Arc::new(resource),
         )?;
-        proxy.initialize().await?;
-        proxy.start().await?;
-        proxy.stop().await?;
+        proxy
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!(
             creations.load(Ordering::SeqCst),
             3,
@@ -609,14 +711,19 @@ async fn configured_identity_matrix() -> anyhow::Result<()> {
         assert_eq!(injected.reads.load(Ordering::SeqCst), 1);
         injected.failed.store(true, Ordering::SeqCst);
         let starts = (fixture.probe)(fixture::AUTHENTICATED);
-        assert!(proxy.start().await.is_err());
+        assert!(proxy
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await
+            .is_err());
         assert_eq!((fixture.probe)(fixture::AUTHENTICATED), starts);
         assert_eq!(
             creations.load(Ordering::SeqCst),
             3,
             "failed injection must not fall back to configured credentials"
         );
-        proxy.stop().await?;
+        proxy
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert_eq!(serde_json::to_string(&recipe)?, persisted);
         assert!(!format!("{configuration:?}").contains("database-password"));
         let mut wrong_role = specification.clone();

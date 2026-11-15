@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle_ctx;
 use drasi_lib::computation::v1::*;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -87,9 +88,9 @@ async fn channel_backpressure_cancellation_and_three_restarts_preserve_envelopes
         ApplicationReaction::channel(component_id(297), schema(), NonZeroUsize::new(1).unwrap())
             .unwrap();
     for sequence in 1..=3 {
-        reaction.start().await.unwrap();
+        reaction.start(&lifecycle_ctx::start()).await.unwrap();
         assert!(reaction
-            .start()
+            .start(&lifecycle_ctx::start())
             .await
             .unwrap_err()
             .is::<ApplicationReactionError>());
@@ -101,7 +102,7 @@ async fn channel_backpressure_cancellation_and_three_restarts_preserve_envelopes
                 .await
                 .is_err()
         );
-        reaction.stop().await.unwrap();
+        reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
         let actual = receiver.recv().await.unwrap();
         assert_eq!(actual.port, expected.port);
         assert!(Arc::ptr_eq(
@@ -116,12 +117,16 @@ async fn channel_backpressure_cancellation_and_three_restarts_preserve_envelopes
             receiver.try_recv().is_err(),
             "cancelled send must not publish"
         );
-        reaction.stop().await.unwrap();
+        reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
     }
 
     receiver.close();
     assert!(matches!(
-        reaction.start().await.unwrap_err().downcast_ref(),
+        reaction
+            .start(&lifecycle_ctx::start())
+            .await
+            .unwrap_err()
+            .downcast_ref(),
         Some(ApplicationReactionError::ReceiverClosed)
     ));
 }
@@ -149,13 +154,13 @@ async fn closed_receiver_fails_delivery_without_success_fallback() {
     let (mut reaction, receiver) =
         ApplicationReaction::channel(component_id(297), schema(), NonZeroUsize::new(1).unwrap())
             .unwrap();
-    reaction.start().await.unwrap();
+    reaction.start(&lifecycle_ctx::start()).await.unwrap();
     drop(receiver);
     assert!(matches!(
         reaction.handle(input(1)).await.unwrap_err().downcast_ref(),
         Some(ApplicationReactionError::ReceiverClosed)
     ));
-    reaction.stop().await.unwrap();
+    reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -171,7 +176,7 @@ async fn validates_lifecycle_port_and_full_schema_before_calling_application() {
         reaction.handle(input(1)).await.unwrap_err().downcast_ref(),
         Some(ApplicationReactionError::NotRunning)
     ));
-    reaction.start().await.unwrap();
+    reaction.start(&lifecycle_ctx::start()).await.unwrap();
     let mut wrong_port = input(1);
     wrong_port.port = PortId::try_new("wrong").unwrap();
     assert!(matches!(
@@ -202,7 +207,7 @@ async fn validates_lifecycle_port_and_full_schema_before_calling_application() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     reaction.handle(input(1)).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    reaction.stop().await.unwrap();
+    reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -226,7 +231,7 @@ async fn cancelled_callback_and_stop_retain_submitted_blocking_work() {
         }
     })
     .unwrap();
-    reaction.start().await.unwrap();
+    reaction.start(&lifecycle_ctx::start()).await.unwrap();
     {
         let handling = reaction.handle(input(1));
         tokio::pin!(handling);
@@ -237,14 +242,19 @@ async fn cancelled_callback_and_stop_retain_submitted_blocking_work() {
         }
     }
     for _ in 0..2 {
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), reaction.stop())
-                .await
-                .is_err()
-        );
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            reaction.stop(&lifecycle_ctx::stop())
+        )
+        .await
+        .is_err());
         assert_eq!(completed.load(Ordering::SeqCst), 0);
         assert!(matches!(
-            reaction.start().await.unwrap_err().downcast_ref(),
+            reaction
+                .start(&lifecycle_ctx::start())
+                .await
+                .unwrap_err()
+                .downcast_ref(),
             Some(ApplicationReactionError::CleanupRequired)
         ));
         assert!(matches!(
@@ -253,13 +263,16 @@ async fn cancelled_callback_and_stop_retain_submitted_blocking_work() {
         ));
     }
     release.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(3), reaction.stop())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        reaction.stop(&lifecycle_ctx::stop()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(completed.load(Ordering::SeqCst), 1);
-    reaction.start().await.unwrap();
-    reaction.stop().await.unwrap();
+    reaction.start(&lifecycle_ctx::start()).await.unwrap();
+    reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -278,7 +291,7 @@ async fn callback_errors_remain_typed_in_handling_and_cancelled_cleanup() {
         }
     })
     .unwrap();
-    reaction.start().await.unwrap();
+    reaction.start(&lifecycle_ctx::start()).await.unwrap();
     release.notify_one();
     assert!(reaction
         .handle(input(1))
@@ -290,8 +303,8 @@ async fn callback_errors_remain_typed_in_handling_and_cancelled_cleanup() {
         .await
         .unwrap_err()
         .is::<ApplicationReactionError>());
-    reaction.stop().await.unwrap();
-    reaction.start().await.unwrap();
+    reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
+    reaction.start(&lifecycle_ctx::start()).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(20), reaction.handle(input(2)))
             .await
@@ -299,14 +312,14 @@ async fn callback_errors_remain_typed_in_handling_and_cancelled_cleanup() {
     );
     release.notify_one();
     assert!(reaction
-        .stop()
+        .stop(&lifecycle_ctx::stop())
         .await
         .unwrap_err()
         .is::<ApplicationFailure>());
-    assert!(reaction.start().await.is_err());
-    reaction.stop().await.unwrap();
-    reaction.start().await.unwrap();
-    reaction.stop().await.unwrap();
+    assert!(reaction.start(&lifecycle_ctx::start()).await.is_err());
+    reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
+    reaction.start(&lifecycle_ctx::start()).await.unwrap();
+    reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -323,22 +336,26 @@ async fn callback_factory_and_future_panics_poison_only_their_binding() {
     })
     .unwrap();
     for mut reaction in [factory, future] {
-        reaction.start().await.unwrap();
+        reaction.start(&lifecycle_ctx::start()).await.unwrap();
         assert!(matches!(
             reaction.handle(input(1)).await.unwrap_err().downcast_ref(),
             Some(ApplicationReactionError::CallbackPanicked(_))
         ));
-        reaction.stop().await.unwrap();
+        reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
         assert!(matches!(
-            reaction.start().await.unwrap_err().downcast_ref(),
+            reaction
+                .start(&lifecycle_ctx::start())
+                .await
+                .unwrap_err()
+                .downcast_ref(),
             Some(ApplicationReactionError::CallbackPoisoned)
         ));
     }
     let mut healthy =
         ApplicationReaction::callback(component_id(788), schema(), |_| async { Ok(()) }).unwrap();
     for sequence in 1..=3 {
-        healthy.start().await.unwrap();
+        healthy.start(&lifecycle_ctx::start()).await.unwrap();
         healthy.handle(input(sequence)).await.unwrap();
-        healthy.stop().await.unwrap();
+        healthy.stop(&lifecycle_ctx::stop()).await.unwrap();
     }
 }

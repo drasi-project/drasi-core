@@ -75,7 +75,7 @@ async fn public_binding(dynamic: bool) -> Result<()> {
     let declared = sink.configuration()?;
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     let failure = sink
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("provider failure must propagate before SQL");
     ensure!(
@@ -84,10 +84,10 @@ async fn public_binding(dynamic: bool) -> Result<()> {
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(sink.configuration()?, declared);
-    sink.stop().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
     provider.certificate.store(1, Ordering::SeqCst);
     let failure = sink
-        .start()
+        .start(&crate::hooks::start_ctx())
         .await
         .expect_err("certificate must be rejected at Host boundary");
     ensure!(
@@ -106,7 +106,7 @@ async fn public_binding(dynamic: bool) -> Result<()> {
         .iter()
         .all(|context| context == &("credential-only.invalid".into(), "1437".into())));
     assert_eq!(sink.configuration()?, declared);
-    sink.stop().await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 #[tokio::test]
@@ -176,7 +176,7 @@ pub(super) async fn actual_override_and_refresh(dynamic: bool) -> Result<()> {
     )?;
     let declared = sink.configuration()?;
     for _ in 0..2 {
-        sink.start().await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         use drasi_core::evaluation::context::QueryPartEvaluationContext;
         let envelope = QueryChangeCodec::encode_evaluation(
             None,
@@ -204,7 +204,7 @@ pub(super) async fn actual_override_and_refresh(dynamic: bool) -> Result<()> {
             envelope,
         })
         .await?;
-        sink.stop().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
         ensure!(
             sink.configuration()? == declared,
             "provider credentials replaced declared configuration"

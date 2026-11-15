@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use async_trait::async_trait;
 use tokio::sync::watch;
@@ -176,12 +178,12 @@ async fn external_reader_initializes_and_replays_without_fabricating_local_owner
     let mut consumer = query(directory.path(), owner.clone())
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"initial"})]
     );
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     producer
         .handle()
         .execute_batch(
@@ -189,8 +191,8 @@ async fn external_reader_initializes_and_replays_without_fabricating_local_owner
         )
         .await?;
     let original = next(&mut producer).await?;
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(producer);
     drop(consumer);
     drop(boundary);
@@ -207,12 +209,12 @@ async fn external_reader_initializes_and_replays_without_fabricating_local_owner
     let mut consumer = query(directory.path(), owner.clone())
         .await?
         .with_bootstrap(snapshot);
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"initial"})]
     );
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     let replay = next(&mut producer).await?;
     assert_eq!(
         original.envelope.system().source_position(),
@@ -227,9 +229,9 @@ async fn external_reader_initializes_and_replays_without_fabricating_local_owner
         ]
     );
     producer.handle().query("SELECT id FROM items").await?;
-    producer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
-    consumer.stop().await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -239,7 +241,7 @@ async fn revoked_external_reader_fails_before_sqlite_open_and_retains_uncommitte
     let directory = tempfile::tempdir()?;
     let owner = super::progress();
     let mut consumer = query(directory.path(), owner.clone()).await?;
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     let boundary = Boundary::new(owner.clone());
     boundary.revoked.send_replace(true);
     let mut producer = SqliteSource::new_replayable(
@@ -248,16 +250,19 @@ async fn revoked_external_reader_fails_before_sqlite_open_and_retains_uncommitte
         config(directory.path()),
         boundary.reader(),
     )?;
-    let error = producer.start().await.expect_err("revoked startup");
+    let error = producer
+        .start(&lifecycle_ctx::start())
+        .await
+        .expect_err("revoked startup");
     assert_eq!(
         error.downcast_ref::<std::io::Error>().unwrap().kind(),
         std::io::ErrorKind::PermissionDenied
     );
     assert!(!directory.path().join("source.db").exists());
-    producer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
 
     boundary.revoked.send_replace(false);
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     producer
         .handle()
         .execute_batch(
@@ -273,14 +278,14 @@ async fn revoked_external_reader_fails_before_sqlite_open_and_retains_uncommitte
         std::io::ErrorKind::PermissionDenied
     );
     assert!(owner.snapshot().checkpoints.is_empty());
-    producer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?.0, 1);
     assert_eq!(journal_state(directory.path())?.1, 0);
     drop(producer);
 
     let mut producer = source(config(directory.path()), owner.clone())?;
     assert!(Arc::ptr_eq(&producer.recovery_progress().unwrap(), &owner));
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     let replay = next(&mut producer).await?;
     assert_eq!(
         original.envelope.system().source_position(),
@@ -291,7 +296,7 @@ async fn revoked_external_reader_fails_before_sqlite_open_and_retains_uncommitte
         rows(&consumer),
         [serde_json::json!({"id":1,"value":"retained"})]
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }

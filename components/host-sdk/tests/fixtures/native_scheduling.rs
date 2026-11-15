@@ -161,73 +161,108 @@ impl sdk::NativeComponent for Delay {
         Ok(self.configuration.clone())
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
-        let scope = self.scope.clone();
-        let component = self.descriptor.id().clone();
-        let stream = StreamId::try_new("delay/out")?;
-        let (producer, pending): (GraphProducerIdentity, Option<Vec<u8>>) = self
-            .processing
-            .run(move |context| async move {
-                context.recover_input_progress().await?;
-                context.stage_bootstrap_complete(true).await?;
-                let producer = match context.read_checkpoint(PRODUCER).await? {
-                    Some(checkpoint) => {
-                        anyhow::ensure!(checkpoint.sequence == 1, "invalid delay producer version");
-                        let producer: GraphProducerIdentity = serde_json::from_slice(
-                            &checkpoint
-                                .source_position
-                                .context("missing delay producer")?,
-                        )?;
-                        anyhow::ensure!(
-                            producer.graph_id() == scope.graph_id
-                                && producer.component_id() == &component
-                                && producer.stream() == &stream,
-                            "delay producer belongs to another component"
-                        );
-                        producer
+    async fn initialize(
+        &mut self,
+        _: &sdk::lifecycle::InitializeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        sdk::lifecycle::nothing_to_do()
+    }
+    async fn pause(&mut self, _: &sdk::lifecycle::PauseContext) -> sdk::lifecycle::LifecycleResult {
+        sdk::lifecycle::nothing_to_do()
+    }
+    async fn resume(
+        &mut self,
+        _: &sdk::lifecycle::ResumeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        sdk::lifecycle::nothing_to_do()
+    }
+    async fn dispose(
+        &mut self,
+        _: &sdk::lifecycle::DisposeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        sdk::lifecycle::nothing_to_do()
+    }
+    async fn start(
+        &mut self,
+        _: &mut sdk::lifecycle::StartContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        let started: anyhow::Result<()> = async {
+            let scope = self.scope.clone();
+            let component = self.descriptor.id().clone();
+            let stream = StreamId::try_new("delay/out")?;
+            let (producer, pending): (GraphProducerIdentity, Option<Vec<u8>>) = self
+                .processing
+                .run(move |context| async move {
+                    context.recover_input_progress().await?;
+                    context.stage_bootstrap_complete(true).await?;
+                    let producer = match context.read_checkpoint(PRODUCER).await? {
+                        Some(checkpoint) => {
+                            anyhow::ensure!(
+                                checkpoint.sequence == 1,
+                                "invalid delay producer version"
+                            );
+                            let producer: GraphProducerIdentity = serde_json::from_slice(
+                                &checkpoint
+                                    .source_position
+                                    .context("missing delay producer")?,
+                            )?;
+                            anyhow::ensure!(
+                                producer.graph_id() == scope.graph_id
+                                    && producer.component_id() == &component
+                                    && producer.stream() == &stream,
+                                "delay producer belongs to another component"
+                            );
+                            producer
+                        }
+                        None => {
+                            let producer = GraphProducerIdentity::new(
+                                scope.instance_id,
+                                scope.graph_id,
+                                component.clone(),
+                                stream,
+                                true,
+                            )?;
+                            context
+                                .stage_checkpoint(
+                                    PRODUCER,
+                                    1,
+                                    Some(&serde_json::to_vec(&producer)?),
+                                )
+                                .await?;
+                            producer
+                        }
+                    };
+                    let head = context.read_result_sequence().await?;
+                    let delivered = context.read_delivery_progress().await?;
+                    if head.is_none() {
+                        context.stage_result_sequence(0).await?;
+                        context.stage_delivery_progress(0).await?;
                     }
-                    None => {
-                        let producer = GraphProducerIdentity::new(
-                            scope.instance_id,
-                            scope.graph_id,
-                            component.clone(),
-                            stream,
-                            true,
-                        )?;
-                        context
-                            .stage_checkpoint(PRODUCER, 1, Some(&serde_json::to_vec(&producer)?))
+                    let pending = if head.unwrap_or(0) > delivered.unwrap_or(0) {
+                        let mut page = context
+                            .read_outbox_page(delivered.unwrap_or(0), page())
                             .await?;
-                        producer
-                    }
-                };
-                let head = context.read_result_sequence().await?;
-                let delivered = context.read_delivery_progress().await?;
-                if head.is_none() {
-                    context.stage_result_sequence(0).await?;
-                    context.stage_delivery_progress(0).await?;
-                }
-                let pending = if head.unwrap_or(0) > delivered.unwrap_or(0) {
-                    let mut page = context
-                        .read_outbox_page(delivered.unwrap_or(0), page())
-                        .await?;
-                    anyhow::ensure!(
-                        page.len() == 1 && Some(page[0].0) == head,
-                        "missing retained delay output"
-                    );
-                    Some(page.remove(0).1)
-                } else {
-                    None
-                };
-                Ok((producer, pending))
-            })
-            .await?;
-        self.producer = Some(producer);
-        self.pending = pending.map(|bytes| self.codec.decode(&bytes)).transpose()?;
-        self.replay = self.pending.is_some();
-        Ok(())
+                        anyhow::ensure!(
+                            page.len() == 1 && Some(page[0].0) == head,
+                            "missing retained delay output"
+                        );
+                        Some(page.remove(0).1)
+                    } else {
+                        None
+                    };
+                    Ok((producer, pending))
+                })
+                .await?;
+            self.producer = Some(producer);
+            self.pending = pending.map(|bytes| self.codec.decode(&bytes)).transpose()?;
+            self.replay = self.pending.is_some();
+            Ok(())
+        }
+        .await;
+        Ok(started?)
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _: &sdk::lifecycle::StopContext) -> sdk::lifecycle::LifecycleResult {
         self.pending = None;
         self.producer = None;
         self.replay = false;

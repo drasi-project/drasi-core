@@ -151,24 +151,62 @@ impl sdk::NativeComponent for LiveSource {
             _ => None,
         }
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        if self.lifecycle.block_start.load(Ordering::SeqCst) {
-            self.lifecycle.release_start.notified().await;
+    async fn start(
+        &mut self,
+        _ctx: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            if self.lifecycle.block_start.load(Ordering::SeqCst) {
+                self.lifecycle.release_start.notified().await;
+            }
+            anyhow::ensure!(
+                !self.lifecycle.fail_start.load(Ordering::SeqCst),
+                "source start failed"
+            );
+            Ok(())
         }
-        anyhow::ensure!(
-            !self.lifecycle.fail_start.load(Ordering::SeqCst),
-            "source start failed"
-        );
+        .await;
+        Ok(result?)
+    }
+    async fn stop(
+        &mut self,
+        _ctx: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            if self.lifecycle.block_stop.load(Ordering::SeqCst) {
+                self.lifecycle.release_stop.notified().await;
+            }
+            anyhow::ensure!(
+                !self.lifecycle.fail_stop.load(Ordering::SeqCst),
+                "source cleanup failed"
+            );
+            Ok(())
+        }
+        .await;
+        Ok(result?)
+    }
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        if self.lifecycle.block_stop.load(Ordering::SeqCst) {
-            self.lifecycle.release_stop.notified().await;
-        }
-        anyhow::ensure!(
-            !self.lifecycle.fail_stop.load(Ordering::SeqCst),
-            "source cleanup failed"
-        );
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn dispose(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
 }
@@ -537,7 +575,8 @@ async fn coordination_matrix() -> anyhow::Result<()> {
             coordinator.clone(),
             progress(shared, &query, &group),
         )?;
-        live.initialize().await?;
+        live.initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         if shared {
             let live = state.live.lock().unwrap();
             let sdk::SourceBootstrapLiveProgress::Shared(live) = live.as_ref().unwrap() else {
@@ -564,7 +603,8 @@ async fn coordination_matrix() -> anyhow::Result<()> {
             };
             assert!(!live.same_owner(progress));
         }
-        live.start().await?;
+        live.start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         assert!(
             factory
                 .create_component_with_source_bootstrap(
@@ -577,7 +617,8 @@ async fn coordination_matrix() -> anyhow::Result<()> {
                 .is_err(),
             "a retained live source lease fences reconstruction"
         );
-        live.stop().await?;
+        live.stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         assert!(
             factory
                 .create_component_with_source_bootstrap(
@@ -599,9 +640,12 @@ async fn coordination_matrix() -> anyhow::Result<()> {
             coordinator.clone(),
             progress(shared, &query, &group),
         )?;
-        live.initialize().await?;
-        live.start().await?;
-        live.stop().await?;
+        live.initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        live.start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        live.stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         state.provider_stop.blocked.store(true, Ordering::SeqCst);
         assert!(
             tokio::time::timeout(Duration::from_millis(20), provider.stop())
@@ -657,7 +701,9 @@ async fn coordination_matrix() -> anyhow::Result<()> {
         );
         readers_active(&state, false);
         assert!(
-            live.start().await.is_err(),
+            live.start(&crate::computation::test_hooks::start_ctx())
+                .await
+                .is_err(),
             "a retained old source cannot restart a retired coordinator"
         );
         drop(live);
@@ -876,7 +922,8 @@ async fn bootstrap_coordination_dropped_failed_sources_remain_fenced() -> anyhow
             let never_started = make(1)?;
             drop(never_started);
             let mut live = make(2)?;
-            live.initialize().await?;
+            live.initialize(&crate::computation::test_hooks::initialize_ctx())
+                .await?;
             state
                 .source_lifecycle
                 .fail_stop
@@ -887,32 +934,44 @@ async fn bootstrap_coordination_dropped_failed_sources_remain_fenced() -> anyhow
                         .source_lifecycle
                         .fail_start
                         .store(true, Ordering::SeqCst);
-                    assert!(live.start().await.is_err());
+                    assert!(live
+                        .start(&crate::computation::test_hooks::start_ctx())
+                        .await
+                        .is_err());
                 }
                 "failed-stop" => {
-                    live.start().await?;
-                    assert!(live.stop().await.is_err());
+                    live.start(&crate::computation::test_hooks::start_ctx())
+                        .await?;
+                    assert!(live
+                        .stop(&crate::computation::test_hooks::stop_ctx())
+                        .await
+                        .is_err());
                 }
                 "cancelled-start" => {
                     state
                         .source_lifecycle
                         .block_start
                         .store(true, Ordering::SeqCst);
-                    assert!(
-                        tokio::time::timeout(Duration::from_millis(20), live.start())
-                            .await
-                            .is_err()
-                    );
+                    assert!(tokio::time::timeout(
+                        Duration::from_millis(20),
+                        live.start(&crate::computation::test_hooks::start_ctx())
+                    )
+                    .await
+                    .is_err());
                 }
                 "cancelled-stop" => {
-                    live.start().await?;
+                    live.start(&crate::computation::test_hooks::start_ctx())
+                        .await?;
                     state
                         .source_lifecycle
                         .block_stop
                         .store(true, Ordering::SeqCst);
-                    assert!(tokio::time::timeout(Duration::from_millis(20), live.stop())
-                        .await
-                        .is_err());
+                    assert!(tokio::time::timeout(
+                        Duration::from_millis(20),
+                        live.stop(&crate::computation::test_hooks::stop_ctx())
+                    )
+                    .await
+                    .is_err());
                 }
                 _ => unreachable!(),
             }
@@ -1389,9 +1448,12 @@ async fn bootstrap_coordination_recipes_preserve_secrets_and_exact_owners() -> a
             actual.clone(),
             progress(shared, &query, &group),
         )?;
-        live.initialize().await?;
-        live.start().await?;
-        live.stop().await?;
+        live.initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        live.start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        live.stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
         drop(live);
         drop(provider);
         drop(bootstrap);

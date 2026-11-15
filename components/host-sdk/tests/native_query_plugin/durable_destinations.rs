@@ -375,19 +375,19 @@ async fn actual_destinations() -> Result<()> {
     stopped?;
     drop(second);
     let mut blocked = create(&root.join("query"), QUERY, 3)?;
-    blocked.initialize().await?;
-    blocked.start().await?;
-    blocked.stop().await?;
+    blocked.initialize(&crate::hooks::initialize_ctx()).await?;
+    blocked.start(&crate::hooks::start_ctx()).await?;
+    blocked.stop(&crate::hooks::stop_ctx()).await?;
     for _ in 0..2 {
         let failure = blocked
-            .delete_owned_resources()
+            .dispose(&crate::hooks::erase_ctx())
             .await
             .expect_err("bound destinations must protect their state");
         assert!(format!("{failure:#}").contains("destinations"));
     }
     let mut query = create(&root.join("query"), QUERY, 3)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(
         query.continue_transform().await.is_err(),
         "retained destinations were not actually rebound"
@@ -396,8 +396,8 @@ async fn actual_destinations() -> Result<()> {
         .bind_output_destinations(&OutputBindings::default())
         .await?;
     assert!(query.continue_transform().await?.is_empty());
-    query.stop().await?;
-    query.delete_owned_resources().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
+    query.dispose(&crate::hooks::erase_ctx()).await?;
     drop(blocked);
     Ok(())
 }

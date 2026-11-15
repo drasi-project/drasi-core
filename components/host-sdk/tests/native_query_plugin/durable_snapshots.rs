@@ -56,8 +56,8 @@ async fn indexed_snapshot_exit_child() -> Result<()> {
     let path =
         PathBuf::from(std::env::var_os(SNAPSHOT_ROOT).context("snapshot child needs a directory")?);
     let mut query = create(&path, TEXT, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let changes: Vec<_> = (0..ROWS)
         .map(|id| SourceChange::Insert {
             element: node(id, json!(id), 1),
@@ -131,9 +131,9 @@ async fn persistent_snapshots() -> Result<()> {
         String::from_utf8_lossy(&child.stderr)
     );
     let mut query = create(directory.path(), TEXT, 2)?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     assert!(reader(&query)?.snapshot().await.is_err());
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let initial = reader(&query)?.snapshot().await?;
     assert!(initial.cursor().producer().persistent());
     assert_eq!(initial.cursor().sequence(), 3);
@@ -182,17 +182,17 @@ async fn persistent_snapshots() -> Result<()> {
         assert_eq!(current_rows[&id], value);
     }
     let old_reader = reader(&query)?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     assert!(old_reader.snapshot().await.is_err());
     drop(query);
     let mut query = create(directory.path(), TEXT, 3)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.continue_transform().await?.is_empty());
     let reopened = reader(&query)?.snapshot().await?;
     assert_eq!(reopened.cursor(), current.cursor());
     assert_eq!(rows(&reopened)?, current_rows);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -211,8 +211,8 @@ async fn missing_or_corrupt_live_rows_cannot_become_an_empty_snapshot() -> Resul
     for missing in [true, false] {
         let directory = tempfile::tempdir()?;
         let mut query = create(directory.path(), TEXT, 1)?;
-        query.initialize().await?;
-        query.start().await?;
+        query.initialize(&crate::hooks::initialize_ctx()).await?;
+        query.start(&crate::hooks::start_ctx()).await?;
         let output = query
             .transform(input(
                 SourceChange::Insert {
@@ -231,7 +231,7 @@ async fn missing_or_corrupt_live_rows_cannot_become_an_empty_snapshot() -> Resul
         let signature = QueryChangeCodec::decode_row(record)?
             .signature
             .context("stored signature")?;
-        query.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
         drop(query);
         let owner = ComputationTransaction::try_new(
             provider(directory.path())?
@@ -263,13 +263,13 @@ async fn missing_or_corrupt_live_rows_cannot_become_an_empty_snapshot() -> Resul
         owner.shutdown().await?;
         drop(owner);
         let mut query = create(directory.path(), TEXT, 2)?;
-        query.initialize().await?;
+        query.initialize(&crate::hooks::initialize_ctx()).await?;
         assert!(
-            query.start().await.is_err(),
+            query.start(&crate::hooks::start_ctx()).await.is_err(),
             "damaged projection must not be published"
         );
         assert!(reader(&query)?.snapshot().await.is_err());
-        query.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
     }
     Ok(())
 }
@@ -279,8 +279,8 @@ async fn failed_mutation_hides_snapshot_until_committed_rows_are_restored() -> R
     let directory = tempfile::tempdir()?;
     let text = "MATCH (n:Item) RETURN n.id AS id, abs(n.value) AS value";
     let mut query = create(directory.path(), text, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -301,14 +301,14 @@ async fn failed_mutation_hides_snapshot_until_committed_rows_are_restored() -> R
         .await
         .is_err());
     assert!(reader(&query)?.snapshot().await.is_err());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
     let mut query = create(directory.path(), text, 2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let restored = reader(&query)?.snapshot().await?;
     assert_eq!(restored.cursor(), initial.cursor());
     assert_eq!(rows(&restored)?, rows(&initial)?);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }

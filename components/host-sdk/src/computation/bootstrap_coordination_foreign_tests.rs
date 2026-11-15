@@ -472,12 +472,7 @@ impl sdk::NativeComponent for OrdinarySource {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(json!({}))
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_computation_plugin_sdk::passive_lifecycle!();
 }
 #[async_trait]
 impl sdk::NativeSource for OrdinarySource {
@@ -545,10 +540,13 @@ async fn bootstrap_coordination_absent_and_opted_out_factories_preserve_ordinary
             ComponentId::try_new("1c154521-8577-54dc-863e-d6d044881ba2")?,
             json!({}),
         )?;
-        live.initialize().await?;
-        live.start().await?;
+        live.initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        live.start(&crate::computation::test_hooks::start_ctx())
+            .await?;
         assert!(live.next().await?.is_none());
-        live.stop().await?;
+        live.stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
     // Merely advertising the extension cannot grant coordination without its
     // required source progress service.

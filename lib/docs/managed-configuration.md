@@ -106,7 +106,7 @@ inspection exposes resource-to-resource links. Direct builders support
 
 For recipe changes affecting constructed component users, the provider's
 `ManagementResourceResolver::plan_update` must assess the explicit change.
-The supported plan is `Recreate` with `Preserve`, retaining the graph-owned
+The supported plan is `Recreate` (the Replace boundary) with `Preserve`, retaining the graph-owned
 resource's ID, role and binding interface. The default assessment rejects live
 changes. Consumers do not reconfigure their injected provider or approve its
 configuration: their unchanged recipes are reconstructed as dependency effects.

@@ -6,6 +6,10 @@ use async_trait::async_trait;
 use drasi_computation_contracts::{
     ComponentDescriptor, InputEnvelope, QueryChangeCodec, SinkCompletion,
 };
+use drasi_computation_plugin_sdk::lifecycle::{
+    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StopContext,
+};
 use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
 use drasi_core_types::profiling::{timestamp_ns, ProfilingMetadata};
 use serde::{Deserialize, Serialize};
@@ -182,8 +186,28 @@ impl NativeComponent for ProfilerSink {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(&self.config)?)
     }
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation().await?)
+    }
+    async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+}
 
-    async fn start(&mut self) -> Result<()> {
+impl ProfilerSink {
+    async fn start_activation(&mut self) -> Result<()> {
         ensure!(self.task.is_none(), "profiler sink already started");
         let cancel = CancellationToken::new();
         let shutdown = cancel.clone();
@@ -203,8 +227,7 @@ impl NativeComponent for ProfilerSink {
         self.cancel = Some(cancel);
         Ok(())
     }
-
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop_activation(&mut self) -> Result<()> {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
         }

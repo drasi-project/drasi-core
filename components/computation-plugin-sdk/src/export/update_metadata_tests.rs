@@ -2,9 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle::{
+    ApplyContext, ApplyError, Assessment, DisposeReason, StateIntent, StopMode, UpdateBoundary,
+};
 use crate::{
-    ApplyUpdateRequest, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
-    UpdateRequest,
+    ApplyUpdateRequest, ComponentUpdateData, ComponentUpdateMode, NativeManagement, UpdateRequest,
 };
 use abi::operation::*;
 use async_trait::async_trait;
@@ -202,6 +204,7 @@ impl Factory for QueryFactory {
                 output_queries: vec![PortId::try_new("out").unwrap()],
                 query_observations: true,
                 update_modes: vec![ComponentUpdateMode::InPlace],
+                management: true,
                 ..Default::default()
             },
         }
@@ -209,16 +212,8 @@ impl Factory for QueryFactory {
     fn supports_update_planning(&self) -> bool {
         true
     }
-    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
-        anyhow::ensure!(
-            request.proposed.configuration["outbox_capacity"].as_u64()
-                > request.current.configuration["outbox_capacity"].as_u64(),
-            "only capacity increases are supported"
-        );
-        Ok(ComponentUpdatePlan {
-            mode: ComponentUpdateMode::InPlace,
-            data: ComponentUpdateData::Preserve,
-        })
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        assess_capacity(request)
     }
     fn create(
         &self,
@@ -233,6 +228,18 @@ impl Factory for QueryFactory {
         }))
         .into())
     }
+}
+
+fn assess_capacity(request: &UpdateRequest) -> anyhow::Result<Assessment> {
+    anyhow::ensure!(
+        request.proposed.configuration["outbox_capacity"].as_u64()
+            > request.current.configuration["outbox_capacity"].as_u64(),
+        "only capacity increases are supported"
+    );
+    Ok(Assessment::supported(
+        UpdateBoundary::Pause,
+        ComponentUpdateData::Preserve,
+    ))
 }
 
 struct QueryComponent {
@@ -250,13 +257,30 @@ impl ComputationComponent for QueryComponent {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.configuration.clone())
     }
-    fn supports_apply_update(&self) -> bool {
-        true
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        Some(self)
     }
     fn output_readers(&self) -> OutputReaders {
         OutputReaders::new().with_query(PortId::try_new("out").unwrap(), self.reader.clone())
     }
-    async fn apply_update(&mut self, update: &ApplyUpdateRequest) -> anyhow::Result<()> {
+    crate::passive_lifecycle!();
+}
+
+#[async_trait]
+impl NativeManagement for QueryComponent {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        assess_capacity(request)
+    }
+    async fn apply(
+        &mut self,
+        _: &ApplyContext,
+        update: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError> {
+        if let Mutation::FailHook = self.mutation {
+            return Err(ApplyError::Failed(anyhow::anyhow!(
+                "injected update failure before metadata mutation"
+            )));
+        }
         self.configuration = update.request.proposed.configuration.clone();
         self.reader.0.lock().unwrap().description.outbox_capacity =
             NonZeroUsize::new(self.configuration["outbox_capacity"].as_u64().unwrap() as usize)
@@ -272,14 +296,15 @@ impl ComputationComponent for QueryComponent {
                 self.descriptor = ComponentDescriptor::try_new(
                     self.descriptor.id().clone(),
                     vec![PortDescriptor::new(
-                        PortId::try_new("changed")?,
+                        PortId::try_new("changed").map_err(anyhow::Error::from)?,
                         PortDirection::Output,
                         GraphChangeCodec::schema().descriptor().clone(),
                         Default::default(),
                     )],
-                )?
+                )
+                .map_err(anyhow::Error::from)?
             }
-            Mutation::FailHook => anyhow::bail!("injected update failure after metadata mutation"),
+            Mutation::FailHook => unreachable!(),
         }
         Ok(())
     }
@@ -361,7 +386,15 @@ impl Fixture {
         }
     }
 
+    /// Lifecycle operations with an empty payload receive a minimal valid context.
     async fn call(&self, code: u32, input: &[u8]) -> anyhow::Result<transport::ReceivedBytes> {
+        let context;
+        let input = if input.is_empty() && is_lifecycle(code) {
+            context = wire::encode(&Self::context(code))?;
+            &context[..]
+        } else {
+            input
+        };
         let mut operation = abi::OperationHandle::null();
         unsafe {
             transport::take_status((*self.component.vtable).begin.unwrap()(
@@ -375,6 +408,32 @@ impl Fixture {
         }
     }
 
+    fn context(code: u32) -> wire::LifecycleRequest {
+        let context = wire::LifecycleRequest::new("lifecycle-operation", ID, 1);
+        match code {
+            STOP => context.with_stop_mode(StopMode::Drain),
+            DISPOSE => context.with_dispose(DisposeReason::Shutdown, StateIntent::Preserve, 1),
+            _ => context,
+        }
+    }
+
+    async fn apply(
+        &self,
+        update: &ApplyUpdateRequest,
+    ) -> Result<transport::ReceivedBytes, Failure> {
+        let input = wire::encode(&Self::context(APPLY).with_update(update.clone()))
+            .map_err(Failure::from)?;
+        let mut operation = abi::OperationHandle::null();
+        unsafe {
+            transport::take_status((*self.exported.management()).apply.unwrap()(
+                self.component.state,
+                BorrowedBytes::new(&input),
+                &mut operation,
+            ))?;
+            transport::OperationFuture::new(operation)?.await
+        }
+    }
+
     fn approved(&self) -> anyhow::Result<ApplyUpdateRequest> {
         let mut proposed = self.request.clone();
         proposed.configuration = serde_json::json!({"outbox_capacity": 8});
@@ -383,9 +442,9 @@ impl Fixture {
             proposed,
         };
         let bytes = serde_json::to_vec(&request)?;
-        let plan = unsafe {
+        let assessment: Assessment = unsafe {
             serde_json::from_slice(&transport::take_reply((*self.factory.vtable)
-                .plan_update
+                .assess
                 .unwrap()(
                 self.factory.state,
                 BorrowedBytes::new(&bytes),
@@ -394,7 +453,8 @@ impl Fixture {
         Ok(ApplyUpdateRequest {
             operation_id: "grow-outbox".into(),
             request,
-            plan,
+            plan: assessment.plan().context("unsupported update")?,
+            fingerprint: assessment.fingerprint().map(str::to_owned),
         })
     }
 
@@ -460,9 +520,9 @@ async fn query_metadata_reflection() -> anyhow::Result<()> {
         anyhow::bail!("snapshot must be readable");
     };
     assert_eq!(rows.snapshot.records.len(), 1);
-    fixture.call(PAUSE_PROCESSING, &[]).await?;
-    let update = wire::encode(&fixture.approved()?)?;
-    fixture.call(APPLY_UPDATE, &update).await?;
+    fixture.call(PAUSE, &[]).await?;
+    let update = fixture.approved()?;
+    assert!(fixture.apply(&update).await?.is_empty());
     let after = fixture.inspect()?;
     assert_eq!(after.queries[&out].outbox_capacity.get(), 8);
     assert_eq!(after.descriptor, before.descriptor);
@@ -473,9 +533,9 @@ async fn query_metadata_reflection() -> anyhow::Result<()> {
         serde_json::to_value(&after.queries[&out])?,
         previous_description
     );
-    fixture.call(APPLY_UPDATE, &update).await?;
+    assert!(fixture.apply(&update).await?.is_empty());
     assert_eq!(fixture.inspect()?.queries[&out].outbox_capacity.get(), 8);
-    fixture.call(RESUME_PROCESSING, &[]).await?;
+    fixture.call(RESUME, &[]).await?;
     let preserved = query.read(QUERY_SNAPSHOT).await?;
     assert_eq!(
         &*preserved, &*snapshot,
@@ -542,9 +602,8 @@ async fn failed_updates_do_not_publish_descriptions_or_replace_captured_readers(
         let fixture = Fixture::new(mutation)?;
         fixture.call(INITIALIZE, &[]).await?;
         fixture.call(START, &[]).await?;
-        fixture.call(PAUSE_PROCESSING, &[]).await?;
-        let update = wire::encode(&fixture.approved()?)?;
-        let error = fixture.call(APPLY_UPDATE, &update).await.unwrap_err();
+        fixture.call(PAUSE, &[]).await?;
+        let error = fixture.apply(&fixture.approved()?).await.unwrap_err();
         assert!(error.to_string().contains(message), "{error:#}");
         assert_eq!(
             fixture.inspect()?.queries[&PortId::try_new("out")?]
@@ -552,7 +611,12 @@ async fn failed_updates_do_not_publish_descriptions_or_replace_captured_readers(
                 .get(),
             2
         );
-        assert!(fixture.call(RESUME_PROCESSING, &[]).await.is_err());
+        if let Mutation::FailHook = mutation {
+            assert_eq!(error.data, Some(serde_json::json!({"apply": "failed"})));
+            fixture.call(RESUME, &[]).await?;
+        } else {
+            assert!(fixture.call(RESUME, &[]).await.is_err());
+        }
         fixture.call(STOP, &[]).await?;
         fixture.call(DISPOSE, &[]).await?;
     }

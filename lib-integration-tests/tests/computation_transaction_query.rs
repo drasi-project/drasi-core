@@ -50,7 +50,7 @@ async fn query(root: &Path) -> Result<ContinuousQueryTransformer> {
     )
     .await?
     .with_delivery_tracking();
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     Ok(query)
 }
 
@@ -136,12 +136,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSink for Sink {
@@ -189,7 +184,7 @@ async fn sink(
             store,
         )?),
     )?;
-    sink.start().await?;
+    sink.start(&lifecycle_contexts::start()).await?;
     Ok(sink)
 }
 
@@ -289,10 +284,10 @@ async fn query_handoff_worker() -> Result<()> {
             std::fs::read_to_string(root.join(format!("{name}.effects")))?,
             "1\n"
         );
-        sink.stop().await?;
+        sink.stop(&lifecycle_contexts::stop()).await?;
     }
     assert_eq!(incoming.progress().await?.processed["query"], 1);
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     incoming.shutdown().await?;
     outgoing.shutdown().await?;
     Ok(())
@@ -355,8 +350,8 @@ async fn scheduled_query_worker() -> Result<()> {
         StreamId::try_new("clock/out")?,
         scheduling,
     )?;
-    query.start().await?;
-    source.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
+    source.start(&lifecycle_contexts::start()).await?;
     if phase == "seed" {
         assert!(query
             .transform(InputEnvelope {
@@ -417,8 +412,8 @@ async fn scheduled_query_worker() -> Result<()> {
         .is_empty());
     assert_eq!(query.results().snapshot()?.rows.len(), 1);
     assert_eq!(query.results().snapshot()?.as_of_sequence, 1);
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_contexts::stop()).await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -521,8 +516,8 @@ async fn scheduled_pair(
         StreamId::try_new("clock/out")?,
         scheduling,
     )?;
-    query.start().await?;
-    source.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
+    source.start(&lifecycle_contexts::start()).await?;
     Ok((query, source))
 }
 
@@ -564,8 +559,8 @@ async fn timer_burst_reconstruction() -> Result<()> {
                 .await?
                 .is_empty());
         }
-        clock.stop().await?;
-        query.stop().await?;
+        clock.stop(&lifecycle_contexts::stop()).await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
     }
     let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
     let expected: std::collections::BTreeSet<_> = (0..COUNT)
@@ -623,8 +618,8 @@ async fn timer_burst_reconstruction() -> Result<()> {
         .await?
         .is_empty());
     assert!(!query.has_pending_emissions());
-    clock.stop().await?;
-    query.stop().await?;
+    clock.stop(&lifecycle_contexts::stop()).await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -726,8 +721,8 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
         }
         assert_eq!(outgoing.progress().await?.accepted, 1);
         assert_eq!(outgoing.progress().await?.processed["receiver"], 0);
-        clock.stop().await?;
-        query.stop().await?;
+        clock.stop(&lifecycle_contexts::stop()).await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
     }
     {
         let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
@@ -792,14 +787,56 @@ async fn cancelled_timer_and_backpressured_live_output_recover_without_recalcula
         let snapshot = query.results().snapshot()?;
         assert!(snapshot.rows.is_empty());
         assert_eq!(snapshot.as_of_sequence, 2);
-        clock.stop().await?;
-        query.stop().await?;
+        clock.stop(&lifecycle_contexts::stop()).await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
     }
     let (mut query, mut clock) = scheduled_pair(directory.path(), progress).await?;
     assert!(!query.has_pending_emissions());
     assert_eq!(query.results().replay(0)?.len(), 2);
-    clock.stop().await?;
-    query.stop().await?;
+    clock.stop(&lifecycle_contexts::stop()).await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     outgoing.shutdown().await?;
     Ok(())
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

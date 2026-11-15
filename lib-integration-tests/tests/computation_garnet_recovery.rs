@@ -92,20 +92,20 @@ async fn exercise(provider: Arc<dyn ComputationIndexProvider>, graph: &str) -> R
         let mut query = ContinuousQueryTransformer::new(definition(graph, false), provider.clone())
             .await?
             .with_bootstrap(Arc::new(Bootstrap));
-        query.start().await?;
+        query.start(&lifecycle_contexts::start()).await?;
         ensure!(query.transform(input(2)).await?.len() == 1);
         ensure!(query.transform(input(3)).await?.len() == 1);
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
     }
     {
         let mut query = ContinuousQueryTransformer::new(definition(graph, false), provider.clone())
             .await?
             .with_bootstrap(Arc::new(Bootstrap));
-        query.start().await?;
+        query.start(&lifecycle_contexts::start()).await?;
         ensure!(query.results().snapshot()?.as_of_sequence == 2);
         ensure!(query.results().replay(0)?.len() == 2);
         ensure!(query.transform(input(3)).await?.is_empty());
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
     }
     let generation;
     {
@@ -119,18 +119,18 @@ async fn exercise(provider: Arc<dyn ComputationIndexProvider>, graph: &str) -> R
         )
         .await?
         .with_bootstrap(Arc::new(Bootstrap));
-        query.start().await?;
+        query.start(&lifecycle_contexts::start()).await?;
         let snapshot = query.results().snapshot()?;
         generation = snapshot.generation;
         ensure!(generation > 0);
         ensure!(snapshot.rows.len() == 1);
         ensure!(snapshot.as_of_sequence == 2);
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
     }
     let mut query = ContinuousQueryTransformer::new(definition(graph, true), provider)
         .await?
         .with_bootstrap(Arc::new(Bootstrap));
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     let snapshot = query.results().snapshot()?;
     ensure!(snapshot.generation == generation);
     ensure!(snapshot.as_of_sequence == 2);
@@ -139,7 +139,7 @@ async fn exercise(provider: Arc<dyn ComputationIndexProvider>, graph: &str) -> R
     let output = query.transform(input(2)).await?;
     ensure!(output.len() == 1);
     ensure!(output[0].envelope.system().sequence() == 3);
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(())
 }
 
@@ -193,13 +193,13 @@ async fn native_query_rejects_unqualified_garnet_without_touching_storage() -> R
             },
             provider.clone(),
         )?;
-        query.initialize().await?;
+        query.initialize(&lifecycle_contexts::initialize()).await?;
         let error = query
-            .start()
+            .start(&lifecycle_contexts::start())
             .await
             .expect_err("unknown storage durability cannot be upgraded");
         ensure!(format!("{error:#}").contains("not guaranteed"), "{error:#}");
-        query.stop().await?;
+        query.stop(&lifecycle_contexts::stop()).await?;
         drop(query);
         let indexes = provider
             .create_indexes("native-garnet-capabilities", &query_id)
@@ -225,4 +225,46 @@ async fn native_query_rejects_unqualified_garnet_without_touching_storage() -> R
     .await;
     redis.cleanup().await;
     result
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

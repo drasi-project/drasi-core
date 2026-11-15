@@ -123,7 +123,9 @@ async fn native_consumer_completion_crash_worker() -> anyhow::Result<()> {
         options(),
     )
     .await?;
-    consumer.start().await?;
+    consumer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     boundary.remaining.store(2, Ordering::Release);
     let operation = consumer.handle(batch()?);
     tokio::pin!(operation);
@@ -195,7 +197,9 @@ async fn native_consumer_completion_recovers_after_process_exit() -> anyhow::Res
                 options(),
             )
             .await?;
-            consumer.start().await?;
+            consumer
+                .start(&crate::computation::test_hooks::start_ctx())
+                .await?;
             assert_eq!(
                 consumer.progress().await?[0].completed_operations,
                 usize::from(after)
@@ -203,7 +207,9 @@ async fn native_consumer_completion_recovers_after_process_exit() -> anyhow::Res
             consumer.handle(batch()?).await?;
             assert_eq!(consumer.progress().await?[0].handled_sequence, 1);
             consumer.handle(batch()?).await?;
-            consumer.stop().await?;
+            consumer
+                .stop(&crate::computation::test_hooks::stop_ctx())
+                .await?;
             if mode == sdk::ConsumerMode::Transactional {
                 assert_eq!(
                     count(provider.as_ref()).await?,
@@ -253,7 +259,9 @@ async fn native_consumer_real_library_recovers_uncertain_completion_without_losi
                     options(),
                 )
                 .await?;
-                consumer.start().await?;
+                consumer
+                    .start(&crate::computation::test_hooks::start_ctx())
+                    .await?;
                 // After startup, admission commits first, then operation completion.
                 boundary.remaining.store(2, Ordering::Release);
                 if cancel {
@@ -272,7 +280,9 @@ async fn native_consumer_real_library_recovers_uncertain_completion_without_losi
                     "uncertain commit must fence cached progress"
                 );
                 assert!(consumer.handle(batch()?).await.is_err());
-                consumer.stop().await?;
+                consumer
+                    .stop(&crate::computation::test_hooks::stop_ctx())
+                    .await?;
                 if mode == sdk::ConsumerMode::Transactional {
                     assert_eq!(
                         count(inner.as_ref()).await?,
@@ -290,14 +300,18 @@ async fn native_consumer_real_library_recovers_uncertain_completion_without_losi
                     options(),
                 )
                 .await?;
-                consumer.start().await?;
+                consumer
+                    .start(&crate::computation::test_hooks::start_ctx())
+                    .await?;
                 assert_eq!(
                     consumer.progress().await?[0].completed_operations,
                     usize::from(after)
                 );
                 consumer.handle(batch()?).await?;
                 assert_eq!(consumer.progress().await?[0].handled_sequence, 1);
-                consumer.stop().await?;
+                consumer
+                    .stop(&crate::computation::test_hooks::stop_ctx())
+                    .await?;
                 if mode == sdk::ConsumerMode::Transactional {
                     assert_eq!(count(inner.as_ref()).await?, Some(ElementValue::Integer(3)));
                 } else {

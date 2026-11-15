@@ -1,19 +1,22 @@
 # Native ComputationGraph ABI
 
 This dependency-free crate freezes the C layouts for native computation plugins.
-The ABI version is **2.0.0**, independent of crate releases and the
+The ABI version is **4.0.0**, independent of crate releases and the
 Source/Reaction/Bootstrap SDK **0.17.0** (which also accepts 0.16 fast-mode plugins).
 Its two symbols are
 `drasi_computation_plugin_metadata` and `drasi_computation_plugin_entry`.
 Do not call a legacy registration function to interpret native metadata.
-The native payload contract is **wire version 2**: UUID component identities,
+The native payload contract is **wire version 4**: UUID component identities,
 bounded MessagePack with bulk binary buffers and binary computation envelopes.
-Wire version 1 is rejected; rebuild the host and plugins together. ABI 2 changes
-the family magic to `DRASICG2`, the header major to 2 and the factory table layout.
-It does not change BinaryEnvelopeCodec/EnvelopeCodec serialization version 2.
+Other wire versions are rejected. The family magic is `DRASICG4` and the header
+major is 4. This does not change BinaryEnvelopeCodec/EnvelopeCodec serialization
+version 2.
 
-Headers must match the family magic, version and exact structure size before
-reading any subsequent field. Missing metadata, unsupported capabilities and
+Headers must match the family magic and major before reading any subsequent
+field. A host accepts the same major with an older or equal minor, whose
+structure size must match that minor's layout, and rejects a newer minor or
+another major before invoking any callback. Tables grow only by appending fields
+in a later minor. Missing metadata, unsupported capabilities and
 unknown wire versions are errors. Enum-like ABI fields are integers, not Rust
 enums with invalid discriminants.
 
@@ -31,34 +34,56 @@ for I/O. Every exported function and callback must contain Rust panics.
 Native libraries are pinned for process lifetime. Hot unloading is unsupported.
 Native code is trusted in-process code, not a memory or security sandbox.
 
-## ABI 2 lifecycle and update planning
+## Lifecycle and update management
 
-`FactoryVTable::plan_update` is an additional
-`unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply` callback. Its input is
-JSON `UpdateRequest { current: CreateRequest, proposed: CreateRequest }`; success
-returns JSON `ComponentUpdatePlan { mode, data }`. Both are bounded by
-`MAX_METADATA_BYTES` (1 MiB). Planning inspects configuration only, without
-construction, I/O or activation. Unsupported changes fail explicitly.
-
-Mutable operations still use `ComponentVTable::begin` and producer-owned,
-caller-polled operation handles. Lifecycle hooks take empty payloads (except the
-existing credential-bound START). Added/renamed opcodes are:
+Mutable operations use `ComponentVTable::begin` and producer-owned,
+caller-polled operation handles. Lifecycle operations carry a bounded named
+MessagePack `LifecycleRequest { version: 1, operation_id, component_id,
+generation, deadline_ms?, required?, credentials?, stop_mode?, dispose?, update? }`.
+`deadline_ms` is cooperative: expiry is neither completion nor rollback. An
+unknown entry in `required` rejects the operation. Lifecycle opcodes are:
 
 | Opcode | Value | Meaning |
 |---|---:|---|
-| `PAUSE_PROCESSING` | 7 | Temporary processing pause, retaining activation |
-| `DELETE_OWNED_RESOURCES` | 17 | Explicit permanent owned-resource deletion |
-| `INITIALIZE` | 24 | Once per object, before its first START |
-| `DISPOSE` | 25 | Awaited final instance cleanup after positive STOP cleanup |
-| `RESUME_PROCESSING` | 26 | Resume a completed temporary pause |
-| `APPLY_UPDATE` | 27 | Execute an approved retained-instance update |
+| `START` | 1 | Begin an activation after INITIALIZE; credentials only for bound factories |
+| `STOP` | 2 | End an activation, including a partial START or a pause; `stop_mode` is `drain` or `abort` |
+| `PAUSE` | 7 | Temporary pause retaining the activation; fails `UNSUPPORTED` rather than succeeding as a no-op |
+| `INITIALIZE` | 24 | Once per object, before its first START; failure requires DISPOSE |
+| `DISPOSE` | 25 | Final retirement after STOP, including partial initialization |
+| `RESUME` | 26 | Resume a completed pause, not another START |
+| `APPLY` | 28 | Management apply at an accepted Pause or Stop boundary |
 
-`APPLY_UPDATE` uses bounded named MessagePack
-`ApplyUpdateRequest { operation_id, request: UpdateRequest, plan }`. Recreate
-cannot be applied to an instance. Factory metadata declares unique
-`capabilities.update_modes`; empty means no update support. These declarations
-are not permission to discard state: the graph owns data-boundary, storage and
-downstream safety checks.
+DISPOSE carries `DisposeRequest { reason, intent, attempt }`. `reason` is
+`shutdown`, `removal`, `replacement` or `initializationFailure`; `intent` is
+`preserve` or `erase`, and shutdown or initialization failure must preserve.
+`erase` is permanent removal of state the component owns, requested only of
+factories declaring `erases_owned_state`; there is no separate deletion opcode.
+Retries repeat the same reason and intent, so erasure must be idempotent.
+
+`FactoryVTable::assess` is the pure factory planner:
+`unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply`. Its input is JSON
+`UpdateRequest { current: CreateRequest, proposed: CreateRequest }`; success
+returns a JSON `Assessment`, either `{"outcome": "unsupported", "reason"}` or
+`{"outcome": "supported", "boundary": "pause" | "stop" | "replace", "data",
+"fingerprint"?}`. Both are bounded by `MAX_METADATA_BYTES` (1 MiB). Planning
+inspects configuration only, without construction, I/O or activation; a failure
+to assess is an error, never an implicit Replace. Boundaries are stored as
+`capabilities.update_modes` `InPlace`, `Restart` and `Recreate`; empty means no
+update support.
+
+`drasi_computation_plugin_management_v1` is an optional extension
+(`PluginManagementV1`) declared exactly when `capabilities.management` is set,
+which is required when `update_modes` names Pause or Stop. Its synchronous,
+side-effect-free `assess` uses the same JSON request/response with live instance
+facts and fails `BUSY` while another operation is active, or `UNSUPPORTED` so the
+host uses the factory planner. Its `apply` begins an APPLY operation whose
+`LifecycleRequest.update` is `ApplyUpdateRequest { operation_id, request, plan,
+fingerprint? }`. Replace is never applied to an instance: the host disposes the
+old object and constructs anew. A failed apply reports `{"apply": "refused" |
+"failed" | "damaged", "nowRequires"?: boundary}` in its failure data. Refused and
+failed leave the object unchanged; damaged retires it. An interrupted apply is
+never retried on the same object. These declarations are not permission to
+discard state: the graph owns data-boundary, storage and downstream safety checks.
 
 Owner-approved reconstruction intent uses a separate named MessagePack creation
 envelope: `update_creation_version: 1`, `request: CreateRequest`,
@@ -70,18 +95,16 @@ Ordinary construction and pure planning descriptions have no directive.
 
 Successful duplicate transitions acknowledge completion without repeating hooks.
 Incomplete initialization must be disposed, not retried on the same object;
-partial start needs stop. Stop/disposal/update cancellation does not roll back or
+partial start needs stop. Stop/disposal/apply cancellation does not roll back or
 complete cleanup, and cannot authorize restart. Retained cleanup can be retried.
 Disposal fences and settles independent calls/readers; synchronous release is not
-its replacement. Permanent deletion is separate and explicit, after positive
-activation cleanup and before disposal. The old destructive and service-quiesce
-operation names have no compatibility aliases in ABI 2.
+its replacement.
 
 ## Optional services, version 1
 
 `drasi_computation_plugin_services_v1` is an optional, independently versioned
 extension. The two base entry points, base vtables, ABI version, wire version and
-strict base metadata remain unchanged. Matching wire-version-2 libraries may omit
+strict base metadata remain unchanged. Matching wire-version-4 libraries may omit
 this symbol; loading does not grant recovery support.
 An extension without the base entry points is malformed, not a legacy plugin.
 
@@ -127,7 +150,7 @@ complete consumer set. `PluginConsumerProgressV1` supplies per-factory discovery
 construction with `ConsumerProgressV1`, and immutable upstream-retention inspection.
 An advertising factory requires the binding and must reject unbound creation.
 Only source and transformer producers support it; single-owner recovery cannot
-be combined with this capability. Base ABI 2.0, wire 2 and recovery-v1 are unchanged.
+be combined with this capability. Base ABI 4.0, wire 4 and recovery-v1 are unchanged.
 
 The identity fixes the graph, producer and 1-256 distinct consumer IDs. Each
 snapshot carries every member's existing recovery-v1 snapshot as a binary frame,
@@ -172,7 +195,7 @@ subsequent generation/index/key request is limited to 4096 bytes. Batch release
 rejects stale generations or active calls. Explicit retryable handler failures use
 the extension's `RETRYABLE` status, not an empty success response.
 
-Both extensions leave base tables, strict metadata, ABI 2.0 and wire 2 unchanged.
+Both extensions leave base tables, strict metadata, ABI 4.0 and wire 4 unchanged.
 Only negotiated, bound factories may use them; missing services never imply
 recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
@@ -180,7 +203,7 @@ recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
 `drasi_computation_plugin_output_reads_v2` and
 `drasi_computation_plugin_output_follow_v2` are independent extensions; base ABI
-2.0, wire 2 and every other table are unchanged. A factory declares the output
+4.0, wire 4 and every other table are unchanged. A factory declares the output
 ports it serves in manifest `capabilities.output_snapshots`, `output_replays` and
 `output_follows` (empty lists are omitted); the Host requires the matching
 extension exactly then.

@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -218,7 +220,11 @@ async fn native_snapshot_releases_global_lock_before_scan_and_hands_over_without
         Result::<()>::Ok(())
     };
     let (started, written, streamed) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(query.start(), writes, source.start())
+        tokio::join!(
+            query.start(lifecycle_ctx::held(lifecycle_ctx::start())),
+            writes,
+            source.start(lifecycle_ctx::held(lifecycle_ctx::start()))
+        )
     })
     .await?;
     started?;
@@ -252,8 +258,8 @@ async fn native_snapshot_releases_global_lock_before_scan_and_hands_over_without
             serde_json::json!({"id":5,"value":"five"}),
         ]
     );
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     drop(query);
     drop(source);
     database
@@ -265,13 +271,13 @@ async fn native_snapshot_releases_global_lock_before_scan_and_hands_over_without
     let mut query = super::query(path.path(), owner)
         .await?
         .with_bootstrap(bootstrap);
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     assert_eq!(query.results().snapshot()?.rows.len(), 4);
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     apply(&mut query, next(&mut source).await?).await?;
     assert_eq!(query.results().snapshot()?.rows.len(), 5);
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())
 }
@@ -299,7 +305,7 @@ async fn native_snapshot_retains_cleanup_across_cancelled_and_timed_out_stop() -
             exit_after: None,
         }));
     {
-        let start = query.start();
+        let start = query.start(lifecycle_ctx::held(lifecycle_ctx::start()));
         tokio::pin!(start);
         tokio::select! {
             result = &mut start => anyhow::bail!("paused snapshot unexpectedly completed: {result:?}"),
@@ -327,7 +333,7 @@ async fn native_snapshot_retains_cleanup_across_cancelled_and_timed_out_stop() -
             "{error:#}"
         );
         anyhow::ensure!(
-            query.start().await.is_err(),
+            query.start(&lifecycle_ctx::start()).await.is_err(),
             "replacement started before cleanup"
         );
         anyhow::ensure!(
@@ -339,7 +345,7 @@ async fn native_snapshot_retains_cleanup_across_cancelled_and_timed_out_stop() -
     .await;
     database._container.unpause().await?;
     let cleanup = bootstrap.stop().await;
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     result?;
     anyhow::ensure!(
         cleanup.is_err(),
@@ -411,15 +417,15 @@ async fn native_snapshot_lock_wait_timeout_and_cancellation_retire_pending_globa
         let result = async {
             if cancel {
                 tokio::select! {
-                    result = query.start() => anyhow::bail!("blocked snapshot unexpectedly completed: {result:?}"),
+                    result = query.start(lifecycle_ctx::held(lifecycle_ctx::start())) => anyhow::bail!("blocked snapshot unexpectedly completed: {result:?}"),
                     ready = wait_for_statement(&mut database.admin, "FLUSH TABLES WITH READ LOCK") => ready?,
                 }
             } else {
-                let error = tokio::time::timeout(Duration::from_secs(5), query.start()).await?
+                let error = tokio::time::timeout(Duration::from_secs(5), query.start(&lifecycle_ctx::start())).await?
                     .expect_err("global lock acquisition deadline");
                 anyhow::ensure!(error.to_string().contains("lock deadline"), "{error:#}");
             }
-            query.stop().await?;
+            query.stop(&lifecycle_ctx::stop()).await?;
             tokio::time::timeout(Duration::from_secs(2), database.admin.execute("INSERT INTO unrelated VALUES (2)")).await??;
             let sessions = database.admin.query(&format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER='root' AND ID NOT IN (CONNECTION_ID(),{blocker_id})")).await?;
             anyhow::ensure!(catalog::field(&sessions.values[0],0)? == "0", "snapshot sessions still active");
@@ -465,7 +471,7 @@ async fn native_snapshot_reused_binlog_contents_fail_before_live_admission() -> 
     let mut query = query(path.path(), owner.clone())
         .await?
         .with_bootstrap(bootstrap);
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let saved = owner.snapshot().checkpoints[&key].clone();
     let position: super::super::binlog::Position = serde_json::from_slice(
         saved
@@ -473,7 +479,7 @@ async fn native_snapshot_reused_binlog_contents_fail_before_live_admission() -> 
             .as_ref()
             .context("snapshot position")?,
     )?;
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     drop(query);
     drop(source);
     let reset = if database.admin.version >= (8, 4, 0) {
@@ -502,8 +508,11 @@ async fn native_snapshot_reused_binlog_contents_fail_before_live_admission() -> 
     let mut query = super::query(path.path(), owner.clone())
         .await?
         .with_bootstrap(bootstrap);
-    query.start().await?;
-    let error = source.start().await.expect_err("reused snapshot binlog");
+    query.start(&lifecycle_ctx::start()).await?;
+    let error = source
+        .start(&lifecycle_ctx::start())
+        .await
+        .expect_err("reused snapshot binlog");
     anyhow::ensure!(
         error.to_string().contains("different contents")
             || error.to_string().contains("not an event boundary"),
@@ -514,8 +523,8 @@ async fn native_snapshot_reused_binlog_contents_fail_before_live_admission() -> 
         rows(&query)?,
         vec![serde_json::json!({"id":1,"value":"initial"})]
     );
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())
 }
@@ -540,14 +549,17 @@ async fn native_snapshot_bounds_expanded_rows_without_completing_initialization(
     let mut query = query(path.path(), owner.clone())
         .await?
         .with_bootstrap(snapshot);
-    let error = query.start().await.expect_err("expanded snapshot row");
+    let error = query
+        .start(&lifecycle_ctx::start())
+        .await
+        .expect_err("expanded snapshot row");
     anyhow::ensure!(
         error.to_string().contains("decoded snapshot row"),
         "{error:#}"
     );
     assert!(!owner.snapshot().bootstrap_complete);
     assert!(owner.snapshot().checkpoints.is_empty());
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     drop(query);
     config.max_protocol_bytes = NonZeroUsize::new(1024 * 1024).unwrap();
     config.start = MySqlStartPosition::Snapshot {
@@ -558,14 +570,14 @@ async fn native_snapshot_bounds_expanded_rows_without_completing_initialization(
     let mut query = query_with_recovery(path.path(), owner, QueryRecoveryPolicy::AutoReset)
         .await?
         .with_bootstrap(snapshot);
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         rows(&query)?,
         vec![serde_json::json!({"id":1,"value":"large"})]
     );
-    source.start().await?;
-    source.stop().await?;
-    query.stop().await?;
+    source.start(&lifecycle_ctx::start()).await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())
 }
@@ -594,7 +606,7 @@ async fn native_snapshot_process_exit_helper() -> Result<()> {
             release,
             exit_after: (point == "partial").then_some(2),
         }));
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     anyhow::ensure!(
         point == "completed",
         "partial crash helper missed its boundary"
@@ -645,14 +657,14 @@ async fn native_snapshot_process_exit_recovers_completed_state_and_explicitly_re
             let (_source, bootstrap) = paired(config.clone(), owner.clone())?;
             let mut query = query(path.path(), owner).await?.with_bootstrap(bootstrap);
             let error = query
-                .start()
+                .start(&lifecycle_ctx::start())
                 .await
                 .expect_err("partial snapshot must not resume as complete");
             assert!(matches!(
                 error.downcast_ref::<QueryRecoveryError>(),
                 Some(QueryRecoveryError::IncompleteBootstrap)
             ));
-            query.stop().await?;
+            query.stop(&lifecycle_ctx::stop()).await?;
         }
         let owner = progress()?;
         let (mut source, bootstrap) = paired(config, owner.clone())?;
@@ -664,12 +676,12 @@ async fn native_snapshot_process_exit_recovers_completed_state_and_explicitly_re
         let mut query = query_with_recovery(path.path(), owner, policy)
             .await?
             .with_bootstrap(bootstrap);
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         assert_eq!(
             query.results().snapshot()?.rows.len(),
             if point == "partial" { 5 } else { 4 }
         );
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         if point == "completed" {
             apply(&mut query, next(&mut source).await?).await?;
         }
@@ -679,8 +691,8 @@ async fn native_snapshot_process_exit_recovers_completed_state_and_explicitly_re
             .await?;
         apply(&mut query, next(&mut source).await?).await?;
         assert_eq!(query.results().snapshot()?.rows.len(), 6);
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
         database.admin.close().await?;
     }
     Ok(())
@@ -699,8 +711,8 @@ async fn native_snapshot_checkpoint_replays_without_rescanning_after_rotation() 
     let owner = progress()?;
     let (source, bootstrap) = paired(config.clone(), owner.clone())?;
     let mut query = query(path.path(), owner).await?.with_bootstrap(bootstrap);
-    query.start().await?;
-    query.stop().await?;
+    query.start(&lifecycle_ctx::start()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     drop(query);
     drop(source);
     database.admin.execute("FLUSH BINARY LOGS").await?;
@@ -713,13 +725,13 @@ async fn native_snapshot_checkpoint_replays_without_rescanning_after_rotation() 
     let mut query = super::query(path.path(), owner)
         .await?
         .with_bootstrap(bootstrap);
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     assert_eq!(query.results().snapshot()?.rows.len(), 1);
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     apply(&mut query, next(&mut source).await?).await?;
     assert_eq!(query.results().snapshot()?.rows.len(), 2);
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())
 }
@@ -748,12 +760,12 @@ async fn native_snapshot_cancelled_start_retires_sessions_and_blocks_incomplete_
         }));
     tokio::time::timeout(Duration::from_secs(10), async {
         tokio::select! {
-            result = query.start() => anyhow::bail!("snapshot unexpectedly completed: {result:?}"),
+            result = query.start(lifecycle_ctx::held(lifecycle_ctx::start())) => anyhow::bail!("snapshot unexpectedly completed: {result:?}"),
             _ = prepared.notified() => Result::<()>::Ok(()),
         }
     })
     .await??;
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     assert!(!owner.snapshot().bootstrap_complete);
     assert!(owner.snapshot().checkpoints.is_empty());
     let rows = database.admin.query("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER='root' AND ID<>CONNECTION_ID()").await?;
@@ -768,7 +780,10 @@ async fn native_snapshot_cancelled_start_retires_sessions_and_blocks_incomplete_
     let mut query = super::query(path.path(), owner)
         .await?
         .with_bootstrap(bootstrap);
-    let error = query.start().await.expect_err("incomplete initialization");
+    let error = query
+        .start(&lifecycle_ctx::start())
+        .await
+        .expect_err("incomplete initialization");
     assert!(
         matches!(
             error.downcast_ref::<QueryRecoveryError>(),
@@ -776,7 +791,7 @@ async fn native_snapshot_cancelled_start_retires_sessions_and_blocks_incomplete_
         ),
         "{error:#}"
     );
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())
 }

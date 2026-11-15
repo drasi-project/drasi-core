@@ -72,13 +72,19 @@ impl ComputationComponent for Source {
                 }
             })
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.lifecycle
             .starts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         if let Some(gate) = &self.stop_gate {
             gate.entered.notify_one();
             gate.release.notified().await;
@@ -87,6 +93,18 @@ impl ComputationComponent for Source {
         self.lifecycle
             .stops
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -109,12 +127,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSink for Sink {
@@ -201,8 +214,8 @@ async fn result_nodes_chain_into_another_query(second_time: u64) {
         ContinuousQueryTransformer::new(second_definition, Arc::new(InMemoryComputationProvider))
             .await
             .unwrap();
-    first.start().await.unwrap();
-    second.start().await.unwrap();
+    first.start(&lifecycle_contexts::start()).await.unwrap();
+    second.start(&lifecycle_contexts::start()).await.unwrap();
     for (sequence, room, value, time, expected) in
         [(1, "a", 20, 2000, 20.0), (2, "b", 10, second_time, 30.0)]
     {
@@ -254,8 +267,8 @@ async fn result_nodes_chain_into_another_query(second_time: u64) {
             .collect::<Vec<_>>();
         assert_eq!(rows, [serde_json::json!({"total":expected})]);
     }
-    second.stop().await.unwrap();
-    first.stop().await.unwrap();
+    second.stop(&lifecycle_contexts::stop()).await.unwrap();
+    first.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -308,7 +321,7 @@ async fn generic_snapshot_watermark_binds_epoch_before_live_deduplication() {
         .with_bootstrap(Arc::new(OutputSeed {
             cursor: OutputCursor::try_new(producer.clone(), 9).unwrap(),
         }));
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         let live = |producer: &GraphProducerIdentity, sequence, name: &str| {
             let mut envelope = GraphChangeCodec::encode_change(
                 person(name, true, sequence),
@@ -352,7 +365,7 @@ async fn generic_snapshot_watermark_binds_epoch_before_live_deduplication() {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("producer identity changed"));
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -829,12 +842,7 @@ impl ComputationComponent for GraphRelay {
     fn recovery_contract(&self) -> ComponentRecovery {
         ComponentRecovery::stateless()
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -1437,7 +1445,7 @@ async fn result_label_names_published_nodes_without_changing_the_output_schema()
     let mut node_labels = Vec::new();
     for label in [None, Some("RoomTotal")] {
         let mut query = labelled_room_total(label).await.unwrap();
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         let output = query.transform(room_input(2000)).await.unwrap();
         assert_eq!(output.len(), 1);
         assert_eq!(
@@ -1459,7 +1467,7 @@ async fn result_label_names_published_nodes_without_changing_the_output_schema()
                 .map(|l| l.to_string())
                 .collect::<Vec<_>>(),
         );
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
     assert_eq!(node_labels, [vec!["Result"], vec!["RoomTotal"]]);
 }
@@ -1474,8 +1482,8 @@ async fn labelled_result_nodes_chain_into_a_query_matching_that_label() {
         ContinuousQueryTransformer::new(second_definition, Arc::new(InMemoryComputationProvider))
             .await
             .unwrap();
-    first.start().await.unwrap();
-    second.start().await.unwrap();
+    first.start(&lifecycle_contexts::start()).await.unwrap();
+    second.start(&lifecycle_contexts::start()).await.unwrap();
     for event in first.transform(room_input(2000)).await.unwrap() {
         second
             .transform(InputEnvelope {
@@ -1491,11 +1499,53 @@ async fn labelled_result_nodes_chain_into_a_query_matching_that_label() {
         .map(|(_, row)| row)
         .collect::<Vec<_>>();
     assert_eq!(rows, [serde_json::json!({"total": 20.0})]);
-    second.stop().await.unwrap();
-    first.stop().await.unwrap();
+    second.stop(&lifecycle_contexts::stop()).await.unwrap();
+    first.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn empty_result_label_is_rejected_before_construction() {
     assert!(labelled_room_total(Some("")).await.is_err());
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

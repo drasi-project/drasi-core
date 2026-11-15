@@ -87,12 +87,7 @@ impl ComputationComponent for SnapshotSource {
             self.snapshot.clone(),
         )
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -399,15 +394,15 @@ fn assert_total(output: &[OutputEnvelope], before: f64, after: f64) -> Result<()
 async fn snapshot_then_live() -> Result<()> {
     let fixture = Fixture::new().await?;
     let mut query = fixture.query()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.transform(fixture.input(99, 2)?).await?.is_empty());
     let output = query.transform(fixture.input(3, 3)?).await?;
     assert_total(&output, 3.0, 5.0)?;
     assert_eq!(output[0].envelope.system().sequence(), 1);
     assert!(query.transform(fixture.input(3, 3)?).await?.is_empty());
     assert_total(&query.transform(fixture.input(4, 4)?).await?, 5.0, 6.0)?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     fixture.core.shutdown().await?;
     Ok(())
 }
@@ -465,21 +460,24 @@ async fn failed_snapshot_does_not_start_query_and_can_retry_after_stop() -> Resu
     fixture.snapshot.unavailable.store(true, Ordering::Release);
     let mut query = fixture.query()?;
     let reader = snapshot_reader(&query)?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     assert!(reader.snapshot().await.is_err());
-    let error = query.start().await.expect_err("snapshot must fail startup");
+    let error = query
+        .start(&crate::hooks::start_ctx())
+        .await
+        .expect_err("snapshot must fail startup");
     assert!(
         format!("{error:#}").contains("bootstrap fixture unavailable"),
         "{error:#}"
     );
     assert!(query.transform(fixture.input(3, 3)?).await.is_err());
     assert!(reader.snapshot().await.is_err());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     fixture.snapshot.unavailable.store(false, Ordering::Release);
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert_snapshot_total(&snapshot_reader(&query)?.snapshot().await?, 3.0)?;
     assert_total(&query.transform(fixture.input(3, 3)?).await?, 3.0, 5.0)?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     fixture.core.shutdown().await?;
     Ok(())
 }
@@ -488,8 +486,8 @@ async fn failed_snapshot_does_not_start_query_and_can_retry_after_stop() -> Resu
 async fn loaded_query_exposes_completed_initial_and_live_snapshots() -> Result<()> {
     let fixture = Fixture::new().await?;
     let mut query = fixture.query()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let initial = snapshot_reader(&query)?.snapshot().await?;
     assert_snapshot_total(&initial, 3.0)?;
     assert_eq!(initial.cursor().sequence(), 0);
@@ -503,7 +501,7 @@ async fn loaded_query_exposes_completed_initial_and_live_snapshots() -> Result<(
     assert_snapshot_total(&current, 5.0)?;
     assert_eq!(current.cursor().sequence(), 1);
     assert_snapshot_total(&initial, 3.0)?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     fixture.core.shutdown().await?;
     Ok(())
 }
@@ -518,8 +516,8 @@ async fn loaded_query_snapshot_removes_rows_and_fences_restart_epoch() -> Result
         configuration,
         fixture.binding.clone(),
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let initial = snapshot_reader(&query)?.snapshot().await?;
     assert_eq!(initial.records().len(), 2);
     let output = query
@@ -540,14 +538,14 @@ async fn loaded_query_snapshot_removes_rows_and_fences_restart_epoch() -> Result
         Some(&VariableValue::from(json!(2)))
     );
     let old_reader = snapshot_reader(&query)?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     assert!(old_reader.snapshot().await.is_err());
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let restarted = snapshot_reader(&query)?.snapshot().await?;
     assert_eq!(restarted.records().len(), 2);
     assert_eq!(restarted.cursor().sequence(), 0);
     assert_ne!(restarted.cursor().epoch(), initial.cursor().epoch());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     fixture.core.shutdown().await?;
     Ok(())
 }
@@ -562,8 +560,8 @@ async fn loaded_query_exposes_an_empty_initial_snapshot() -> Result<()> {
         configuration,
         fixture.binding.clone(),
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let snapshot = snapshot_reader(&query)?.snapshot().await?;
     assert!(snapshot.records().is_empty());
     assert_eq!(snapshot.cursor().sequence(), 0);
@@ -577,7 +575,7 @@ async fn loaded_query_exposes_an_empty_initial_snapshot() -> Result<()> {
             &PortId::try_new("out")?,
         )?
     );
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     fixture.core.shutdown().await?;
     Ok(())
 }
@@ -755,8 +753,8 @@ async fn downstream_loaded_query_bootstraps_and_runs_in_graph_multi_thread() -> 
 async fn bootstrapped_query_rejects_missing_or_changed_producer() -> Result<()> {
     let fixture = Fixture::new().await?;
     let mut query = fixture.query()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let unmarked = InputEnvelope {
         port: fixture.binding.input_port.clone(),
         envelope: GraphChangeCodec::encode_change(
@@ -788,7 +786,7 @@ async fn bootstrapped_query_rejects_missing_or_changed_producer() -> Result<()> 
         .expect_err("changed producer epoch must fail");
     assert!(format!("{error:#}").contains("epoch changed"), "{error:#}");
     assert_total(&query.transform(fixture.input(3, 3)?).await?, 3.0, 5.0)?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     fixture.core.shutdown().await?;
     Ok(())
 }

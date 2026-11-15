@@ -48,7 +48,7 @@ impl sdk::Factory for Factory {
             completion: None,
             capabilities: Capabilities {
                 control: self.control,
-                delete_owned_resources: self.declared,
+                erases_owned_state: self.declared,
                 output_snapshots: if self.reads {
                     vec![PortId::try_new("out").unwrap()]
                 } else {
@@ -96,16 +96,32 @@ impl sdk::NativeComponent for StatefulTransformer {
         Ok(json!({}))
     }
 
-    fn supports_delete_owned_resources(&self) -> bool {
-        self.implemented
-    }
-
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _: &sdk::lifecycle::InitializeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
         self.state.initializations.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn pause(&mut self, _: &sdk::lifecycle::PauseContext) -> sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+
+    async fn resume(
+        &mut self,
+        _: &sdk::lifecycle::ResumeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+
+    async fn dispose(
+        &mut self,
+        context: &sdk::lifecycle::DisposeContext,
+    ) -> sdk::lifecycle::LifecycleResult {
+        if context.erases_owned_state() && self.implemented {
+            self.delete_owned_resources().await?;
+        }
         self.state.disposals.fetch_add(1, Ordering::SeqCst);
         if self.state.block_dispose.load(Ordering::SeqCst) {
             self.state.dispose_entered.notify_one();
@@ -123,24 +139,28 @@ impl sdk::NativeComponent for StatefulTransformer {
         }
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _: &mut sdk::lifecycle::StartContext,
+    ) -> sdk::lifecycle::LifecycleResult {
         self.state.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _: &sdk::lifecycle::StopContext) -> sdk::lifecycle::LifecycleResult {
         self.state.stops.fetch_add(1, Ordering::SeqCst);
         if self.state.block_stop.load(Ordering::SeqCst) {
             self.state.stop_entered.notify_one();
             self.state.stop_release.notified().await;
         }
-        anyhow::ensure!(
-            !self.state.fail_stop.load(Ordering::SeqCst),
-            "injected stop failure"
-        );
+        if self.state.fail_stop.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("injected stop failure").into());
+        }
         Ok(())
     }
+}
 
+impl StatefulTransformer {
     async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         self.state.deprovisions.fetch_add(1, Ordering::SeqCst);
         if self.state.block_deprovision.load(Ordering::SeqCst) {
@@ -210,7 +230,9 @@ async fn fixture(
         ComponentId::try_new("d8672572-ab46-4e79-9547-1379df5190bf")?,
         json!({}),
     )?;
-    proxy.initialize().await?;
+    proxy
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
     Ok((proxy, state))
 }
 
@@ -225,61 +247,105 @@ async fn assert_pending<T>(future: &mut std::pin::Pin<Box<impl Future<Output = T
 async fn capability_is_optional_and_must_match_the_constructed_component_case() -> anyhow::Result<()>
 {
     let (mut unsupported, _) = fixture(false, false, false, false).await?;
-    assert!(unsupported.delete_owned_resources().await.is_err());
-    unsupported.start().await?;
-    unsupported.stop().await?;
+    assert!(unsupported
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await
+        .is_err());
+    unsupported
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    unsupported
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
 
-    for (declared, implemented) in [(true, false), (false, true)] {
-        let error = match fixture(declared, implemented, false, false).await {
-            Ok(_) => panic!("a mismatched state-removal capability was accepted"),
-            Err(error) => error,
-        };
-        assert!(format!("{error:#}").contains("native owned-resource deletion capability mismatch"));
-    }
+    // ABI 4 declares erasure only in factory metadata, so an undeclared
+    // capability is refused before the plugin runs even when the component
+    // could erase.
+    let (mut undeclared, state) = fixture(false, true, false, false).await?;
+    assert!(undeclared
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await
+        .is_err());
+    assert_eq!(state.deprovisions.load(Ordering::SeqCst), 0);
     Ok(())
 }
 
 async fn deletion_requires_a_successful_stop_and_permanently_fences_restart_case(
 ) -> anyhow::Result<()> {
     let (mut transformer, state) = fixture(true, true, false, false).await?;
-    transformer.start().await?;
-    assert!(transformer.delete_owned_resources().await.is_err());
+    transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    assert!(transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await
+        .is_err());
     assert_eq!(state.deprovisions.load(Ordering::SeqCst), 0);
 
     state.fail_stop.store(true, Ordering::SeqCst);
-    assert!(transformer.stop().await.is_err());
-    assert!(transformer.delete_owned_resources().await.is_err());
+    assert!(transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .is_err());
+    assert!(transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await
+        .is_err());
     state.fail_stop.store(false, Ordering::SeqCst);
-    transformer.stop().await?;
-    transformer.delete_owned_resources().await?;
-    transformer.delete_owned_resources().await?;
+    transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
+    transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
+    transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
     assert_eq!(state.deprovisions.load(Ordering::SeqCst), 1);
     assert_eq!(state.completed.load(Ordering::SeqCst), 1);
-    assert!(transformer.start().await.is_err());
+    assert!(transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
 
     let (mut unstarted, state) = fixture(true, true, false, false).await?;
-    unstarted.delete_owned_resources().await?;
+    unstarted
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
     assert_eq!(state.completed.load(Ordering::SeqCst), 1);
-    assert!(unstarted.start().await.is_err());
+    assert!(unstarted
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     Ok(())
 }
 
 async fn cancelled_stop_is_retained_and_cannot_authorize_deletion_case() -> anyhow::Result<()> {
     let (mut transformer, state) = fixture(true, true, false, false).await?;
-    transformer.start().await?;
+    transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     state.block_stop.store(true, Ordering::SeqCst);
 
-    let mut stop = Box::pin(transformer.stop());
+    let stop_context = crate::computation::test_hooks::stop_ctx();
+    let mut stop = Box::pin(transformer.stop(&stop_context));
     assert_pending(&mut stop).await;
     state.stop_entered.notified().await;
     drop(stop);
-    assert!(transformer.delete_owned_resources().await.is_err());
+    assert!(transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await
+        .is_err());
     assert_eq!(state.deprovisions.load(Ordering::SeqCst), 0);
 
     state.stop_release.notify_one();
-    transformer.stop().await?;
+    transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(state.stops.load(Ordering::SeqCst), 1);
-    transformer.delete_owned_resources().await?;
+    transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
     assert_eq!(state.completed.load(Ordering::SeqCst), 1);
     Ok(())
 }
@@ -287,29 +353,54 @@ async fn cancelled_stop_is_retained_and_cannot_authorize_deletion_case() -> anyh
 async fn cancelled_and_failed_deprovision_remain_fenced_and_are_retryable_case(
 ) -> anyhow::Result<()> {
     let (mut transformer, state) = fixture(true, true, false, false).await?;
-    transformer.start().await?;
-    transformer.stop().await?;
+    transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     state.block_deprovision.store(true, Ordering::SeqCst);
 
-    let mut deletion = Box::pin(transformer.delete_owned_resources());
+    let erase_context = crate::computation::test_hooks::erase_ctx();
+    let mut deletion = Box::pin(transformer.dispose(&erase_context));
     assert_pending(&mut deletion).await;
     state.deprovision_entered.notified().await;
     drop(deletion);
-    assert!(transformer.start().await.is_err());
-    assert!(transformer.stop().await.is_err());
+    assert!(transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
+    assert!(transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await
+        .is_err());
     state.deprovision_release.notify_one();
-    transformer.delete_owned_resources().await?;
+    transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
     assert_eq!(state.deprovisions.load(Ordering::SeqCst), 1);
     assert_eq!(state.completed.load(Ordering::SeqCst), 1);
 
     let (mut failed, state) = fixture(true, true, false, false).await?;
-    failed.start().await?;
-    failed.stop().await?;
+    failed
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    failed
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     state.fail_deprovision.store(true, Ordering::SeqCst);
-    assert!(failed.delete_owned_resources().await.is_err());
-    assert!(failed.start().await.is_err());
+    assert!(failed
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await
+        .is_err());
+    assert!(failed
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     state.fail_deprovision.store(false, Ordering::SeqCst);
-    failed.delete_owned_resources().await?;
+    failed
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
     assert_eq!(state.deprovisions.load(Ordering::SeqCst), 2);
     assert_eq!(state.completed.load(Ordering::SeqCst), 1);
     Ok(())
@@ -317,7 +408,9 @@ async fn cancelled_and_failed_deprovision_remain_fenced_and_are_retryable_case(
 
 async fn deletion_cancels_an_accepted_control_operation_case() -> anyhow::Result<()> {
     let (mut transformer, state) = fixture(true, true, true, false).await?;
-    transformer.start().await?;
+    transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let remote = transformer.inner.clone();
     let message = sdk::wire::encode(&sdk::ControlMessage {
         from: ComponentId::try_new("ca2454e5-2adc-48f2-a4eb-902d00105a46")?,
@@ -331,7 +424,9 @@ async fn deletion_cancels_an_accepted_control_operation_case() -> anyhow::Result
     let mut control = Box::pin(remote.unit(abi::operation::CONTROL, &message));
     assert_pending(&mut control).await;
     state.control_entered.notified().await;
-    transformer.stop().await?;
+    transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     let error = control
         .await
         .expect_err("stopped control reply must be fenced");
@@ -341,14 +436,18 @@ async fn deletion_cancels_an_accepted_control_operation_case() -> anyhow::Result
             failure.code,
             abi::status::CLOSED | abi::status::CANCELLED
         ))));
-    transformer.delete_owned_resources().await?;
+    transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
     assert_eq!(state.completed.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
 async fn deletion_cancels_unpolled_reads_and_releases_their_provider_case() -> anyhow::Result<()> {
     let (mut transformer, state) = fixture(true, true, false, true).await?;
-    transformer.start().await?;
+    transformer
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = transformer.output_readers();
     let snapshot = readers.ports()[&PortId::try_new("out")?]
         .snapshot()
@@ -356,9 +455,13 @@ async fn deletion_cancels_unpolled_reads_and_releases_their_provider_case() -> a
         .expect("snapshot reader");
     let mut read = Box::pin(snapshot.snapshot());
     assert_pending(&mut read).await;
-    transformer.stop().await?;
+    transformer
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert!(read.await.is_err());
-    transformer.delete_owned_resources().await?;
+    transformer
+        .dispose(&crate::computation::test_hooks::erase_ctx())
+        .await?;
     assert_eq!(state.completed.load(Ordering::SeqCst), 1);
     Ok(())
 }
@@ -381,30 +484,47 @@ async fn instance_lifecycle_does_not_repeat_initialization_or_delete_owned_state
 ) -> anyhow::Result<()> {
     let (mut component, state) = fixture(true, true, false, false).await?;
     for _ in 0..2 {
-        component.start().await?;
-        component.stop().await?;
+        component
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        component
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
-    component.dispose().await?;
-    component.dispose().await?;
+    component
+        .dispose(&crate::computation::test_hooks::dispose_ctx())
+        .await?;
+    component
+        .dispose(&crate::computation::test_hooks::dispose_ctx())
+        .await?;
     assert_eq!(state.initializations.load(Ordering::SeqCst), 1);
     assert_eq!(state.starts.load(Ordering::SeqCst), 2);
     assert_eq!(state.stops.load(Ordering::SeqCst), 2);
     assert_eq!(state.disposals.load(Ordering::SeqCst), 1);
     assert_eq!(state.deprovisions.load(Ordering::SeqCst), 0);
-    assert!(component.start().await.is_err());
+    assert!(component
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     Ok(())
 }
 
 async fn cancelled_disposal_retains_the_original_operation_case() -> anyhow::Result<()> {
     let (mut component, state) = fixture(true, true, false, false).await?;
     state.block_dispose.store(true, Ordering::SeqCst);
-    let mut disposal = Box::pin(component.dispose());
+    let dispose_context = crate::computation::test_hooks::dispose_ctx();
+    let mut disposal = Box::pin(component.dispose(&dispose_context));
     assert_pending(&mut disposal).await;
     state.dispose_entered.notified().await;
     drop(disposal);
-    assert!(component.start().await.is_err());
+    assert!(component
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await
+        .is_err());
     state.dispose_release.notify_one();
-    component.dispose().await?;
+    component
+        .dispose(&crate::computation::test_hooks::dispose_ctx())
+        .await?;
     assert_eq!(state.initializations.load(Ordering::SeqCst), 1);
     assert_eq!(state.starts.load(Ordering::SeqCst), 0);
     assert_eq!(state.stops.load(Ordering::SeqCst), 0);

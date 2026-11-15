@@ -482,50 +482,35 @@ impl Component {
         !matches!(self, Self::Deferred { .. } | Self::Unresolved(_))
     }
 
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    fn constructed(&mut self) -> anyhow::Result<&mut dyn super::ComputationComponent> {
         match self {
-            Self::Source(component) => component.initialize().await,
-            Self::Transformer(component) => component.initialize().await,
-            Self::Sink(component) => component.initialize().await,
-            Self::Service(component) => component.initialize().await,
+            Self::Source(component) => Ok(component.as_mut()),
+            Self::Transformer(component) => Ok(component.as_mut()),
+            Self::Sink(component) => Ok(component.as_mut()),
+            Self::Service(component) => Ok(component.as_mut()),
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 anyhow::bail!("component has not been constructed")
             }
         }
     }
 
-    async fn dispose(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Source(component) => component.dispose().await,
-            Self::Transformer(component) => component.dispose().await,
-            Self::Sink(component) => component.dispose().await,
-            Self::Service(component) => component.dispose().await,
-            Self::Deferred { .. } | Self::Unresolved(_) => Ok(()),
-        }
+    async fn initialize(&mut self, context: &super::InitializeContext) -> anyhow::Result<()> {
+        self.constructed()?.initialize(context).await
     }
 
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Source(component) => component.pause_processing().await,
-            Self::Transformer(component) => component.pause_processing().await,
-            Self::Sink(component) => component.pause_processing().await,
-            Self::Service(component) => component.pause_processing().await,
-            Self::Deferred { .. } | Self::Unresolved(_) => {
-                anyhow::bail!("component has not been constructed")
-            }
+    async fn dispose(&mut self, context: &super::DisposeContext) -> anyhow::Result<()> {
+        if !self.is_constructed() {
+            return Ok(());
         }
+        self.constructed()?.dispose(context).await
     }
 
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Source(component) => component.resume_processing().await,
-            Self::Transformer(component) => component.resume_processing().await,
-            Self::Sink(component) => component.resume_processing().await,
-            Self::Service(component) => component.resume_processing().await,
-            Self::Deferred { .. } | Self::Unresolved(_) => {
-                anyhow::bail!("component has not been constructed")
-            }
-        }
+    async fn pause(&mut self, context: &super::PauseContext) -> anyhow::Result<()> {
+        self.constructed()?.pause(context).await
+    }
+
+    async fn resume(&mut self, context: &super::ResumeContext) -> anyhow::Result<()> {
+        self.constructed()?.resume(context).await
     }
 
     fn recovery_contract(&self) -> super::ComponentRecovery {
@@ -621,16 +606,8 @@ impl Component {
         }
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Source(component) => component.start().await,
-            Self::Transformer(component) => component.start().await,
-            Self::Sink(component) => component.start().await,
-            Self::Service(component) => component.start().await,
-            Self::Deferred { .. } | Self::Unresolved(_) => {
-                Err(anyhow::anyhow!("component has not been constructed"))
-            }
-        }
+    async fn start(&mut self, context: &super::StartContext) -> anyhow::Result<()> {
+        self.constructed()?.start(context).await
     }
 
     fn binds_inputs(&self) -> bool {
@@ -651,40 +628,43 @@ impl Component {
         }
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Source(component) => component.stop().await,
-            Self::Transformer(component) => component.stop().await,
-            Self::Sink(component) => component.stop().await,
-            Self::Service(component) => component.stop().await,
-            Self::Deferred { .. } | Self::Unresolved(_) => {
-                Err(anyhow::anyhow!("component has not been constructed"))
-            }
+    async fn stop(&mut self, context: &super::StopContext) -> anyhow::Result<()> {
+        self.constructed()?.stop(context).await
+    }
+
+    /// Assess a proposed change against this live object, if it manages updates.
+    fn assess_update(
+        &self,
+        current: &super::ComponentSpecification,
+        proposed: &super::ComponentSpecification,
+    ) -> anyhow::Result<Option<super::Assessment>> {
+        let component: &dyn super::ComputationComponent = match self {
+            Self::Source(component) => component.as_ref(),
+            Self::Transformer(component) => component.as_ref(),
+            Self::Sink(component) => component.as_ref(),
+            Self::Service(component) => component.as_ref(),
+            Self::Deferred { .. } | Self::Unresolved(_) => return Ok(None),
+        };
+        match component.management() {
+            Some(management) => management.assess(current, proposed),
+            None => Ok(None),
         }
     }
 
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Source(component) => component.delete_owned_resources().await,
-            Self::Transformer(component) => component.delete_owned_resources().await,
-            Self::Sink(component) => component.delete_owned_resources().await,
-            Self::Service(component) => component.delete_owned_resources().await,
-            Self::Deferred { .. } | Self::Unresolved(_) => {
-                anyhow::bail!("component has not been constructed")
-            }
-        }
-    }
-
-    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
-        match self {
-            Self::Source(component) => component.apply_update(context).await,
-            Self::Transformer(component) => component.apply_update(context).await,
-            Self::Sink(component) => component.apply_update(context).await,
-            Self::Service(component) => component.apply_update(context).await,
-            Self::Deferred { .. } | Self::Unresolved(_) => {
-                Err(anyhow::anyhow!("component has not been constructed"))
-            }
-        }
+    async fn apply_update(
+        &mut self,
+        context: &super::ApplyContext,
+        update: ComponentUpdateContext,
+    ) -> Result<(), super::ApplyError> {
+        let management = self
+            .constructed()
+            .map_err(super::ApplyError::Failed)?
+            .management_mut()
+            .ok_or_else(|| super::ApplyError::Refused {
+                now_requires: Some(super::UpdateBoundary::Replace),
+                reason: "component does not provide instance management".into(),
+            })?;
+        management.apply(context, update).await
     }
 
     fn bind_control(&mut self, control: super::ComponentControl) {

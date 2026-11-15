@@ -39,12 +39,7 @@ impl ComputationComponent for Capture {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait::async_trait]
 impl EnvelopeSink for Capture {
@@ -1186,8 +1181,8 @@ async fn cancelled_rest_cleanup() -> Result<()> {
                 "stream":"sqlite/out","settings":config,"rest_api":{"host":"127.0.0.1","port":port},
             }),
         )?;
-        source.initialize().await?;
-        source.start().await?;
+        source.initialize(&crate::hooks::initialize_ctx()).await?;
+        source.start(&crate::hooks::start_ctx()).await?;
         let mut request = tokio::net::TcpStream::connect(&address).await?;
         let body = r#"{"id":1,"value":"accepted"}"#;
         request.write_all(format!(
@@ -1202,15 +1197,18 @@ async fn cancelled_rest_cleanup() -> Result<()> {
         );
         if cancel {
             anyhow::ensure!(
-                tokio::time::timeout(Duration::from_millis(20), source.stop())
-                    .await
-                    .is_err(),
+                tokio::time::timeout(
+                    Duration::from_millis(20),
+                    source.stop(&crate::hooks::stop_ctx())
+                )
+                .await
+                .is_err(),
                 "in-flight native stop completed without draining the request"
             );
         } else {
             let start = tokio::time::Instant::now();
             source
-                .stop()
+                .stop(&crate::hooks::stop_ctx())
                 .await
                 .expect_err("unfinished request must retain cleanup");
             anyhow::ensure!(
@@ -1219,7 +1217,7 @@ async fn cancelled_rest_cleanup() -> Result<()> {
             );
         }
         anyhow::ensure!(
-            source.start().await.is_err(),
+            source.start(&crate::hooks::start_ctx()).await.is_err(),
             "failed/cancelled cleanup permitted replacement"
         );
         request.write_all(body.as_bytes()).await?;
@@ -1230,10 +1228,10 @@ async fn cancelled_rest_cleanup() -> Result<()> {
             response.starts_with("HTTP/1.1 200 OK"),
             "accepted native REST request failed: {response}"
         );
-        source.stop().await?;
+        source.stop(&crate::hooks::stop_ctx()).await?;
         let released = tokio::net::TcpListener::bind(&address).await?;
         drop(released);
-        source.start().await?;
+        source.start(&crate::hooks::start_ctx()).await?;
         let rows: Value = reqwest::Client::builder()
             .timeout(DEADLINE)
             .build()?
@@ -1247,7 +1245,7 @@ async fn cancelled_rest_cleanup() -> Result<()> {
             rows == json!([{"id":1,"value":"accepted"}]),
             "accepted SQL was lost after cleanup/restart"
         );
-        source.stop().await?;
+        source.stop(&crate::hooks::stop_ctx()).await?;
     }
     Ok(())
 }
@@ -1280,7 +1278,7 @@ async fn native_schema_reader_lifecycle() -> Result<()> {
         reader.describe_schema().await.is_err(),
         "schema read opened an unstarted source"
     );
-    source.start().await?;
+    source.start(&mut crate::hooks::sdk::start_ctx()).await?;
     anyhow::ensure!(
         Arc::ptr_eq(
             &reader,
@@ -1327,7 +1325,7 @@ async fn native_schema_reader_lifecycle() -> Result<()> {
             .is_err(),
         "ordinary metadata entered an active transaction"
     );
-    source.stop().await?;
+    source.stop(&crate::hooks::sdk::stop_ctx()).await?;
     anyhow::ensure!(
         transaction.await?.is_err(),
         "source stop did not abort its active SQL scope"
@@ -1337,7 +1335,7 @@ async fn native_schema_reader_lifecycle() -> Result<()> {
         reader.describe_schema().await.is_err(),
         "stopped schema reader stayed active"
     );
-    source.start().await?;
+    source.start(&mut crate::hooks::sdk::start_ctx()).await?;
     anyhow::ensure!(
         pending.await.is_err(),
         "old schema request silently moved to a replacement worker"
@@ -1346,7 +1344,7 @@ async fn native_schema_reader_lifecycle() -> Result<()> {
         reader.describe_schema().await? == Some(schema),
         "fresh schema generation was not activated"
     );
-    source.stop().await?;
+    source.stop(&crate::hooks::sdk::stop_ctx()).await?;
     drop(source);
     anyhow::ensure!(
         reader.describe_schema().await.is_err(),

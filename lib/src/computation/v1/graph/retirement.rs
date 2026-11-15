@@ -197,12 +197,7 @@ mod tests {
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        crate::passive_component_lifecycle!();
     }
 
     #[async_trait::async_trait]

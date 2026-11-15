@@ -886,7 +886,7 @@ impl ComputationComponent for QueryReplayTransformer {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(&mut self, _context: &super::StartContext) -> anyhow::Result<()> {
         *self
             .cursor
             .write()
@@ -894,7 +894,14 @@ impl ComputationComponent for QueryReplayTransformer {
         self.pending.store(true, Ordering::Release);
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    crate::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    crate::passive_component_lifecycle!(@hook pause, PauseContext);
+    crate::passive_component_lifecycle!(@hook resume, ResumeContext);
+    crate::passive_component_lifecycle!(@hook stop, StopContext);
+    async fn dispose(&mut self, context: &super::DisposeContext) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -988,34 +995,70 @@ impl ComputationComponent for CheckpointedSink {
     fn requires_readiness_confirmation(&self) -> bool {
         self.inner.requires_readiness_confirmation()
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
-        self.inner.initialize().await
+    async fn initialize(&mut self, context: &super::InitializeContext) -> anyhow::Result<()> {
+        self.inner.initialize(context).await
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
-        self.inner.dispose().await
+    async fn start(&mut self, context: &super::StartContext) -> anyhow::Result<()> {
+        self.inner.start(context).await
     }
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
-        self.inner.pause_processing().await
+    async fn pause(&mut self, context: &super::PauseContext) -> anyhow::Result<()> {
+        self.inner.pause(context).await
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
-        self.inner.resume_processing().await
+    async fn resume(&mut self, context: &super::ResumeContext) -> anyhow::Result<()> {
+        self.inner.resume(context).await
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        self.inner.start().await
+    async fn stop(&mut self, context: &super::StopContext) -> anyhow::Result<()> {
+        self.inner.stop(context).await
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        self.inner.stop().await
+    async fn dispose(&mut self, context: &super::DisposeContext) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!(
+                "checkpointed sink cannot delete its inner state without scoped progress-store deletion"
+            );
+        }
+        self.inner.dispose(context).await
     }
-    async fn apply_update(&mut self, context: super::ComponentUpdateContext) -> anyhow::Result<()> {
-        self.inner.apply_update(context).await?;
-        anyhow::ensure!(
-            self.inner.recovery_contract().delivery.is_none(),
-            "checkpointed sink cannot forward retirement proof that excludes its progress store"
-        );
+    fn management(&self) -> Option<&dyn super::ComponentManagement> {
+        self.inner.management()?;
+        Some(self)
+    }
+    fn management_mut(&mut self) -> Option<&mut dyn super::ComponentManagement> {
+        self.inner.management_mut()?;
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl super::ComponentManagement for CheckpointedSink {
+    fn assess(
+        &self,
+        current: &super::ComponentSpecification,
+        proposed: &super::ComponentSpecification,
+    ) -> anyhow::Result<Option<super::Assessment>> {
+        self.inner
+            .management()
+            .ok_or_else(|| anyhow::anyhow!("inner sink no longer exposes management"))?
+            .assess(current, proposed)
+    }
+    async fn apply(
+        &mut self,
+        context: &super::ApplyContext,
+        update: super::ComponentUpdateContext,
+    ) -> Result<(), super::ApplyError> {
+        self.inner
+            .management_mut()
+            .ok_or_else(|| super::ApplyError::Refused {
+                now_requires: Some(super::UpdateBoundary::Replace),
+                reason: "inner sink no longer exposes management".into(),
+            })?
+            .apply(context, update)
+            .await?;
+        if self.inner.recovery_contract().delivery.is_some() {
+            return Err(super::ApplyError::Damaged(anyhow::anyhow!(
+                "checkpointed sink cannot forward retirement proof that excludes its progress store"
+            )));
+        }
         Ok(())
-    }
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        anyhow::bail!("checkpointed sink cannot delete its inner state without scoped progress-store deletion")
     }
 }
 
@@ -1333,7 +1376,10 @@ mod capability_tests {
         fn configuration(&self) -> anyhow::Result<serde_json::Value> {
             Ok(serde_json::json!({"kind": "capable"}))
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
+        async fn start(
+            &mut self,
+            _context: &crate::computation::v1::StartContext,
+        ) -> anyhow::Result<()> {
             anyhow::ensure!(self.bound, "input binding was lost");
             self.control
                 .as_ref()
@@ -1341,7 +1387,22 @@ mod capability_tests {
                 .ready()?;
             Ok(())
         }
-        async fn stop(&mut self) -> anyhow::Result<()> {
+        async fn stop(
+            &mut self,
+            _context: &crate::computation::v1::StopContext,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        crate::passive_component_lifecycle!(@hook initialize, InitializeContext);
+        crate::passive_component_lifecycle!(@hook pause, PauseContext);
+        crate::passive_component_lifecycle!(@hook resume, ResumeContext);
+        async fn dispose(
+            &mut self,
+            context: &crate::computation::v1::DisposeContext,
+        ) -> anyhow::Result<()> {
+            if context.erases_owned_state() {
+                anyhow::bail!("this component does not support permanent state removal");
+            }
             Ok(())
         }
     }
@@ -1393,15 +1454,57 @@ mod capability_tests {
         assert_eq!(wrapped.configuration().unwrap()["inner"]["kind"], "capable");
         wrapped.bind_inputs(&[]).await.unwrap();
         wrapped.bind_control(control);
-        wrapped.start().await.unwrap();
+        wrapped.start(&lifecycle_contexts::start()).await.unwrap();
         assert!(plane.is_ready(&id, generation));
         assert!(wrapped.handle_batch(Vec::new()).await.is_err());
         assert!(wrapped
-            .delete_owned_resources()
+            .dispose(&lifecycle_contexts::erase())
             .await
             .unwrap_err()
             .to_string()
             .contains("progress-store deletion"));
-        wrapped.stop().await.unwrap();
+        wrapped.stop(&lifecycle_contexts::stop()).await.unwrap();
+    }
+
+    #[allow(dead_code)]
+    mod lifecycle_contexts {
+        use crate::computation::v1::{
+            CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+            PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+        };
+
+        fn scope() -> OperationScope {
+            OperationScope::new("test", "component", 1, None, CancellationToken::new())
+        }
+
+        pub fn initialize() -> InitializeContext {
+            InitializeContext::new(scope())
+        }
+
+        pub fn start() -> StartContext {
+            StartContext::new(scope())
+        }
+
+        pub fn pause() -> PauseContext {
+            PauseContext::new(scope())
+        }
+
+        pub fn resume() -> ResumeContext {
+            ResumeContext::new(scope())
+        }
+
+        pub fn stop() -> StopContext {
+            StopContext::new(scope(), StopMode::Drain)
+        }
+
+        pub fn dispose() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+                .expect("shutdown preserves state")
+        }
+
+        pub fn erase() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+                .expect("removal may erase state")
+        }
     }
 }

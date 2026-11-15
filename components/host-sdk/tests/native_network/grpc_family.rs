@@ -159,8 +159,8 @@ async fn native_grpc_stream_totals_preserve_the_consumer_contract_and_failed_pre
             }),
             linked,
         )?;
-        source.initialize().await?;
-        source.start().await?;
+        source.initialize(&crate::hooks::initialize_ctx()).await?;
+        source.start(&crate::hooks::start_ctx()).await?;
         let mut client = source::source_service_client::SourceServiceClient::connect(format!(
             "http://127.0.0.1:{port}"
         ))
@@ -204,8 +204,8 @@ async fn native_grpc_stream_totals_preserve_the_consumer_contract_and_failed_pre
         for value in 3..=5 {
             assert_eq!(source_value(&next(&mut source).await?)?, value);
         }
-        source.stop().await?;
-        source.dispose().await?;
+        source.stop(&crate::hooks::stop_ctx()).await?;
+        source.dispose(&crate::hooks::dispose_ctx()).await?;
     }
     Ok(())
 }
@@ -227,8 +227,8 @@ async fn native_grpc_batches_preserve_templates_metadata_boundaries_and_typed_ro
             }),
             linked,
         )?;
-        sink.initialize().await?;
-        sink.start().await?;
+        sink.initialize(&crate::hooks::initialize_ctx()).await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         let before = receiver.state.requests.lock().unwrap().len();
         sink.handle_batch(vec![
             input(
@@ -247,8 +247,8 @@ async fn native_grpc_batches_preserve_templates_metadata_boundaries_and_typed_ro
             &["left", "right"],
         )?)
         .await?;
-        sink.stop().await?;
-        sink.dispose().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
+        sink.dispose(&crate::hooks::dispose_ctx()).await?;
         let requests = receiver.state.requests.lock().unwrap();
         let calls = &requests[before..];
         assert_eq!(
@@ -321,8 +321,8 @@ async fn native_grpc_retries_the_same_batch_and_requires_exact_acknowledgement()
             }),
             linked,
         )?;
-        sink.initialize().await?;
-        sink.start().await?;
+        sink.initialize(&crate::hooks::initialize_ctx()).await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         receiver.state.failures.store(1, Ordering::SeqCst);
         let start = receiver.state.requests.lock().unwrap().len();
         sink.handle_batch(vec![result_input(1)?, result_input(2)?, result_input(3)?])
@@ -363,8 +363,8 @@ async fn native_grpc_retries_the_same_batch_and_requires_exact_acknowledgement()
             receiver.state.release.notify_one();
             call.await?;
         }
-        sink.stop().await?;
-        sink.dispose().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
+        sink.dispose(&crate::hooks::dispose_ctx()).await?;
     }
     receiver.stop().await
 }
@@ -386,8 +386,8 @@ async fn native_grpc_failure_policy_defines_graph_retry_ownership() -> Result<()
 
         let mut strict =
             family_component(GRPC_SINK, NETWORK_SINK_ID, configuration("strict"), linked)?;
-        strict.initialize().await?;
-        strict.start().await?;
+        strict.initialize(&crate::hooks::initialize_ctx()).await?;
+        strict.start(&crate::hooks::start_ctx()).await?;
         receiver.state.failures.store(1, Ordering::SeqCst);
         let start = receiver.state.requests.lock().unwrap().len();
         assert!(strict.handle(result_input(1)?).await.is_err());
@@ -401,8 +401,8 @@ async fn native_grpc_failure_policy_defines_graph_retry_ownership() -> Result<()
                 "the graph-owned retry must preserve the exact failed envelope"
             );
         }
-        strict.stop().await?;
-        strict.dispose().await?;
+        strict.stop(&crate::hooks::stop_ctx()).await?;
+        strict.dispose(&crate::hooks::dispose_ctx()).await?;
 
         let mut skip = family_component(
             GRPC_SINK,
@@ -410,8 +410,8 @@ async fn native_grpc_failure_policy_defines_graph_retry_ownership() -> Result<()
             configuration("skip"),
             linked,
         )?;
-        skip.initialize().await?;
-        skip.start().await?;
+        skip.initialize(&crate::hooks::initialize_ctx()).await?;
+        skip.start(&crate::hooks::start_ctx()).await?;
         receiver.state.failures.store(1, Ordering::SeqCst);
         let start = receiver.state.requests.lock().unwrap().len();
         skip.handle(result_input(2)?).await?;
@@ -420,8 +420,8 @@ async fn native_grpc_failure_policy_defines_graph_retry_ownership() -> Result<()
             1,
             "skip deliberately acknowledges the failed envelope without retry"
         );
-        skip.stop().await?;
-        skip.dispose().await?;
+        skip.stop(&crate::hooks::stop_ctx()).await?;
+        skip.dispose(&crate::hooks::dispose_ctx()).await?;
     }
     receiver.stop().await
 }
@@ -441,8 +441,8 @@ async fn native_grpc_adaptive_and_request_byte_limits_split_without_losing_items
             }),
             linked,
         )?;
-        sink.initialize().await?;
-        sink.start().await?;
+        sink.initialize(&crate::hooks::initialize_ctx()).await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         assert_eq!(sink.batching()?.unwrap().max_operations, 10);
         let before = receiver.state.requests.lock().unwrap().len();
         sink.handle(input(
@@ -452,8 +452,8 @@ async fn native_grpc_adaptive_and_request_byte_limits_split_without_losing_items
             &["route"; 10],
         )?)
         .await?;
-        sink.stop().await?;
-        sink.dispose().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
+        sink.dispose(&crate::hooks::dispose_ctx()).await?;
         let requests = receiver.state.requests.lock().unwrap();
         let calls = &requests[before..];
         assert!(

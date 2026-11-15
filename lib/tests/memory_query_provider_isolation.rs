@@ -80,7 +80,7 @@ async fn measure(
         },
     )
     .await?;
-    query.start().await?;
+    query.start(&lifecycle_contexts::start()).await?;
     let mut sequence = 0;
     for number in 0..12 {
         sequence += 1;
@@ -146,7 +146,7 @@ async fn measure(
         "p95_ns":times[37].to_string(),"max_ns":times[39].to_string(),
         "scope":"query transform and delivery completion, not live graph queue latency",
     });
-    query.stop().await?;
+    query.stop(&lifecycle_contexts::stop()).await?;
     Ok(report)
 }
 
@@ -283,4 +283,46 @@ async fn default_pipeline_memory_provider_processes_the_same_context_updates() -
     drop(batch);
     core.shutdown().await?;
     Ok(())
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

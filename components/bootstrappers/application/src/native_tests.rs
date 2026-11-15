@@ -220,8 +220,26 @@ fn a_native_query_receives_the_application_snapshot() {
         .await
         .unwrap()
         .with_bootstrap(bootstrap);
-        query.start().await.unwrap();
+        let scope = || {
+            drasi_lib::computation::v1::OperationScope::new(
+                "test",
+                "component",
+                1,
+                None,
+                drasi_lib::computation::v1::CancellationToken::new(),
+            )
+        };
+        query
+            .start(&drasi_lib::computation::v1::StartContext::new(scope()))
+            .await
+            .unwrap();
         assert_eq!(query.results().snapshot().unwrap().rows.len(), 2);
-        query.stop().await.unwrap();
+        query
+            .stop(&drasi_lib::computation::v1::StopContext::new(
+                scope(),
+                drasi_lib::computation::v1::StopMode::Drain,
+            ))
+            .await
+            .unwrap();
     });
 }

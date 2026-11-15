@@ -130,7 +130,10 @@ impl ComputationComponent for BridgeSource {
         )
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.runtime.is_none(),
             "previous bridge workers must be stopped and joined before restart"
@@ -232,7 +235,10 @@ impl ComputationComponent for BridgeSource {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         let Some(runtime) = &mut self.runtime else {
             return Ok(());
         };
@@ -249,6 +255,21 @@ impl ComputationComponent for BridgeSource {
         }
         self.ingress_control.unbind(&runtime.receiver)?;
         self.runtime = None;
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }

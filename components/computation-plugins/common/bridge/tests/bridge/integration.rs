@@ -52,10 +52,25 @@ impl ComputationComponent for Capture {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }
@@ -182,10 +197,25 @@ impl ComputationComponent for InputSource {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }
@@ -213,10 +243,25 @@ impl ComputationComponent for AdmissionOnly {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        Ok(())
+    }
+
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }
@@ -479,8 +524,8 @@ async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() 
     let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
     let mut sink = BridgeSink::new(sink_config, GRAPH.into(), None, None)?;
     let control = sink.control();
-    source.start().await?;
-    sink.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
+    sink.start(&lifecycle_ctx::start()).await?;
     let first = graph_input(5, 5)?;
     sink.handle(input(first.clone())).await?;
     let first_receipt = sink.last_receipt().unwrap().clone();
@@ -528,8 +573,8 @@ async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() 
             .code,
         ErrorCode::Expired
     );
-    sink.stop().await?;
-    source.stop().await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -625,7 +670,7 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
         Some(provider(&directory.path().join("sender"))),
         None,
     )?;
-    sink.start().await?;
+    sink.start(&lifecycle_ctx::start()).await?;
     let error = sink.handle(input(original.clone())).await.unwrap_err();
     assert_eq!(
         error.downcast_ref::<BridgeError>().unwrap().code,
@@ -644,7 +689,7 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
         original.changes().operations()
     );
     wait_ack(&receiver_journal, "capture", 1).await?;
-    sink.stop().await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
     right.shutdown().await?;
     receiver_journal.shutdown().await?;
     drop(sink);
@@ -669,7 +714,7 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
         Some(provider(&directory.path().join("sender"))),
         None,
     )?;
-    sink.start().await?;
+    sink.start(&lifecycle_ctx::start()).await?;
     sink.handle(input(replay_transport(&original, u64::MAX)?))
         .await?;
     assert_eq!(sink.last_receipt(), Some(&remote_receipt));
@@ -694,7 +739,7 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
             .code,
         ErrorCode::Conflict
     );
-    sink.stop().await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
     right.shutdown().await?;
     reopened.shutdown().await?;
     Ok(())
@@ -720,7 +765,7 @@ async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input()
         Some(provider(&directory.path().join("sender"))),
         None,
     )?;
-    sink.start().await?;
+    sink.start(&lifecycle_ctx::start()).await?;
     sink.handle(input(original.clone())).await?;
     tokio::time::timeout(DEADLINE, captured.recv())
         .await?
@@ -732,7 +777,7 @@ async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input()
         Some(provider(&directory.path().join("lost-sender"))),
         None,
     )?;
-    empty_sender.start().await?;
+    empty_sender.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         empty_sender
             .handle(input(original.clone()))
@@ -743,7 +788,7 @@ async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input()
             .code,
         ErrorCode::StateLost
     );
-    empty_sender.stop().await?;
+    empty_sender.stop(&lifecycle_ctx::stop()).await?;
     right.shutdown().await?;
     journal.shutdown().await?;
     drop(right);
@@ -761,7 +806,7 @@ async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input()
         ErrorCode::StateLost
     );
     assert_eq!(empty.progress().await?.accepted, 0);
-    sink.stop().await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
     right.shutdown().await?;
     empty.shutdown().await?;
     Ok(())
@@ -785,7 +830,7 @@ async fn malformed_peer_and_stale_connections_do_not_stop_the_receiver_or_contro
         PortableDelivery::Events,
     );
     let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let mut client = Client::new(sink_config.clone(), None);
     let welcome = client.connect(None).await?;
     let mut io = connect(&sink_config.transport, false, None, DEADLINE).await?;
@@ -886,7 +931,7 @@ async fn malformed_peer_and_stale_connections_do_not_stop_the_receiver_or_contro
     );
     replacement.invalidate().await;
     client.invalidate().await;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -993,8 +1038,8 @@ async fn sealed_volatile_cut_requires_actual_queue_handoff_and_revokes_old_lifet
     let ingress = source.ingress_control();
     let mut sink = BridgeSink::new(sink_config, GRAPH.into(), None, None)?;
     let egress = sink.egress_control();
-    source.start().await?;
-    sink.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
+    sink.start(&lifecycle_ctx::start()).await?;
     assert!(ingress.sealed_cut().await?.is_none());
     sink.handle(input(graph_input(1, 1)?)).await?;
     let generation = sink.control().status().await?.generation;
@@ -1031,15 +1076,15 @@ async fn sealed_volatile_cut_requires_actual_queue_handoff_and_revokes_old_lifet
         ResourceCleanup::shutdown(ingress.as_ref()).await.is_err(),
         "live dependency must retain its control resource"
     );
-    sink.stop().await?;
-    source.stop().await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert!(ingress.sealed_cut().await.is_err());
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     assert_eq!(
         ingress.drain_status(&cut).await.unwrap_err().code,
         ErrorCode::StaleGeneration
     );
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     ResourceCleanup::shutdown(ingress.as_ref()).await?;
     Ok(())
 }
@@ -1071,7 +1116,7 @@ async fn durable_cut_waits_for_actual_required_subscriber_acknowledgement() -> R
         Some(provider(&directory.path().join("sender"))),
         None,
     )?;
-    sink.start().await?;
+    sink.start(&lifecycle_ctx::start()).await?;
     sink.handle(input(original)).await?;
     tokio::time::timeout(DEADLINE, captured.recv())
         .await?
@@ -1081,7 +1126,7 @@ async fn durable_cut_waits_for_actual_required_subscriber_acknowledgement() -> R
     assert!(!ingress.drain_status(&cut).await?.drained);
     release.notify_one();
     assert!(ingress.wait_drained(&cut, DEADLINE).await?.drained);
-    sink.stop().await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
     right.shutdown().await?;
     journal.shutdown().await?;
     assert!(ingress.sealed_cut().await.is_err());

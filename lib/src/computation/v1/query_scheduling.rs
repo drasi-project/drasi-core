@@ -225,11 +225,45 @@ impl ComputationComponent for QueryScheduledSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.not_before = None;
+        Ok(())
+    }
+
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -547,8 +581,8 @@ mod tests {
         assert_eq!(first.system().sequence(), 1);
         assert_eq!(first.system().timestamp().unwrap().timestamp_millis(), 2000);
         assert!(GraphChangeCodec::is_futures_due(&first));
-        source.stop().await.unwrap();
-        source.start().await.unwrap();
+        source.stop(&lifecycle_contexts::stop()).await.unwrap();
+        source.start(&lifecycle_contexts::start()).await.unwrap();
         let second = source.next().await.unwrap().unwrap().envelope;
         assert_eq!(second.system().sequence(), 2);
         assert_eq!(second.system().timestamp(), first.system().timestamp());
@@ -630,7 +664,7 @@ mod tests {
         )
         .await
         .unwrap();
-        native.start().await.unwrap();
+        native.start(&lifecycle_contexts::start()).await.unwrap();
         for (sequence, name) in ["one", "two", "three"].into_iter().enumerate() {
             let change = change(name, true, true);
             assert!(legacy
@@ -807,6 +841,48 @@ mod tests {
         assert!(
             matches!(&actual[2], ResultDiff::Delete { data, .. } if data == &serde_json::json!({"name":"two"}))
         );
-        native.stop().await.unwrap();
+        native.stop(&lifecycle_contexts::stop()).await.unwrap();
+    }
+
+    #[allow(dead_code)]
+    mod lifecycle_contexts {
+        use crate::computation::v1::{
+            CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+            PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+        };
+
+        fn scope() -> OperationScope {
+            OperationScope::new("test", "component", 1, None, CancellationToken::new())
+        }
+
+        pub fn initialize() -> InitializeContext {
+            InitializeContext::new(scope())
+        }
+
+        pub fn start() -> StartContext {
+            StartContext::new(scope())
+        }
+
+        pub fn pause() -> PauseContext {
+            PauseContext::new(scope())
+        }
+
+        pub fn resume() -> ResumeContext {
+            ResumeContext::new(scope())
+        }
+
+        pub fn stop() -> StopContext {
+            StopContext::new(scope(), StopMode::Drain)
+        }
+
+        pub fn dispose() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+                .expect("shutdown preserves state")
+        }
+
+        pub fn erase() -> DisposeContext {
+            DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+                .expect("removal may erase state")
+        }
     }
 }

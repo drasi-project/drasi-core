@@ -8,6 +8,8 @@
 //! There is deliberately no Rust dependency on these component crates here.
 //! All component calls use computation::load and the exported C tables.
 
+#[path = "common/hooks.rs"]
+mod hooks;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_core::{
@@ -430,12 +432,7 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
         fn configuration(&self) -> Result<Value> {
             Ok(json!({}))
         }
-        async fn start(&mut self) -> Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl EnvelopeSink for Sink {
@@ -701,7 +698,7 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
     let summary = scan_plugin_metadata(&path).context("native metadata-only scan")?;
     assert_eq!(summary.plugin_id, qualified_id);
     assert_eq!(summary.abi_family.as_deref(), Some("computation"));
-    assert_eq!(summary.abi_version.as_deref(), Some("3.0.0"));
+    assert_eq!(summary.abi_version.as_deref(), Some("4.0.0"));
     assert_eq!(summary.version, shared.metadata().plugin.version.as_ref());
 
     // Restrict discovery to the existing build artifact: copying a process-pinned
@@ -819,12 +816,14 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
         storage(&directory.path().join("registered-transactions")),
     )
     .await?;
-    transaction.initialize().await?;
-    transaction.start().await?;
+    transaction
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
+    transaction.start(&crate::hooks::start_ctx()).await?;
     let output = transaction.transform(insert(1, 3)?).await?;
     assert_eq!(transaction_row(&output)?, (20, 1, 1));
     transaction.delivery_completed(&output).await?;
-    transaction.stop().await?;
+    transaction.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -859,12 +858,25 @@ impl ComputationComponent for HostCapture {
     fn configuration(&self) -> Result<Value> {
         Ok(json!({"kind":"host-capture"}))
     }
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         self.stopped.store(false, Ordering::Release);
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
         self.stopped.store(true, Ordering::Release);
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !context.erases_owned_state(),
+            "this component does not support permanent state removal"
+        );
         Ok(())
     }
 }
@@ -892,7 +904,7 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
     );
     assert!(plugin
         .iter()
-        .all(|plugin| plugin.metadata().abi_version == "3.0.0"));
+        .all(|plugin| plugin.metadata().abi_version == "4.0.0"));
     assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.19.0");
     assert_eq!(plugin.len(), 4);
     assert!(plugin.iter().all(|plugin| plugin.factories().len() == 1));
@@ -1105,19 +1117,19 @@ async fn actual_library_rejects_bad_configuration_ports_schemas_and_failed_lifec
     let bad_path = directory.path().join("missing-parent/capture.jsonl");
     let mut failed = sink.create_component(id("failed"), json!({"path":bad_path}))?;
     assert!(!bad_path.exists(), "constructor must not open files");
-    failed.initialize().await?;
-    assert!(failed.start().await.is_err());
+    failed.initialize(&crate::hooks::initialize_ctx()).await?;
+    assert!(failed.start(&crate::hooks::start_ctx()).await.is_err());
     assert_eq!(
         failed.configuration()?,
         json!({"path":bad_path,"append":false})
     );
     assert!(failed.handle(insert(1, 3)?).await.is_err());
-    failed.stop().await?;
+    failed.stop(&crate::hooks::stop_ctx()).await?;
     let path = directory.path().join("sink.jsonl");
     let mut capture = sink.create_component(id("sink"), json!({"path":path}))?;
     assert!(capture.handle(insert(1, 3)?).await.is_err());
-    capture.initialize().await?;
-    capture.start().await?;
+    capture.initialize(&crate::hooks::initialize_ctx()).await?;
+    capture.start(&crate::hooks::start_ctx()).await?;
     let mut bad_port = insert(1, 3)?;
     bad_port.port = PortId::try_new("not-in")?;
     assert!(capture.handle(bad_port).await.is_err());
@@ -1145,7 +1157,7 @@ async fn actual_library_rejects_bad_configuration_ports_schemas_and_failed_lifec
         .await
         .is_err());
     capture.handle(insert(1, 3)?).await?;
-    capture.stop().await?;
+    capture.stop(&crate::hooks::stop_ctx()).await?;
     assert!(capture.handle(insert(2, 4)?).await.is_err());
     assert_eq!(values(&captured(&path)?)?, [3]);
     let mut invalid = sink.specification(id("sink"), json!({"path":path}))?;
@@ -1289,8 +1301,8 @@ async fn transaction(plugin: &[Arc<NativePlugin>], root: &Path) -> Result<Transa
         storage(root),
     )
     .await?;
-    value.initialize().await?;
-    value.start().await?;
+    value.initialize(&crate::hooks::initialize_ctx()).await?;
+    value.start(&crate::hooks::start_ctx()).await?;
     Ok(value)
 }
 fn transaction_row(output: &[OutputEnvelope]) -> Result<(i64, i64, i64)> {
@@ -1319,7 +1331,7 @@ async fn native_transaction_state_is_isolated_and_committed_output_replays_witho
         .context("durable producer")?
         .identity()
         .persistent());
-    subject.stop().await?;
+    subject.stop(&crate::hooks::stop_ctx()).await?;
     drop(subject);
     let mut subject = transaction(&plugin, &root).await?;
     assert!(subject.has_pending_emissions());
@@ -1381,14 +1393,14 @@ async fn native_transaction_state_is_isolated_and_committed_output_replays_witho
         "replay and duplicate input must not increment either participant"
     );
     subject.delivery_completed(&next).await?;
-    subject.stop().await?;
+    subject.stop(&crate::hooks::stop_ctx()).await?;
     drop(subject);
     let mut reconstructed = transaction(&plugin, &root).await?;
     assert!(!reconstructed.has_pending_emissions());
     let next = reconstructed.transform(insert(5, 5)?).await?;
     assert_eq!(transaction_row(&next)?, (28, 5, 5));
     reconstructed.delivery_completed(&next).await?;
-    reconstructed.stop().await?;
+    reconstructed.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -1545,8 +1557,8 @@ async fn fault_transaction(
         provider,
     )
     .await?;
-    subject.initialize().await?;
-    subject.start().await?;
+    subject.initialize(&crate::hooks::initialize_ctx()).await?;
+    subject.start(&crate::hooks::start_ctx()).await?;
     Ok(subject)
 }
 
@@ -1569,7 +1581,7 @@ async fn failed_foreign_state_rpc_rolls_back_every_step_and_preserves_exact_retr
         subject.transform(input.clone()).await.is_err(),
         "failed container requires reconstruction"
     );
-    subject.stop().await?;
+    subject.stop(&crate::hooks::stop_ctx()).await?;
     drop(subject);
     let mut subject = transaction(&plugin, &root).await?;
     assert!(
@@ -1583,7 +1595,7 @@ async fn failed_foreign_state_rpc_rolls_back_every_step_and_preserves_exact_retr
         "both already-staged per-step counters rolled back"
     );
     subject.delivery_completed(&output).await?;
-    subject.stop().await?;
+    subject.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -1610,7 +1622,7 @@ async fn cancelling_borrowed_transaction_rpc_revokes_plugin_work_and_rolls_back_
         // borrowed RPC scope. The storage adapter still owns any submitted I/O.
     }
     gate.release.notify_one();
-    tokio::time::timeout(TIMEOUT, subject.stop()).await??;
+    tokio::time::timeout(TIMEOUT, subject.stop(&crate::hooks::stop_ctx())).await??;
     assert_eq!(
         gate.active.load(Ordering::Acquire),
         0,
@@ -1627,7 +1639,7 @@ async fn cancelling_borrowed_transaction_rpc_revokes_plugin_work_and_rolls_back_
     let output = subject.transform(input).await?;
     assert_eq!(transaction_row(&output)?, (20, 1, 1));
     subject.delivery_completed(&output).await?;
-    subject.stop().await?;
+    subject.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -1661,12 +1673,7 @@ impl ComputationComponent for StableSource {
             json!({"kind":"host-owned-stable-input","stream":"stable-host/out","sequence":1,"value":3}),
         )
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSource for StableSource {
@@ -1934,14 +1941,14 @@ async fn managed_qos_recipes_replay_real_native_records_and_isolate_instances() 
         id("counter"),
         json!({"stream":"counter/out","count":1,"start":7,"step":1,"interval_ms":1}),
     )?;
-    source.initialize().await?;
-    source.start().await?;
+    source.initialize(&crate::hooks::initialize_ctx()).await?;
+    source.start(&crate::hooks::start_ctx()).await?;
     let envelope = source
         .next()
         .await?
         .context("native source event")?
         .envelope;
-    source.stop().await?;
+    source.stop(&crate::hooks::stop_ctx()).await?;
     {
         let handle = resources
             .resolve("first", "graph", &specification, &recipe)

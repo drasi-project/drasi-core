@@ -35,14 +35,7 @@ impl ComputationComponent for BindingSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -282,7 +275,7 @@ async fn separately_loaded_consumer_receives_input_bindings_case() -> Result<()>
             },
         )
         .await?;
-    consumer.initialize().await?;
+    consumer.initialize(&crate::hooks::initialize_ctx()).await?;
     assert!(consumer.binds_inputs());
     for (producer, stream_name, before_start) in
         [("left", "left/out", true), ("right", "right/out", false)]
@@ -296,10 +289,10 @@ async fn separately_loaded_consumer_receives_input_bindings_case() -> Result<()>
         let actual: Vec<InputBinding> = serde_json::from_slice(&std::fs::read(&path)?)?;
         assert_eq!(actual, bindings);
         if before_start {
-            consumer.start().await?;
+            consumer.start(&crate::hooks::start_ctx()).await?;
         }
     }
-    consumer.stop().await?;
+    consumer.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 

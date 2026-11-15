@@ -978,12 +978,30 @@ pub(super) fn preview_with_updates(
                 phase: FailurePhase::Validation,
             }
             .call(|| {
-                factory
-                    .plan_update(current, proposed)
-                    .map_err(|source| GraphError::Validation {
-                        component: id.clone(),
-                        source,
-                    })
+                let validation = |source| GraphError::Validation {
+                    component: id.clone(),
+                    source,
+                };
+                let live = graph
+                    .ids
+                    .get(id)
+                    .map(|index| graph.components[*index].assess_update(current, proposed))
+                    .transpose()
+                    .map_err(validation)?
+                    .flatten();
+                match live {
+                    Some(assessment) => assessment.plan().ok_or_else(|| {
+                        validation(anyhow::anyhow!(
+                            "component reports the update as unsupported: {}",
+                            match &assessment {
+                                crate::computation::v1::Assessment::Unsupported { reason } =>
+                                    reason.as_str(),
+                                _ => "",
+                            }
+                        ))
+                    }),
+                    None => factory.plan_update(current, proposed).map_err(validation),
+                }
             })?;
             factory
                 .validate_update_plan(current, proposed, assessment)
@@ -2606,10 +2624,12 @@ async fn stop_instance(
     controls: &mut PipeGuard,
     cancel: &mut watch::Receiver<bool>,
     index: usize,
-    delete_owned_resources: bool,
-    dispose: bool,
+    retirement: Option<super::Retirement>,
     commands: &mut CommandReceiver,
 ) -> GraphResult<()> {
+    let delete_owned_resources = retirement
+        .is_some_and(|retirement| retirement.intent == crate::computation::v1::StateIntent::Erase);
+    let dispose = retirement.is_some();
     let slot = graph.components[index].clone();
     if operations
         .peer_controls
@@ -2638,7 +2658,7 @@ async fn stop_instance(
         } else {
             Operation::Stop
         },
-        delete_owned_resources,
+        retirement,
     )?;
     let (reply, response) = oneshot::channel();
     operations
@@ -3002,8 +3022,22 @@ async fn execute_reserved(
                 controls,
                 cancel,
                 index,
-                plan.delete_owned_resources.contains(&id),
-                plan.remove.contains(&id) || plan.replace.contains(&id),
+                if plan.remove.contains(&id) {
+                    Some(super::Retirement {
+                        reason: crate::computation::v1::DisposeReason::Removal,
+                        intent: if plan.delete_owned_resources.contains(&id) {
+                            crate::computation::v1::StateIntent::Erase
+                        } else {
+                            crate::computation::v1::StateIntent::Preserve
+                        },
+                    })
+                } else if plan.replace.contains(&id) {
+                    Some(super::Retirement::preserve(
+                        crate::computation::v1::DisposeReason::Replacement,
+                    ))
+                } else {
+                    None
+                },
                 commands,
             )
             .await

@@ -266,10 +266,13 @@ automatic remove/recreate fallback.
 Removal rejects dependent consumers, stops the query's dedicated helpers,
 erases its owned processing state and removes unused resource declarations.
 Ordinary stop and instance shutdown retain processing state. Custom native
-components must implement `delete_owned_resources` to remove their owned state;
-arbitrary factory/input rewiring still uses explicit computation operations.
-The optional `dispose` hook runs at final retirement, including partial
-initialization failure, but is not authorization to delete persistent state.
+components erase their owned state inside `dispose` when its context carries
+`StateIntent::Erase` (removal stops the component, then disposes it with that
+intent); erasure must be idempotent because a failed dispose is retried.
+Arbitrary factory/input rewiring still uses explicit computation operations.
+`dispose` also runs at final retirement for shutdown, replacement and partial
+initialization failure with `StateIntent::Preserve`, which is not authorization
+to delete persistent state.
 Neither manual replacement nor an accepted state-preserving update overrides
 consumer recovery policy. A strict consumer rejects incompatible progress
 rather than silently abandoning it; inspect failed or pending reconciliation.

@@ -20,6 +20,7 @@ pub mod consumer_progress;
 mod control;
 mod export;
 pub mod input_position;
+pub mod lifecycle;
 pub mod metadata;
 pub mod output_reads;
 pub mod output_snapshots;
@@ -38,7 +39,9 @@ pub use bootstrap_coordination::{
     LinkedBootstrapProvider, NativeSourceBootstrap, NativeSourceBootstrapCoordinator,
     SourceBootstrapLiveProgress, SourceBootstrapMetadata, SourceBootstrapProgress,
 };
-pub use component::{NativeComponent, NativeService, NativeSink, NativeSource, NativeTransformer};
+pub use component::{
+    NativeComponent, NativeManagement, NativeService, NativeSink, NativeSource, NativeTransformer,
+};
 pub use configuration::{ConfigDefinition, ConfigDetails, ConfigOption};
 pub use consumer::{ConsumerMode, NativeConsumer, NativeTransactionalConsumer};
 pub use consumer_progress::NativeConsumerProgress;
@@ -57,7 +60,10 @@ pub use processing::{NativeProcessing, NativeProcessingContext};
 pub use progress::NativeSourceProgress;
 pub use scheduling::NativeScheduling;
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
-pub use wire::{ApplyUpdateRequest, CreateRequest, Scope, UpdateDirective, UpdateRequest};
+pub use wire::{
+    ApplyUpdateRequest, CreateRequest, DisposeRequest, LifecycleRequest, Scope, UpdateDirective,
+    UpdateRequest,
+};
 
 /// Export only under a plugin crate's `dynamic-plugin` feature. The expression is
 /// evaluated once and must return `anyhow::Result<PluginDefinition>`. It must be
@@ -194,6 +200,17 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.output_reads(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_management_v1(
+        ) -> *const $crate::abi::management::PluginManagementV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.management(),
                     Err(_) => std::ptr::null(),
                 }
             }))

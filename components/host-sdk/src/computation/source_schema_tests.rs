@@ -79,12 +79,7 @@ impl sdk::NativeComponent for SchemaSource {
     fn configuration(&self) -> anyhow::Result<Value> {
         Ok(json!({}))
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_computation_plugin_sdk::passive_lifecycle!();
 }
 
 #[async_trait]
@@ -118,8 +113,12 @@ async fn source_schema_matrix() -> anyhow::Result<()> {
         .expect("negotiated capability");
     assert_eq!(state.calls.load(Ordering::Acquire), 0);
     assert!(reader.describe_schema().await.is_err());
-    source.initialize().await?;
-    source.start().await?;
+    source
+        .initialize(&crate::computation::test_hooks::initialize_ctx())
+        .await?;
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     {
         let mut next = Box::pin(source.next());
         tokio::select! {
@@ -167,9 +166,13 @@ async fn source_schema_matrix() -> anyhow::Result<()> {
         result = &mut old => panic!("schema read should remain pending: {result:?}"),
         _ = state.entered.notified() => {}
     }
-    source.stop().await?;
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert!(reader.describe_schema().await.is_err());
-    source.start().await?;
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     state.blocked.store(false, Ordering::Release);
     assert!(reader.describe_schema().await?.is_some());
     let retired = tokio::time::timeout(Duration::from_secs(1), old)
@@ -183,8 +186,12 @@ async fn source_schema_matrix() -> anyhow::Result<()> {
         abi::status::CLOSED
     );
     assert!(reader.describe_schema().await?.is_some());
-    source.stop().await?;
-    source.start().await?;
+    source
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
+    source
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     state.blocked.store(true, Ordering::Release);
     let _ = state.entered.notified().now_or_never();
     let mut removed = Box::pin(reader.describe_schema());

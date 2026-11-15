@@ -18,7 +18,7 @@
 
 use async_trait::async_trait;
 
-use super::{ComponentDescriptor, PortId};
+use super::{ApplyError, Assessment, ComponentDescriptor, PortId};
 
 pub use drasi_computation_contracts::{
     ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan, InputEnvelope, OutputEnvelope,
@@ -46,8 +46,8 @@ pub struct ComponentUpdateDirective {
 /// transactional lifecycle; see [`super::ComputationGraph`] for host policy.
 ///
 /// The descriptor must remain unchanged throughout the owned component's life.
-/// Lifecycle defaults do no work. They do not advertise update, reset, deletion,
-/// or externally owned processing guarantees.
+/// Every lifecycle hook is required; [`crate::passive_component_lifecycle!`]
+/// opts a component with no lifecycle work into successful no-ops.
 #[async_trait]
 pub trait ComputationComponent: Send + Sync {
     /// Immutable identity, semantic role and declared ports for this instance.
@@ -131,46 +131,62 @@ pub trait ComputationComponent: Send + Sync {
         false
     }
     /// Initialize this object once after mandatory bindings, before its first start.
-    /// Failed initialization retires the object; it is never retried on that object.
-    async fn initialize(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    /// Activate owned resources before processing can begin.
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    /// Stop and join owned work; an interrupted wait is not completed cleanup.
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    /// Failed initialization retires the object with
+    /// [`super::DisposeReason::InitializationFailure`]; it is never retried on that object.
+    async fn initialize(&mut self, context: &super::InitializeContext) -> anyhow::Result<()>;
+    /// Activate owned work before processing can begin. A failed or cancelled
+    /// start is settled by [`Self::stop`].
+    async fn start(&mut self, context: &super::StartContext) -> anyhow::Result<()>;
+    /// Gate independently owned processing at a graph-coordinated boundary.
+    /// The activation continues. A component that cannot pause returns
+    /// [`super::unsupported`]; it never succeeds as a no-op.
+    async fn pause(&mut self, context: &super::PauseContext) -> anyhow::Result<()>;
+    /// Resume a completed pause without a new activation or initialization.
+    async fn resume(&mut self, context: &super::ResumeContext) -> anyhow::Result<()>;
+    /// Stop and join activation work, including a partial start. The object is
+    /// restartable. An interrupted wait is not completed cleanup.
+    async fn stop(&mut self, context: &super::StopContext) -> anyhow::Result<()>;
     /// Release instance-lifetime resources at final retirement, including after
-    /// failed initialization. Failure retains this object for cleanup retry.
-    /// This does not authorize deletion of persistent state or external artifacts.
-    async fn dispose(&mut self) -> anyhow::Result<()> {
-        Ok(())
+    /// failed initialization. With [`super::StateIntent::Erase`], first erase state this
+    /// generation owns; erasure must tolerate retries. Failure retains this object
+    /// for a retry with the same reason and intent. Success is final.
+    async fn dispose(&mut self, context: &super::DisposeContext) -> anyhow::Result<()>;
+    /// Optional instance management for Pause- and Stop-boundary updates.
+    /// Replacement updates use the factory planner and need no instance interface.
+    /// Implement together with [`Self::management_mut`]; both return the same object.
+    fn management(&self) -> Option<&dyn ComponentManagement> {
+        None
     }
-    /// Pause independently owned processing at a graph-coordinated boundary.
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
-        Ok(())
+    /// Mutable access to the management interface returned by [`Self::management`].
+    fn management_mut(&mut self) -> Option<&mut dyn ComponentManagement> {
+        None
     }
-    /// Resume a temporary processing pause without a new activation or initialization.
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
-        Ok(())
+}
+
+/// Instance-level update assessment and application for a live component.
+///
+/// Assessment is pure: it inspects live facts but performs no I/O that changes
+/// state. Application runs only after the owner accepted the assessed plan and
+/// the graph established its boundary.
+#[async_trait]
+pub trait ComponentManagement: Send + Sync {
+    /// Assess a proposed specification against this live object. `None` defers
+    /// to the factory planner, which remains authoritative for that change.
+    fn assess(
+        &self,
+        _current: &super::ComponentSpecification,
+        _proposed: &super::ComponentSpecification,
+    ) -> anyhow::Result<Option<Assessment>> {
+        Ok(None)
     }
-    /// Erase owned state for explicit permanent removal, after stopping work.
-    /// Ordinary stop, replacement and instance shutdown do not call this hook.
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        anyhow::bail!("this component does not support permanent state removal")
-    }
-    /// Execute a factory-assessed retained-object update after owner acceptance.
+    /// Execute an accepted retained-object update at the boundary in `context`.
     /// The operation ID is stable across recovery and retry. Implementations must
     /// safely settle repeated or interrupted execution; the descriptor stays immutable.
-    async fn apply_update(
+    async fn apply(
         &mut self,
-        _context: super::ComponentUpdateContext,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("this component does not support retained-object updates")
-    }
+        context: &super::ApplyContext,
+        update: super::ComponentUpdateContext,
+    ) -> Result<(), ApplyError>;
 }
 
 /// A constructed service or nested graph with lifecycle but no data ports.

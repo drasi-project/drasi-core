@@ -188,17 +188,29 @@ impl ComputationComponent for Fixture {
         &self.descriptor
     }
 
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.signals.initialized.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         self.signals.disposed.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.signals
             .starts
             .lock()
@@ -226,7 +238,10 @@ impl ComputationComponent for Fixture {
         }
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         assert!(
             self.signals
                 .starts
@@ -251,6 +266,8 @@ impl ComputationComponent for Fixture {
         }
         Ok(())
     }
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
 }
 
 #[async_trait]

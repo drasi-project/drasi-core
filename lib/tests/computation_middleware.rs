@@ -191,7 +191,10 @@ async fn running(
 ) -> MiddlewareTransformer {
     let mut subject = MiddlewareTransformer::new(definition(middleware, pipeline), registry())
         .expect("construct middleware transformer");
-    subject.start().await.expect("start middleware transformer");
+    subject
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start middleware transformer");
     subject
 }
 
@@ -447,7 +450,10 @@ async fn assert_element_mutations(
     );
     assert!(output.system().sequence() > previous_sequence.expect("prior output"));
     assert_future_passthrough(&mut subject).await;
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 async fn assert_processing_failure(
@@ -481,14 +487,20 @@ async fn assert_processing_failure(
             .is_err(),
         "a failed instance cannot resume processing"
     );
-    subject.stop().await.expect("stop failed instance");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop failed instance");
     assert!(
-        subject.start().await.is_err(),
+        subject.start(&lifecycle_contexts::start()).await.is_err(),
         "stop/start must not clear the failed-processing fence"
     );
     let mut replacement = running(vec![middleware], &[&name]).await;
     let output = transform_one(&mut replacement, valid).await;
-    replacement.stop().await.expect("stop replacement");
+    replacement
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop replacement");
     output
 }
 
@@ -653,8 +665,14 @@ async fn metadata_ancestry_and_input_are_preserved_across_clean_restart() {
         annotations
     );
 
-    subject.stop().await.expect("stop");
-    subject.start().await.expect("restart same instance");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
+    subject
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("restart same instance");
     let next_input = event(
         "producer",
         50,
@@ -673,7 +691,10 @@ async fn metadata_ancestry_and_input_are_preserved_across_clean_restart() {
             element: node("database", "item", "Raw", 200, json!({"value": 10})),
         }]
     );
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -750,7 +771,10 @@ async fn empty_pipeline_preserves_batch_order_with_one_full_replacement() {
         }
     ));
     assert_future_passthrough(&mut subject).await;
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -846,7 +870,10 @@ async fn removals_nulls_and_replacements_pass_through_in_place_transforms() {
     ));
     assert!(replaced.system().sequence() > updated.system().sequence());
     assert!(updated.system().sequence() > inserted.system().sequence());
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -871,7 +898,10 @@ async fn filtering_and_already_empty_input_still_emit_progress_batches() {
     assert!(output.changes().is_empty());
     assert!(output.system().sequence() > filtered.system().sequence());
     assert_ne!(output.id(), filtered.id());
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -951,16 +981,25 @@ macro_rules! lifecycle {
                 &self.descriptor
             }
 
-            async fn start(&mut self) -> anyhow::Result<()> {
+            async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> anyhow::Result<()> {
                 self.started = true;
                 Ok(())
             }
 
-            async fn stop(&mut self) -> anyhow::Result<()> {
+            async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> anyhow::Result<()> {
                 self.started = false;
                 Ok(())
             }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(&mut self, context: &drasi_lib::computation::v1::DisposeContext) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
         }
+        Ok(())
+    }
+}
     };
 }
 
@@ -1264,7 +1303,10 @@ mod decoder {
                 ),
             }]
         );
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -1383,7 +1425,10 @@ mod parse_json {
                 ),
             }]
         );
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -1554,7 +1599,10 @@ mod promote {
                 ),
             }]
         );
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -1612,7 +1660,10 @@ mod relabel {
                 },
             }]
         );
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -1728,7 +1779,10 @@ mod map {
         assert!(filtered.changes().is_empty());
         assert!(filtered.system().sequence() > output.system().sequence());
         assert_future_passthrough(&mut subject).await;
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -1841,7 +1895,10 @@ mod jq {
         assert!(filtered.changes().is_empty());
         assert!(filtered.system().sequence() > output.system().sequence());
         assert_future_passthrough(&mut subject).await;
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 
     #[tokio::test]
@@ -2057,7 +2114,10 @@ mod unwind {
             "deleted state is removed"
         );
         assert_future_passthrough(&mut subject).await;
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
 
         let mut reconstructed = running(vec![settings()], &["children"]).await;
         let output = transform_one(&mut reconstructed, &delete).await;
@@ -2162,7 +2222,10 @@ mod unwind {
         let next = transform_one(&mut subject, &repeated).await;
         assert_eq!(decoded(&next), decoded(&repeated));
         assert!(next.system().sequence() > output.system().sequence());
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 
     #[tokio::test]
@@ -2241,7 +2304,10 @@ mod unwind {
         let deleted = transform_one(&mut subject, &event("producer", 60, deletion.clone())).await;
         assert_eq!(decoded(&deleted), [deletion]);
         assert!(deleted.system().sequence() > replaced.system().sequence());
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 
     #[tokio::test]
@@ -2281,7 +2347,10 @@ mod unwind {
                 removal,
             ],
         );
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 
     #[tokio::test]
@@ -2356,7 +2425,10 @@ mod unwind {
             ]
         );
         assert!(deleted.system().sequence() > updated.system().sequence());
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 
     #[tokio::test]
@@ -2504,7 +2576,10 @@ mod unwind {
             }
             previous_sequence = Some(output.system().sequence());
         }
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -2587,7 +2662,10 @@ async fn ordered_decoder_parse_json_promote_relabel_chain_uses_configured_names(
         decoded(&input)[0].get_reference(),
         &ElementReference::new("database", "item")
     );
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 
     let mut wrong_order = running(middleware, &["promote", "parse", "decode", "label"]).await;
     let error = wrong_order
@@ -2656,7 +2734,10 @@ mod ordered_mapping {
                 },
             ]
         );
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
 
         let mut wrong_order = running(middleware, &["project", "before", "after"]).await;
         let output = transform_one(&mut wrong_order, &input).await;
@@ -2699,5 +2780,47 @@ mod ordered_mapping {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn builtin_two_producer_graph_multi_thread() {
         graph_scenario().await;
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

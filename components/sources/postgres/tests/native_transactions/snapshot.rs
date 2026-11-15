@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::lifecycle_ctx;
+
 use super::*;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -125,7 +127,11 @@ async fn exported_snapshot_and_concurrent_wal_have_no_gap_and_restart_uses_the_s
         };
         let (started, written, source_started) =
             tokio::time::timeout(Duration::from_secs(15), async {
-                tokio::join!(query.start(), writes, source.start())
+                tokio::join!(
+                    query.start(lifecycle_ctx::held(lifecycle_ctx::start())),
+                    writes,
+                    source.start(lifecycle_ctx::held(lifecycle_ctx::start()))
+                )
             })
             .await?;
         started?;
@@ -148,8 +154,8 @@ async fn exported_snapshot_and_concurrent_wal_have_no_gap_and_restart_uses_the_s
                 serde_json::json!({"id":3, "name":"during snapshot"}),
             ]
         );
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     database
         .client()
@@ -161,15 +167,15 @@ async fn exported_snapshot_and_concurrent_wal_have_no_gap_and_restart_uses_the_s
         let mut query = query(path.path(), progress)
             .await?
             .with_bootstrap(bootstrap);
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         assert_eq!(managed_slot(&database).await?, slot);
         assert_eq!(rows(&query).len(), 2);
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         let group = next(&mut source).await?;
         apply(&mut query, group).await?;
         assert_eq!(rows(&query).len(), 3);
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     database.shutdown().await
 }
@@ -198,7 +204,7 @@ async fn interrupted_snapshot_requires_reset_and_replaces_only_its_owned_unfinis
             }));
         tokio::time::timeout(Duration::from_secs(15), async {
             tokio::select! {
-                result = query.start() => anyhow::bail!("snapshot unexpectedly ended: {result:?}"),
+                result = query.start(lifecycle_ctx::held(lifecycle_ctx::start())) => anyhow::bail!("snapshot unexpectedly ended: {result:?}"),
                 _ = prepared.notified() => Ok(()),
             }
         })
@@ -206,7 +212,7 @@ async fn interrupted_snapshot_requires_reset_and_replaces_only_its_owned_unfinis
         assert!(!progress.snapshot().ready);
         assert!(progress.snapshot().checkpoints.is_empty());
         abandoned = managed_slot(&database).await?;
-        query.stop().await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     database
         .client()
@@ -218,12 +224,15 @@ async fn interrupted_snapshot_requires_reset_and_replaces_only_its_owned_unfinis
         let mut query = query(path.path(), progress)
             .await?
             .with_bootstrap(bootstrap);
-        let error = query.start().await.expect_err("strict incomplete snapshot");
+        let error = query
+            .start(&lifecycle_ctx::start())
+            .await
+            .expect_err("strict incomplete snapshot");
         assert!(matches!(
             error.downcast_ref::<QueryRecoveryError>(),
             Some(QueryRecoveryError::IncompleteBootstrap)
         ));
-        query.stop().await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
         assert_eq!(managed_slot(&database).await?, abandoned);
     }
     {
@@ -232,7 +241,7 @@ async fn interrupted_snapshot_requires_reset_and_replaces_only_its_owned_unfinis
         let mut query = query_with_recovery(path.path(), progress, QueryRecoveryPolicy::AutoReset)
             .await?
             .with_bootstrap(bootstrap);
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         assert_ne!(managed_slot(&database).await?, abandoned);
         assert_eq!(
             rows(&query),
@@ -242,7 +251,7 @@ async fn interrupted_snapshot_requires_reset_and_replaces_only_its_owned_unfinis
             "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'native_slot')", &[],
         ).await?.get(0);
         assert!(external, "externally managed slot must remain untouched");
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         database
             .client()
             .batch_execute("UPDATE person SET name = 'live' WHERE id = 2;")
@@ -253,8 +262,8 @@ async fn interrupted_snapshot_requires_reset_and_replaces_only_its_owned_unfinis
             rows(&query),
             vec![serde_json::json!({"id":2, "name":"live"})]
         );
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     database.shutdown().await
 }
@@ -278,8 +287,8 @@ async fn completed_snapshot_refuses_missing_history_or_changed_publication_witho
             let mut query = query(path.path(), progress)
                 .await?
                 .with_bootstrap(bootstrap);
-            query.start().await?;
-            query.stop().await?;
+            query.start(&lifecycle_ctx::start()).await?;
+            query.stop(&lifecycle_ctx::stop()).await?;
         }
         let slot = managed_slot(&database).await?;
         match damage {
@@ -309,8 +318,11 @@ async fn completed_snapshot_refuses_missing_history_or_changed_publication_witho
         let mut query = query_with_recovery(path.path(), progress, QueryRecoveryPolicy::AutoReset)
             .await?
             .with_bootstrap(bootstrap);
-        query.start().await?;
-        let error = source.start().await.expect_err("changed recovery boundary");
+        query.start(&lifecycle_ctx::start()).await?;
+        let error = source
+            .start(&lifecycle_ctx::start())
+            .await
+            .expect_err("changed recovery boundary");
         if damage == "missing-slot" {
             assert!(error.to_string().contains("existing slot"), "{error:#}");
         } else {
@@ -329,8 +341,8 @@ async fn completed_snapshot_refuses_missing_history_or_changed_publication_witho
             rows(&query),
             vec![serde_json::json!({"id":1, "name":"original"})]
         );
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
         database.shutdown().await?;
     }
     Ok(())
@@ -357,26 +369,29 @@ async fn oversized_snapshot_row_never_completes_and_restarts_after_limit_increas
         let mut query = query(path.path(), progress.clone())
             .await?
             .with_bootstrap(bootstrap);
-        let error = query.start().await.expect_err("oversized snapshot row");
+        let error = query
+            .start(&lifecycle_ctx::start())
+            .await
+            .expect_err("oversized snapshot row");
         assert!(error.to_string().contains("byte limit"), "{error:#}");
         assert!(!progress.snapshot().ready && progress.snapshot().checkpoints.is_empty());
         abandoned = managed_slot(&database).await?;
-        query.stop().await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     let progress = progress();
     let (mut source, bootstrap) = coordinated(database.config.clone(), progress.clone())?;
     let mut query = query_with_recovery(path.path(), progress, QueryRecoveryPolicy::AutoReset)
         .await?
         .with_bootstrap(bootstrap);
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     assert_ne!(managed_slot(&database).await?, abandoned);
     assert_eq!(
         rows(&query),
         vec![serde_json::json!({"id":1, "name":"large".repeat(4000)})]
     );
-    source.start().await?;
-    source.stop().await?;
-    query.stop().await?;
+    source.start(&lifecycle_ctx::start()).await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -428,7 +443,7 @@ async fn postgres_snapshot_process_exit_helper() -> Result<()> {
     let mut query = query(Path::new(&path), progress)
         .await?
         .with_bootstrap(bootstrap);
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     anyhow::ensure!(
         point == "completed",
         "partial snapshot did not reach its crash point"
@@ -490,14 +505,14 @@ async fn process_exit_during_or_after_snapshot_keeps_ownership_and_the_correct_r
         let mut query = query_with_recovery(path.path(), progress, recovery)
             .await?
             .with_bootstrap(bootstrap);
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         let after = managed_slot(&database).await?;
         if point == "during" {
             assert_ne!(before, after);
         } else {
             assert_eq!(before, after);
         }
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         if point == "completed" {
             let group = next(&mut source).await?;
             apply(&mut query, group).await?;
@@ -509,8 +524,8 @@ async fn process_exit_during_or_after_snapshot_keeps_ownership_and_the_correct_r
                 serde_json::json!({"id":3, "name":"new"}),
             ]
         );
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
         database.shutdown().await?;
     }
     Ok(())

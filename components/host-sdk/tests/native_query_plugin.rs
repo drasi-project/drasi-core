@@ -7,6 +7,8 @@
 mod bootstrap;
 #[path = "native_query_plugin/durable.rs"]
 mod durable;
+#[path = "common/hooks.rs"]
+mod hooks;
 #[path = "native_query_plugin/semantics.rs"]
 mod semantics;
 
@@ -107,8 +109,8 @@ async fn run_query() -> Result<()> {
         ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
         configuration,
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let changes = [
         SourceChange::Insert {
             element: item(1, 1),
@@ -142,7 +144,7 @@ async fn run_query() -> Result<()> {
             (result, _) => anyhow::bail!("unexpected query result: {result:?}"),
         }
     }
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -194,8 +196,8 @@ async fn separately_loaded_query_supports_gql() -> Result<()> {
         scope,
         provider,
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -212,7 +214,7 @@ async fn separately_loaded_query_supports_gql() -> Result<()> {
         }
         _ => anyhow::bail!("unexpected GQL query result: {results:?}"),
     }
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -250,8 +252,8 @@ async fn separately_loaded_query_reuses_host_indexes_after_recreation() -> Resul
         )
     };
     let mut query = create()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -262,12 +264,12 @@ async fn separately_loaded_query_reuses_host_indexes_after_recreation() -> Resul
         .await?;
     assert_eq!(output.len(), 1);
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Replace {
@@ -302,7 +304,7 @@ async fn separately_loaded_query_reuses_host_indexes_after_recreation() -> Resul
         }
         _ => anyhow::bail!("unexpected query result after deletion: {results:?}"),
     }
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -339,8 +341,8 @@ async fn separately_loaded_aggregate_reuses_host_result_index() -> Result<()> {
         )
     };
     let mut query = create()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -351,12 +353,12 @@ async fn separately_loaded_aggregate_reuses_host_result_index() -> Result<()> {
         .await?;
     assert_eq!(output.len(), 1);
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Replace {
@@ -377,7 +379,7 @@ async fn separately_loaded_aggregate_reuses_host_result_index() -> Result<()> {
         }
         _ => anyhow::bail!("unexpected aggregate result after recreation: {results:?}"),
     }
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -414,8 +416,8 @@ async fn separately_loaded_grouped_query_reuses_host_result_index() -> Result<()
         )
     };
     let mut query = create()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -426,12 +428,12 @@ async fn separately_loaded_grouped_query_reuses_host_result_index() -> Result<()
         .await?;
     assert_eq!(output.len(), 1);
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -453,7 +455,7 @@ async fn separately_loaded_grouped_query_reuses_host_result_index() -> Result<()
         }
         _ => anyhow::bail!("unexpected grouped result after recreation: {results:?}"),
     }
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -490,8 +492,8 @@ async fn separately_loaded_min_query_reuses_sorted_index() -> Result<()> {
         )
     };
     let mut query = create()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Insert {
@@ -510,12 +512,12 @@ async fn separately_loaded_min_query_reuses_sorted_index() -> Result<()> {
         )?)
         .await?;
     query.delivery_completed(&output).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let output = query
         .transform(input(
             SourceChange::Delete {
@@ -536,7 +538,7 @@ async fn separately_loaded_min_query_reuses_sorted_index() -> Result<()> {
         }
         _ => anyhow::bail!("unexpected minimum result after recreation: {results:?}"),
     }
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -569,8 +571,8 @@ async fn separately_loaded_indexed_query_matches_relationships() -> Result<()> {
         },
         provider,
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     for (sequence, element) in [
         item_with_id("one", 1, 1),
         item_with_id("two", 2, 2),
@@ -646,7 +648,7 @@ async fn separately_loaded_indexed_query_matches_relationships() -> Result<()> {
         results.as_slice(),
         [QueryPartEvaluationContext::Removing { .. }]
     ));
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -660,12 +662,7 @@ impl ComputationComponent for Source {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -689,12 +686,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]

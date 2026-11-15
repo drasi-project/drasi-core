@@ -168,7 +168,10 @@ async fn wal_source_resumes_in_order_then_observes_live_appends_without_owning_p
         resource,
         1,
     );
-    source.start().await.expect("resume after one");
+    source
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("resume after one");
     for sequence in [2, 3] {
         let output = source.next().await.expect("replay").expect("event");
         assert_eq!(
@@ -200,9 +203,15 @@ async fn wal_source_resumes_in_order_then_observes_live_appends_without_owning_p
             .sequence,
         Some(4)
     );
-    source.stop().await.expect("stop only adapter");
+    source
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop only adapter");
     assert_eq!(wal.deletes.load(Ordering::SeqCst), 0);
-    source.start().await.expect("explicit replay restart");
+    source
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("explicit replay restart");
     let replayed = source.next().await.expect("replay").expect("event");
     assert!(replayed.envelope.system().sequence() > live.envelope.system().sequence());
     assert_eq!(
@@ -212,7 +221,10 @@ async fn wal_source_resumes_in_order_then_observes_live_appends_without_owning_p
             .sequence,
         Some(2)
     );
-    source.stop().await.expect("stop");
+    source
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -247,7 +259,7 @@ async fn unavailable_wal_position_is_reported_instead_of_silently_skipped() {
         0,
     );
     assert!(source
-        .start()
+        .start(&lifecycle_contexts::start())
         .await
         .expect_err("strict replay")
         .downcast_ref::<WalError>()
@@ -273,12 +285,7 @@ mod persistent_progress {
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl EnvelopeSink for Sink {
@@ -893,5 +900,47 @@ mod persistent_progress {
         source.stop().await.expect("stop source");
         query.stop().await.expect("stop query");
         assert_eq!(wal.deletes.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

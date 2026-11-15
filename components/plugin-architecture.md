@@ -231,15 +231,16 @@ serve different purposes. Do not substitute one for another.
 
 | Host interface | Accepted plugin interface |
 |---|---|
-| Native computation ABI 2.0.0 | Matching native tables, target and wire version 2; advertised capabilities/extensions are validated separately |
+| Native computation ABI 4.0.0 | Same major (4) with an older or equal minor, matching target and wire version 4; a newer minor or another major is rejected before any callback; advertised capabilities/extensions are validated separately |
 | Ordinary ABI 0.18.x | Ordinary 0.18.x on the same target; mandatory binding and fallible lifecycle tables |
 | Ordinary ABI 0.16.x / 0.17.x component layouts | Reject before plugin initialization; rebuild with the current ordinary SDK |
 | Missing metadata, wrong target, incompatible or unknown interface | Reject; never guess a compatible layout |
 
-Native base tables and strict metadata are checked independently of the version 2
-MessagePack payload definition. Build hosts and native libraries from matching
-sources. ABI 2.0 carries the native lifecycle/update contract; an advertised
-capability must match the implemented tables rather than follow from SDK presence.
+Native base tables and strict metadata are checked independently of the version 4
+MessagePack payload definition. ABI 4 carries the native lifecycle contract
+(INITIALIZE, START, PAUSE, RESUME, STOP, DISPOSE) and the optional management
+extension for assess/apply; an advertised capability must match the implemented
+tables rather than follow from SDK presence.
 
 Ordinary ABI 0.18 separates required runtime-context binding from optional
 once-per-object initialization, adds disposal and temporary processing-pause
@@ -264,7 +265,7 @@ built libraries. Rust memory layouts are not part of that contract.
 
 ### Serialized Payload Pattern
 
-Native metadata/configuration are JSON. Native wire version 2 carries typed
+Native metadata/configuration are JSON. Native wire version 4 carries typed
 envelopes and bulk byte buffers as named MessagePack records. The persisted
 envelope representation is a separate contract; changing transport encoding
 does not authorize rewriting saved state.
@@ -365,13 +366,13 @@ Rust syntax alone is not evidence that unfinished effects have stopped.
 ## Lifecycle observations
 
 The graph owns an object's initialization, repeatable activation cycles and final
-disposal, separately from destructive resource deletion:
+disposal. For native components, destructive removal is a dispose whose context
+carries `StateIntent::Erase`:
 
 ```text
 construct → mandatory framework binding → initialize
-              start → stop → start → stop
-              [delete_owned_resources, only when explicitly requested]
-              dispose → final release
+              start → [pause → resume] → stop → start → stop
+              dispose(reason, Preserve | Erase) → final release
 ```
 
 For ordinary Source/Reaction implementations, required
@@ -381,6 +382,10 @@ returns `()`. It wires base services independently of optional developer hooks.
 `resume_processing` are no-argument async `Result<()>` hooks with no-op defaults.
 Native authors use `NativeComponent` and the role interfaces from the
 [native SDK](computation-plugin-sdk/README.md), not ordinary bases or vtables.
+Its six hooks (`initialize`, `start`, `pause`, `resume`, `stop`, `dispose`) are
+required and take typed contexts carrying the operation ID, cooperative deadline
+and cancellation token; passive components opt in with `passive_lifecycle!`.
+A native pause that cannot be honoured returns `unsupported`, never a no-op.
 
 Initialize once per **actual constructed object**, not per UUID, port,
 subscription, wrapper or loaded library. A stopped object remains initialized;
@@ -404,11 +409,25 @@ failed, cancelled or abandoned cleanup still fences the owner until confirmed
 resource cleanup permits recovery. Closed durable consumers retain their last
 confirmed cursors for upstream cleanup, but processing must recover before
 readiness returns.
+Native destructive removal runs stop, then dispose with
+`DisposeReason::Removal` and `StateIntent::Erase`, only for components declaring
+`erases_owned_state`. Dispose erases owned state first; erasure must be
+idempotent because a failed dispose is retried with the same reason and intent.
+Shutdown and initialization-failure disposal always preserve state. Deletion
+failure does not become successful removal. Ordinary Source/Reaction
 `delete_owned_resources` defaults to unsupported and runs only on explicit
-destructive removal, after successful stop and before dispose. Deletion failure
-does not become successful removal. Temporary `pause_processing` /
-`resume_processing` retains activation and is not an alias or mandatory prelude
-to stop/start.
+destructive removal, after successful stop and before dispose. Temporary pause
+(native `pause`/`resume`, ordinary `pause_processing`/`resume_processing`)
+retains activation and is not an alias or mandatory prelude to stop/start.
+
+Native updates are separate from the lifecycle: the factory's pure `assess`, or
+an instance's optional `NativeManagement::assess`, returns an `Assessment` with an
+`UpdateBoundary` (Pause, Stop or Replace, stored as InPlace, Restart or
+Recreate). The host establishes that boundary, then calls `apply` for Pause or
+Stop; Replace disposes the old object and constructs a new one. `Refused` and
+`Failed` leave the object unchanged; `Damaged` leaves it failed (stopped with
+Abort and disposed) without automatic replacement; an interrupted apply is never
+retried on the same object.
 
 Ordinary ABI **0.18 is creation-only for managed updates**: its descriptor/FFI
 tables do not export factory planning or `apply_update`. A loaded plugin or
@@ -468,7 +487,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "2.0.0"
+abi-version = "4.0.0"
 kind = "example-native"
 ```
 

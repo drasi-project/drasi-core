@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle_ctx;
 use drasi_core::models::SourceChange;
 use drasi_lib::computation::v1::{
     ComponentId, ComputationComponent, EnvelopeSource, GraphChangeCodec, SourceTransactionCodec,
@@ -132,7 +133,7 @@ async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> R
         settings.clone(),
         None,
     )?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     admin.execute("BEGIN").await?;
     admin
         .execute("INSERT INTO items VALUES (X'00FF', 'first'), (X'0100', 'second')")
@@ -165,8 +166,8 @@ async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> R
     assert!(matches!(&changes[0], SourceChange::Delete { metadata } if metadata.reference == old));
     assert!(matches!(&changes[1], SourceChange::Insert { .. }));
     assert_ne!(changes[1].get_reference(), &old);
-    source.stop().await?;
-    source.start().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
     admin.execute("DELETE FROM items").await?;
     let envelope = tokio::time::timeout(Duration::from_secs(5), source.next())
         .await??
@@ -177,7 +178,7 @@ async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> R
             .len(),
         2
     );
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     let mut fast = MySqlSource::new(
         ComponentId::try_new("334de629-0dc2-56d8-a5a8-7c5475721769")?,
         StreamId::try_new("mysql-fast")?,
@@ -186,7 +187,7 @@ async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> R
     )?;
     assert_eq!(fast.recovery_contract(), Default::default());
     assert!(fast.recovery_progress().is_none());
-    fast.start().await?;
+    fast.start(&lifecycle_ctx::start()).await?;
     admin
         .execute("INSERT INTO items VALUES (X'FF00', 'fast')")
         .await?;
@@ -197,7 +198,7 @@ async fn native_owned_source_emits_complete_transactions_and_fast_changes() -> R
         envelope.envelope.changes().schema(),
         GraphChangeCodec::schema().descriptor()
     );
-    fast.stop().await?;
+    fast.stop(&lifecycle_ctx::stop()).await?;
     admin.close().await?;
     Ok(())
 }
@@ -216,9 +217,9 @@ async fn native_mysql_process_exit_helper() -> Result<()> {
     let path = std::env::var("DRASI_MYSQL_CRASH_PATH")?;
     let owner = progress()?;
     let mut query = query(std::path::Path::new(&path), owner.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(config, owner)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let transaction = next(&mut source).await?;
     if point == "after" {
         apply(&mut query, transaction).await?;
@@ -269,7 +270,7 @@ async fn native_process_exit_before_and_after_commit_recovers_complete_query_sta
         );
         let owner = progress()?;
         let mut query = query(path.path(), owner.clone()).await?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         assert_eq!(
             query.results().snapshot()?.rows.len(),
             usize::from(point == "after")
@@ -279,14 +280,14 @@ async fn native_process_exit_before_and_after_commit_recovers_complete_query_sta
             .execute("INSERT INTO items VALUES (2, 'offline')")
             .await?;
         let mut source = source(database.settings, owner)?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         if point == "before" {
             apply(&mut query, next(&mut source).await?).await?;
         }
         apply(&mut query, next(&mut source).await?).await?;
         assert_eq!(query.results().snapshot()?.rows.len(), 2);
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
         database.admin.close().await?;
     }
     Ok(())
@@ -300,7 +301,7 @@ async fn native_retention_and_schema_failures_do_not_modify_server_settings_or_c
     let path = tempfile::tempdir()?;
     let owner = progress()?;
     let mut query = query(path.path(), owner.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(database.settings, owner.clone())?;
     if !database
         .admin
@@ -314,12 +315,12 @@ async fn native_retention_and_schema_failures_do_not_modify_server_settings_or_c
             .execute("SET GLOBAL expire_logs_days=1")
             .await?;
         assert!(source
-            .start()
+            .start(&lifecycle_ctx::start())
             .await
             .unwrap_err()
             .to_string()
             .contains("expiry disabled"));
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
         let expiry = database
             .admin
             .query("SELECT @@global.expire_logs_days")
@@ -335,12 +336,12 @@ async fn native_retention_and_schema_failures_do_not_modify_server_settings_or_c
         .execute("SET GLOBAL binlog_expire_logs_seconds=3600")
         .await?;
     assert!(source
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("expiry disabled"));
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     let expiry = database
         .admin
         .query("SELECT @@global.binlog_expire_logs_seconds")
@@ -358,8 +359,8 @@ async fn native_retention_and_schema_failures_do_not_modify_server_settings_or_c
             .admin
             .execute("SET GLOBAL binlog_expire_logs_auto_purge=OFF")
             .await?;
-        source.start().await?;
-        source.stop().await?;
+        source.start(&lifecycle_ctx::start()).await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
         database
             .admin
             .execute("SET GLOBAL binlog_expire_logs_auto_purge=ON")
@@ -369,7 +370,7 @@ async fn native_retention_and_schema_failures_do_not_modify_server_settings_or_c
         .admin
         .execute("SET GLOBAL binlog_expire_logs_seconds=0")
         .await?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     database
         .admin
         .execute("INSERT INTO items VALUES (1, 'original')")
@@ -386,15 +387,15 @@ async fn native_retention_and_schema_failures_do_not_modify_server_settings_or_c
         .to_string()
         .contains("schema recovery"));
     assert_eq!(owner.snapshot().checkpoints, checkpoint);
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert!(source
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("binding"));
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())
 }
@@ -433,7 +434,7 @@ async fn native_column_types_preserve_values_and_unsupported_types_fail_before_s
         database.settings.clone(),
         None,
     )?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     database
         .admin
         .execute(
@@ -515,7 +516,7 @@ async fn native_column_types_preserve_values_and_unsupported_types_fail_before_s
         element.get_property("b"),
         &ElementValue::List(vec![Integer(0), Integer(0), Integer(0)])
     );
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     let (_, catalog) = catalog::inspect(&mut database.admin, &database.settings).await?;
     let mut cursor = database.admin.cursor("SELECT * FROM items").await?;
     catalog::validate_snapshot_columns(&catalog["items"], &cursor.columns)?;
@@ -558,12 +559,12 @@ async fn native_column_types_preserve_values_and_unsupported_types_fail_before_s
         .execute("CREATE TABLE items (id INT PRIMARY KEY, p POINT)")
         .await?;
     assert!(source
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("unsupported native MySQL column type"));
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())
 }
@@ -581,7 +582,10 @@ async fn cancelled_native_start_closes_owned_handshake_and_requires_cleanup_befo
         None,
     )?;
     let (start, peer) = tokio::join!(
-        tokio::time::timeout(Duration::from_millis(50), source.start()),
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            source.start(lifecycle_ctx::held(lifecycle_ctx::start()))
+        ),
         async {
             let (mut socket, _) = listener.accept().await?;
             socket.write_all(&[100, 0]).await?;
@@ -596,12 +600,12 @@ async fn cancelled_native_start_closes_owned_handshake_and_requires_cleanup_befo
     assert!(start.is_err());
     peer?;
     assert!(source
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("cleanup"));
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -782,7 +786,7 @@ async fn native_transactions_replay_only_after_actual_query_commit_and_fail_on_p
         let path = tempfile::tempdir()?;
         let owner = progress()?;
         let mut query = query(path.path(), owner.clone()).await?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         let mut first = source(database.settings.clone(), owner.clone())?;
         let contract = if retention == MySqlRetention::UntilProcessed {
             ComponentRecovery::admitted(
@@ -793,7 +797,7 @@ async fn native_transactions_replay_only_after_actual_query_commit_and_fail_on_p
             ComponentRecovery::default()
         };
         assert_eq!(first.recovery_contract(), contract);
-        first.start().await?;
+        first.start(&lifecycle_ctx::start()).await?;
         database.admin.execute("BEGIN").await?;
         database
             .admin
@@ -817,8 +821,8 @@ async fn native_transactions_replay_only_after_actual_query_commit_and_fail_on_p
             SourceTransactionCodec::decode(&uncommitted.envelope, database.settings.transactions)?;
         let original_position = original.position().to_vec();
         assert!(owner.snapshot().checkpoints.is_empty());
-        first.stop().await?;
-        first.start().await?;
+        first.stop(&lifecycle_ctx::stop()).await?;
+        first.start(&lifecycle_ctx::start()).await?;
         let replayed = next(&mut first).await?;
         assert_eq!(
             SourceTransactionCodec::decode(&replayed.envelope, database.settings.transactions)?
@@ -836,8 +840,8 @@ async fn native_transactions_replay_only_after_actual_query_commit_and_fail_on_p
             serde_json::json!({"id":1,"value":"final"})
         );
         assert!(!owner.snapshot().checkpoints.is_empty());
-        first.stop().await?;
-        query.stop().await?;
+        first.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
         drop(first);
         drop(query);
         database
@@ -846,9 +850,9 @@ async fn native_transactions_replay_only_after_actual_query_commit_and_fail_on_p
             .await?;
         let owner = progress()?;
         let mut restored = self::query(path.path(), owner.clone()).await?;
-        restored.start().await?;
+        restored.start(&lifecycle_ctx::start()).await?;
         let mut second = source(database.settings.clone(), owner.clone())?;
-        second.start().await?;
+        second.start(&lifecycle_ctx::start()).await?;
         let offline = next(&mut second).await?;
         let changes =
             SourceTransactionCodec::decode(&offline.envelope, database.settings.transactions)?
@@ -856,7 +860,7 @@ async fn native_transactions_replay_only_after_actual_query_commit_and_fail_on_p
         assert_eq!(changes.len(), 1, "committed anchor must not be republished");
         apply(&mut restored, offline).await?;
         assert_eq!(restored.results().snapshot()?.rows.len(), 2);
-        second.stop().await?;
+        second.stop(&lifecycle_ctx::stop()).await?;
         database.admin.execute("FLUSH BINARY LOGS").await?;
         let logs = database.admin.query("SHOW BINARY LOGS").await?;
         let latest = catalog::field(logs.values.last().context("latest binlog")?, 0)?;
@@ -864,15 +868,18 @@ async fn native_transactions_replay_only_after_actual_query_commit_and_fail_on_p
             .admin
             .execute(&format!("PURGE BINARY LOGS TO '{latest}'"))
             .await?;
-        let error = second.start().await.expect_err("purged replay anchor");
+        let error = second
+            .start(&lifecycle_ctx::start())
+            .await
+            .expect_err("purged replay anchor");
         assert!(
             error
                 .downcast_ref::<drasi_lib::sources::SourceError>()
                 .is_some(),
             "{error:#}"
         );
-        second.stop().await?;
-        restored.stop().await?;
+        second.stop(&lifecycle_ctx::stop()).await?;
+        restored.stop(&lifecycle_ctx::stop()).await?;
         database.admin.close().await?;
     }
     Ok(())
@@ -886,11 +893,11 @@ async fn native_oversized_transactions_never_publish_a_prefix_and_retry_after_li
     let path = tempfile::tempdir()?;
     let owner = progress()?;
     let mut query = query(path.path(), owner.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut settings = database.settings.clone();
     settings.transactions.max_changes = NonZeroUsize::new(1).unwrap();
     let mut limited = source(settings, owner.clone())?;
-    limited.start().await?;
+    limited.start(&lifecycle_ctx::start()).await?;
     database
         .admin
         .execute("INSERT INTO items VALUES (1, 'one'), (2, 'two')")
@@ -904,13 +911,13 @@ async fn native_oversized_transactions_never_publish_a_prefix_and_retry_after_li
     );
     assert!(owner.snapshot().checkpoints.is_empty());
     assert!(query.results().snapshot()?.rows.is_empty());
-    limited.stop().await?;
+    limited.stop(&lifecycle_ctx::stop()).await?;
     let mut retry = source(database.settings, owner.clone())?;
-    retry.start().await?;
+    retry.start(&lifecycle_ctx::start()).await?;
     apply(&mut query, next(&mut retry).await?).await?;
     assert_eq!(query.results().snapshot()?.rows.len(), 2);
-    retry.stop().await?;
-    query.stop().await?;
+    retry.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())
 }

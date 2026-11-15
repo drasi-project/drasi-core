@@ -273,7 +273,10 @@ impl ComputationComponent for LegacySourceAdapter {
         &self.descriptor
     }
 
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         if self.resource.owned {
             anyhow::ensure!(
                 !self.resource.disposed.load(Ordering::Acquire),
@@ -297,7 +300,13 @@ impl ComputationComponent for LegacySourceAdapter {
         }
         Ok(())
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            self.erase_owned_state().await?;
+        }
         drive_observations(
             self.resource.source.id(),
             &mut self.updates,
@@ -306,27 +315,28 @@ impl ComputationComponent for LegacySourceAdapter {
         )
         .await
     }
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+    async fn pause(
+        &mut self,
+        _context: &crate::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
         if self.resource.owned {
             self.resource.source.pause_processing().await?;
         }
         Ok(())
     }
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+    async fn resume(
+        &mut self,
+        _context: &crate::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
         if self.resource.owned {
             self.resource.source.resume_processing().await?;
         }
         Ok(())
     }
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.resource.owned,
-            "borrowed source resources belong to their owner"
-        );
-        self.resource.source.delete_owned_resources().await
-    }
-
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         if let Some(updates) = &mut self.updates {
             while let Ok(update) = updates.try_recv() {
                 log::trace!(
@@ -356,7 +366,7 @@ impl ComputationComponent for LegacySourceAdapter {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         self.receiver = None;
         drive_observations(
             self.resource.source.id(),
@@ -365,6 +375,16 @@ impl ComputationComponent for LegacySourceAdapter {
             true,
         )
         .await
+    }
+}
+
+impl LegacySourceAdapter {
+    async fn erase_owned_state(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.resource.owned,
+            "borrowed source resources belong to their owner"
+        );
+        self.resource.source.delete_owned_resources().await
     }
 }
 

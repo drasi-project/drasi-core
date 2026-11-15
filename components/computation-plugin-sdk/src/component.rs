@@ -14,6 +14,14 @@ use drasi_computation_contracts::{
 use drasi_core_types::interface::StorageDurability;
 use std::sync::Arc;
 
+use crate::{
+    lifecycle::{
+        ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext, LifecycleResult,
+        PauseContext, ResumeContext, StartContext, StopContext,
+    },
+    ApplyUpdateRequest, UpdateRequest,
+};
+
 #[async_trait]
 pub trait NativeComponent: Send + Sync {
     fn descriptor(&self) -> &ComponentDescriptor;
@@ -23,19 +31,10 @@ pub trait NativeComponent: Send + Sync {
             self.descriptor().id()
         )
     }
-    fn requires_readiness_confirmation(&self) -> bool {
-        false
-    }
-    /// Whether this component implements explicit, permanent deletion of owned
-    /// state/resources. Must match `Capabilities::delete_owned_resources`.
-    fn supports_delete_owned_resources(&self) -> bool {
-        false
-    }
-    /// Whether the retained-instance update hook is implemented. Must agree with
-    /// the factory declaring an InPlace or Restart update mode. Recreate-only
-    /// factories do not need this hook. This is not a data-loss authorization.
-    fn supports_apply_update(&self) -> bool {
-        false
+    /// Instance management for Pause and Stop boundary updates. Presence must
+    /// match `Capabilities::management`; it is fixed for the object's lifetime.
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        None
     }
     /// Whether this component consumes graph input-binding updates. This must
     /// agree with the factory's `input_binding_updates` capability.
@@ -76,77 +75,50 @@ pub trait NativeComponent: Send + Sync {
     /// Set up instance-lifetime resources once after construction has bound
     /// context/services, before the first start. Do not start normal processing
     /// or wait for the graph to become live. Failure/cancellation retires this
-    /// object: dispose it, and construct a fresh object to retry initialization.
-    async fn initialize(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    /// Start an activation on an initialized object. A partial failure or
-    /// cancellation still requires stop before retry or final disposal.
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    /// Called instead of `start` by the normal owned START operation when an
-    /// identity resource was bound at construction. Never update configuration
-    /// with these ephemeral values or fall back to literal authentication.
-    async fn start_with_credentials(
-        &mut self,
-        _credentials: crate::ActivationCredentials,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("component does not implement activation credentials")
-    }
-    /// Settle activation-owned work, including a partial start, and retain
-    /// resources needed for a later start. Incomplete cleanup must be retry-safe;
+    /// object: only Dispose(InitializationFailure, Preserve) follows.
+    async fn initialize(&mut self, ctx: &InitializeContext) -> LifecycleResult;
+    /// Start an activation on an initialized object. Credentials, when the
+    /// factory declares them, are in the context; never persist them. A partial
+    /// failure or cancellation still requires Stop before retry or Dispose.
+    /// Readiness, when declared, is signalled separately with `Ready`.
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult;
+    /// Pause processing without ending activation: no new output, workers
+    /// gated, obligations accounted for. Return `unsupported` rather than
+    /// succeeding when independent work cannot actually be settled.
+    async fn pause(&mut self, ctx: &PauseContext) -> LifecycleResult;
+    /// Resume a completed pause, without another Start or Initialize.
+    async fn resume(&mut self, ctx: &ResumeContext) -> LifecycleResult;
+    /// Settle activation-owned work, including a partial Start, and retain
+    /// resources needed for a later Start. `Drain` completes in-flight work;
+    /// `Abort` cancels promptly. Incomplete cleanup must be retry-safe;
     /// cancellation is not completion. This does not end the object's lifetime.
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    /// Release instance-lifetime resources at final retirement, including after
-    /// partial initialization. Called only after activation cleanup has completed.
-    /// Incomplete disposal must be retry-safe. Successful disposal is final and
-    /// does not delete persistent state or component-owned external artifacts.
-    async fn dispose(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    /// Temporarily pause processing without ending activation. Components with
-    /// independently running work must actually settle that work before claiming
-    /// an update plan that relies on this boundary. No-op defaults prove nothing
-    /// about data safety, draining or persistence.
-    async fn pause_processing(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    /// Resume a completed temporary pause, without another start/initialize.
-    async fn resume_processing(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    /// Execute an approved retained-instance update at its required boundary.
-    /// InPlace requires completed pause; Restart requires completed stop.
-    /// Recreate is never an instance operation. Expose the proposed configuration
-    /// from `configuration()` on success; omitted fields may expose the factory's
-    /// published literal defaults, but never arbitrary extra/different values.
-    /// Comparison does not rewrite the accepted request. An incomplete attempt may be retried
-    /// with the identical request/plan; it is not rolled back by cancellation.
-    /// Core, not this declaration, validates actual data and downstream safety.
-    /// Success refreshes inspected query descriptions from the same registered
-    /// readers. Hosts must re-inspect rather than retaining creation-time metadata.
-    async fn apply_update(&mut self, _update: &crate::ApplyUpdateRequest) -> anyhow::Result<()> {
-        Err(crate::transport::Failure::new(
-            crate::abi::status::UNSUPPORTED,
-            "component does not implement retained-instance updates",
-        )
-        .into())
-    }
-    /// Permanently delete owned persistent state and external resources, only
-    /// when explicitly requested after positive activation cleanup. Ordinary
-    /// stop, disposal and updates must not invoke this hook implicitly. A failed
-    /// or cancelled deletion may be partial and must be retry-safe. Borrowed or
-    /// shared host-owned resources are never covered by this permission.
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        Err(crate::transport::Failure::new(
-            crate::abi::status::UNSUPPORTED,
-            "component does not implement permanent owned-resource deletion",
-        )
-        .into())
-    }
+    async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult;
+    /// Retire the object, including after partial initialization. Called only
+    /// after activation cleanup has completed. `StateIntent::Erase` permits
+    /// permanently erasing state and external resources this component owns;
+    /// never borrowed or shared state. A failed attempt is retried with the
+    /// same reason and intent and must be retry-safe. Success is final.
+    async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult;
+}
+
+/// Updates a retained object at a Pause or Stop boundary. Replace is never an
+/// instance operation: the host disposes the old object and constructs anew.
+#[async_trait]
+pub trait NativeManagement: Send + Sync {
+    /// Side-effect-free assessment of a proposed change using live facts. A
+    /// failure is an error, never an implicit Replace.
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment>;
+    /// Apply an accepted change at the established boundary. Expose the
+    /// proposed configuration from `configuration()` on success; omitted
+    /// fields may expose the factory's published defaults only. `Refused` and
+    /// `Failed` must leave the object unchanged and may be retried; `Damaged`
+    /// retires it. An interrupted or cancelled attempt is never retried on the
+    /// same object: only Stop and Dispose remain admissible.
+    async fn apply(
+        &mut self,
+        ctx: &ApplyContext,
+        update: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError>;
 }
 
 #[async_trait]
@@ -235,6 +207,6 @@ pub trait NativeSink: NativeComponent {
 #[async_trait]
 pub trait NativeService: NativeComponent {
     /// Perform service processing. This is not a lifecycle alias; temporary
-    /// quiescence uses NativeComponent::pause_processing/resume_processing.
+    /// quiescence uses NativeComponent::pause/resume.
     async fn run(&mut self) -> anyhow::Result<()>;
 }

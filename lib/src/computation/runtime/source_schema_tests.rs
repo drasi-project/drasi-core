@@ -65,7 +65,10 @@ impl ComputationComponent for NativeSource {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::json!({"nodes": [{"label": "ConfigurationOnly"}]}))
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &crate::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         if self.probe.hold_initialization.load(Ordering::Acquire) {
             self.probe.initializing.notify_one();
             self.probe.release_initialization.notified().await;
@@ -75,10 +78,24 @@ impl ComputationComponent for NativeSource {
         }
         Ok(())
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &crate::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+    crate::passive_component_lifecycle!(@hook pause, PauseContext);
+    crate::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &crate::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -98,12 +115,7 @@ impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    crate::passive_component_lifecycle!();
 }
 
 #[async_trait]

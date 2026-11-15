@@ -89,8 +89,8 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
             }
         });
         let mut source = family_component(HTTP_SOURCE, NETWORK_SOURCE_ID, config, linked)?;
-        source.initialize().await?;
-        source.start().await?;
+        source.initialize(&crate::hooks::initialize_ctx()).await?;
+        source.start(&crate::hooks::start_ctx()).await?;
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{port}/hooks/acme?region=west%20coast");
         assert_eq!(
@@ -174,8 +174,8 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
             cors.headers()["access-control-allow-origin"],
             "https://example.test"
         );
-        source.stop().await?;
-        source.dispose().await?;
+        source.stop(&crate::hooks::stop_ctx()).await?;
+        source.dispose(&crate::hooks::dispose_ctx()).await?;
         drop(TcpListener::bind(("127.0.0.1", port)).await?);
     }
     std::env::remove_var("NATIVE_HTTP_FAMILY_HMAC_TEST");
@@ -198,8 +198,8 @@ async fn native_http_adaptive_prefetch_keeps_the_first_event_when_next_is_cancel
             }),
             linked,
         )?;
-        source.initialize().await?;
-        source.start().await?;
+        source.initialize(&crate::hooks::initialize_ctx()).await?;
+        source.start(&crate::hooks::start_ctx()).await?;
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{port}/sources/{NETWORK_SOURCE_ID}/events");
         client
@@ -226,8 +226,8 @@ async fn native_http_adaptive_prefetch_keeps_the_first_event_when_next_is_cancel
             assert_eq!(source_value(&envelope)?, value);
             assert_eq!(envelope.system().sequence(), value as u64);
         }
-        source.stop().await?;
-        source.dispose().await?;
+        source.stop(&crate::hooks::stop_ctx()).await?;
+        source.dispose(&crate::hooks::dispose_ctx()).await?;
     }
     Ok(())
 }
@@ -362,11 +362,11 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
             }),
             linked,
         )?;
-        sink.initialize().await?;
-        sink.start().await?;
+        sink.initialize(&crate::hooks::initialize_ctx()).await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         sink.handle(result_input(1)?).await?;
-        sink.stop().await?;
-        sink.dispose().await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
+        sink.dispose(&crate::hooks::dispose_ctx()).await?;
         let request = server
             .state
             .requests
@@ -397,13 +397,13 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
             }),
             linked,
         )?;
-        batch.initialize().await?;
-        batch.start().await?;
+        batch.initialize(&crate::hooks::initialize_ctx()).await?;
+        batch.start(&crate::hooks::start_ctx()).await?;
         batch
             .handle_batch(vec![result_input(2)?, result_input(3)?])
             .await?;
-        batch.stop().await?;
-        batch.dispose().await?;
+        batch.stop(&crate::hooks::stop_ctx()).await?;
+        batch.dispose(&crate::hooks::dispose_ctx()).await?;
         let request = server
             .state
             .requests

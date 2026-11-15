@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle_ctx;
 use tokio::{sync::oneshot, time::timeout};
 
 fn component_id(value: u128) -> ComponentId {
@@ -58,7 +59,7 @@ async fn worker_schema_is_actual_bounded_and_generation_scoped() -> Result<()> {
         sql.describe_schema().await.is_err(),
         "constructor must not open SQLite"
     );
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     assert!(sql.describe_schema().await?.is_empty());
     sql.execute(
         "CREATE TABLE items(id INTEGER PRIMARY KEY,code TEXT NOT NULL,value REAL,raw BLOB)",
@@ -89,14 +90,14 @@ async fn worker_schema_is_actual_bounded_and_generation_scoped() -> Result<()> {
         .as_ref()
         .is_some_and(|description| description.contains("element key")));
     let old_worker = sql.bind_to_current_worker().await?;
-    source.stop().await?;
-    source.start().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
     assert!(
         old_worker.describe_schema().await.is_err(),
         "retired schema client cannot rebind"
     );
     assert_eq!(sql.describe_schema().await?, schema);
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -429,14 +430,14 @@ async fn rest_sql_handles_are_fenced_to_their_original_database_worker() -> Resu
     let mut settings = config(SqliteOutput::Changes);
     settings.path = Some(directory.path().join("source.db"));
     let mut source = source(settings)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let live = source.handle();
     let bound = live.bind_to_current_worker().await?;
     bound
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
         .await?;
-    source.stop().await?;
-    source.start().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
     assert!(bound.execute("INSERT INTO items VALUES(1)").await.is_err());
     live.execute("INSERT INTO items VALUES(2)").await?;
     assert_eq!(
@@ -445,7 +446,7 @@ async fn rest_sql_handles_are_fenced_to_their_original_database_worker() -> Resu
     );
     let output = next(&mut source).await?;
     assert_eq!(GraphChangeCodec::decode_changes(&output.envelope)?.len(), 1);
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -525,7 +526,7 @@ async fn configured_keys() -> Result<()> {
             }];
             let limits = settings.transactions;
             let mut source = source(settings)?;
-            source.start().await?;
+            source.start(&lifecycle_ctx::start()).await?;
             let handle = source.handle();
             let result = async {
                 let primary_key = if primary_key { "PRIMARY KEY" } else { "" };
@@ -581,7 +582,7 @@ async fn configured_keys() -> Result<()> {
                 Ok::<_, anyhow::Error>(())
             }
             .await;
-            let cleanup = source.stop().await;
+            let cleanup = source.stop(&lifecycle_ctx::stop()).await;
             result?;
             cleanup?;
         }
@@ -599,20 +600,20 @@ async fn all_shadowed_rowid_aliases_require_explicit_keys() -> Result<()> {
     settings.path = Some(path);
     let mut rejected = source(settings.clone())?;
     let error = rejected
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .expect_err("rowid must not be confused with a user column");
     assert!(
         format!("{error:#}").contains("configure explicit key columns"),
         "{error:#}"
     );
-    rejected.stop().await?;
+    rejected.stop(&lifecycle_ctx::stop()).await?;
     settings.table_keys = vec![crate::TableKeyConfig {
         table: "items".into(),
         key_columns: vec!["id".into()],
     }];
     let mut source = source(settings)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     source
         .handle()
         .execute("INSERT INTO items VALUES(1,'rowid','_rowid_','oid')")
@@ -623,7 +624,7 @@ async fn all_shadowed_rowid_aliases_require_explicit_keys() -> Result<()> {
         .get_reference()
         .element_id
         .starts_with("sqlite:v1:"));
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -633,7 +634,7 @@ async fn keyless_rowids() -> Result<()> {
         let settings = config(mode);
         let limits = settings.transactions;
         let mut source = source(settings)?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         let handle = source.handle();
         let result = async {
             handle.execute_batch(
@@ -670,7 +671,7 @@ async fn keyless_rowids() -> Result<()> {
                 if metadata.reference.element_id.as_ref() == "sqlite:rowid:v1:[\"items\",42]"));
             Ok::<_, anyhow::Error>(())
         }.await;
-        let cleanup = source.stop().await;
+        let cleanup = source.stop(&lifecycle_ctx::stop()).await;
         result?;
         cleanup?;
     }
@@ -706,7 +707,7 @@ async fn configured_keys_validate_actual_columns_before_admission() -> Result<()
     }];
     let mut source = source(settings)?;
     let error = source
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .expect_err("unknown key column cannot be ignored");
     assert!(
@@ -718,7 +719,7 @@ async fn configured_keys_validate_actual_columns_before_admission() -> Result<()
         .execute("UPDATE items SET value='lost'")
         .await
         .is_err());
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     let retained: String = rusqlite::Connection::open(&path)?.query_row(
         "SELECT value FROM items WHERE id=1",
         [],
@@ -744,7 +745,7 @@ async fn both_native_modes_publish_only_after_the_isolated_scope_commits() -> Re
         let config = config(mode);
         let limits = config.transactions;
         let mut source = source(config)?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         let handle = source.handle();
         handle
             .execute("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)")
@@ -780,7 +781,7 @@ async fn both_native_modes_publish_only_after_the_isolated_scope_commits() -> Re
             }
         };
         assert_eq!(changes.len(), 2);
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
 }
@@ -788,7 +789,7 @@ async fn both_native_modes_publish_only_after_the_isolated_scope_commits() -> Re
 #[tokio::test(flavor = "current_thread")]
 async fn cancellation_rolls_back_and_revokes_escaped_handles_before_other_work() -> Result<()> {
     let mut source = source(config(SqliteOutput::Transactions))?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
@@ -812,14 +813,14 @@ async fn cancellation_rolls_back_and_revokes_escaped_handles_before_other_work()
     assert!(tx.execute("INSERT INTO items VALUES(2)").await.is_err());
     assert!(handle.query("SELECT id FROM items").await?.is_empty());
     no_output(&mut source).await;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn caught_statement_errors_and_failed_commits_never_publish_or_leave_rows() -> Result<()> {
     let mut source = source(config(SqliteOutput::Transactions))?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle.execute_batch(
         "CREATE TABLE items(id INTEGER PRIMARY KEY);
@@ -845,7 +846,7 @@ async fn caught_statement_errors_and_failed_commits_never_publish_or_leave_rows(
     no_output(&mut source).await;
     handle.execute("INSERT INTO items VALUES(3)").await?;
     next(&mut source).await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -854,7 +855,7 @@ async fn parsed_savepoints_and_key_changes_preserve_exact_committed_changes() ->
     let config = config(SqliteOutput::Transactions);
     let limits = config.transactions;
     let mut source = source(config)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id TEXT PRIMARY KEY, value TEXT)")
@@ -890,14 +891,14 @@ async fn parsed_savepoints_and_key_changes_preserve_exact_committed_changes() ->
         &changes[4],
         drasi_core::models::SourceChange::Insert { .. }
     ));
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn authorizer_denies_raw_boundaries_and_query_mutations() -> Result<()> {
     let mut source = source(config(SqliteOutput::Changes))?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
@@ -939,7 +940,7 @@ async fn authorizer_denies_raw_boundaries_and_query_mutations() -> Result<()> {
         .is_err());
     assert!(handle.query("SELECT * FROM items").await?.is_empty());
     no_output(&mut source).await;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -949,7 +950,7 @@ async fn stop_rolls_back_a_scope_and_old_handles_cannot_reach_replacement() -> R
     let mut config = config(SqliteOutput::Transactions);
     config.path = Some(directory.path().join("source.db"));
     let mut source = source(config)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
@@ -964,15 +965,15 @@ async fn stop_rolls_back_a_scope_and_old_handles_cannot_reach_replacement() -> R
         Ok(())
     }));
     let tx = tokio::select! { result = &mut transaction => panic!("{result:?}"), result = captured => result? };
-    source.stop().await?;
-    source.start().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
     assert!(tx.execute("INSERT INTO items VALUES(3)").await.is_err());
     finish.send(()).unwrap();
     assert!(transaction.await.is_err());
     assert!(handle.query("SELECT id FROM items").await?.is_empty());
     handle.execute("INSERT INTO items VALUES(4)").await?;
     next(&mut source).await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -983,7 +984,7 @@ async fn oversized_capture_is_rejected_atomically_and_increased_limits_allow_ret
     config.path = Some(directory.path().join("source.db"));
     config.transactions.max_changes = NonZeroUsize::new(1).unwrap();
     let mut first = source(config.clone())?;
-    first.start().await?;
+    first.start(&lifecycle_ctx::start()).await?;
     first
         .handle()
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
@@ -999,23 +1000,23 @@ async fn oversized_capture_is_rejected_atomically_and_increased_limits_allow_ret
         .await?
         .is_empty());
     no_output(&mut first).await;
-    first.stop().await?;
+    first.stop(&lifecycle_ctx::stop()).await?;
     config.transactions.max_changes = NonZeroUsize::new(2).unwrap();
     let mut second = source(config)?;
-    second.start().await?;
+    second.start(&lifecycle_ctx::start()).await?;
     second
         .handle()
         .execute("INSERT INTO items VALUES(1),(2)")
         .await?;
     next(&mut second).await?;
-    second.stop().await?;
+    second.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn local_validation_errors_also_abort_a_scope_even_when_caught() -> Result<()> {
     let mut source = source(config(SqliteOutput::Transactions))?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
@@ -1032,7 +1033,7 @@ async fn local_validation_errors_also_abort_a_scope_even_when_caught() -> Result
         assert!(handle.query("SELECT * FROM items").await?.is_empty());
     }
     no_output(&mut source).await;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -1041,7 +1042,7 @@ async fn idle_scopes_and_expensive_queries_obey_real_execution_deadlines() -> Re
     let mut config = config(SqliteOutput::Transactions);
     config.transactions.max_duration_ms = NonZeroU64::new(60).unwrap();
     let mut source = source(config)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
@@ -1078,7 +1079,7 @@ async fn idle_scopes_and_expensive_queries_obey_real_execution_deadlines() -> Re
     assert!(error.to_string().contains("deadline"));
     assert!(began.elapsed() >= Duration::from_millis(60));
     no_output(&mut source).await;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -1087,7 +1088,7 @@ async fn native_keys_cover_without_rowid_composites_blobs_and_cascades() -> Resu
     let config = config(SqliteOutput::Transactions);
     let limits = config.transactions;
     let mut source = source(config)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle.execute_batch(
         "CREATE TABLE items(a TEXT,b TEXT,PRIMARY KEY(a,b)) WITHOUT ROWID;
@@ -1126,14 +1127,14 @@ async fn native_keys_cover_without_rowid_composites_blobs_and_cascades() -> Resu
         .await
         .is_err());
     no_output(&mut source).await;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn panicked_callback_rolls_back_before_the_next_handle_operation() -> Result<()> {
     let mut source = source(config(SqliteOutput::Transactions))?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
@@ -1152,7 +1153,7 @@ async fn panicked_callback_rolls_back_before_the_next_handle_operation() -> Resu
     assert!(callback.await.unwrap_err().is_panic());
     assert!(handle.query("SELECT * FROM items").await?.is_empty());
     no_output(&mut source).await;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -1167,7 +1168,7 @@ async fn cancelled_and_timed_out_stop_retains_a_submitted_commit_and_client_owne
         config.clone(),
     )?);
     let mut source = source(config.clone())?.with_client_resource(client.clone())?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = client.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY)")
@@ -1181,15 +1182,18 @@ async fn cancelled_and_timed_out_stop_retains_a_submitted_commit_and_client_owne
     assert!(timeout(Duration::from_millis(30), &mut write)
         .await
         .is_err());
-    assert!(timeout(Duration::from_millis(1), source.stop())
-        .await
-        .is_err());
+    assert!(timeout(
+        Duration::from_millis(1),
+        source.stop(&lifecycle_ctx::stop())
+    )
+    .await
+    .is_err());
     let began = tokio::time::Instant::now();
-    let error = source.stop().await.unwrap_err();
+    let error = source.stop(&lifecycle_ctx::stop()).await.unwrap_err();
     assert!(error.is::<drasi_lib::context::workers::WorkerCleanupError>());
     assert!(began.elapsed() >= Duration::from_millis(30));
     assert!(source.runtime.owns_database_worker().await);
-    assert!(source.start().await.is_err());
+    assert!(source.start(&lifecycle_ctx::start()).await.is_err());
     assert_eq!(client.owner.available_permits(), 0);
     assert!(SqliteSource::new(
         ComponentId::try_new("64bf4c56-178d-5ff8-940a-9748059b65fe")?,
@@ -1200,7 +1204,7 @@ async fn cancelled_and_timed_out_stop_retains_a_submitted_commit_and_client_owne
     .is_err());
     reader.execute_batch("COMMIT")?;
     assert_eq!(timeout(Duration::from_secs(2), &mut write).await??, 1);
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(
         reader.query_row("SELECT count(*) FROM items", [], |row| row
             .get::<_, usize>(0))?,
@@ -1214,8 +1218,8 @@ async fn cancelled_and_timed_out_stop_retains_a_submitted_commit_and_client_owne
         config,
     )?
     .with_client_resource(client)?;
-    replacement.start().await?;
+    replacement.start(&lifecycle_ctx::start()).await?;
     assert_eq!(handle.query("SELECT * FROM items").await?.len(), 1);
-    replacement.stop().await?;
+    replacement.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }

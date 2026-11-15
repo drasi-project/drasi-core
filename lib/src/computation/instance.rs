@@ -990,11 +990,29 @@ mod tests {
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
+        async fn start(
+            &mut self,
+            _context: &crate::computation::v1::StartContext,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn stop(&mut self) -> anyhow::Result<()> {
+        async fn stop(
+            &mut self,
+            _context: &crate::computation::v1::StopContext,
+        ) -> anyhow::Result<()> {
             self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        crate::passive_component_lifecycle!(@hook initialize, InitializeContext);
+        crate::passive_component_lifecycle!(@hook pause, PauseContext);
+        crate::passive_component_lifecycle!(@hook resume, ResumeContext);
+        async fn dispose(
+            &mut self,
+            context: &crate::computation::v1::DisposeContext,
+        ) -> anyhow::Result<()> {
+            if context.erases_owned_state() {
+                anyhow::bail!("this component does not support permanent state removal");
+            }
             Ok(())
         }
     }

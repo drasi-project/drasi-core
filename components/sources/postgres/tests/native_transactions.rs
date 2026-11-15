@@ -280,9 +280,9 @@ async fn postgres_whole_commits_hide_intermediate_rows_and_handle_key_changes() 
     let path = tempfile::tempdir()?;
     let progress = progress();
     let mut query = query(path.path(), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(database.config.clone(), progress.clone())?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     database
         .client()
         .batch_execute(
@@ -332,8 +332,8 @@ async fn postgres_whole_commits_hide_intermediate_rows_and_handle_key_changes() 
     apply(&mut query, group).await?;
     assert!(rows(&query).is_empty());
     database.wait_feedback(committed(&progress)).await?;
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -346,11 +346,11 @@ async fn postgres_rejected_group_is_not_acknowledged_and_higher_limit_replays_it
     {
         let progress = progress();
         let mut query = query(path.path(), progress.clone()).await?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         let mut config = database.config.clone();
         config.transactions.max_changes = size(1);
         let mut source = source(config, progress.clone())?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         database
             .client()
             .batch_execute("INSERT INTO person VALUES (1, 'initial')")
@@ -377,15 +377,15 @@ async fn postgres_rejected_group_is_not_acknowledged_and_higher_limit_replays_it
             rows(&query),
             vec![serde_json::json!({"id":1, "name":"initial"})]
         );
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     {
         let progress = progress();
         let mut query = query(path.path(), progress.clone()).await?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         let mut source = source(database.config.clone(), progress.clone())?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         let group = next(&mut source).await?;
         assert_eq!(
             SourceTransactionCodec::decode(&group.envelope, limits(16))?
@@ -404,8 +404,8 @@ async fn postgres_rejected_group_is_not_acknowledged_and_higher_limit_replays_it
             ]
         );
         database.wait_feedback(committed(&progress)).await?;
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     database.shutdown().await
 }
@@ -418,9 +418,9 @@ async fn postgres_heartbeats_survive_backpressure_and_same_source_restart_replay
     let path = tempfile::tempdir()?;
     let progress = progress();
     let mut query = query(path.path(), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(database.config.clone(), progress.clone())?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     for id in 1..=4 {
         database
             .client()
@@ -447,7 +447,7 @@ async fn postgres_heartbeats_survive_backpressure_and_same_source_restart_replay
         let original_sequence = original.envelope.system().sequence();
         let original_position = original.envelope.system().source_position().cloned();
         {
-            let stopping = source.stop();
+            let stopping = source.stop(lifecycle_ctx::held(lifecycle_ctx::stop()));
             tokio::pin!(stopping);
             assert!(
                 futures::poll!(&mut stopping).is_pending(),
@@ -455,13 +455,13 @@ async fn postgres_heartbeats_survive_backpressure_and_same_source_restart_replay
             );
         }
         assert!(source
-            .start()
+            .start(&lifecycle_ctx::start())
             .await
             .unwrap_err()
             .to_string()
             .contains("cleanup"));
-        source.stop().await?;
-        source.start().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        source.start(&lifecycle_ctx::start()).await?;
         let replay = next(&mut source).await?;
         assert!(replay.envelope.system().sequence() > original_sequence);
         assert_eq!(
@@ -472,8 +472,8 @@ async fn postgres_heartbeats_survive_backpressure_and_same_source_restart_replay
         assert_eq!(rows(&query).len(), expected);
         database.wait_feedback(committed(&progress)).await?;
     }
-    source.stop().await?;
-    query.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -484,29 +484,29 @@ async fn postgres_tls_requirement_and_unavailable_cursor_fail_before_publication
     let path = tempfile::tempdir()?;
     let progress = progress();
     let mut query = query(path.path(), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut config = database.config.clone();
     config.connection.ssl_mode = SslMode::Require;
     let mut source_tls = source(config, progress.clone())?;
-    let error = source_tls.start().await.unwrap_err();
+    let error = source_tls.start(&lifecycle_ctx::start()).await.unwrap_err();
     assert!(error.to_string().contains("refused required TLS"));
     assert!(source_tls
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("cleanup"));
-    source_tls.stop().await?;
+    source_tls.stop(&lifecycle_ctx::stop()).await?;
     let mut config = database.config.clone();
     config.start_lsn = "0/1".into();
     let mut source_gap = source(config, progress)?;
     assert!(source_gap
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("no longer available"));
-    source_gap.stop().await?;
+    source_gap.stop(&lifecycle_ctx::stop()).await?;
     database
         .client()
         .batch_execute("ALTER SYSTEM SET max_slot_wal_keep_size = '64MB';")
@@ -534,13 +534,13 @@ async fn postgres_tls_requirement_and_unavailable_cursor_fail_before_publication
         source_gap.recovery_progress().unwrap(),
     )?;
     assert!(unsafe_retention
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("max_slot_wal_keep_size"));
-    unsafe_retention.stop().await?;
-    query.stop().await?;
+    unsafe_retention.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
 
@@ -808,9 +808,9 @@ async fn postgres_process_exit_helper() -> Result<()> {
     let path = std::env::var("DRASI_PG_TRANSACTION_PATH")?;
     let progress = progress();
     let mut query = query(Path::new(&path), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(config, progress)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let group = next(&mut source).await?;
     if mode == "after" {
         apply(&mut query, group).await?;
@@ -869,10 +869,10 @@ async fn postgres_abrupt_process_exit_before_and_after_query_commit_recovers_wit
         assert_eq!(database.feedback().await?, database.config.start_lsn);
         let progress = progress();
         let mut query = query(path.path(), progress.clone()).await?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         assert_eq!(rows(&query).len(), usize::from(point == "after"));
         let mut source = source(database.config.clone(), progress.clone())?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         if point == "before" {
             let replay = next(&mut source).await?;
             apply(&mut query, replay).await?;
@@ -896,9 +896,59 @@ async fn postgres_abrupt_process_exit_before_and_after_query_commit_recovers_wit
         apply(&mut query, next_group).await?;
         assert_eq!(rows(&query).len(), 2);
         database.wait_feedback(committed(&progress)).await?;
-        source.stop().await?;
-        query.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
         database.shutdown().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod lifecycle_ctx {
+    use drasi_lib::computation::v1::{
+        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
+        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
+        StopMode, UpdateBoundary,
+    };
+
+    /// Keeps a context alive for futures that outlive the calling statement.
+    pub(crate) fn held<T>(value: T) -> &'static T {
+        Box::leak(Box::new(value))
+    }
+    pub(crate) fn native_start() -> drasi_computation_plugin_sdk::lifecycle::StartContext {
+        drasi_computation_plugin_sdk::lifecycle::StartContext::new(scope(), None)
+    }
+    pub(crate) fn native_stop() -> drasi_computation_plugin_sdk::lifecycle::StopContext {
+        drasi_computation_plugin_sdk::lifecycle::StopContext::new(scope(), StopMode::Drain)
+    }
+    pub(crate) fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+    pub(crate) fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+    pub(crate) fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+    pub(crate) fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+    pub(crate) fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+    pub(crate) fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+    pub(crate) fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
+        ApplyContext::new(scope(), boundary)
+    }
 }

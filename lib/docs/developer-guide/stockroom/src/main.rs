@@ -312,10 +312,26 @@ impl<T: FileRow> ComputationComponent for FileSource<T> {
     }
 
     // ANCHOR: file-initialization
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.reload().await
     }
     // ANCHOR_END: file-initialization
+    drasi_lib::passive_component_lifecycle!(@hook start, StartContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    drasi_lib::passive_component_lifecycle!(@hook stop, StopContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -371,14 +387,7 @@ impl ComputationComponent for Audit {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 // ANCHOR: audit-transform
@@ -509,12 +518,30 @@ impl ComputationComponent for Alerts {
         Ok(serde_json::json!({}))
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.output.flush().await?;
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -1099,34 +1126,51 @@ mod tests {
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn initialize(&mut self) -> anyhow::Result<()> {
+        async fn initialize(
+            &mut self,
+            _context: &drasi_lib::computation::v1::InitializeContext,
+        ) -> anyhow::Result<()> {
             self.events
                 .lock()
                 .unwrap()
                 .push((self.descriptor.id().clone(), "initialize"));
             Ok(())
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
+        async fn start(
+            &mut self,
+            _context: &drasi_lib::computation::v1::StartContext,
+        ) -> anyhow::Result<()> {
             self.events
                 .lock()
                 .unwrap()
                 .push((self.descriptor.id().clone(), "start"));
             Ok(())
         }
-        async fn stop(&mut self) -> anyhow::Result<()> {
+        async fn stop(
+            &mut self,
+            _context: &drasi_lib::computation::v1::StopContext,
+        ) -> anyhow::Result<()> {
             self.events
                 .lock()
                 .unwrap()
                 .push((self.descriptor.id().clone(), "stop"));
             Ok(())
         }
-        async fn dispose(&mut self) -> anyhow::Result<()> {
+        async fn dispose(
+            &mut self,
+            context: &drasi_lib::computation::v1::DisposeContext,
+        ) -> anyhow::Result<()> {
+            if context.erases_owned_state() {
+                anyhow::bail!("this component does not support permanent state removal");
+            }
             self.events
                 .lock()
                 .unwrap()
                 .push((self.descriptor.id().clone(), "dispose"));
             Ok(())
         }
+        drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+        drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
     }
 
     #[async_trait]
@@ -1281,14 +1325,7 @@ mod tests {
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
 
     #[async_trait]

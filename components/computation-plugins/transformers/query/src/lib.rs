@@ -23,8 +23,12 @@ use drasi_computation_contracts::{
     ResultNodeProjector, StreamId, WakeupSource,
 };
 use drasi_computation_plugin_sdk::{
+    lifecycle::{
+        nothing_to_do, ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext,
+        LifecycleResult, PauseContext, ResumeContext, StartContext, StopContext,
+    },
     ApplyUpdateRequest, Capabilities, Component, ConfigSchema, ConfigType, ControlSender,
-    CreateRequest, CreatedComponent, Factory, FactoryMetadata, NativeComponent,
+    CreateRequest, CreatedComponent, Factory, FactoryMetadata, NativeComponent, NativeManagement,
     NativeOutputSnapshots, NativeProcessing, NativeTransformer, PluginDefinition, UpdateRequest,
 };
 use drasi_core::{
@@ -153,6 +157,7 @@ impl Factory for QueryFactory {
                 continuations: true,
                 wakeups: true,
                 input_binding_updates: true,
+                management: true,
                 update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Recreate],
                 ..Capabilities::default()
             },
@@ -163,8 +168,8 @@ impl Factory for QueryFactory {
         true
     }
 
-    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
-        update::plan(request, &self.middleware, &self.metadata())
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        update::plan(request, &self.middleware, &self.metadata()).map(Assessment::from)
     }
 
     fn create(
@@ -248,7 +253,7 @@ impl Factory for IndexedQueryFactory {
         metadata.capabilities.continuations = true;
         metadata.capabilities.startup_continuation = true;
         metadata.capabilities.durable_output = true;
-        metadata.capabilities.delete_owned_resources = true;
+        metadata.capabilities.erases_owned_state = true;
         metadata.capabilities.binds_inputs = false;
         metadata
     }
@@ -257,8 +262,8 @@ impl Factory for IndexedQueryFactory {
         true
     }
 
-    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
-        update::plan(request, &self.middleware, &self.metadata())
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        update::plan(request, &self.middleware, &self.metadata()).map(Assessment::from)
     }
 
     fn create(&self, _: &CreateRequest, _: ControlSender) -> anyhow::Result<CreatedComponent> {
@@ -323,8 +328,8 @@ impl Factory for ProviderQueryFactory {
         true
     }
 
-    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
-        update::plan(request, &self.middleware, &self.metadata())
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        update::plan(request, &self.middleware, &self.metadata()).map(Assessment::from)
     }
 
     fn create(
@@ -555,32 +560,8 @@ struct QueryTransformer {
 
 #[async_trait]
 impl NativeComponent for QueryTransformer {
-    fn supports_apply_update(&self) -> bool {
-        true
-    }
-
-    async fn apply_update(&mut self, request: &ApplyUpdateRequest) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.started && !self.failed && self.provider_rows.is_none(),
-            "query update requires completed activation and a paused processing boundary"
-        );
-        anyhow::ensure!(
-            request.request.current.id == *self.descriptor.id()
-                && request.request.current.configuration == self.configuration
-                && request.plan
-                    == update::plan(&request.request, &self.middleware, &self.metadata)?
-                && request.plan.mode == ComponentUpdateMode::InPlace
-                && request.plan.data == ComponentUpdateData::Preserve,
-            "retained query update does not match the approved configuration and plan"
-        );
-        let (definition, _) = query_configuration(&request.request.proposed, &self.middleware)?;
-        self.output.increase_retention(definition.outbox_capacity)?;
-        if let Some(durable) = &mut self.durable {
-            durable.set_retention(definition.outbox_capacity);
-        }
-        Arc::make_mut(&mut self.definition).outbox_capacity = definition.outbox_capacity;
-        self.configuration = request.request.proposed.configuration.clone();
-        Ok(())
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        Some(self)
     }
 
     fn supports_input_binding_updates(&self) -> bool {
@@ -637,11 +618,77 @@ impl NativeComponent for QueryTransformer {
         }
     }
 
-    fn supports_delete_owned_resources(&self) -> bool {
-        self.durable.is_some()
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        nothing_to_do()
     }
 
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation().await?)
+    }
+
+    // Transformation, continuations and wakeups are driven by the host; the
+    // query owns no independent workers.
+    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        nothing_to_do()
+    }
+
+    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
+        Ok(self.stop_activation()?)
+    }
+
+    async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult {
+        if ctx.erases_owned_state() {
+            self.erase_owned_state().await?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl NativeManagement for QueryTransformer {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        update::plan(request, &self.middleware, &self.metadata).map(Assessment::from)
+    }
+
+    async fn apply(
+        &mut self,
+        _ctx: &ApplyContext,
+        request: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError> {
+        Ok(self.apply_update(request).await?)
+    }
+}
+
+impl QueryTransformer {
+    async fn apply_update(&mut self, request: &ApplyUpdateRequest) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.started && !self.failed && self.provider_rows.is_none(),
+            "query update requires completed activation and a paused processing boundary"
+        );
+        anyhow::ensure!(
+            request.request.current.id == *self.descriptor.id()
+                && request.request.current.configuration == self.configuration
+                && request.plan
+                    == update::plan(&request.request, &self.middleware, &self.metadata)?
+                && request.plan.mode == ComponentUpdateMode::InPlace
+                && request.plan.data == ComponentUpdateData::Preserve,
+            "retained query update does not match the approved configuration and plan"
+        );
+        let (definition, _) = query_configuration(&request.request.proposed, &self.middleware)?;
+        self.output.increase_retention(definition.outbox_capacity)?;
+        if let Some(durable) = &mut self.durable {
+            durable.set_retention(definition.outbox_capacity);
+        }
+        Arc::make_mut(&mut self.definition).outbox_capacity = definition.outbox_capacity;
+        self.configuration = request.request.proposed.configuration.clone();
+        Ok(())
+    }
+
+    async fn erase_owned_state(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.started,
             "query resource deletion requires completed stop"
@@ -684,7 +731,7 @@ impl NativeComponent for QueryTransformer {
         Ok(())
     }
 
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start_activation(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.started && self.provider_rows.is_none(),
             "query is already started or initializing"
@@ -765,7 +812,7 @@ impl NativeComponent for QueryTransformer {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    fn stop_activation(&mut self) -> anyhow::Result<()> {
         if self.processing.is_some() || self.failed {
             self.evaluator = None;
         }

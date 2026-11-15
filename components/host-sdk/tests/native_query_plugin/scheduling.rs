@@ -87,8 +87,8 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
     )
     };
     let mut query = create(1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let initial = query.transform(scheduled_input(1000, 2000)?).await?;
     query.delivery_completed(&initial).await?;
     expired(&query, false).await?;
@@ -99,12 +99,12 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
             .has_pending()
             .await?
     );
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create(2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.continue_transform().await?.is_empty());
     expired(&query, false).await?;
     let due = query.on_wakeup().await?;
@@ -125,12 +125,12 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
             if reference.namespace.as_ref() == "source"
     ));
     expired(&query, true).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create(3)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let replay = query.continue_transform().await?;
     assert_eq!(replay.len(), 1);
     assert_eq!(QueryChangeCodec::query_sequence(&replay[0].envelope)?, 2);
@@ -149,25 +149,25 @@ async fn persistent_restart_and_replay(publication: QueryPublicationMode) -> Res
             .has_pending()
             .await?
     );
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
 async fn volatile_due_and_cancellation() -> Result<()> {
     let mut query = volatile()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     query.transform(scheduled_input(1000, 2000)?).await?;
     expired(&query, false).await?;
     let due = query.on_wakeup().await?;
     assert_eq!(due.len(), 1);
     expired(&query, true).await?;
     assert!(query.on_wakeup().await?.is_empty());
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
 
     let mut query = volatile()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     query.transform(scheduled_input(1000, 2000)?).await?;
     let deleted = query
         .transform(input(
@@ -186,11 +186,11 @@ async fn volatile_due_and_cancellation() -> Result<()> {
         query.on_wakeup().await?.is_empty(),
         "deleted input must not produce a stale expiry"
     );
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
 
     let mut query = volatile()?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let now = u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -202,7 +202,7 @@ async fn volatile_due_and_cancellation() -> Result<()> {
         "future work ran before its deadline"
     );
     expired(&query, false).await?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 

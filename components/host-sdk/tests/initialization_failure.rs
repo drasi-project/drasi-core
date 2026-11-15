@@ -743,19 +743,33 @@ impl ComputationComponent for GraphProbe {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn initialize(&mut self) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
         self.observer = Some(self.plugin.bind_runtime_context(self.store.take()).await);
         self.plugin.initialize_result().await
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
         self.plugin.start().await
     }
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn stop(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StopContext,
+    ) -> anyhow::Result<()> {
         self.plugin.stop().await
     }
-    async fn dispose(&mut self) -> anyhow::Result<()> {
+    async fn dispose(
+        &mut self,
+        _context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
         self.plugin.dispose().await
     }
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
 }
 
 #[async_trait]

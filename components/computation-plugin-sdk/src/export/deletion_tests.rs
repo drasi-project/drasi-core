@@ -2,6 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crate::lifecycle::{
+    DisposeContext, DisposeReason, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
+    StartContext, StateIntent, StopContext, StopMode,
+};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity,
@@ -31,7 +35,7 @@ impl Factory for TestFactory {
                 .collect(),
             completion: None,
             capabilities: crate::Capabilities {
-                delete_owned_resources: true,
+                erases_owned_state: true,
                 ..Default::default()
             },
         }
@@ -65,20 +69,30 @@ impl ComputationComponent for TestTransformer {
         Ok(serde_json::json!({}))
     }
 
-    fn supports_delete_owned_resources(&self) -> bool {
-        true
-    }
-
-    async fn start(&mut self) -> anyhow::Result<()> {
+    async fn initialize(&mut self, _: &InitializeContext) -> LifecycleResult {
         Ok(())
     }
 
-    async fn stop(&mut self) -> anyhow::Result<()> {
+    async fn start(&mut self, _: &mut StartContext) -> LifecycleResult {
         Ok(())
     }
 
-    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
-        self.deletions.fetch_add(1, Ordering::SeqCst);
+    async fn pause(&mut self, _: &PauseContext) -> LifecycleResult {
+        Ok(())
+    }
+
+    async fn resume(&mut self, _: &ResumeContext) -> LifecycleResult {
+        Ok(())
+    }
+
+    async fn stop(&mut self, _: &StopContext) -> LifecycleResult {
+        Ok(())
+    }
+
+    async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult {
+        if ctx.erases_owned_state() {
+            self.deletions.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
@@ -88,6 +102,31 @@ impl Transformer for TestTransformer {
     async fn transform(&mut self, _: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
         Ok(Vec::new())
     }
+}
+
+const ID: &str = "92178c18-6de1-4403-8db3-9c9940289011";
+
+fn context(code: u32) -> Vec<u8> {
+    let context = wire::LifecycleRequest::new("lifecycle-operation", ID, 1);
+    wire::encode(&match code {
+        abi::operation::STOP => context.with_stop_mode(StopMode::Drain),
+        abi::operation::DISPOSE => {
+            context.with_dispose(DisposeReason::Shutdown, StateIntent::Preserve, 1)
+        }
+        _ => context,
+    })
+    .unwrap()
+}
+
+fn erase(attempt: u32) -> Vec<u8> {
+    wire::encode(
+        &wire::LifecycleRequest::new("lifecycle-operation", ID, 1).with_dispose(
+            DisposeReason::Removal,
+            StateIntent::Erase,
+            attempt,
+        ),
+    )
+    .unwrap()
 }
 
 struct RawComponent(abi::ComponentHandle);
@@ -107,8 +146,8 @@ impl RawComponent {
         }
     }
 
-    async fn run(&self, code: u32) -> Result<(), Failure> {
-        let output = self.begin(code, &[])?.await?;
+    async fn run(&self, code: u32, input: &[u8]) -> Result<(), Failure> {
+        let output = self.begin(code, input)?.await?;
         assert!(output.is_empty());
         Ok(())
     }
@@ -133,7 +172,7 @@ fn raw_component(deletions: Arc<AtomicUsize>) -> anyhow::Result<RawComponent> {
     let mut factory = abi::FactoryHandle::null();
     let mut component = abi::ComponentHandle::null();
     let request = wire::encode(&CreateRequest {
-        id: ComponentId::try_new("92178c18-6de1-4403-8db3-9c9940289011")?,
+        id: ComponentId::try_new(ID)?,
         implementation: metadata.implementation.clone(),
         configuration_version: 1,
         configuration: serde_json::json!({}),
@@ -161,51 +200,55 @@ fn raw_component(deletions: Arc<AtomicUsize>) -> anyhow::Result<RawComponent> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn direct_abi_fences_retirement_and_does_not_repeat_completed_deletion() -> anyhow::Result<()>
+async fn direct_abi_fences_retirement_and_does_not_repeat_completed_erasure() -> anyhow::Result<()>
 {
+    use abi::operation::{DISPOSE, INITIALIZE, START, STOP};
     let deletions = Arc::new(AtomicUsize::new(0));
     let component = raw_component(deletions.clone())?;
-    component.run(abi::operation::INITIALIZE).await?;
-    component.run(abi::operation::START).await?;
+    component.run(INITIALIZE, &context(INITIALIZE)).await?;
+    component.run(START, &context(START)).await?;
     assert_eq!(
         component
-            .begin(abi::operation::DELETE_OWNED_RESOURCES, &[])
+            .begin(DISPOSE, &erase(1))
             .err()
-            .expect("running deletion is rejected")
+            .expect("erasing a running component is rejected")
             .code,
         abi::status::FAILED
     );
-    component.run(abi::operation::STOP).await?;
+    component.run(STOP, &context(STOP)).await?;
     assert_eq!(
         component
-            .begin(abi::operation::DELETE_OWNED_RESOURCES, b"unexpected")
+            .begin(DISPOSE, b"unexpected")
             .err()
-            .expect("deletion input is rejected")
+            .expect("an undecodable dispose context is rejected")
             .code,
         abi::status::PROTOCOL
     );
-    component.run(abi::operation::START).await?;
-    component.run(abi::operation::STOP).await?;
+    component.run(START, &context(START)).await?;
+    component.run(STOP, &context(STOP)).await?;
 
-    let cancelled = component.begin(abi::operation::DELETE_OWNED_RESOURCES, &[])?;
+    let cancelled = component.begin(DISPOSE, &erase(1))?;
     drop(cancelled);
     assert_eq!(
         component
-            .begin(abi::operation::START, &[])
+            .begin(START, &context(START))
             .err()
             .expect("retirement fences restart")
             .code,
         abi::status::CLOSED
     );
-    component
-        .run(abi::operation::DELETE_OWNED_RESOURCES)
-        .await?;
-    component
-        .run(abi::operation::DELETE_OWNED_RESOURCES)
-        .await?;
+    assert_eq!(
+        component
+            .begin(DISPOSE, &context(DISPOSE))
+            .err()
+            .expect("a retry cannot change the state intent")
+            .code,
+        abi::status::PROTOCOL
+    );
+    component.run(DISPOSE, &erase(2)).await?;
+    component.run(DISPOSE, &erase(3)).await?;
     assert_eq!(deletions.load(Ordering::SeqCst), 1);
-    component.run(abi::operation::STOP).await?;
-    component.run(abi::operation::DISPOSE).await?;
+    component.run(STOP, &context(STOP)).await?;
     Ok(())
 }
 

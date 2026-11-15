@@ -81,7 +81,8 @@ struct Instance {
     initialized: bool,
     disposal_started: bool,
     disposed: bool,
-    resources_deleted: bool,
+    dispose_attempts: u32,
+    retirement: Option<Retirement>,
     processing_paused: bool,
     replacement: bool,
     pending_update: Option<super::ComponentUpdateExecution>,
@@ -89,6 +90,22 @@ struct Instance {
 }
 
 impl InstanceSlot {
+    /// Ask an idle live object to assess a change. `None` means the object is
+    /// busy, unconstructed or defers to its factory planner.
+    pub(super) fn assess_update(
+        &self,
+        current: &crate::computation::v1::ComponentSpecification,
+        proposed: &crate::computation::v1::ComponentSpecification,
+    ) -> anyhow::Result<Option<crate::computation::v1::Assessment>> {
+        let Ok(value) = self.value.try_lock() else {
+            return Ok(None);
+        };
+        match value.as_ref() {
+            Some(instance) => instance.component.assess_update(current, proposed),
+            None => Ok(None),
+        }
+    }
+
     fn awaiting_update_confirmation(self: &Arc<Self>) -> bool {
         self.take().is_ok_and(|lease| {
             lease.pending_update.as_ref().is_some_and(|update| {
@@ -151,7 +168,8 @@ impl InstanceSlot {
                 initialized: false,
                 disposal_started: false,
                 disposed: false,
-                resources_deleted: false,
+                dispose_attempts: 0,
+                retirement: None,
                 processing_paused: false,
                 replacement: false,
                 pending_update: None,
@@ -2024,6 +2042,69 @@ async fn deploy(
     Ok(controls)
 }
 
+/// The reason and state intent of a Dispose, fixed by its first attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Retirement {
+    pub(super) reason: crate::computation::v1::DisposeReason,
+    pub(super) intent: crate::computation::v1::StateIntent,
+}
+
+impl Retirement {
+    pub(super) fn preserve(reason: crate::computation::v1::DisposeReason) -> Self {
+        Self {
+            reason,
+            intent: crate::computation::v1::StateIntent::Preserve,
+        }
+    }
+}
+
+/// Builds lifecycle hook contexts for one graph operation. The token is
+/// cancelled when the operation fails, times out or is aborted.
+#[derive(Clone)]
+struct HookScopes {
+    component: Arc<str>,
+    generation: u64,
+    epoch: u64,
+    token: crate::computation::v1::CancellationToken,
+}
+
+impl HookScopes {
+    fn scope(
+        &self,
+        hook: &str,
+        deadline: tokio::time::Instant,
+    ) -> crate::computation::v1::OperationScope {
+        crate::computation::v1::OperationScope::new(
+            format!(
+                "{}/{}/{}/{hook}",
+                self.component, self.generation, self.epoch
+            ),
+            self.component.clone(),
+            self.generation,
+            Some(deadline),
+            self.token.clone(),
+        )
+    }
+
+    /// Dispose retries keep one operation ID.
+    fn dispose_scope(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> crate::computation::v1::OperationScope {
+        crate::computation::v1::OperationScope::new(
+            format!("{}/{}/dispose", self.component, self.generation),
+            self.component.clone(),
+            self.generation,
+            Some(deadline),
+            self.token.clone(),
+        )
+    }
+
+    fn after(timeout: std::time::Duration) -> tokio::time::Instant {
+        tokio::time::Instant::now() + timeout
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Create,
@@ -2084,22 +2165,71 @@ pub(super) struct Completion {
 async fn apply_component_update(
     lease: &mut InstanceLease,
     node: &NodeSnapshot,
+    hooks: &HookScopes,
+    deadline: tokio::time::Instant,
     update: super::ComponentUpdateExecution,
     context: ConstructionContext,
 ) -> GraphResult<()> {
     if lease.applied_update.as_ref() == Some(&update.operation_id) {
         return Ok(());
     }
-    lease
+    let apply = crate::computation::v1::ApplyContext::new(
+        crate::computation::v1::OperationScope::new(
+            update.operation_id.clone(),
+            hooks.component.clone(),
+            hooks.generation,
+            Some(deadline),
+            hooks.token.clone(),
+        ),
+        update.plan.mode.into(),
+    );
+    let reassessed = lease
         .component
-        .apply_update(super::ComponentUpdateContext {
-            operation_id: update.operation_id.clone(),
-            plan: update.plan,
-            current: update.current,
-            proposed: context,
-        })
-        .await
-        .map_err(|source| component_error(node, "apply update", source))?;
+        .assess_update(&update.current, &update.proposed);
+    let result = match reassessed {
+        Ok(Some(crate::computation::v1::Assessment::Unsupported { reason })) => {
+            Err(crate::computation::v1::ApplyError::Refused {
+                now_requires: None,
+                reason,
+            })
+        }
+        Ok(Some(crate::computation::v1::Assessment::Supported { boundary, .. }))
+            if boundary > crate::computation::v1::UpdateBoundary::from(update.plan.mode) =>
+        {
+            Err(crate::computation::v1::ApplyError::Refused {
+                now_requires: Some(boundary),
+                reason: "the accepted assessment is stale".into(),
+            })
+        }
+        Err(source) => Err(crate::computation::v1::ApplyError::Failed(source)),
+        Ok(_) => Ok(()),
+    };
+    let result = match result {
+        Err(error) => Err(error),
+        Ok(()) => {
+            lease
+                .component
+                .apply_update(
+                    &apply,
+                    super::ComponentUpdateContext {
+                        operation_id: update.operation_id.clone(),
+                        plan: update.plan,
+                        current: update.current,
+                        proposed: context,
+                    },
+                )
+                .await
+        }
+    };
+    if let Err(error) = result {
+        let damaged = error.damages_object();
+        let failure = component_error(node, "apply update", anyhow::Error::new(error));
+        if damaged {
+            let cause = lease.slot.quarantine(failure);
+            return Err(GraphError::Reported { cause });
+        }
+        return Err(failure);
+    }
     lease.applied_update = Some(update.operation_id);
     if !update.require_confirmation {
         lease.pending_update = None;
@@ -3917,7 +4047,7 @@ impl Operations {
         if matches!(operation, Operation::Create | Operation::Reconfigure) {
             self.pending_creation.remove(&index);
         }
-        self.launch_cleanup(graph, index, operation, false)
+        self.launch_cleanup(graph, index, operation, None)
     }
 
     fn launch_cleanup(
@@ -3925,9 +4055,9 @@ impl Operations {
         graph: &ComputationGraph,
         index: usize,
         operation: Operation,
-        delete_owned_resources: bool,
+        retirement: Option<Retirement>,
     ) -> GraphResult<()> {
-        self.launch_guarded(graph, index, operation, delete_owned_resources, None)
+        self.launch_guarded(graph, index, operation, retirement, None)
     }
 
     fn launch_guarded(
@@ -3935,7 +4065,7 @@ impl Operations {
         graph: &ComputationGraph,
         index: usize,
         operation: Operation,
-        delete_owned_resources: bool,
+        retirement: Option<Retirement>,
         start_guard: Option<crate::computation::instance::StartupCancellation>,
     ) -> GraphResult<()> {
         if operation == Operation::Create {
@@ -4046,6 +4176,13 @@ impl Operations {
             action: operation.action(),
         };
         let work_identity = identity.clone();
+        let hooks = HookScopes {
+            component: Arc::from(node.descriptor.id().to_string()),
+            generation: generation.0,
+            epoch: epoch.0,
+            token: crate::computation::v1::CancellationToken::new(),
+        };
+        let operation_token = hooks.token.clone();
         let span = tracing::info_span!("computation_component",
             instance_id = %graph.execution_scope,
             component_id = %node.descriptor.id(),
@@ -4071,7 +4208,7 @@ impl Operations {
         update(graph, |state| {
             let observed = state.components.get_mut(&slot.id).expect("component");
             let cleanup_only = operation.is_cleanup()
-                && (delete_owned_resources || operation == Operation::Dispose)
+                && operation == Operation::Dispose
                 && observed.lifecycle == ComponentLifecycle::Stopped;
             observed.operation = epoch;
             observed.revision = state.revision;
@@ -4180,7 +4317,7 @@ impl Operations {
                             if !lease.initialized || lease.disposal_started {
                                 return Err(topology("component update requires an initialized, retained object"));
                             }
-                            tokio::time::timeout_at(construction_deadline, apply_component_update(&mut lease, &node, update, context))
+                            tokio::time::timeout_at(construction_deadline, apply_component_update(&mut lease, &node, &hooks, construction_deadline, update, context))
                                 .await
                                 .map_err(|_| work_identity.interrupted("update timeout"))??;
                         } else {
@@ -4235,7 +4372,10 @@ impl Operations {
                             super::bind_inputs(&mut lease.component, &node, &admission_snapshot))
                             .await.map_err(|_| work_identity.interrupted("input binding timeout"))??;
                         lease.initialization_attempted = true;
-                        tokio::time::timeout_at(construction_deadline, lease.component.initialize())
+                        let context = crate::computation::v1::InitializeContext::new(
+                            hooks.scope("initialize", construction_deadline),
+                        );
+                        tokio::time::timeout_at(construction_deadline, lease.component.initialize(&context))
                             .await
                             .map_err(|_| work_identity.interrupted("initialization timeout"))?
                             .map_err(|source| component_error(&node, "initialize", source))?;
@@ -4269,7 +4409,7 @@ impl Operations {
                                                 update: None,
                                             },
                                         ).await.map_err(|error| component_error(&node, "resolve update", error.source))?;
-                                        apply_component_update(&mut lease, &node, update, context).await
+                                        apply_component_update(&mut lease, &node, &hooks, construction_deadline, update, context).await
                                     }).await.map_err(|_| work_identity.interrupted("restored update timeout"))??;
                                 }
                                 crate::computation::v1::ComponentUpdateMode::InPlace => {}
@@ -4398,7 +4538,10 @@ impl Operations {
                     }
                     super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
                     if !already_activated {
-                        lease.component.start().await
+                        let context = crate::computation::v1::StartContext::new(
+                            hooks.scope("start", HookScopes::after(activation_timeout)),
+                        );
+                        lease.component.start(&context).await
                             .map_err(|source| component_error(&node, "start", source))?;
                     }
                     if let Some(update) = lease.pending_update.clone() {
@@ -4406,7 +4549,10 @@ impl Operations {
                             && !lease.processing_paused {
                             lease.processing_paused = true;
                             lease.slot.processing_ready.store(false, std::sync::atomic::Ordering::Release);
-                            lease.component.pause_processing().await
+                            let context = crate::computation::v1::PauseContext::new(
+                                hooks.scope("pause", HookScopes::after(activation_timeout)),
+                            );
+                            lease.component.pause(&context).await
                                 .map_err(|source| component_error(&node, "pause update recovery", source))?;
                         }
                         if update.plan.mode != crate::computation::v1::ComponentUpdateMode::Recreate {
@@ -4425,7 +4571,7 @@ impl Operations {
                                     update: None,
                                 },
                             ).await.map_err(|error| component_error(&node, "resolve update", error.source))?;
-                            apply_component_update(&mut lease, &node, update, context).await?;
+                            apply_component_update(&mut lease, &node, &hooks, HookScopes::after(activation_timeout), update, context).await?;
                         }
                     }
                     {
@@ -4447,7 +4593,10 @@ impl Operations {
                     {
                         lease.processing_paused = true;
                         lease.slot.processing_ready.store(false, std::sync::atomic::Ordering::Release);
-                        lease.component.pause_processing().await
+                        let context = crate::computation::v1::PauseContext::new(
+                            hooks.scope("pause", HookScopes::after(activation_timeout)),
+                        );
+                        lease.component.pause(&context).await
                             .map_err(|source| component_error(&node, "pause update recovery", source))?;
                     }
                     let actual = lease.refresh_recovery()?;
@@ -4518,7 +4667,10 @@ impl Operations {
                         return Err(topology("accepted update is awaiting durable completion"));
                     }
                     if lease.processing_paused {
-                        tokio::time::timeout(activation_timeout, lease.component.resume_processing())
+                        let context = crate::computation::v1::ResumeContext::new(
+                            hooks.scope("resume", HookScopes::after(activation_timeout)),
+                        );
+                        tokio::time::timeout(activation_timeout, lease.component.resume(&context))
                             .await
                             .map_err(|_| work_identity.interrupted("resume processing timeout"))?
                             .map_err(|source| component_error(&node, "resume processing", source))?;
@@ -4578,7 +4730,10 @@ impl Operations {
                     if *quiescence.borrow() && perform_pause.load(std::sync::atomic::Ordering::Acquire) {
                         lease.processing_paused = true;
                         lease.slot.processing_ready.store(false, std::sync::atomic::Ordering::Release);
-                        tokio::time::timeout(timeout, lease.component.pause_processing())
+                        let context = crate::computation::v1::PauseContext::new(
+                            hooks.scope("pause", HookScopes::after(timeout)),
+                        );
+                        tokio::time::timeout(timeout, lease.component.pause(&context))
                             .await
                             .map_err(|_| work_identity.interrupted("pause processing timeout"))?
                             .map_err(|source| component_error(&node, "pause processing", source))?;
@@ -4591,40 +4746,60 @@ impl Operations {
                         .as_ref()
                         .map(|progress| progress.fence());
                     if lease.attempted {
+                        let mode = if lease.slot.damage().is_some() {
+                            crate::computation::v1::StopMode::Abort
+                        } else {
+                            crate::computation::v1::StopMode::Drain
+                        };
+                        let context = crate::computation::v1::StopContext::new(
+                            hooks.scope("stop", HookScopes::after(timeout)),
+                            mode,
+                        );
                         lease
                             .component
-                            .stop()
+                            .stop(&context)
                             .await
                             .map_err(|source| component_error(&node, "stop", source))?;
                         lease.attempted = false;
                         lease.processing_paused = false;
                         lease.slot.processing_ready.store(true, std::sync::atomic::Ordering::Release);
                     }
+                    let erase = retirement.is_some_and(|retirement| {
+                        retirement.intent == crate::computation::v1::StateIntent::Erase
+                    });
                     // An unresolved/deferred declaration has no component-owned
                     // state. Its declared resource owners are still retired by
                     // reconciliation, including acquisitions retained after failure.
-                    if delete_owned_resources && !lease.component.is_constructed()
+                    if erase && !lease.component.is_constructed()
                         && (lease.initialization_attempted || lease.attempted || lease.disposal_started)
                     {
                         return Err(topology("unconstructed declaration has unfinished component lifecycle work"));
                     }
-                    if delete_owned_resources
-                        && !lease.resources_deleted
-                        && lease.component.is_constructed()
-                    {
-                        if lease.disposed {
-                            return Err(topology("disposed component cannot delete owned resources"));
-                        }
-                        lease
-                            .component
-                            .delete_owned_resources()
-                            .await
-                            .map_err(|source| component_error(&node, "delete owned resources", source))?;
-                        lease.resources_deleted = true;
+                    if erase && lease.disposed && lease.component.is_constructed() {
+                        return Err(topology("disposed component cannot erase owned state"));
                     }
                     if operation == Operation::Dispose && !lease.disposed && lease.component.is_constructed() {
+                        let requested = retirement.unwrap_or_else(|| {
+                            Retirement::preserve(if lease.initialized {
+                                crate::computation::v1::DisposeReason::Shutdown
+                            } else {
+                                crate::computation::v1::DisposeReason::InitializationFailure
+                            })
+                        });
+                        let retirement = *lease.retirement.get_or_insert(requested);
+                        if retirement.intent != requested.intent {
+                            return Err(topology("dispose retry changed its state intent"));
+                        }
                         lease.disposal_started = true;
-                        lease.component.dispose().await
+                        lease.dispose_attempts = lease.dispose_attempts.saturating_add(1);
+                        let context = crate::computation::v1::DisposeContext::new(
+                            hooks.dispose_scope(HookScopes::after(timeout)),
+                            retirement.reason,
+                            retirement.intent,
+                            lease.dispose_attempts,
+                        )
+                        .map_err(|source| component_error(&node, "dispose", source.into()))?;
+                        lease.component.dispose(&context).await
                             .map_err(|source| component_error(&node, "dispose", source))?;
                         lease.disposed = true;
                         lease.initialized = false;
@@ -4652,15 +4827,26 @@ impl Operations {
             .spawn(identity.clone(), abort.clone(), async move {
                 let result = identity
                     .run(async {
-                        Abortable::new(future.instrument(span), registration)
-                            .await
-                            .unwrap_or_else(|_| {
-                                Err(if operation == Operation::Reconfigure {
-                                    identity.interrupted("reconfiguration cancellation")
-                                } else {
-                                    GraphError::Cancelled
-                                })
+                        Abortable::new(
+                            async move {
+                                let guard = operation_token.drop_guard();
+                                let result = future.await;
+                                if result.is_ok() {
+                                    guard.disarm();
+                                }
+                                result
+                            }
+                            .instrument(span),
+                            registration,
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(if operation == Operation::Reconfigure {
+                                identity.interrupted("reconfiguration cancellation")
+                            } else {
+                                GraphError::Cancelled
                             })
+                        })
                     })
                     .await;
                 Completion {
@@ -4981,7 +5167,7 @@ impl Operations {
                 graph,
                 index,
                 Operation::Start,
-                false,
+                None,
                 group.cancellation.clone(),
             ) {
                 let failure = self.fail_operation(graph, index, Operation::Start, error)?;
@@ -5626,7 +5812,14 @@ impl Operations {
                                 node.failure = Some(failed);
                             });
                             if completion.operation == Operation::Create {
-                                self.launch(graph, completion.index, Operation::Dispose)?;
+                                self.launch_cleanup(
+                                    graph,
+                                    completion.index,
+                                    Operation::Dispose,
+                                    Some(Retirement::preserve(
+                                        crate::computation::v1::DisposeReason::InitializationFailure,
+                                    )),
+                                )?;
                             }
                             return Ok(());
                         }
@@ -5710,7 +5903,14 @@ impl Operations {
                 }
             });
             if retire_failed_creation {
-                self.launch(graph, completion.index, Operation::Dispose)?;
+                self.launch_cleanup(
+                    graph,
+                    completion.index,
+                    Operation::Dispose,
+                    Some(Retirement::preserve(
+                        crate::computation::v1::DisposeReason::InitializationFailure,
+                    )),
+                )?;
             }
             return Ok(());
         }
@@ -7502,7 +7702,9 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph, dispose: bool) -> Vec<
                 } else {
                     Operation::Stop
                 };
-                if let Err(error) = operations.launch(graph, index, operation) {
+                let retirement = dispose
+                    .then(|| Retirement::preserve(crate::computation::v1::DisposeReason::Shutdown));
+                if let Err(error) = operations.launch_cleanup(graph, index, operation, retirement) {
                     errors.push(error);
                 }
             }
@@ -7808,12 +8010,7 @@ mod command_tests {
         fn recovery_contract(&self) -> ComponentRecovery {
             ComponentRecovery::admitted(drasi_core::interface::StorageDurability::VOLATILE)
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        crate::passive_component_lifecycle!();
     }
 
     #[async_trait::async_trait]
@@ -7947,7 +8144,10 @@ mod command_tests {
             &self.descriptor
         }
 
-        async fn initialize(&mut self) -> anyhow::Result<()> {
+        async fn initialize(
+            &mut self,
+            _context: &crate::computation::v1::InitializeContext,
+        ) -> anyhow::Result<()> {
             use std::sync::atomic::Ordering::SeqCst;
             self.lifecycle.initialized.fetch_add(1, SeqCst);
             if self.lifecycle.armed.load(SeqCst) {
@@ -7957,26 +8157,40 @@ mod command_tests {
             Ok(())
         }
 
-        async fn start(&mut self) -> anyhow::Result<()> {
+        async fn start(
+            &mut self,
+            _context: &crate::computation::v1::StartContext,
+        ) -> anyhow::Result<()> {
             self.lifecycle
                 .started
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
-        async fn stop(&mut self) -> anyhow::Result<()> {
+        async fn stop(
+            &mut self,
+            _context: &crate::computation::v1::StopContext,
+        ) -> anyhow::Result<()> {
             self.lifecycle
                 .stopped
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
-        async fn dispose(&mut self) -> anyhow::Result<()> {
+        async fn dispose(
+            &mut self,
+            context: &crate::computation::v1::DisposeContext,
+        ) -> anyhow::Result<()> {
+            if context.erases_owned_state() {
+                anyhow::bail!("this component does not support permanent state removal");
+            }
             self.lifecycle
                 .disposed
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+        crate::passive_component_lifecycle!(@hook pause, PauseContext);
+        crate::passive_component_lifecycle!(@hook resume, ResumeContext);
     }
 
     #[async_trait::async_trait]

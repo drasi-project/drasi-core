@@ -55,7 +55,7 @@ async fn parity_and_aliases() -> Result<()> {
             scope(1),
             provider(&directory.path().join("native"))?,
         )?;
-        native.initialize().await?;
+        native.initialize(&crate::hooks::initialize_ctx()).await?;
         let mut ordinary_config = drasi_lib::Query::cypher(component_name()?)
             .query(TEXT)
             .from_input_by_id(ComponentId::try_new(SOURCE_ID)?)
@@ -110,8 +110,8 @@ async fn parity_and_aliases() -> Result<()> {
         ];
         native.bind_inputs(&bindings).await?;
         linked.bind_inputs(&bindings).await?;
-        native.start().await?;
-        linked.start().await?;
+        native.start(&crate::hooks::start_ctx()).await?;
+        linked.start(&crate::hooks::start_ctx()).await?;
         let ignored = InputEnvelope {
             port: PortId::try_new("in")?,
             envelope: GraphChangeCodec::encode_change(
@@ -154,8 +154,8 @@ async fn parity_and_aliases() -> Result<()> {
             native.delivery_completed(&actual).await?;
             linked.delivery_completed(&expected).await?;
         }
-        native.stop().await?;
-        linked.stop().await?;
+        native.stop(&crate::hooks::stop_ctx()).await?;
+        linked.stop(&crate::hooks::stop_ctx()).await?;
     }
     Ok(())
 }
@@ -181,10 +181,12 @@ async fn derived_input_scope() -> Result<()> {
             "upstream/out",
         )?])
         .await?;
-    upstream.initialize().await?;
-    downstream.initialize().await?;
-    upstream.start().await?;
-    downstream.start().await?;
+    upstream.initialize(&crate::hooks::initialize_ctx()).await?;
+    downstream
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
+    upstream.start(&crate::hooks::start_ctx()).await?;
+    downstream.start(&crate::hooks::start_ctx()).await?;
     for sequence in 1..=2 {
         let output = upstream
             .transform(input(
@@ -221,8 +223,8 @@ async fn derived_input_scope() -> Result<()> {
         );
         downstream.delivery_completed(&converted).await?;
     }
-    downstream.stop().await?;
-    upstream.stop().await?;
+    downstream.stop(&crate::hooks::stop_ctx()).await?;
+    upstream.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -313,14 +315,14 @@ async fn bootstrap_origin_and_live_binding() -> Result<()> {
             ScopedBootstrap,
         ))),
     )?;
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     query
         .bind_inputs(&[binding(
             ComponentId::try_new("1386fd15-7c70-53b2-b727-5b28f3d05f3f")?,
             "source/out",
         )?])
         .await?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let readers = query.output_readers();
     let snapshot = readers
         .ports()
@@ -361,7 +363,7 @@ async fn bootstrap_origin_and_live_binding() -> Result<()> {
         [QueryPartEvaluationContext::Updating { after, .. }]
             if after.get("value") == Some(&VariableValue::from(json!(2)))
     ));
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -415,14 +417,14 @@ async fn custom_factory_and_actual_index(persistent: bool) -> Result<()> {
         configuration["volatile"] = json!(true);
         factory.create_component(component_id()?, configuration)?
     };
-    query.initialize().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
     query
         .bind_inputs(&[binding(
             ComponentId::try_new("1386fd15-7c70-53b2-b727-5b28f3d05f3f")?,
             "source/out",
         )?])
         .await?;
-    query.start().await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let mut instance = None;
     for sequence in 1..=2 {
         let output = query
@@ -465,9 +467,9 @@ async fn custom_factory_and_actual_index(persistent: bool) -> Result<()> {
                 .and_then(|port| port.query())
                 .context("missing query reader")?;
             let before = reader.query_head().await?;
-            query.stop().await?;
+            query.stop(&crate::hooks::stop_ctx()).await?;
             assert!(reader.query_head().await.is_err());
-            query.start().await?;
+            query.start(&crate::hooks::start_ctx()).await?;
             assert_eq!(
                 reader.query_head().await?,
                 before,
@@ -485,13 +487,13 @@ async fn custom_factory_and_actual_index(persistent: bool) -> Result<()> {
             .transform(input(SourceChange::Replace { element: bad }, 3)?)
             .await
             .is_err());
-        query.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
         assert!(
-            query.start().await.is_err(),
+            query.start(&crate::hooks::start_ctx()).await.is_err(),
             "failed volatile state must not restart empty"
         );
     }
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 

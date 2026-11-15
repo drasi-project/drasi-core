@@ -379,12 +379,7 @@ impl sdk::NativeComponent for Node {
             _ => readers,
         }
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_computation_plugin_sdk::passive_lifecycle!();
 }
 
 #[async_trait]
@@ -553,7 +548,9 @@ impl Fixture {
 
     async fn create(&self, name: &str) -> anyhow::Result<(NativeComponentProxy, Arc<Shared>)> {
         let (mut proxy, shared) = self.try_create(name)?;
-        proxy.initialize().await?;
+        proxy
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
         Ok((proxy, shared))
     }
 }
@@ -584,7 +581,9 @@ async fn source_snapshot_and_replay_cross_the_exported_tables() -> anyhow::Resul
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("source").await?;
     shared.commit(3);
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
 
     let snapshot = snapshots(&readers).snapshot().await?;
@@ -615,7 +614,9 @@ async fn source_snapshot_and_replay_cross_the_exported_tables() -> anyhow::Resul
         [3]
     );
     assert!(replay.replay_after(&head).await?.envelopes().is_empty());
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -641,11 +642,15 @@ async fn snapshot_and_replay_capabilities_are_independent_per_output() -> anyhow
     let fixture = fixture(Kind::Transformer)?;
     let (mut proxy, shared) = fixture.create("transformer").await?;
     shared.commit(2);
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
     assert_eq!(snapshots(&readers).snapshot().await?.records().len(), 2);
     assert_eq!(replays(&readers).committed_head().await?.sequence(), 2);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -731,7 +736,9 @@ async fn transfer_owns_one_observation_and_cannot_cross_activation() -> anyhow::
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("paged-observation").await?;
     shared.commit(2049);
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
     let transfer = provider.transfer()?;
     let header = raw_request(&transfer.0, transfer_operation::START, &[])?.await?;
@@ -780,8 +787,12 @@ async fn transfer_owns_one_observation_and_cannot_cross_activation() -> anyhow::
     let held = provider.transfer()?;
     raw_request(&held.0, transfer_operation::START, &[])?.await?;
     raw_request(&held.0, transfer_operation::NEXT, &[])?.await?;
-    proxy.stop().await?;
-    proxy.start().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert_eq!(
         raw_request(&held.0, transfer_operation::NEXT, &[])
             .err()
@@ -798,7 +809,9 @@ async fn transfer_owns_one_observation_and_cannot_cross_activation() -> anyhow::
         4098
     );
     drop(held);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -810,7 +823,9 @@ async fn transfer_release_cancels_unpolled_work_and_returns_capacity() -> anyhow
     };
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("paged-release").await?;
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
     let mut held = Vec::new();
     for _ in 0..MAX_TRANSFERS {
@@ -847,7 +862,9 @@ async fn transfer_release_cancels_unpolled_work_and_returns_capacity() -> anyhow
         held.push(provider.transfer()?);
     }
     held.clear();
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -859,7 +876,9 @@ async fn stop_releases_an_abandoned_transfer_without_any_follow_lease() -> anyho
     };
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("stopped-transfer").await?;
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     shared.block(true);
     let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
     let transfer = provider.transfer()?;
@@ -870,7 +889,9 @@ async fn stop_releases_an_abandoned_transfer_without_any_follow_lease() -> anyho
             .is_err()
     );
     assert_eq!(shared.active(), 1);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert_eq!(
         shared.active(),
         0,
@@ -953,7 +974,9 @@ async fn reads_are_independent_of_pending_data_work_and_retire_with_the_proxy() 
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("pending").await?;
     shared.commit(2);
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
     let snapshot = snapshots(&readers);
     let replay = replays(&readers);
@@ -1000,7 +1023,9 @@ async fn reads_are_independent_of_pending_data_work_and_retire_with_the_proxy() 
 async fn typed_errors_are_preserved_and_never_become_empty_results() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("errors").await?;
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
     let (snapshot, replay) = (snapshots(&readers), replays(&readers));
 
@@ -1074,7 +1099,9 @@ async fn typed_errors_are_preserved_and_never_become_empty_results() -> anyhow::
     ));
     shared.mode(Mode::Ready);
     assert_eq!(snapshot.snapshot().await?.records().len(), 5);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1089,7 +1116,9 @@ async fn inactive_components_are_not_ready_and_stop_ends_in_flight_reads() -> an
         matches!(snapshot.snapshot().await, Err(OutputReadError::NotReady(_))),
         "a read before START must not answer"
     );
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert_eq!(snapshot.snapshot().await?.records().len(), 1);
 
     shared.block(true);
@@ -1099,7 +1128,9 @@ async fn inactive_components_are_not_ready_and_stop_ends_in_flight_reads() -> an
     });
     shared.entered.notified().await;
     assert_eq!(shared.active(), 1);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert!(matches!(read.await?, Err(OutputReadError::Retired)));
     assert_eq!(
         shared.active(),
@@ -1112,9 +1143,13 @@ async fn inactive_components_are_not_ready_and_stop_ends_in_flight_reads() -> an
         "a stopped component must not answer"
     );
 
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert_eq!(snapshot.snapshot().await?.records().len(), 1);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1123,7 +1158,9 @@ async fn cancelled_reads_release_their_slots_and_cancel_the_provider() -> anyhow
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("cancelled").await?;
     shared.commit(1);
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
     let snapshot = snapshots(&readers);
 
@@ -1143,7 +1180,9 @@ async fn cancelled_reads_release_their_slots_and_cancel_the_provider() -> anyhow
         1,
         "cancelled reads leaked concurrency slots"
     );
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1151,7 +1190,9 @@ async fn cancelled_reads_release_their_slots_and_cancel_the_provider() -> anyhow
 async fn large_snapshots_and_replay_use_complete_bounded_transfers() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("limits").await?;
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
 
     shared.mode(Mode::Huge);
@@ -1211,7 +1252,9 @@ async fn large_snapshots_and_replay_use_complete_bounded_transfers() -> anyhow::
         abi::output_reads::MAX_REPLAY_ENVELOPES
     );
     assert_eq!(replay.replay_after(&within).await?.envelopes().len(), 1);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1220,14 +1263,20 @@ async fn a_replaced_component_never_serves_its_successor_or_predecessor() -> any
     let fixture = fixture(Kind::Both)?;
     let (mut first, first_state) = fixture.create("replaced").await?;
     first_state.commit(1);
-    first.start().await?;
+    first
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let old = snapshots(&first.output_readers());
-    first.stop().await?;
+    first
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     drop(first);
 
     let (mut second, second_state) = fixture.create("replaced-again").await?;
     second_state.commit(2);
-    second.start().await?;
+    second
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let new = snapshots(&second.output_readers());
     assert!(matches!(
         old.snapshot().await,
@@ -1236,7 +1285,9 @@ async fn a_replaced_component_never_serves_its_successor_or_predecessor() -> any
     let snapshot = new.snapshot().await?;
     assert_eq!(snapshot.records().len(), 2);
     assert_eq!(snapshot.cursor().producer(), &second_state.identity);
-    second.stop().await?;
+    second
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1256,7 +1307,9 @@ async fn follow_delivers_a_coherent_snapshot_then_the_live_tail_in_order() -> an
     let fixture = fixture(Kind::Follow)?;
     let (mut proxy, shared) = fixture.create("follow").await?;
     shared.commit(2);
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
     let follow = follow_provider(&readers)
         .snapshot_and_follow(open_limits())
@@ -1279,7 +1332,9 @@ async fn follow_delivers_a_coherent_snapshot_then_the_live_tail_in_order() -> an
     shared.publish_to(5);
     assert_eq!(logical(&tail.next().await?), 5);
     drop(tail);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1287,7 +1342,9 @@ async fn follow_delivers_a_coherent_snapshot_then_the_live_tail_in_order() -> an
 async fn follow_lag_expiry_and_capacity_are_distinct_typed_errors() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Follow)?;
     let (mut proxy, shared) = fixture.create("follow-errors").await?;
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
     let provider = follow_provider(&readers);
 
@@ -1377,7 +1434,9 @@ async fn follow_lag_expiry_and_capacity_are_distinct_typed_errors() -> anyhow::R
         held.push(provider.snapshot_and_follow(open_limits()).await?);
     }
     held.clear();
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1385,7 +1444,9 @@ async fn follow_lag_expiry_and_capacity_are_distinct_typed_errors() -> anyhow::R
 async fn stop_releases_leases_and_a_restart_never_revives_them() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Follow)?;
     let (mut proxy, shared) = fixture.create("follow-lifecycle").await?;
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
     let provider = follow_provider(&readers);
 
@@ -1400,19 +1461,27 @@ async fn stop_releases_leases_and_a_restart_never_revives_them() -> anyhow::Resu
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(!pending.is_finished());
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     assert!(matches!(pending.await?, Err(OutputReadError::Retired)));
 
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let (_, mut old) = provider
         .snapshot_and_follow(open_limits())
         .await?
         .into_parts();
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     // The host still holds the lease handle, but stop already released the
     // provider's retention, and a restart does not revive it.
     assert!(matches!(old.next().await, Err(OutputReadError::Retired)));
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert!(matches!(old.next().await, Err(OutputReadError::Retired)));
     let mut held = Vec::new();
     for _ in 0..HUB_LEASES {
@@ -1425,7 +1494,9 @@ async fn stop_releases_leases_and_a_restart_never_revives_them() -> anyhow::Resu
     assert_eq!(logical(&current.next().await?), 1);
     assert_eq!(logical(&current.next().await?), 2);
     drop((old, held, current));
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     drop(readers);
     drop(proxy);
     // The provider handle stays valid after release, but fails closed.
@@ -1447,7 +1518,9 @@ async fn a_pending_follow_does_not_block_other_output_reads() -> anyhow::Result<
     let fixture = fixture(Kind::Follow)?;
     let (mut proxy, shared) = fixture.create("follow-independent").await?;
     shared.commit(1);
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let readers = proxy.output_readers();
     let (_, tail) = follow_provider(&readers)
         .snapshot_and_follow(open_limits())
@@ -1471,7 +1544,9 @@ async fn a_pending_follow_does_not_block_other_output_reads() -> anyhow::Result<
     .expect("point reads or another open waited behind a pending follow")?;
     shared.publish_to(2);
     assert_eq!(pending.await??, 2);
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1584,7 +1659,9 @@ async fn raw_lease_retains_an_unacknowledged_item_until_it_is_observed() -> anyh
         begin(&limits).err().map(|e| e.code),
         Some(abi::output_reads::status::NOT_ACTIVE)
     );
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     assert_eq!(
         begin(&[1, 2, 3]).err().map(|e| e.code),
         Some(abi::status::INVALID_ARGUMENT)
@@ -1624,7 +1701,9 @@ async fn raw_lease_retains_an_unacknowledged_item_until_it_is_observed() -> anyh
         ((*lease.vtable).release.unwrap())(lease.state);
         ((*provider.vtable).release.unwrap())(provider.state);
     }
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1731,7 +1810,9 @@ async fn releasing_a_lease_drops_a_running_next_while_its_operation_is_retained(
     let table = raw_follow_table()?;
     let fixture = fixture(Kind::Follow)?;
     let (mut proxy, _shared) = fixture.create("release-next").await?;
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let provider = raw_follow_provider(&table, &proxy)?;
 
     let (first, granted) = raw_open_lease(&provider).await?;
@@ -1773,7 +1854,9 @@ async fn releasing_a_lease_drops_a_running_next_while_its_operation_is_retained(
         raw_release(lease);
     }
     unsafe { ((*provider.vtable).release.unwrap())(provider.state) };
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     Ok(())
 }
 
@@ -1783,7 +1866,9 @@ async fn releasing_a_lease_cancels_its_pending_open_while_its_operation_is_retai
     let table = raw_follow_table()?;
     let fixture = fixture(Kind::Follow)?;
     let (mut proxy, shared) = fixture.create("release-open").await?;
-    proxy.start().await?;
+    proxy
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
     let provider = raw_follow_provider(&table, &proxy)?;
 
     shared.block(true);
@@ -1816,7 +1901,9 @@ async fn releasing_a_lease_cancels_its_pending_open_while_its_operation_is_retai
             .await
             .is_err()
     );
-    proxy.stop().await?;
+    proxy
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
     let error = tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
         .expect("a stopped lease's operation must end promptly")

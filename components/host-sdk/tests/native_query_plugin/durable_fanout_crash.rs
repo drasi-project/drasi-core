@@ -86,8 +86,8 @@ async fn partial_fanout() -> Result<()> {
     owner.shutdown().await?;
     drop(owner);
     let mut pending = create(&root.join("query"), QUERY, 2)?;
-    pending.initialize().await?;
-    pending.start().await?;
+    pending.initialize(&crate::hooks::initialize_ctx()).await?;
+    pending.start(&crate::hooks::start_ctx()).await?;
     assert!(
         pending
             .bind_output_destinations(&OutputBindings::try_new(
@@ -106,7 +106,7 @@ async fn partial_fanout() -> Result<()> {
             .is_err(),
         "matching names accepted a replacement journal while output was pending"
     );
-    pending.stop().await?;
+    pending.stop(&crate::hooks::stop_ctx()).await?;
     drop(pending);
     let mut recovered = Fixture::new(root, None).await?;
     let run = tokio::time::timeout(Duration::from_secs(15), recovered.graph.start()?).await;
@@ -132,13 +132,15 @@ async fn partial_fanout() -> Result<()> {
     stopped?;
     drop(recovered);
     let mut confirmed = create(&root.join("query"), QUERY, 3)?;
-    confirmed.initialize().await?;
-    confirmed.start().await?;
+    confirmed
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
+    confirmed.start(&crate::hooks::start_ctx()).await?;
     confirmed
         .bind_output_destinations(&OutputBindings::default())
         .await?;
     assert!(confirmed.continue_transform().await?.is_empty());
-    confirmed.stop().await?;
+    confirmed.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 

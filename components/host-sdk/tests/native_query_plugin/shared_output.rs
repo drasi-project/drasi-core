@@ -40,8 +40,8 @@ async fn follow(
 async fn shared_output_lifecycle() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.continue_transform().await?.is_empty());
     let first = query
         .transform(input(
@@ -52,12 +52,12 @@ async fn shared_output_lifecycle() -> Result<()> {
         )?)
         .await?;
     aggregate(&first, Some(0.0), 10.0, 1)?;
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create(directory.path(), QUERY, 2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     let before_replay = observation(&query).await?;
     let replayed = query.continue_transform().await?;
     query.delivery_completed(&replayed).await?;
@@ -101,7 +101,7 @@ async fn shared_output_lifecycle() -> Result<()> {
             snapshot.cursor().producer()
         );
     }
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     assert!(tokio::time::timeout(Duration::from_secs(1), tail.next())
         .await?
         .is_err());
@@ -122,8 +122,8 @@ async fn shared_query_output_follow_survives_replay_and_fences_stop_multi_thread
 async fn shared_query_output_reports_slow_followers_without_failing_processing() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut query = create(directory.path(), QUERY, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.continue_transform().await?.is_empty());
     let (_, mut tail) = follow(&query, 1).await?;
     for sequence in 1..=2 {
@@ -143,7 +143,7 @@ async fn shared_query_output_reports_slow_followers_without_failing_processing()
     ));
     let (snapshot, _) = follow(&query, 1).await?;
     assert_eq!(snapshot.cursor().sequence(), 2);
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -160,8 +160,8 @@ async fn shared_query_output_history_reopens_and_capacity_is_operational() -> Re
         )
     };
     let mut query = create(4, 1)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.continue_transform().await?.is_empty());
     for sequence in 1..=6 {
         let output = query
@@ -201,12 +201,12 @@ async fn shared_query_output_history_reopens_and_capacity_is_operational() -> Re
             ..
         })
     ));
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     drop(query);
 
     let mut query = create(6, 2)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.start(&crate::hooks::start_ctx()).await?;
     assert!(query.continue_transform().await?.is_empty());
     let readers = query.output_readers();
     let replay = readers.ports()[&PortId::try_new("out")?]
@@ -247,7 +247,7 @@ async fn shared_query_output_history_reopens_and_capacity_is_operational() -> Re
             .len(),
         5
     );
-    query.stop().await?;
+    query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
 
@@ -270,8 +270,8 @@ async fn shared_query_definition_scopes_same_named_results_and_preserves_labels(
             },
             provider(&directory.path().join(instance))?,
         )?;
-        query.initialize().await?;
-        query.start().await?;
+        query.initialize(&crate::hooks::initialize_ctx()).await?;
+        query.start(&crate::hooks::start_ctx()).await?;
         assert!(query.continue_transform().await?.is_empty());
         let output = query
             .transform(input(
@@ -298,7 +298,7 @@ async fn shared_query_definition_scopes_same_named_results_and_preserves_labels(
         );
         datasets.push(projection.projector().dataset().to_owned());
         query.delivery_completed(&output).await?;
-        query.stop().await?;
+        query.stop(&crate::hooks::stop_ctx()).await?;
     }
     assert_ne!(datasets[0], datasets[1]);
     Ok(())

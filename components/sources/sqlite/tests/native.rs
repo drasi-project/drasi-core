@@ -165,9 +165,9 @@ async fn durable_sqlite_replays_whole_transactions_and_exposes_only_final_query_
     let directory = tempfile::tempdir()?;
     let progress = progress();
     let mut query = query(directory.path(), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(config(directory.path()), progress.clone())?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)")
@@ -191,7 +191,7 @@ async fn durable_sqlite_replays_whole_transactions_and_exposes_only_final_query_
             .0,
         1
     );
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let replay = next(&mut source).await?;
     assert_eq!(
         original.envelope.system().source_position(),
@@ -210,9 +210,9 @@ async fn durable_sqlite_replays_whole_transactions_and_exposes_only_final_query_
     assert_eq!(rows(&query), [serde_json::json!({"id":1,"value":"final"})]);
     assert!(apply(&mut query, duplicate).await?.is_empty());
     handle.query("SELECT id FROM items").await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -220,7 +220,7 @@ async fn journal_state_after_stop(
     source: &mut SqliteSource,
     path: &Path,
 ) -> Result<(u64, u64, u64)> {
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     journal_state(path)
 }
 
@@ -229,7 +229,7 @@ async fn journal_capacity_and_failed_commit_roll_back_both_sql_and_replay_record
     let directory = tempfile::tempdir()?;
     let progress = progress();
     let mut query = query(directory.path(), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut settings = config(directory.path());
     settings
         .replay
@@ -237,7 +237,7 @@ async fn journal_capacity_and_failed_commit_roll_back_both_sql_and_replay_record
         .expect("replay configuration")
         .max_transactions = size(1);
     let mut source = source(settings, progress)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle.execute_batch("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT);
         CREATE TABLE child(id INTEGER PRIMARY KEY,parent INTEGER REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED);").await?;
@@ -263,10 +263,10 @@ async fn journal_capacity_and_failed_commit_roll_back_both_sql_and_replay_record
         .await?;
     apply(&mut query, next(&mut source).await?).await?;
     handle.query("SELECT 1").await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (2, 2, 0));
     assert_eq!(rows(&query).len(), 2);
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -276,9 +276,9 @@ async fn application_sql_cannot_shadow_or_attach_side_effects_to_the_replay_jour
     let directory = tempfile::tempdir()?;
     let progress = progress();
     let mut query = query(directory.path(), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(config(directory.path()), progress)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
@@ -303,10 +303,10 @@ async fn application_sql_cannot_shadow_or_attach_side_effects_to_the_replay_jour
         .await?;
     apply(&mut query, next(&mut source).await?).await?;
     handle.query("SELECT 1").await?;
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
     assert_eq!(rows(&query), [serde_json::json!({"id":2,"value":"valid"})]);
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -315,30 +315,30 @@ async fn replay_requires_real_file_storage_and_never_adopts_existing_data() -> R
     let directory = tempfile::tempdir()?;
     let progress = progress();
     let mut query = query(directory.path(), progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     for alias in ["", ":memory:", "file::memory:?cache=shared"] {
         let mut settings = config(directory.path());
         settings.path = Some(alias.into());
         let mut source = source(settings, progress.clone())?;
         assert!(source
-            .start()
+            .start(&lifecycle_ctx::start())
             .await
             .unwrap_err()
             .to_string()
             .contains("persistent database file"));
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
     }
     let connection = rusqlite::Connection::open(directory.path().join("source.db"))?;
     connection.execute_batch("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'existing');")?;
     drop(connection);
     let mut source = source(config(directory.path()), progress)?;
     assert!(source
-        .start()
+        .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("coordinated bootstrap"));
-    source.stop().await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
     let connection = rusqlite::Connection::open(directory.path().join("source.db"))?;
     assert_eq!(
         connection.query_row("SELECT count(*) FROM items", [], |row| row
@@ -353,7 +353,7 @@ async fn replay_requires_real_file_storage_and_never_adopts_existing_data() -> R
         )?,
         0
     );
-    query.stop().await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -364,10 +364,10 @@ async fn durable_start_refuses_rebinding_missing_history_and_external_schema_cha
         let directory = tempfile::tempdir()?;
         let progress = progress();
         let mut query = query(directory.path(), progress.clone()).await?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         let settings = config(directory.path());
         let mut first = source(settings.clone(), progress.clone())?;
-        first.start().await?;
+        first.start(&lifecycle_ctx::start()).await?;
         first
             .handle()
             .execute("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
@@ -376,7 +376,7 @@ async fn durable_start_refuses_rebinding_missing_history_and_external_schema_cha
             .handle()
             .execute("INSERT INTO items VALUES(1,'first')")
             .await?;
-        first.stop().await?;
+        first.stop(&lifecycle_ctx::stop()).await?;
         let connection = rusqlite::Connection::open(directory.path().join("source.db"))?;
         match fault {
             "missing" => {
@@ -404,9 +404,12 @@ async fn durable_start_refuses_rebinding_missing_history_and_external_schema_cha
         } else {
             source(next_settings, progress)?
         };
-        assert!(second.start().await.is_err(), "{fault}");
-        second.stop().await?;
-        query.stop().await?;
+        assert!(
+            second.start(&lifecycle_ctx::start()).await.is_err(),
+            "{fault}"
+        );
+        second.stop(&lifecycle_ctx::stop()).await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
 }
@@ -416,34 +419,37 @@ async fn query_deprovision_cannot_silently_resume_after_sqlite_history_retiremen
     let directory = tempfile::tempdir()?;
     let owner = progress();
     let mut consumer = query(directory.path(), owner.clone()).await?;
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     let mut producer = source(config(directory.path()), owner)?;
-    producer.start().await?;
+    producer.start(&lifecycle_ctx::start()).await?;
     producer.handle().execute_batch(
         "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'retained data')",
     ).await?;
     apply(&mut consumer, next(&mut producer).await?).await?;
     producer.handle().query("SELECT 1").await?;
-    producer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
-    consumer.stop().await?;
-    consumer.delete_owned_resources().await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.dispose(&lifecycle_ctx::erase()).await?;
     drop(consumer);
     drop(producer);
 
     let owner = progress();
     let mut consumer = query(directory.path(), owner.clone()).await?;
-    consumer.start().await?;
+    consumer.start(&lifecycle_ctx::start()).await?;
     let mut producer = source(config(directory.path()), owner)?;
-    let error = producer.start().await.expect_err("missing retired cursor");
+    let error = producer
+        .start(&lifecycle_ctx::start())
+        .await
+        .expect_err("missing retired cursor");
     assert!(
         error
             .to_string()
             .contains("no cursor for already retired history"),
         "{error:#}"
     );
-    producer.stop().await?;
-    consumer.stop().await?;
+    producer.stop(&lifecycle_ctx::stop()).await?;
+    consumer.stop(&lifecycle_ctx::stop()).await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
     Ok(())
 }
@@ -455,10 +461,10 @@ async fn reduced_limits_and_corrupt_records_never_discard_or_publish_retained_tr
         let directory = tempfile::tempdir()?;
         let owner = progress();
         let mut consumer = query(directory.path(), owner.clone()).await?;
-        consumer.start().await?;
+        consumer.start(&lifecycle_ctx::start()).await?;
         let mut settings = config(directory.path());
         let mut producer = source(settings.clone(), owner.clone())?;
-        producer.start().await?;
+        producer.start(&lifecycle_ctx::start()).await?;
         producer
             .handle()
             .execute("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
@@ -471,7 +477,7 @@ async fn reduced_limits_and_corrupt_records_never_discard_or_publish_retained_tr
             .handle()
             .execute("INSERT INTO items VALUES(2,'second')")
             .await?;
-        producer.stop().await?;
+        producer.stop(&lifecycle_ctx::stop()).await?;
         let before = journal_state(directory.path())?;
         match fault {
             "count" => settings.replay.as_mut().context("replay")?.max_transactions = size(1),
@@ -491,7 +497,7 @@ async fn reduced_limits_and_corrupt_records_never_discard_or_publish_retained_tr
         }
         drop(producer);
         let mut producer = source(settings, owner)?;
-        match producer.start().await {
+        match producer.start(&lifecycle_ctx::start()).await {
             Err(error) => assert!(
                 error.to_string().contains("exceeds configured limits"),
                 "{fault}: {error:#}"
@@ -508,8 +514,8 @@ async fn reduced_limits_and_corrupt_records_never_discard_or_publish_retained_tr
                 }
             }
         }
-        producer.stop().await?;
-        consumer.stop().await?;
+        producer.stop(&lifecycle_ctx::stop()).await?;
+        consumer.stop(&lifecycle_ctx::stop()).await?;
         assert_eq!(journal_state(directory.path())?, before, "{fault}");
         assert!(rows(&consumer).is_empty(), "{fault}");
     }
@@ -736,9 +742,9 @@ async fn sqlite_process_exit_helper() -> Result<()> {
     let path = Path::new(&path);
     let progress = progress();
     let mut query = query(path, progress.clone()).await?;
-    query.start().await?;
+    query.start(&lifecycle_ctx::start()).await?;
     let mut source = source(config(path), progress)?;
-    source.start().await?;
+    source.start(&lifecycle_ctx::start()).await?;
     let handle = source.handle();
     handle
         .execute("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
@@ -785,9 +791,9 @@ async fn actual_process_exits_recover_sql_and_replay_at_each_commit_boundary() -
         );
         let progress = progress();
         let mut query = query(directory.path(), progress.clone()).await?;
-        query.start().await?;
+        query.start(&lifecycle_ctx::start()).await?;
         let mut source = source(config(directory.path()), progress)?;
-        source.start().await?;
+        source.start(&lifecycle_ctx::start()).await?;
         if mode == "committed" {
             apply(&mut query, next(&mut source).await?).await?;
         } else {
@@ -796,7 +802,7 @@ async fn actual_process_exits_recover_sql_and_replay_at_each_commit_boundary() -
                 .is_err());
         }
         source.handle().query("SELECT id FROM items").await?;
-        source.stop().await?;
+        source.stop(&lifecycle_ctx::stop()).await?;
         if mode == "uncommitted" {
             assert!(rows(&query).is_empty());
             assert_eq!(journal_state(directory.path())?, (0, 0, 0));
@@ -804,7 +810,51 @@ async fn actual_process_exits_recover_sql_and_replay_at_each_commit_boundary() -
             assert_eq!(rows(&query), [serde_json::json!({"id":1,"value":"final"})]);
             assert_eq!(journal_state(directory.path())?, (1, 1, 0));
         }
-        query.stop().await?;
+        query.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod lifecycle_ctx {
+    use drasi_lib::computation::v1::{
+        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
+        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
+        StopMode, UpdateBoundary,
+    };
+
+    /// Keeps a context alive for futures that outlive the calling statement.
+    pub(crate) fn held<T>(value: T) -> &'static T {
+        Box::leak(Box::new(value))
+    }
+    pub(crate) fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+    pub(crate) fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+    pub(crate) fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+    pub(crate) fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+    pub(crate) fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+    pub(crate) fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+    pub(crate) fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("valid dispose context")
+    }
+    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
+        ApplyContext::new(scope(), boundary)
+    }
 }

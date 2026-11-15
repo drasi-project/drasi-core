@@ -228,12 +228,7 @@ impl ComputationComponent for Arithmetic {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> TestResult<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> TestResult<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl Transformer for Arithmetic {
@@ -1258,11 +1253,26 @@ impl ComputationComponent for JournalSource {
         ComponentRecovery::admitted(self.store.durability())
             .replay_until(self.progress.component_id().clone())
     }
-    async fn start(&mut self) -> TestResult<()> {
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> TestResult<()> {
         self.position = 0;
         Ok(())
     }
-    async fn stop(&mut self) -> TestResult<()> {
+    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> TestResult<()> {
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn dispose(
+        &mut self,
+        context: &drasi_lib::computation::v1::DisposeContext,
+    ) -> anyhow::Result<()> {
+        if context.erases_owned_state() {
+            anyhow::bail!("this component does not support permanent state removal");
+        }
         Ok(())
     }
 }
@@ -1305,12 +1315,7 @@ impl ComputationComponent for ReplayRelay {
             ComponentRecovery::default()
         }
     }
-    async fn start(&mut self) -> TestResult<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> TestResult<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -1791,12 +1796,7 @@ impl ComputationComponent for FiniteSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> TestResult<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> TestResult<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSource for FiniteSource {
@@ -1816,12 +1816,7 @@ impl ComputationComponent for Collector {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> TestResult<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> TestResult<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl EnvelopeSink for Collector {
@@ -2221,12 +2216,7 @@ impl ComputationComponent for NumberStep {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> TestResult<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> TestResult<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl Transformer for NumberStep {
@@ -2316,12 +2306,7 @@ impl ComputationComponent for QueryRows {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> TestResult<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> TestResult<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait]
 impl Transformer for QueryRows {
@@ -2517,7 +2502,7 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
 
     query.stop().await.expect("stop before reset");
     query
-        .delete_owned_resources()
+        .dispose(&lifecycle_contexts::erase())
         .await
         .expect("explicitly delete query state");
     query.start().await.expect("restart reset query");
@@ -2638,4 +2623,46 @@ async fn custom_schemas_flow_directly_and_incompatible_or_branched_steps_are_rej
         definition.descriptor(&registry).is_err(),
         "adjacent formats must agree"
     );
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

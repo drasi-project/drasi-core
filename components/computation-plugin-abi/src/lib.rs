@@ -14,19 +14,20 @@
 //! All entry points and callbacks must contain panics. Libraries are pinned for
 //! process lifetime; this ABI does not provide hot unloading.
 //!
-//! V3 headers and layouts are frozen. Read and validate the header before reading
-//! the rest of a table. V3 requires an exact version and size, including reserved
-//! fields. Metadata and tables remain valid until their owning handle is released.
+//! Read and validate the header before reading the rest of a table. V4 tables
+//! may only grow by appending fields in a later minor version: a host accepts the
+//! same major and an older or equal minor, and rejects a newer minor or another
+//! major before invoking any callback. Sizes must match the accepted minor's layout. Metadata and tables remain valid until their owning handle is released.
 //! Calls on one operation are serialized by its owner; wake/retain/release may be
 //! called concurrently. A poll must be cooperative and must never wait for I/O.
 
 use std::{ffi::c_void, fmt, mem::size_of, ptr};
 
-pub const ABI_VERSION: &str = "3.0.0";
-pub const ABI_MAJOR: u16 = 3;
+pub const ABI_VERSION: &str = "4.0.0";
+pub const ABI_MAJOR: u16 = 4;
 pub const ABI_MINOR: u16 = 0;
-pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4733; // DRASICG3
-pub const WIRE_VERSION: u32 = 3;
+pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4734; // DRASICG4
+pub const WIRE_VERSION: u32 = 4;
 pub const METADATA_SYMBOL: &[u8] = b"drasi_computation_plugin_metadata\0";
 pub const ENTRY_SYMBOL: &[u8] = b"drasi_computation_plugin_entry\0";
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
@@ -39,6 +40,7 @@ pub mod bootstrap_coordination;
 pub mod configuration;
 pub mod consumer;
 pub mod consumer_progress;
+pub mod management;
 pub mod output_follow;
 pub mod output_reads;
 pub mod output_snapshots;
@@ -66,12 +68,23 @@ impl Header {
         }
     }
 
+    /// Accepts the same family and major, and an older or equal minor whose
+    /// layout size is known. Only minor 0 exists in 4.x, so its size is exact.
     pub fn validate<T>(&self) -> Result<(), InvalidHeader> {
-        if *self == Self::new::<T>() {
+        let current = Self::new::<T>();
+        if self.magic == current.magic
+            && self.major == current.major
+            && self.minor <= current.minor
+            && self.size == Self::size_for_minor::<T>(self.minor)
+        {
             Ok(())
         } else {
             Err(InvalidHeader(*self))
         }
+    }
+
+    const fn size_for_minor<T>(_minor: u16) -> u32 {
+        size_of::<T>() as u32
     }
 }
 
@@ -229,11 +242,12 @@ pub struct FactoryVTable {
     /// Configuration-only constructor. No I/O, activation, workers or blocking.
     pub create:
         Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes, *mut ComponentHandle) -> Status>,
-    /// Pure configuration inspection. Input is a JSON UpdateRequest and success
-    /// returns a JSON ComponentUpdatePlan, each bounded by MAX_METADATA_BYTES.
-    /// No construction, I/O, activation or inspection of mutable external state.
-    /// Unsupported changes return an error, never an implicit recreate plan.
-    pub plan_update: Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply>,
+    /// Pure factory planner. Input is a JSON UpdateRequest and success returns a
+    /// JSON Assessment, each bounded by MAX_METADATA_BYTES. No construction, I/O,
+    /// activation or inspection of mutable external state. An unsupported change
+    /// is an `unsupported` Assessment; a failure to assess is an error, never an
+    /// implicit Replace.
+    pub assess: Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply>,
 }
 
 #[repr(C)]
@@ -259,17 +273,22 @@ pub struct ComponentVTable {
     >,
 }
 
+/// Lifecycle operations (INITIALIZE, START, PAUSE, RESUME, STOP, DISPOSE) carry
+/// a MessagePack lifecycle request (the SDK's `wire::LifecycleRequest`); other
+/// operations keep their role-specific payloads.
 pub mod operation {
     /// Requires successful INITIALIZE. Successful repeats do not reactivate.
     pub const START: u32 = 1;
-    /// End an activation, including a partial START. Retry incomplete cleanup.
+    /// End an activation, including a partial START or a paused activation.
+    /// Retry incomplete cleanup. The context selects Drain or Abort.
     pub const STOP: u32 = 2;
     pub const NEXT: u32 = 3;
     pub const TRANSFORM: u32 = 4;
     pub const HANDLE: u32 = 5;
     pub const RUN: u32 = 6;
-    /// Temporary processing pause, retaining the current activation.
-    pub const PAUSE_PROCESSING: u32 = 7;
+    /// Temporary pause, retaining the current activation. An unsupported pause
+    /// fails UNSUPPORTED; it never succeeds as a no-op.
+    pub const PAUSE: u32 = 7;
     pub const DELIVERY_COMPLETED: u32 = 8;
     pub const CONTINUE: u32 = 9;
     pub const WAKE_WAIT: u32 = 10;
@@ -280,9 +299,6 @@ pub mod operation {
     pub const TRANSACT: u32 = 15;
     /// Available only after negotiating `batching::PluginBatchingV1`.
     pub const HANDLE_BATCH: u32 = 16;
-    /// Explicit, permanent deletion of owned state/resources after positive STOP
-    /// cleanup (or before activation). Never implied by disposal or an update.
-    pub const DELETE_OWNED_RESOURCES: u32 = 17;
     /// Available only when the component declares input-binding updates.
     pub const BIND_INPUTS: u32 = 18;
     /// One initialization envelope for the declared provider-bootstrap input.
@@ -298,14 +314,16 @@ pub mod operation {
     /// Once per constructed object, before its first START. Failure/cancellation
     /// requires DISPOSE, not another initialization attempt on the same object.
     pub const INITIALIZE: u32 = 24;
-    /// Await final instance cleanup after STOP, including partial initialization.
-    /// Successful repeats acknowledge completion; release is not a substitute.
+    /// Final retirement after STOP, including partial initialization. The
+    /// context carries the reason, state intent and attempt; retries must repeat
+    /// the reason and intent. Successful repeats acknowledge completion; release
+    /// is not a substitute.
     pub const DISPOSE: u32 = 25;
     /// Resume a successfully paused activation, not another START.
-    pub const RESUME_PROCESSING: u32 = 26;
-    /// Bounded named MessagePack ApplyUpdateRequest. Only retained-object plans;
-    /// Recreate is executed by the host using disposal and factory construction.
-    pub const APPLY_UPDATE: u32 = 27;
+    pub const RESUME: u32 = 26;
+    /// Management apply of an accepted update at a Pause or Stop boundary.
+    /// Begun only through `management::PluginManagementV1::apply`.
+    pub const APPLY: u32 = 28;
 }
 
 pub const POLL_PENDING: u32 = 0;
@@ -406,7 +424,7 @@ mod tests {
         assert_eq!(size_of::<Metadata>(), 16 + 4 * p);
         assert_eq!(size_of::<PluginVTable>(), 16 + 3 * p);
         assert_eq!(size_of::<FactoryVTable>(), 16 + 3 * p);
-        assert_eq!(offset_of!(FactoryVTable, plan_update), 16 + 2 * p);
+        assert_eq!(offset_of!(FactoryVTable, assess), 16 + 2 * p);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * p);
         assert_eq!(size_of::<OperationVTable>(), 16 + 3 * p);
         assert_eq!(size_of::<Wake>(), 16 + 4 * p);
@@ -421,17 +439,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_other_families_versions_and_truncated_tables() {
+    fn rejects_other_families_majors_newer_minors_and_truncated_tables() {
         let good = Header::new::<ComponentVTable>();
         good.validate::<ComponentVTable>().unwrap();
         for bad in [
             Header { magic: 0, ..good },
             Header {
-                magic: 0x4452_4153_4943_4731,
-                major: 1,
+                magic: 0x4452_4153_4943_4733,
+                major: 3,
                 ..good
             },
-            Header { major: 0, ..good },
+            Header { major: 3, ..good },
+            Header { major: 5, ..good },
             Header { minor: 1, ..good },
             Header { size: 16, ..good },
             Header {
@@ -441,5 +460,13 @@ mod tests {
         ] {
             assert!(bad.validate::<ComponentVTable>().is_err());
         }
+    }
+
+    #[test]
+    fn lifecycle_operation_codes_are_distinct() {
+        use operation::*;
+        let codes = [INITIALIZE, START, PAUSE, RESUME, STOP, DISPOSE, APPLY];
+        let unique: std::collections::BTreeSet<_> = codes.iter().collect();
+        assert_eq!(unique.len(), codes.len());
     }
 }

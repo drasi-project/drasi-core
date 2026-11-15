@@ -233,36 +233,74 @@ impl sdk::NativeComponent for Producer {
             }
         })
     }
-    async fn start(&mut self) -> Result<()> {
-        self.starts += 1;
-        self.commands.starts.fetch_add(1, Ordering::SeqCst);
-        self.started = true;
-        self.commands.reader.snapshot()?;
-        match self.mode.as_str() {
-            "start-fail-once" if self.starts == 1 => anyhow::bail!("fixture start failed"),
-            "start-pending-once" if self.starts == 1 => std::future::pending().await,
-            "wait-recovered" => {
-                self.commands.reader.wait_recovered().await?;
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
-    async fn stop(&mut self) -> Result<()> {
-        self.stops += 1;
-        self.commands.stops.fetch_add(1, Ordering::SeqCst);
-        if self.mode.starts_with("stop-") {
+    async fn start(
+        &mut self,
+        _ctx: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            self.starts += 1;
+            self.commands.starts.fetch_add(1, Ordering::SeqCst);
+            self.started = true;
             self.commands.reader.snapshot()?;
+            match self.mode.as_str() {
+                "start-fail-once" if self.starts == 1 => anyhow::bail!("fixture start failed"),
+                "start-pending-once" if self.starts == 1 => std::future::pending().await,
+                "wait-recovered" => {
+                    self.commands.reader.wait_recovered().await?;
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
         }
-        match self.mode.as_str() {
-            "stop-fail-once" if self.stops == 1 => anyhow::bail!("fixture cleanup failed"),
-            "stop-pending-once" if self.stops == 1 => {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        .await;
+        Ok(result?)
+    }
+    async fn stop(
+        &mut self,
+        _ctx: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            self.stops += 1;
+            self.commands.stops.fetch_add(1, Ordering::SeqCst);
+            if self.mode.starts_with("stop-") {
                 self.commands.reader.snapshot()?;
             }
-            _ => {}
+            match self.mode.as_str() {
+                "stop-fail-once" if self.stops == 1 => anyhow::bail!("fixture cleanup failed"),
+                "stop-pending-once" if self.stops == 1 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    self.commands.reader.snapshot()?;
+                }
+                _ => {}
+            }
+            self.started = false;
+            Ok(())
         }
-        self.started = false;
+        .await;
+        Ok(result?)
+    }
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn dispose(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
 }
@@ -505,12 +543,50 @@ impl sdk::NativeComponent for HandledSink {
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({"mode":"fanout"}))
     }
-    async fn start(&mut self) -> Result<()> {
-        self.state.calls()?.starts += 1;
+    async fn start(
+        &mut self,
+        _ctx: &mut drasi_computation_plugin_sdk::lifecycle::StartContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            self.state.calls()?.starts += 1;
+            Ok(())
+        }
+        .await;
+        Ok(result?)
+    }
+    async fn stop(
+        &mut self,
+        _ctx: &drasi_computation_plugin_sdk::lifecycle::StopContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        let result: anyhow::Result<()> = async {
+            self.state.calls()?.stops += 1;
+            Ok(())
+        }
+        .await;
+        Ok(result?)
+    }
+    async fn initialize(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::InitializeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<()> {
-        self.state.calls()?.stops += 1;
+    async fn pause(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::PauseContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::ResumeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    async fn dispose(
+        &mut self,
+        _: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
+    ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
 }
