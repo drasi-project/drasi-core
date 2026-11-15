@@ -1355,6 +1355,19 @@ impl ComponentFactory for NativeFactory {
                 && specification.completion == self.metadata.completion,
             "native factory implementation, version, role or completion mismatch"
         );
+        if specification.dependencies.contains_key("catalog") {
+            if self.supports_ordinary_queries() {
+                anyhow::bail!(
+                    "native query implementation '{0}' does not bind a query result catalog; \
+                     declare the query with implementation '{0}/ordinary' to use a 'catalog' dependency",
+                    self.metadata.implementation.name
+                );
+            }
+            anyhow::bail!(
+                "native implementation '{}' does not accept a query result catalog",
+                self.metadata.implementation.name
+            );
+        }
         anyhow::ensure!(
             specification.dependencies.iter().all(|(name, resources)| {
                 resources.len() <= 1

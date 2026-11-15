@@ -365,6 +365,33 @@ mod tests {
     }
 
     #[test]
+    fn raw_native_query_factory_directs_catalog_bindings_to_the_ordinary_factory(
+    ) -> anyhow::Result<()> {
+        let plugin = NativePlugin::from_definition(drasi_computation_transformer_query::plugin()?)?;
+        let raw = plugin
+            .factories()
+            .iter()
+            .find(|factory| factory.supports_ordinary_queries())
+            .ok_or_else(|| anyhow::anyhow!("indexed query factory"))?;
+        let mut specification = raw.specification(
+            ComponentId::try_new("6b0e3c2d-5f0a-4a8e-9a43-0b3f53d9f1a2")?,
+            serde_json::json!({"query": "MATCH (n) RETURN n", "stream": "query/out"}),
+        )?;
+        specification
+            .dependencies
+            .insert("catalog".into(), vec![ResourceId::try_new("results")?]);
+        let error = ComponentFactory::validate(raw.as_ref(), &specification)
+            .expect_err("raw native query factory accepted a catalog");
+        assert!(
+            error
+                .to_string()
+                .contains("'drasi.experimental/indexed-query/ordinary'"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn registered_plugins_restore_native_query_authoring_recipes() -> anyhow::Result<()> {
         let plugin = NativePlugin::from_definition(drasi_computation_transformer_query::plugin()?)?;
         let authoring = plugin.query_factory()?;

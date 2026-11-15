@@ -405,6 +405,42 @@ async fn sustained_dependency_churn_multi_thread() -> Result<()> {
 }
 
 #[tokio::test]
+async fn managed_startup_failure_reports_each_typed_cause() -> Result<()> {
+    let state = Arc::new(State::default());
+    state.fail_create.store(true, Ordering::Release);
+    let core = open(&state).await?;
+    core.apply_desired_state(0, "initial", definition(0))
+        .await?;
+    let error = core
+        .start()
+        .await
+        .expect_err("a failed managed resource makes startup partial");
+    let partial = error
+        .downcast_ref::<drasi_lib::error::PartialStartError>()
+        .expect("partial startup");
+    let failures = partial
+        .cause
+        .downcast_ref::<drasi_lib::error::OperationFailures>()
+        .expect("managed startup keeps each failure");
+    assert!(!failures.failures().is_empty());
+    for failure in failures.failures() {
+        assert!(
+            failure.chain().any(|cause| cause.is::<GraphError>()),
+            "{failure:#}"
+        );
+    }
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("starting managed resource m-middle")
+            && message.contains("injected creation failure"),
+        "{message}"
+    );
+    assert!(core.is_running().await);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn failed_dependency_blocks_only_its_descendants_and_retry_reuses_parent() -> Result<()> {
     let state = Arc::new(State::default());
     state.fail_create.store(true, Ordering::Release);

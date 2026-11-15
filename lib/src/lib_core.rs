@@ -389,6 +389,9 @@ impl DrasiLib {
     /// * Any component fails to start (propagated from component)
     ///
     /// A component failure returns a [`crate::error::PartialStartError`] cause.
+    /// For managed components its cause is an
+    /// [`OperationFailures`](crate::error::OperationFailures) that keeps each
+    /// failed component's and resource's typed cause.
     /// Independent components may already be running: `is_running()` stays true
     /// and `stop()`/`shutdown()` remain available. Stop before retrying `start()`.
     /// Valid declarations waiting for missing dependencies are not startup errors.
@@ -546,33 +549,81 @@ impl DrasiLib {
                 .map_err(|cause| {
                     DrasiError::Internal(crate::error::PartialStartError { cause }.into())
                 })?;
-            let publication = self.computation_control()?.registry_snapshot();
-            let observed = &publication.observed;
-            if !report.converged()
-                && (report.error.is_some()
-                    || observed.components.iter().any(|(id, node)| {
-                        node.failure.is_some()
-                            && publication
-                                .desired
-                                .lifecycle_policies
-                                .get(id)
-                                .is_some_and(|policy| policy.auto_start)
-                    })
-                    || observed
-                        .resources
-                        .values()
-                        .any(|resource| resource.failure.is_some()))
-            {
-                return Err(DrasiError::Internal(crate::error::PartialStartError {
-                    cause: DrasiError::invalid_state(
-                        "managed components did not all become ready; inspect management status",
-                    ).into(),
-                }.into()));
+            if !report.converged() {
+                let publication = self.computation_control()?.registry_snapshot();
+                let failures = Self::startup_failures(&publication, report.error.as_deref());
+                if !failures.is_empty() {
+                    return Err(DrasiError::Internal(
+                        crate::error::PartialStartError {
+                            cause: crate::error::OperationFailures::new(
+                                "managed components did not all become ready",
+                                failures,
+                            )
+                            .into(),
+                        }
+                        .into(),
+                    ));
+                }
             }
         }
         info!("drasi-lib started successfully");
 
         Ok(())
+    }
+
+    /// Typed causes of an unconverged managed startup, in a stable order:
+    /// failed auto-start components, failed resources, then the reconcile error
+    /// when no component or resource failure explains it.
+    fn startup_failures(
+        publication: &crate::computation::v1::GraphRegistrySnapshot,
+        reconcile_error: Option<&str>,
+    ) -> Vec<anyhow::Error> {
+        let mut failures: Vec<anyhow::Error> = Vec::new();
+        for (id, node) in &publication.observed.components {
+            let Some(failure) = &node.failure else {
+                continue;
+            };
+            if !publication
+                .desired
+                .lifecycle_policies
+                .get(id)
+                .is_some_and(|policy| policy.auto_start)
+            {
+                continue;
+            }
+            let name = publication
+                .desired
+                .nodes
+                .iter()
+                .find(|node| node.descriptor.id() == id)
+                .map(|node| format!("'{}' ({id})", node.name))
+                .unwrap_or_else(|| id.to_string());
+            failures.push(
+                anyhow::Error::new(crate::computation::v1::GraphError::Reported {
+                    cause: failure.cause.clone(),
+                })
+                .context(format!(
+                    "starting managed component {name} failed during {:?}",
+                    failure.phase
+                )),
+            );
+        }
+        for (id, resource) in &publication.observed.resources {
+            if let Some(failure) = &resource.failure {
+                failures.push(
+                    anyhow::Error::new(crate::computation::v1::GraphError::Reported {
+                        cause: failure.cause.clone(),
+                    })
+                    .context(format!("starting managed resource {id}")),
+                );
+            }
+        }
+        if failures.is_empty() {
+            if let Some(error) = reconcile_error {
+                failures.push(anyhow::anyhow!("reconciling managed components: {error}"));
+            }
+        }
+        failures
     }
 
     /// Stop the server and all running components
