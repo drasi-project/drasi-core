@@ -52,7 +52,7 @@ compatibility-shim or automatic old-state migration programme is implied.
 | Testing quality and selection | [Testing overview](#testing-and-qualification), [production-path oracles](#cw-83), [honest runners](#cw-84), [CI selection](#cw-85), [duplication](#cw-86), [behavior ledgers](#cw-88) |
 | Recovery and behavior qualification | [Pending input](#cw-14), [reset](#cw-20), [completion evidence](#cw-36), [combined failures](#cw-39), [FFI](#cw-41), [Server](#cw-46), [examples](#cw-90) |
 | Query-plugin follow-ups | [Large items](#cw-76), [native parity coverage](#cw-77), [complete test run](#cw-78), [performance](#cw-79), [linked-reference retirement](#cw-80) |
-| Integration and applications | [Connectors](#cw-44), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
+| Integration and applications | [Connectors](#cw-44), [native network sources](#cw-100), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
 | Scaling and maintainability | [Publication](#cw-31), [storage](#cw-28), [hot paths](#cw-32), [decomposition](#cw-34) |
 | Testing reliability and cost | [Asynchronous tests](#cw-37), [MySQL/Postgres container failures](#cw-99), [build/fixture cost](#cw-87), [shared conformance](#cw-89), [application benchmarks](#cw-40), [native-query comparison](#cw-79) |
 | Public API and release | [API curation](#cw-69), [formats](#cw-18), [lints/MSRV](#cw-61), [release documentation](#cw-73) |
@@ -445,10 +445,24 @@ Option B (and, in part, Option C) also requires the following:
 and Resume as no-ops. Graph output stops while paused, but the following
 workers keep running:
 
-- the HTTP, gRPC, Postgres and Bridge sources keep accepting input into their
-  admission queues or channels;
+- the Postgres and Bridge sources keep accepting input into their admission
+  queues or channels;
+- the MySQL, SQL Server and SQLite sources keep their replication or polling
+  workers (and SQLite its REST listener) running. These were found by the
+  [native source review](native-source-production-readiness-plan.md);
 - the SSE sink keeps serving its connected clients;
 - the profiler keeps logging its periodic reports.
+
+**Implemented for HTTP and gRPC:** Pause now closes admission in the shared
+network runtime:
+
+- HTTP returns 503 with `Retry-After`;
+- gRPC returns `UNAVAILABLE`, and open streams end;
+- durable admission returns `Busy`.
+
+Pause waits for in-flight admissions and honours cancellation and the deadline.
+A cancelled Pause reopens admission, and Resume reopens it. Plugin and
+conformance-kit tests cover this.
 
 **Work:** For each listed component, either gate its worker inside a completed
 Pause and reopen it on Resume, or return `unsupported` so that updates at the
@@ -495,6 +509,12 @@ Rebuild every native plugin that Server loads at ABI 4.0.
 - Decide whether removal with erasure should be refused at management
   acceptance when the factory does not declare erasure.
 
+**Progress:** the HTTP and gRPC sources declare `erases_owned_state` with an
+idempotent no-op erase, because they own no external state. The SDK
+conformance kit runs erasure twice for both. Still open: whether the host
+erases their durable admission state (QoS producer registry and journal) on
+removal; see [CW-100](#cw-100).
+
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
 <a id="current-required-family-boundary"></a>
@@ -513,8 +533,8 @@ conversion and protocol logic:
 | Kafka and Kubernetes | Native sources and initial-data providers, independently packaged. |
 | SQL Server | Close capture-table permission, large sink-batch and orphan-marker gaps. |
 | Database discovery | Populate the remaining family catalogs through the existing native schema reader and Server APIs; factory configuration schemas are not source data schemas. |
-| Network profiles | Implement stronger snapshot/progress replacement or destination-backed completion only for profiles that require them. Native gRPC TLS is not advertised; add it before recommending this connector for encrypted gRPC deployments. |
-| HTTP ingress authentication | Protect standard single-event, batch and producer-session routes with explicit authentication and per-client request limits. Define non-loopback exposure rules. Webhook authentication alone does not protect these routes. |
+| Network profiles | Implement stronger snapshot/progress replacement or destination-backed completion only for profiles that require them. Native gRPC TLS and mutual TLS are now implemented (tonic `tls-ring`); their qualification through the loaded library is owned by [CW-41](#cw-41). |
+| HTTP ingress authentication | **Implemented.** Bearer tokens protect the standard single-event, batch and producer-session routes on HTTP, and every gRPC RPC; two tokens are supported for rotation. Per-client rate limits and connection limits apply, and TLS/mTLS is optional. Listeners default to `127.0.0.1`; a non-loopback listener needs a token or an explicit `allowUnauthenticated: true`. Remaining follow-ups are in [CW-100](#cw-100). |
 | Application components | Move remaining old-interface application/example consumers to the native components. Test-consumer migration is owned by [CW-41](#cw-41) and [CW-77](#cw-77). |
 
 HTTP bootstrap, adaptive batching, multi-item gRPC delivery, output templates,
@@ -524,10 +544,13 @@ network/database implementation lists. HTTP REST bootstrap does not establish
 an atomic snapshot/live cut, and event-only sinks must not advertise replacement
 or completion guarantees they do not implement.
 
-The HTTP access-control work is deferred from
-[PR #988's ingress review](https://github.com/drasi-project/drasi-core/pull/988#discussion_r4330093015).
-Until it is implemented, standard ingress must be isolated or protected by an
-authenticated, rate-limited proxy. Documenting that restriction is not a fix.
+The HTTP access-control work deferred from
+[PR #988's ingress review](https://github.com/drasi-project/drasi-core/pull/988#discussion_r4330093015)
+is implemented in the native HTTP and gRPC sources. Native durable HTTP and gRPC
+sources also restore transparent durability for unchanged clients: standard
+routes, webhooks and the legacy RPCs commit through a server-sequenced producer
+before acknowledging, with at-least-once delivery. The rejection-without-changes
+qualification remains in [CW-41](#cw-41).
 Future family conversions should be separate, reviewable changes; retaining
 required ordinary plugins through graph-owned adapters does not block runtime
 qualification or require immediate old-stack deletion.
@@ -541,6 +564,49 @@ and a capability-by-capability comparison finds no omitted working legacy
 functionality. Its applicable [component qualification](#cw-41) and
 [Server acceptance](#cw-46) must pass; skipped cases and matching counts are not proof.
 SQLite has no legacy reaction to port; this work adds no public DrasiLib SQL API.
+
+<a id="cw-100"></a>
+
+### Finish the native HTTP and gRPC source follow-ups (CW-100)
+
+**Kind:** Issue/hardening. **Area:** Native network sources (`common/network`,
+HTTP and gRPC sources), Host. **Priority:** Medium. **Effort:** Medium.
+
+**Current boundary:** the native HTTP and gRPC sources implement all six
+lifecycle hooks, managed updates at every boundary, authentication, TLS, rate
+limits and transparent durability. Their production-readiness review is
+[the native source plan, §7–§9](native-source-production-readiness-plan.md#7-shared-network-runtime-commonnetwork).
+These items remain:
+
+- **Durable state erasure:** confirm and test whether removing a durable
+  source erases its host-owned QoS producer registry and journal (plan D-12,
+  NET-08).
+- **Webhook secrets:** HTTP webhook HMAC/bearer secrets still name environment
+  variables. The host resolves secret references only on top-level fields, so
+  nested `webhooks.routes[].auth` cannot use them. Either support nested
+  references or add a flattened secret map. Replay protection (timestamp
+  tolerance) and an option to disallow HMAC-SHA1 are also missing.
+- **Input depth:** JSON, XML, YAML and protobuf `Struct` nesting depth is not
+  bounded ([CW-19](#cw-19)). There is also no total in-flight byte budget
+  beyond `ingressCapacity × maxMessageBytes` ([CW-29](#cw-29)).
+- **Throughput:** volatile admission holds the sequence lock across queue
+  reservation for a whole batch. Implicit durable admission commits one request
+  at a time per source. Measure both before changing them.
+- **Health and discovery:** there is no standard `grpc.health.v1` service; it
+  needs the `tonic-health` dependency. The gRPC `HealthCheck` RPC requires the
+  bearer token when one is configured, unlike HTTP `/health`. A listener on
+  port `0` reports its bound address only in the log. The HTTP `webhooks`
+  configuration is not published as a nested schema.
+- **Observability:** no metrics ([CW-26](#cw-26)); no readiness reported
+  through the control sender; logs depend on the plugin logging bridge in
+  [CW-24](#cw-24).
+- **Tests:** port the legacy webhook end-to-end and integration suites to
+  native construction. Run the Host SDK PostgreSQL + HTTP bootstrap container
+  tests against the rebuilt libraries; they were not run when this work landed.
+
+**Finish when:** removal-with-erase of a durable network source leaves no
+host-owned admission state, webhook secrets can be secret references, the
+listed input limits hold, and the remaining tests run in CI.
 
 <a id="cw-45"></a>
 
@@ -1050,8 +1116,16 @@ export and shutdown controls from the
 [monitoring design](https://github.com/drasi-project/design-documents/tree/77b155319fd8160496ad059f6fdcb1e6bc93e43d/drasi-lib/tracing-logging).
 Resolve the remaining profiling interfaces and dependency choices.
 
+Dynamically loaded native plugins have no way to send log records to the host:
+the native SDK has no logging bridge, and a cdylib's `log`/`tracing` globals
+are separate from the host's. The network sources' `diag!` macro uses `log`
+only when a logger is installed in the plugin, and otherwise writes warnings
+and errors to stderr. Add an SDK/Host logging bridge so plugin logs reach the
+application's chosen logging, with component identity attached.
+
 **Finish when:** Applications can choose the required monitoring level without
-Drasi replacing their logging setup or disabling existing logs.
+Drasi replacing their logging setup or disabling existing logs, including logs
+from dynamically loaded native plugins.
 
 <a id="cw-25"></a>
 
@@ -2389,9 +2463,15 @@ kept loaded for the process lifetime.
   while retaining their useful assertions and explicitly identified reference
   comparisons.
 - Authenticate/rate-limit rejection on ordinary HTTP single-event, batch and
-  producer-session routes must produce no graph changes. Qualify gRPC TLS only
-  after it is implemented; webhook-only authentication or REST bootstrap does
-  not establish stronger ingress/snapshot guarantees.
+  producer-session routes must produce no graph changes. The plugin tests check
+  the rejection status codes (401 with `WWW-Authenticate`, 429, and gRPC
+  `UNAUTHENTICATED`/`RESOURCE_EXHAUSTED`) and TLS/mTLS listeners in-process.
+  They do not yet assert, through the loaded library, that a rejected request
+  produces no graph changes. gRPC TLS is now implemented and can be qualified.
+  Run the SDK source conformance kit (`drasi_computation_plugin_sdk::testing`)
+  through freshly built dynamic libraries as well as the linked definitions.
+  Webhook-only authentication or REST bootstrap does not establish stronger
+  ingress/snapshot guarantees.
 - For [CW-18](#cw-18), keep fixed byte/identity fixtures for envelopes, graph
   definitions, QoS/delivery metadata and query state. Check version/header
   dispatch before payload decoding and refusal without resetting valid state.

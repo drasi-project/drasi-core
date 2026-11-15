@@ -28,6 +28,8 @@ mod port_formats;
 pub mod processing;
 pub mod progress;
 pub mod scheduling;
+#[cfg(feature = "test-support")]
+pub mod testing;
 mod transaction;
 pub mod transport;
 pub mod wire;

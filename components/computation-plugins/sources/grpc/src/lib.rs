@@ -1,18 +1,34 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Native ComputationGraph gRPC source (`drasi.network/grpc-source`).
+//!
+//! Serves the published `drasi.v1.SourceService` (`SubmitEvent`, bidirectional
+//! `StreamEvents`, `HealthCheck`) and the durable producer-session protocol
+//! `drasi.admission.v1.AdmissionService`. Without an admission binding,
+//! acceptance is volatile; with one, `SourceService` calls commit through the
+//! source's own server-sequenced producer before acknowledging.
+//!
+//! The listener supports TLS (optionally mutual), bearer-token
+//! authentication on every RPC, per-client rate limiting, connection and
+//! stream limits, and binds loopback by default. Pause refuses new
+//! admissions; Stop honours `Drain` and `Abort`.
+//!
+//! See `DESIGN.md` and `CONFIGURATION.md` in this crate.
+
 mod component;
 pub mod config;
 mod durable_grpc;
+mod incoming;
 
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
-    PortDirection, PortId,
+    ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, PipeRequirements,
+    PortDescriptor, PortDirection, PortId,
 };
 use drasi_computation_network_common::{durable, ingress, wire};
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
-    FactoryMetadata, NativeAdmission, PluginDefinition,
+    lifecycle::Assessment, Capabilities, Component, ControlSender, CreateRequest, CreatedComponent,
+    Factory, FactoryMetadata, NativeAdmission, PluginDefinition, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -27,8 +43,10 @@ pub mod proto {
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const GRPC_SOURCE: &str = "drasi.network/grpc-source";
 
+/// Factory for `drasi.network/grpc-source`.
 pub struct GrpcSourceFactory;
 
+/// The plugin definition exported by the dynamic library.
 pub fn plugin() -> anyhow::Result<PluginDefinition> {
     PluginDefinition::new(
         PLUGIN_ID,
@@ -48,21 +66,38 @@ impl Factory for GrpcSourceFactory {
     fn supports_source_admission(&self) -> bool {
         true
     }
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
+    }
 
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
-            implementation: ImplementationIdentity::try_new(GRPC_SOURCE, "1").expect("constant"),
+            // Constant identifiers; validated by `metadata_is_valid`.
+            implementation: ImplementationIdentity::try_new(GRPC_SOURCE, "1")
+                .expect("constant implementation identity"),
             role: ComponentRole::Source,
             configuration_version: 1,
             configuration: GrpcSourceConfig::definition().schema(),
             ports: vec![PortDescriptor::new(
-                PortId::try_new("out").expect("constant"),
+                PortId::try_new("out").expect("constant port"),
                 PortDirection::Output,
                 GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
             )],
             completion: None,
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                management: true,
+                update_modes: vec![
+                    ComponentUpdateMode::InPlace,
+                    ComponentUpdateMode::Restart,
+                    ComponentUpdateMode::Recreate,
+                ],
+                erases_owned_state: true,
+                ..Capabilities::default()
+            },
         }
     }
 
@@ -89,3 +124,6 @@ impl Factory for GrpcSourceFactory {
         .into())
     }
 }
+
+#[cfg(test)]
+mod tests;

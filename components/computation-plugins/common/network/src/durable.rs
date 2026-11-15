@@ -1,14 +1,32 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use crate::ingress::Ingress;
+//! Durable admission through the host's QoS admission service.
+//!
+//! Two producer models share one channel:
+//!
+//! * **Session protocol** (`/admission/v1`, `AdmissionService`): the client
+//!   registers its own producer and supplies consecutive sequences. Retrying
+//!   the same session and sequence is idempotent.
+//! * **Server-sequenced** (standard routes, webhooks, `SubmitEvent`,
+//!   `StreamEvents`): the source registers a producer named with its own
+//!   component UUID and assigns sequences itself. A success response is sent
+//!   only after the event is committed. Delivery is at-least-once: when a
+//!   response is lost or a write's outcome is uncertain, a client retry is
+//!   admitted as a new event. After any uncertain or out-of-sequence result
+//!   the source re-reads the producer's committed head before admitting more.
+//!
+//! Clients using the session protocol must not register the source's own
+//! component UUID as their producer name.
+
+use crate::ingress::{AdmitFailure, Ingress, IngressError, IngressErrorKind};
 use drasi_computation_contracts::{
     AdmissionReceipt, ChangeEnvelope, GraphChangeCodec, ProducerSession,
 };
 use drasi_computation_plugin_sdk::{AdmissionError, AdmissionErrorKind, NativeAdmission};
 use drasi_core_types::models::SourceChange;
 use serde::{Deserialize, Serialize};
-use std::{future::Future, time::Duration};
+use std::future::Future;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,12 +42,73 @@ pub fn invalid(error: impl std::fmt::Display) -> AdmissionError {
     }
 }
 
+/// The source's own producer session and its next sequence.
+pub(crate) struct ImplicitSession {
+    session: ProducerSession,
+    next: u64,
+}
+
+fn paused_admission() -> AdmissionError {
+    AdmissionError {
+        kind: AdmissionErrorKind::Busy,
+        message: "source paused; retry after resume".into(),
+    }
+}
+
+fn admission_error(error: IngressError) -> AdmissionError {
+    let kind = match error.kind {
+        IngressErrorKind::Stopped => AdmissionErrorKind::Closed,
+        IngressErrorKind::Paused | IngressErrorKind::Overloaded => AdmissionErrorKind::Busy,
+        _ => AdmissionErrorKind::Invalid,
+    };
+    AdmissionError {
+        kind,
+        message: error.message,
+    }
+}
+
+/// Maps a host admission failure for a server-sequenced write.
+fn implicit_error(error: AdmissionError) -> IngressError {
+    use AdmissionErrorKind::*;
+    let kind = match error.kind {
+        Busy | CapacityExhausted => IngressErrorKind::Overloaded,
+        Closed => IngressErrorKind::Stopped,
+        AcceptanceUnknown | MetadataUnknown | Sequence | SessionExpired => {
+            IngressErrorKind::Uncertain
+        }
+        Invalid | IdentifierTooLong | PayloadConflict => IngressErrorKind::Invalid,
+        NotEnabled | ReceiptExpired | PendingObligations => IngressErrorKind::Failed,
+    };
+    IngressError::new(kind, error.message)
+}
+
+/// Whether the producer head must be re-read before admitting again.
+fn requires_resync(kind: AdmissionErrorKind) -> bool {
+    !matches!(
+        kind,
+        AdmissionErrorKind::Busy
+            | AdmissionErrorKind::CapacityExhausted
+            | AdmissionErrorKind::Invalid
+    )
+}
+
 impl Ingress {
     pub fn admission_service(&self) -> Result<&NativeAdmission, AdmissionError> {
         self.durable().ok_or_else(|| AdmissionError {
             kind: AdmissionErrorKind::NotEnabled,
             message: "source has no durable admission binding".into(),
         })
+    }
+
+    /// Checks that a session-protocol request addresses this source and that
+    /// durable admission is bound.
+    pub fn check_source(&self, source: &str) -> Result<(), AdmissionError> {
+        let source = drasi_computation_contracts::ComponentId::try_new(source).map_err(invalid)?;
+        if source != self.source_id {
+            return Err(invalid("source ID mismatch"));
+        }
+        self.admission_service()?;
+        Ok(())
     }
 
     pub async fn admission_call<T>(
@@ -56,7 +135,7 @@ impl Ingress {
             biased;
             _ = self.cancel.cancelled() => Err(AdmissionError { kind: uncertainty,
                 message: format!("source stopped during request; {resolution}") }),
-            result = tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), operation) =>
+            result = tokio::time::timeout(self.live().timeout, operation) =>
                 result.unwrap_or_else(|_| Err(AdmissionError { kind: uncertainty,
                     message: format!("admission deadline elapsed; {resolution}") })),
         }
@@ -82,6 +161,9 @@ impl Ingress {
         .map_err(invalid)
     }
 
+    /// Session-protocol batch admission. Events are admitted individually;
+    /// the receipts for the committed prefix are returned with any error.
+    /// A Pause stops the batch at the next event boundary.
     pub async fn admit_durable(
         &self,
         session: &ProducerSession,
@@ -104,10 +186,14 @@ impl Ingress {
             .enumerate()
             .map(|(offset, change)| self.durable_envelope(change, first_sequence + offset as u64))
             .collect::<Result<Vec<_>, _>>()?;
+        let _admission = self.enter_admission().await.map_err(admission_error)?;
         let mut receipts = Vec::with_capacity(envelopes.len());
         let result = self
             .admission_call(AdmissionErrorKind::AcceptanceUnknown, async {
                 for (offset, envelope) in envelopes.iter().enumerate() {
+                    if self.is_paused() {
+                        return Err(paused_admission());
+                    }
                     receipts.push(
                         service
                             .admit(session, first_sequence + offset as u64, envelope)
@@ -121,5 +207,132 @@ impl Ingress {
             receipts,
             error: result.err(),
         })
+    }
+
+    /// Server-sequenced durable admission for the standard routes. Returns
+    /// the number of leading events committed.
+    pub(crate) async fn admit_implicit(
+        &self,
+        service: &NativeAdmission,
+        changes: Vec<SourceChange>,
+    ) -> Result<usize, AdmitFailure> {
+        let _admission = self.enter_admission().await.map_err(AdmitFailure::before)?;
+        // One server-sequenced writer at a time keeps sequences consecutive.
+        let mut slot = self.implicit.lock().await;
+        // Taken out of the slot: if this future is cancelled or times out the
+        // session stays absent, forcing a resync on the next request.
+        let mut current = slot.take();
+        let mut accepted = 0;
+        // Each failure states whether the producer head must be re-read.
+        let work = async {
+            if current.is_none() {
+                let session = service
+                    .register_producer(&self.source_id)
+                    .await
+                    .map_err(|error| (implicit_error(error), true))?;
+                let status = service
+                    .producer_status(&session)
+                    .await
+                    .map_err(|error| (implicit_error(error), true))?;
+                let next = status.next_sequence.ok_or_else(|| {
+                    (
+                        IngressError::new(IngressErrorKind::Failed, "producer sequence exhausted"),
+                        true,
+                    )
+                })?;
+                current = Some(ImplicitSession { session, next });
+            }
+            let Some(state) = current.as_mut() else {
+                return Err((
+                    IngressError::new(IngressErrorKind::Failed, "producer session unavailable"),
+                    true,
+                ));
+            };
+            for change in changes {
+                if self.is_paused() {
+                    return Err((IngressError::paused(), false));
+                }
+                let envelope = self
+                    .durable_envelope(change, state.next)
+                    .map_err(|error| (IngressError::invalid(error.message), false))?;
+                match service.admit(&state.session, state.next, &envelope).await {
+                    Ok(_) => {
+                        state.next = state.next.checked_add(1).ok_or_else(|| {
+                            (
+                                IngressError::new(
+                                    IngressErrorKind::Failed,
+                                    "producer sequence exhausted",
+                                ),
+                                true,
+                            )
+                        })?;
+                        accepted += 1;
+                    }
+                    Err(error) => {
+                        let resync = requires_resync(error.kind);
+                        return Err((implicit_error(error), resync));
+                    }
+                }
+            }
+            Ok(())
+        };
+        let timeout = self.live().timeout;
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err((IngressError::new(
+                IngressErrorKind::Uncertain,
+                "source stopped during admission; the in-flight event may have been committed",
+            ), true)),
+            result = tokio::time::timeout(timeout, work) => result.unwrap_or_else(|_| Err((IngressError::new(
+                IngressErrorKind::Uncertain,
+                "admission deadline elapsed; the in-flight event may have been committed",
+            ), true))),
+        };
+        let result = match result {
+            Ok(()) => Ok(()),
+            Err((error, resync)) => {
+                if resync {
+                    current = None;
+                }
+                Err(error)
+            }
+        };
+        *slot = current;
+        result
+            .map(|()| accepted)
+            .map_err(|error| AdmitFailure { accepted, error })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_clean_rejections_keep_the_server_sequence() {
+        for kind in [
+            AdmissionErrorKind::Busy,
+            AdmissionErrorKind::CapacityExhausted,
+            AdmissionErrorKind::Invalid,
+        ] {
+            assert!(!requires_resync(kind), "{kind:?}");
+        }
+        for kind in [
+            AdmissionErrorKind::AcceptanceUnknown,
+            AdmissionErrorKind::Sequence,
+            AdmissionErrorKind::SessionExpired,
+            AdmissionErrorKind::Closed,
+            AdmissionErrorKind::PayloadConflict,
+        ] {
+            assert!(requires_resync(kind), "{kind:?}");
+        }
+        assert_eq!(
+            implicit_error(AdmissionError {
+                kind: AdmissionErrorKind::AcceptanceUnknown,
+                message: "x".into()
+            })
+            .kind,
+            IngressErrorKind::Uncertain
+        );
     }
 }

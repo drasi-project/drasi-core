@@ -9,7 +9,7 @@ readme = "README.md"
 
 [features]
 default = []
-ingress = ["dep:drasi-http-common", "drasi-http-common/adaptive"]
+ingress = ["dep:drasi-http-common", "drasi-http-common/adaptive", "dep:rustls", "dep:rustls-pemfile", "dep:subtle"]
 http-source = ["ingress", "dep:drasi-http-common"]
 grpc-source = ["ingress", "dep:drasi-grpc-common", "drasi-grpc-common/source", "dep:prost-types"]
 http-sink = ["dep:reqwest", "dep:drasi-http-common", "drasi-http-common/adaptive"]
@@ -22,6 +22,10 @@ drasi-computation-contracts = { workspace = true }
 drasi-http-common = { workspace = true, optional = true }
 drasi-grpc-common = { workspace = true, optional = true }
 anyhow = "1"
+log = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+subtle = { version = "2", optional = true }
 chrono = "0.4"
 futures-util = "0.3"
 prost-types = { version = "0.14", optional = true }
@@ -30,6 +34,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+rcgen = "0.13"
 
 [lints]
 workspace = true

@@ -218,6 +218,12 @@ impl ConfigOption {
         self.details.deprecated = true;
         self
     }
+    /// Marks the field secret: hosts accept only an unresolved secret
+    /// reference for it, never a literal, and it cannot publish a default.
+    pub fn secret(mut self) -> Self {
+        self.field.secret = true;
+        self
+    }
 }
 
 pub struct ConfigDefinition {

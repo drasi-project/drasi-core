@@ -660,6 +660,87 @@ async fn durable_source_rejects_configured_stream_mismatch_before_listening() ->
     Ok(())
 }
 
+/// Standard routes and the published `SourceService` commit through the
+/// source's own server-sequenced producer, and a reopened journal resumes its
+/// sequence rather than conflicting with committed events.
+#[tokio::test(flavor = "current_thread")]
+async fn standard_routes_commit_through_the_server_sequenced_producer() -> Result<()> {
+    async fn submit(grpc: bool, port: u16, value: i64) -> Result<()> {
+        for _ in 0..200 {
+            let accepted = if grpc {
+                let mut client = source::source_service_client::SourceServiceClient::connect(
+                    format!("http://127.0.0.1:{port}"),
+                )
+                .await?;
+                match client
+                    .submit_event(source::SubmitEventRequest {
+                        event: Some(durable_event(value)),
+                    })
+                    .await
+                {
+                    Ok(response) => response.into_inner().success,
+                    Err(status) if status.code() == tonic::Code::Unavailable => false,
+                    Err(status) => anyhow::bail!("unexpected status {status}"),
+                }
+            } else {
+                let response = reqwest::Client::builder()
+                    .timeout(DEADLINE)
+                    .build()?
+                    .post(format!(
+                        "http://127.0.0.1:{port}/sources/{SOURCE_ID}/events"
+                    ))
+                    .json(&http_event(value))
+                    .send()
+                    .await?;
+                match response.status() {
+                    StatusCode::OK => true,
+                    StatusCode::SERVICE_UNAVAILABLE => false,
+                    code => anyhow::bail!("unexpected status {code}: {}", response.text().await?),
+                }
+            };
+            if accepted {
+                return Ok(());
+            }
+            // Admission activation can trail listener startup; retry.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        anyhow::bail!("event {value} was never accepted")
+    }
+    for grpc in [false, true] {
+        let directory = tempfile::tempdir()?;
+        for reopened in [false, true] {
+            let port = free_port()?;
+            let mut harness = Harness::new(directory.path(), port, grpc).await?;
+            let channel = harness.channel.clone();
+            let seen = harness.seen.clone();
+            harness
+                .drive(true, |_| async {
+                    let values: &[i64] = if reopened { &[3] } else { &[1, 2] };
+                    for value in values {
+                        submit(grpc, port, *value).await?;
+                    }
+                    let expected = if reopened { 3 } else { 2 };
+                    while channel.progress().await?.accepted != expected {
+                        tokio::task::yield_now().await;
+                    }
+                    // Every committed value reaches the consumer; a reopened
+                    // journal may also redeliver earlier unacknowledged ones.
+                    while !values
+                        .iter()
+                        .all(|value| seen.lock().unwrap().contains(value))
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(())
+                })
+                .await?;
+            drop(channel);
+            harness.shutdown().await?;
+        }
+    }
+    Ok(())
+}
+
 async fn post(
     client: &reqwest::Client,
     base: &str,
@@ -699,9 +780,6 @@ async fn http_durable_receipts_partial_batch_reconstruction_and_retirement() -> 
             assert_eq!(code, StatusCode::OK, "{session}");
             let (_, duplicate) = post(&client, &base, "producers/register", json!({"producer":CLIENT_ID})).await?;
             assert_eq!(session, duplicate);
-            let legacy = client.post(format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/events"))
-                .json(&http_event(99)).send().await?;
-            assert_eq!(legacy.status(), StatusCode::CONFLICT);
             if !reopened {
                 let mut event = http_event(1);
                 event.as_object_mut().unwrap().remove("timestamp");
@@ -836,8 +914,6 @@ async fn grpc_durable_stream_reconstruction_receipts_and_retirement() -> Result<
             let mut client = Client::connect(address.clone()).await?;
             let session = register(&mut client).await?;
             assert_eq!(register(&mut client).await?, session);
-            let mut legacy = source::source_service_client::SourceServiceClient::connect(address).await?;
-            assert_eq!(legacy.submit_event(source::SubmitEventRequest { event: Some(durable_event(99)) }).await.unwrap_err().code(), tonic::Code::FailedPrecondition);
             if !reopened {
                 let input = tokio_stream::iter((1..=3).map(|sequence| request(&session, sequence, sequence as i64)).collect::<Vec<_>>());
                 let mut output = client.stream_events(input).await?.into_inner();

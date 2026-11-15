@@ -1,35 +1,24 @@
 # Native gRPC source
 
-`drasi-computation-source-grpc` provides only `drasi.network/grpc-source`
-(implementation `"1"`, configuration `1`).
-
-`GrpcSourceConfig` and its validation live in this crate's `config` module.
-Use `GrpcSourceConfig::from_value` for JSON settings.
+`drasi-computation-source-grpc` provides `drasi.network/grpc-source`
+(implementation `1`, configuration version `1`, native ABI 4.0). It serves the
+published `drasi.v1.SourceService` and the durable
+`drasi.admission.v1.AdmissionService` ([`proto/admission.proto`](proto/admission.proto)),
+and emits each change on its `out` port as a `GraphChangeCodec` envelope.
 
 ```sh
-cargo build -p drasi-computation-source-grpc --features dynamic-plugin
+cargo build -p drasi-computation-source-grpc --features dynamic-plugin   # requires protoc
 ```
 
-Configuration requires `stream`. The source identity is always the component UUID
-assigned by the graph and is not configurable. Defaults are `host="0.0.0.0"`,
-`port=50051`, `timeoutMs=60000`, `ingressCapacity=1024`,
-`maxMessageBytes=4194304`, `adaptiveEnabled=false`. `maxBatchEvents` is not accepted.
-Its `out` port emits `GraphChangeCodec` envelopes; construction binds no socket.
+The build script compiles `admission.proto` against the shared source messages
+in `drasi-grpc-common`; there is no local copy of `common.proto`.
 
-This crate owns the durable [admission protocol](proto/admission.proto).
-Its build script imports source messages from `drasi-grpc-common`, without a
-duplicate `common.proto` or dependency on an ordinary source implementation.
-Building this component requires `protoc`. Ordinary acceptance is
-volatile; durable acceptance requires an actual host admission channel and the
-separate session/sequence protocol. See
-[source configuration](../../NETWORK.md#source-configuration) and
-[durable admission](../../NETWORK.md#optional-durable-admission).
-No HTTP source or gRPC sink component is loaded.
+- **[DESIGN.md](DESIGN.md)**: services, admission modes, streaming semantics,
+  lifecycle, management, security model and differences from the legacy source.
+- **[CONFIGURATION.md](CONFIGURATION.md)**: every field with defaults, ranges
+  and update boundaries, services and status codes, durable admission, exposure
+  and operations.
 
-`SourceService.StreamEvents` reports **cumulative accepted counts**, matching
-the published source protocol and both test-run-host dispatchers. The native
-listener emits a progress response for every accepted input; clients retain
-the latest total rather than summing responses. Invalid input returns a failed
-response with the accepted prefix count and closes that stream. Transport,
-timeout and admission errors remain errors even if earlier responses succeeded.
-The separate durable admission service returns receipts, not these counters.
+Minimal configuration: `{"stream": "telemetry"}` listens on `127.0.0.1:50051`.
+Listening on another address requires `authToken` or an explicit
+`allowUnauthenticated: true`.

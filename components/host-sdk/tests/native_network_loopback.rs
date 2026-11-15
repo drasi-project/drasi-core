@@ -184,12 +184,16 @@ fn configuration_descriptions_match_the_loaded_network_components() -> Result<()
                 ComponentId::try_new("28e5dd97-73d7-560f-825e-f9e6ee799a3f")?,
                 json!({"stream":"metadata/out","adaptiveEnabled":true}),
             );
-            if kind == GRPC_SOURCE {
-                assert_eq!(
-                    schema["properties"]["adaptiveEnabled"]["enum"],
-                    json!([false])
+            assert_eq!(schema["properties"]["host"]["default"], "127.0.0.1");
+            for secret in ["authToken", "authTokenSecondary", "tlsPrivateKeyPem"] {
+                assert!(
+                    factory.metadata().configuration.fields[secret].secret,
+                    "{kind} {secret} must be a secret field"
                 );
-                assert!(adaptive.is_err());
+            }
+            if kind == GRPC_SOURCE {
+                assert!(schema["properties"].get("adaptiveEnabled").is_none());
+                assert!(adaptive.is_err(), "gRPC has no adaptive ingress option");
             } else {
                 assert!(schema["properties"]["adaptiveEnabled"]
                     .get("enum")

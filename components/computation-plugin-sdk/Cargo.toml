@@ -7,6 +7,11 @@ license.workspace = true
 description = "SDK for native asynchronous ComputationGraph plugins"
 readme = "README.md"
 
+[features]
+default = []
+# Conformance helpers for native component tests; never enabled by plugin libraries.
+test-support = []
+
 [dependencies]
 drasi-computation-plugin-abi = { workspace = true }
 drasi-computation-contracts = { workspace = true }

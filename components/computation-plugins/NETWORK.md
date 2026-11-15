@@ -3,11 +3,11 @@
 The six [independent network component crates](README.md) provide native
 ComputationGraph HTTP/gRPC transport, HTTP bootstrap and browser SSE delivery. Each library
 registers only its own factory and uses its package name as its plugin identity.
-Native ABI is **2.0.0**, independently of the workspace package version.
+Native ABI is **4.0.0**, independently of the workspace package version.
 Native wire version is **2**, using binary computation envelopes
-and bulk MessagePack buffers. Rebuild native ABI-1 or wire-version-1 libraries.
+and bulk MessagePack buffers. Rebuild libraries built against an older native ABI.
 Each implementation has version `"1"` and configuration version `1`. The legacy
-Source/Reaction/Bootstrap ABI **0.18.0** is independently versioned; earlier
+Source/Reaction/Bootstrap ABI **0.19** is independently versioned; earlier
 ordinary layouts are rejected.
 
 | Factory | Native role | Port/schema |
@@ -148,32 +148,38 @@ CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-reaction-storedproc-p
 
 ## Source configuration
 
-Both sources require `stream`, matching the graph's output stream binding:
+The authoritative per-source references are the HTTP source
+[configuration](sources/http/CONFIGURATION.md) and [design](sources/http/DESIGN.md)
+documents, and the gRPC source [configuration](sources/grpc/CONFIGURATION.md)
+and [design](sources/grpc/DESIGN.md) documents. This section summarizes what
+the two sources share.
 
-```json
-{
-  "stream": "facilities-db",
-  "host": "0.0.0.0",
-  "port": 9000,
-  "timeoutMs": 60000,
-  "ingressCapacity": 1024,
-  "maxMessageBytes": 2097152,
-  "maxBatchEvents": 1024,
-  "adaptiveEnabled": false
-}
-```
+Both sources require `stream`, matching the graph's output stream binding, and
+share these listener settings:
 
-All keys except `stream` have defaults shown above. For gRPC, `port` defaults to
-`50051`, `maxMessageBytes` to `4194304`, and `maxBatchEvents` is not accepted.
-`host` must be a literal IP address. Port zero permits an ephemeral listener;
-the bound address is logged, while the configuration getter preserves the
-configured value (getters are not live state registries).
+- **Address:** `host` (default `127.0.0.1`, which must be a literal IP) and
+  `port`.
+- **Deadlines and limits:** `timeoutMs`, `ingressCapacity`, `maxMessageBytes`
+  and `maxConnections`.
+- **Access control:** bearer tokens (`authToken`, plus `authTokenSecondary` for
+  rotation, both secret), `allowUnauthenticated`, and per-client rate limiting
+  (`rateLimitPerSecond`, `rateLimitBurst`).
+- **TLS:** `tlsCertificatePem`, `tlsPrivateKeyPem` (secret) and the optional
+  mutual-TLS `tlsClientCaPem`.
 
-`ingressCapacity` bounds queued events and concurrent admitted HTTP requests/gRPC
-streams or unary calls. Excess concurrent submissions reject rather than create
-an unbounded waiting queue. A full event queue backpressures admitted requests
-until `timeoutMs`; health traffic does not acquire a data admission permit.
-Request/message sizes and HTTP batch counts have separate explicit limits.
+A non-loopback listener requires authentication, or an explicit
+`allowUnauthenticated: true` behind an authenticating proxy. Port zero permits
+an ephemeral listener; the bound address is logged.
+
+`ingressCapacity` bounds the volatile event queue and the number of concurrent
+admitting requests. gRPC streams use a separate `maxConcurrentStreams` limit.
+Excess submissions are rejected rather than queued without bound.
+Request and message sizes and HTTP batch counts have their own explicit limits.
+
+Both sources implement real Pause gating: new admissions are refused with a
+retryable status until Resume. Stop honours `Drain` and `Abort`. Both support
+managed updates at the Pause, Stop and Replace boundaries; the configuration
+documents list the boundary for each field.
 
 HTTP exposes `POST /sources/{componentId}/events`, `POST
 /sources/{componentId}/events/batch` with `{"events":[...]}`, and `GET /health`,
@@ -193,12 +199,11 @@ prefix count. Retrying that batch can duplicate already accepted events.
 HTTP also supports the published webhook configuration: custom routes, HMAC and
 bearer checks, JSON/XML/YAML/text parsing, conditions, node/relation mappings,
 explicit timestamps and CORS. Its canonical camelCase DTO is converted through
-the existing mapping engine, not a legacy source adapter. In volatile mode,
-`adaptiveEnabled` enables bounded, cancellation-safe prefetch using the legacy
-throughput tiers; each prefetched event remains a separate graph envelope.
-See the [HTTP source guide](sources/http/README.md) for configuration, bounds
-and durable webhook producer headers. Durable admission stays host-scheduled
-and does not allocate an adaptive local queue.
+the existing mapping engine, not a legacy source adapter. Webhook authentication
+failures always return 401. In volatile mode, `adaptiveEnabled` enables bounded,
+cancellation-safe prefetch; each prefetched event remains a separate graph
+envelope. Durable admission stays host-scheduled and does not allocate an
+adaptive local queue.
 
 gRPC uses the unchanged `drasi.v1.SourceService` definition from
 `drasi-source-grpc`. It implements `SubmitEvent`, bidirectional `StreamEvents`
@@ -228,7 +233,7 @@ The source's `stream` must match the channel. Missing service support, incompati
 storage, foreign scope or a memory/mixed output path rejects rather than silently
 downgrading. Construction still performs no network I/O.
 
-This uses the optional native service-v1 interface with ABI 2.0 libraries.
+This uses the optional native service-v1 interface with ABI 4.0 libraries.
 Fast-mode support alone does not provide durable admission. No volatile
 event queue, local producer sequence or second journal is allocated in durable
 mode. HTTP and gRPC acknowledge only after host graph validation and the outgoing
@@ -272,17 +277,24 @@ invalidates the old session and a new registration obtains a new epoch.
 
 gRPC adds the separate `drasi.admission.v1.AdmissionService` defined in
 [`admission.proto`](sources/grpc/proto/admission.proto), reusing the shared source event DTO.
-The imported `common.proto` declaration is packaged locally for standalone crate
-builds; workspace builds reject any difference from the shared source protocol.
+The build script compiles it against the shared source messages in
+`drasi-grpc-common`; there is no local copy of `common.proto`.
 It exposes registration, status, retirement, receipt lookup, unary `Admit`, and
 bidirectional `StreamEvents`. Each streamed request carries its session and
 sequence; each response is a receipt or typed error, never a cumulative count.
 A failed event terminates the stream after its error response; preceding receipts
 remain valid. Transport failures still require resolving the same input identity.
 
-On a durable source, the old HTTP event routes return 409 and old gRPC submissions
-return `FailedPrecondition`; they cannot accidentally accept without the session
-protocol. Health remains available and identifies the active mode. Admission
+On a durable source, the standard HTTP event routes, webhooks and the gRPC
+`SourceService` calls commit through the source's own **server-sequenced
+producer**. That producer is registered under the source's component UUID,
+which clients therefore cannot register.
+
+- A request is acknowledged only after every event in it is committed.
+- Delivery is at-least-once: a client retry after a lost response is admitted
+  as a new event.
+- After any uncertain or out-of-sequence result, the source re-reads the
+  producer's committed head from the host before admitting again. Health remains available and identifies the active mode. Admission
 retains existing request/body limits and deadlines; host outstanding operations
 and graph pending requests are independently bounded. Listeners report failure
 separately from event publication and are joined during cleanup.
@@ -435,7 +447,7 @@ request/retry timings.
 Client requests live in host-polled operation futures, not background sink
 processing queues. Cancellation drops pending calls/backoff; stop drops owned
 client/channel handles after the host drains/cancels operations. The plugin's I/O
-runtime and library remain process-pinned according to ABI 2.0. Cancellation is
+runtime and library remain process-pinned according to ABI 4.0. Cancellation is
 not rollback or exactly-once delivery.
 
 The optional batching extension leaves frozen native metadata/base layouts

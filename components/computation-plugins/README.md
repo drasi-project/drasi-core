@@ -103,11 +103,12 @@ its own configuration declaration. With the plugins loaded in Drasi Server,
 `detailsAvailable` distinguishes these descriptions from an older binary's
 field/type-only metadata.
 
-For example, gRPC sink `batchSize` is bounded to `1..=65536`, while gRPC source
-adaptive ingress is restricted to `false`. These descriptions do not enable
-missing features. Rebuild the component library to publish the new details;
-host and plugins must use native ABI 2.0.0 and the UUID wire-version-2 contract.
-Native ABI-1 and wire-version-1 libraries are rejected.
+For example, gRPC sink `batchSize` is bounded to `1..=65536`, and the network
+sources mark `authToken` and `tlsPrivateKeyPem` as secret fields. These
+descriptions do not enable missing features. Rebuild the component library to
+publish the new details; host and plugins must use native ABI 4.0.0 and the
+UUID wire-version-2 contract. Libraries built against older native ABIs are
+rejected.
 
 ## Shared code and contracts
 
