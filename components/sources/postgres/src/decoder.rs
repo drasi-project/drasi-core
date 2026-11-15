@@ -29,8 +29,11 @@ use super::types::{
     ColumnInfo, PostgresValue, RelationInfo, ReplicaIdentity, TransactionInfo, WalMessage,
 };
 
-// Re-export for callers/tests that previously imported from this module.
-pub use drasi_postgres_common::{decode_column_value_text, decode_text_to_element_value};
+// Re-exported for callers that previously imported from this module.
+// `decode_column_value_text` is deprecated; prefer `decode_text_to_element_value`.
+#[allow(deprecated)]
+pub use drasi_postgres_common::decode_column_value_text;
+pub use drasi_postgres_common::decode_text_to_element_value;
 
 #[allow(dead_code)]
 const PGOUTPUT_VERSION: u32 = 1;
@@ -926,7 +929,7 @@ mod tests {
     #[test]
     fn decode_timestamptz_with_offset_format() {
         // Canonical mapping normalizes to UTC; verify the instant is correct.
-        let ev = decode_column_value_text("2024-06-15 10:30:45.123456+0200", 1184).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15 10:30:45.123456+0200", 1184).unwrap();
         match ev {
             ElementValue::ZonedDateTime(dt) => {
                 assert_eq!(dt.offset().local_minus_utc(), 0);
@@ -984,7 +987,7 @@ mod tests {
 
     #[test]
     fn decode_timestamptz_utc_via_rfc3339() {
-        let ev = decode_column_value_text("2024-06-15T10:30:45+00:00", 1184).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15T10:30:45+00:00", 1184).unwrap();
         match ev {
             ElementValue::ZonedDateTime(dt) => {
                 assert_eq!(dt.offset().local_minus_utc(), 0);

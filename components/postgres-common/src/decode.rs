@@ -162,7 +162,9 @@ pub fn decode_text_to_element_value(text: &str, type_oid: i32) -> Result<Element
     Ok(decode_text_to_postgres_value(text, type_oid as u32)?.to_element_value())
 }
 
-/// Back-compat alias used by existing tests in the source crate.
+/// Deprecated alias for [`decode_text_to_element_value`], kept for backward compatibility.
+///
+/// New code should call [`decode_text_to_element_value`] directly.
 #[deprecated(note = "Use decode_text_to_element_value instead")]
 pub fn decode_column_value_text(text: &str, type_oid: i32) -> Result<ElementValue> {
     decode_text_to_element_value(text, type_oid)

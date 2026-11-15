@@ -24,8 +24,10 @@ pub mod decode;
 pub mod oid;
 pub mod value;
 
+#[allow(deprecated)]
+pub use decode::decode_column_value_text;
 pub use decode::{
-    decode_column_value_text, decode_text_to_element_value, decode_text_to_postgres_value,
+    decode_text_to_element_value, decode_text_to_postgres_value,
     string_element,
 };
 pub use oid::{
