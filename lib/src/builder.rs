@@ -136,6 +136,7 @@ pub struct DrasiLibBuilder {
     construction_timeout_secs: Option<u64>,
     resource_construction_timeout_secs: Option<u64>,
     cleanup_timeout_secs: Option<u64>,
+    feedback_shutdown: bool,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
     query_factory: Option<Arc<dyn crate::computation::v1::ComponentFactory>>,
@@ -278,6 +279,7 @@ impl DrasiLibBuilder {
             construction_timeout_secs: None,
             resource_construction_timeout_secs: None,
             cleanup_timeout_secs: None,
+            feedback_shutdown: false,
             storage_backends: Vec::new(),
             query_configs: Vec::new(),
             query_factory: None,
@@ -560,6 +562,15 @@ impl DrasiLibBuilder {
     /// Bound each owner's cleanup separately from the total shutdown budget. Defaults to five seconds.
     pub fn with_cleanup_timeout_secs(mut self, seconds: u64) -> Self {
         self.cleanup_timeout_secs = Some(seconds);
+        self
+    }
+
+    /// Fence external admission and drain finite same-graph feedback before
+    /// whole-graph stop. Callbacks use `SourceAdmission::feedback`; wakeups not
+    /// yet admitted remain pending. Deadlocked or infinite feedback fails within
+    /// the cleanup budget without acknowledging unfinished input.
+    pub fn with_feedback_shutdown(mut self, enabled: bool) -> Self {
+        self.feedback_shutdown = enabled;
         self
     }
 
@@ -897,6 +908,7 @@ impl DrasiLibBuilder {
             construction_timeout_secs: self.construction_timeout_secs,
             resource_construction_timeout_secs: self.resource_construction_timeout_secs,
             cleanup_timeout_secs: self.cleanup_timeout_secs,
+            feedback_shutdown: self.feedback_shutdown,
             storage_backends: self.storage_backends,
             queries: self.query_configs.clone(),
         };

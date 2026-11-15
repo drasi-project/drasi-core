@@ -154,6 +154,7 @@ def compile_contexts(project):
         "source-admission": provider,
         "admission-contract": "admission-method",
         "admission-retry": "admission: Arc<SourceAdmission>, input: ChangeEnvelope",
+        "admission-wait": "admission: Arc<SourceAdmission>, producer: ProducerSession, next: ChangeEnvelope",
         "journal-binding": f"journal: Arc<QosChannel>, {batch}",
         "checkpointed-view": "items",
         "external-handler": "items",

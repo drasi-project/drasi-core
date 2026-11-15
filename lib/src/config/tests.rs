@@ -18,6 +18,23 @@ mod schema_tests {
     use serde_json::json;
 
     #[test]
+    fn feedback_shutdown_is_opt_in_and_round_trips() {
+        let default = DrasiLibConfig::default();
+        assert!(!default.feedback_shutdown);
+        assert!(serde_json::to_value(default)
+            .unwrap()
+            .get("feedback_shutdown")
+            .is_none());
+        let enabled: DrasiLibConfig =
+            serde_json::from_value(json!({"feedback_shutdown": true})).unwrap();
+        assert!(enabled.feedback_shutdown);
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["feedback_shutdown"],
+            true
+        );
+    }
+
+    #[test]
     fn lifecycle_limits_validate_and_round_trip() {
         for field in [
             "startup_timeout_secs",
@@ -724,6 +741,7 @@ mod runtime_tests {
             construction_timeout_secs: None,
             resource_construction_timeout_secs: None,
             cleanup_timeout_secs: None,
+            feedback_shutdown: false,
             storage_backends: vec![],
             queries: vec![QueryConfig {
                 id: None,
@@ -775,6 +793,7 @@ mod runtime_tests {
             construction_timeout_secs: None,
             resource_construction_timeout_secs: None,
             cleanup_timeout_secs: None,
+            feedback_shutdown: false,
             storage_backends: vec![],
             queries: vec![
                 QueryConfig {
@@ -856,6 +875,7 @@ mod runtime_tests {
             construction_timeout_secs: None,
             resource_construction_timeout_secs: None,
             cleanup_timeout_secs: None,
+            feedback_shutdown: false,
             storage_backends: vec![],
             queries: vec![],
         };
@@ -885,6 +905,7 @@ mod runtime_tests {
             construction_timeout_secs: None,
             resource_construction_timeout_secs: None,
             cleanup_timeout_secs: None,
+            feedback_shutdown: false,
             storage_backends: vec![],
             queries: vec![],
         };

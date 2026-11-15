@@ -521,6 +521,7 @@ impl Runtime {
     ) -> anyhow::Result<()> {
         let mut builder = self.services.declare(
             ComputationGraph::builder("__drasi_lib_runtime__")
+                .feedback_shutdown(self.config.feedback_shutdown)
                 .activation_timeout(std::time::Duration::from_secs(
                     self.config
                         .activation_timeout_secs

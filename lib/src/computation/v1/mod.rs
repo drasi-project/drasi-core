@@ -275,6 +275,7 @@ mod inventory;
 pub use inventory::*;
 mod composite_bootstrap;
 mod consumer_progress;
+mod feedback;
 mod journal_budget;
 mod qos_pipe;
 mod query_bootstrap;

@@ -31,7 +31,7 @@ pub use admission::{
     AdmissionOptions, AdmissionReceipt, AdmissionRejection, ProducerSession, ProducerStatus,
 };
 pub(crate) use ingress::AdmissionActivation;
-pub use ingress::SourceAdmission;
+pub use ingress::{FeedbackAdmission, SourceAdmission};
 pub use recovery::QosRecoveryOptions;
 pub use replay::{ReplayOptions, ReplayRejection};
 pub(crate) use retirement::QosRetirement;
