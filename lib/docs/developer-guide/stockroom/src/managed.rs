@@ -35,7 +35,19 @@ fn alert_factory() -> anyhow::Result<Arc<AlertFactory>> {
         implementation: ImplementationIdentity::try_new("stockroom/alerts", "1")?,
         role: ComponentRole::Sink,
         configuration_version: 1,
-        configuration: ConfigurationSchema::default(),
+        configuration: ConfigurationSchema {
+            fields: [(
+                "label".into(),
+                ConfigurationField {
+                    constraint: None,
+                    value_type: ConfigurationType::String,
+                    required: false,
+                    secret: false,
+                },
+            )]
+            .into(),
+            allow_additional: false,
+        },
         dependencies: Default::default(),
     })))
 }
@@ -106,6 +118,28 @@ impl ComponentFactory for AlertFactory {
         );
         Ok(())
     }
+    // ANCHOR: plan-alert-update
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        self.validate(proposed)?;
+        let without_label = |specification: &ComponentSpecification| {
+            let mut specification = specification.clone();
+            specification.configuration.remove("label");
+            specification
+        };
+        ensure!(
+            without_label(current) == without_label(proposed),
+            "an alert update can change only its label"
+        );
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::InPlace,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
+    // ANCHOR_END: plan-alert-update
     async fn create(
         &self,
         context: ConstructionContext,
@@ -113,7 +147,7 @@ impl ComponentFactory for AlertFactory {
         let (view, _) = watch::channel(ResultView::default());
         Ok(ConstructedComponent::sink(Box::new(Alerts {
             descriptor: context.specification.descriptor.clone(),
-            label: "low-stock",
+            label: alert_label(context.configuration()),
             view,
             output: tokio::io::stdout(),
             audit: false,
@@ -187,7 +221,11 @@ fn desired(
         completion: Some(SinkCompletion::Handled),
         implementation: sink.descriptor().implementation.clone(),
         configuration_version: 1,
-        configuration: Default::default(),
+        configuration: [(
+            "label".into(),
+            ConfigurationValue::Literal(serde_json::json!("low-stock")),
+        )]
+        .into(),
         dependencies: Default::default(),
     };
     let text = threshold.map_or_else(
@@ -470,6 +508,115 @@ mod tests {
             let preserved = core.desired_configuration()?;
             ensure!(preserved.revision == reopened.revision);
             ensure!(preserved.desired == reopened.desired);
+            Ok(())
+        }
+        .await;
+        finish(&core, work).await
+    }
+
+    #[test]
+    fn alert_plan_accepts_only_label_changes() -> anyhow::Result<()> {
+        let factory = alert_factory()?;
+        let current = ComponentSpecification {
+            descriptor: alert_descriptor(component_id(759))?,
+            role: ComponentRole::Sink,
+            completion: Some(SinkCompletion::Handled),
+            implementation: factory.descriptor().implementation.clone(),
+            configuration_version: 1,
+            configuration: [(
+                "label".into(),
+                ConfigurationValue::Literal(serde_json::json!("low-stock")),
+            )]
+            .into(),
+            dependencies: Default::default(),
+        };
+        let mut relabeled = current.clone();
+        relabeled.configuration.insert(
+            "label".into(),
+            ConfigurationValue::Literal(serde_json::json!("reorder")),
+        );
+        ensure!(factory.plan_update(&current, &relabeled)?.mode == ComponentUpdateMode::InPlace);
+        let mut versioned = relabeled;
+        versioned.configuration_version = 2;
+        ensure!(
+            factory.plan_update(&current, &versioned).is_err(),
+            "a change other than the label must be rejected"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn alert_label_updates_in_place() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("inventory.json");
+        tokio::fs::write(
+            &path,
+            r#"[{"sku":"bolts","quantity":3,"minimum":5,"warehouse":"west"}]"#,
+        )
+        .await?;
+        let store =
+            RedbConfigurationStore::new(directory.path().join("configuration.redb"), [23; 32])?;
+        let (core, _health) = open(&path, Arc::new(store), None).await?;
+        let work = async {
+            let alerts = core.component_by_name(&ComponentName::try_new("alerts")?)?;
+            let generation = alerts.generation();
+            // ANCHOR: relabel-alerts
+            let saved = core.desired_configuration()?;
+            let mut desired = saved.desired.clone();
+            let component = desired
+                .topology
+                .components
+                .iter_mut()
+                .find(|component| component.descriptor.id() == alerts.id())
+                .context("saved topology omitted the alert sink")?;
+            let ComponentConstruction::Factory(specification) = &mut component.construction else {
+                anyhow::bail!("the alert sink is not reconstructible");
+            };
+            specification.configuration.insert(
+                "label".into(),
+                ConfigurationValue::Literal(serde_json::json!("reorder")),
+            );
+            let receipt = core
+                .apply_desired_state(saved.revision, "relabel-alerts", desired)
+                .await?;
+            // ANCHOR_END: relabel-alerts
+            let [update] = receipt.updates.as_slice() else {
+                anyhow::bail!("expected one accepted update: {:?}", receipt.updates);
+            };
+            println!(
+                "Accepted revision {}: {:?} update with {:?} data.",
+                receipt.revision, update.plan.mode, update.plan.data
+            );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    core.reconcile_desired_state().await?;
+                    if core.desired_configuration()?.pending_updates.is_empty() {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .context("wait for the accepted update to finish")??;
+            ensure!(
+                core.component_by_id(alerts.id())?.generation() == generation,
+                "an in-place update keeps the same object"
+            );
+            let snapshot = core.snapshot_computation_configuration().await?;
+            let captured = snapshot
+                .native_components
+                .context("the instance has no native components")?;
+            ensure!(
+                matches!(
+                    captured.configurations.get(alerts.id()),
+                    Some(CapturedComponentConfiguration::Available { values })
+                        if values == &serde_json::json!({"label": "reorder"})
+                ),
+                "the running sink did not report its new label"
+            );
+            println!(
+                "The running sink now reports label \"reorder\"; its generation is unchanged."
+            );
             Ok(())
         }
         .await;

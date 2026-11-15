@@ -810,7 +810,7 @@ end of input.
 one output, `out`, with the `GraphChangeCodec` schema. Its `initialize` hook validates
 and loads the file once for that object. A later stop/start preserves any changes still awaiting
 emission. The graph owns the polling work, so the source has no independently
-spawned watcher to stop or join.
+spawned watcher to stop or join. Chapter 7 shows all of its lifecycle hooks.
 
 **Summary.** Stable source-qualified identity makes updates and deletions
 meaningful. Explicit images and timestamps prevent accidental replacement,
@@ -1651,6 +1651,24 @@ Appending an annotation affects this branch, not a sibling's envelope.
 Repeated annotation keys are history entries, not assignments that overwrite
 old entries.
 
+Every component also implements `ComputationComponent`, which supplies its
+descriptor and its lifecycle hooks. `Audit` opens nothing and runs no work of
+its own, so a macro writes its hooks:
+
+<!-- excerpt: stockroom/src/main.rs#audit-component -->
+```rust
+#[async_trait]
+impl ComputationComponent for Audit {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+
+    drasi_lib::passive_component_lifecycle!();
+}
+```
+
+Chapter 7 explains the six hooks and when to write them yourself.
+
 The batch replaces `inventory -> low-stock` with two edges, adds the transformer,
 and binds `audit/out`. It also verifies that the annotation reaches the query's
 output. This is ordinary composition within the same `DrasiLib`, not a nested
@@ -2220,83 +2238,166 @@ idle source from a damaged component.
 #### Follow an object from creation to disposal
 
 A component definition is a recipe; a constructed Rust object is one instance
-of that recipe. Drasi accepts the definition and its ID before running the
-factory. The graph then binds the required resources, calls `initialize` once,
-and calls `start` when activation is requested and prerequisites are ready.
-Only successfully started components process input.
+of that recipe. Drasi accepts the definition and assigns its ID before any
+factory runs. It then constructs the object, binds the resources the object
+declared, and drives it through six **lifecycle hooks**: async methods of
+`ComputationComponent` that the graph awaits. Rust's `Drop` cannot await, so
+cleanup that performs I/O belongs in these hooks.
 
-```text
-accept definition -> construct -> bind resources -> initialize
-                                                   |
-                                                   v
-                                              start -> process
-                                                ^         |
-                                                |         v
-                                                +------- stop
-
-temporary pause: pause -> resume (activation retained)
-final retirement: stop -> dispose(reason, Preserve)
-explicit data removal: stop -> dispose(Removal, Erase)
+```mermaid
+stateDiagram-v2
+    [*] --> Constructed: create
+    Constructed --> Initialized: initialize
+    Constructed --> Disposed: dispose after a failed initialize
+    Initialized --> Running: start
+    Running --> Paused: pause
+    Paused --> Running: resume
+    Running --> Stopped: stop
+    Paused --> Stopped: stop
+    Stopped --> Running: start
+    Initialized --> Disposed: dispose
+    Stopped --> Disposed: dispose
+    Disposed --> [*]
 ```
 
-These are awaited methods, not Rust's synchronous `Drop`. All six hooks are
-required and each receives a typed context (`InitializeContext`,
-`StartContext`, `PauseContext`, `ResumeContext`, `StopContext`,
-`DisposeContext`) carrying the operation ID, a cooperative deadline and a
-cancellation token. A component with no work in a hook opts in explicitly with
-`passive_component_lifecycle!`:
-
-| Hook | Put this work here | How often |
+| Hook | When the graph calls it | Put this work here |
 |---|---|---|
-| Factory `create` | Construct the object using its assigned ID and configuration | Once per constructed object |
-| `initialize` | Prepare resources that belong to the object's lifetime | Once, after required bindings |
-| `start` | Open or resume resources used during active processing | Every activation |
-| `pause` / `resume` | Gate and reopen independently owned work without ending the activation; return `unsupported` if that is impossible | Graph-coordinated pauses |
-| `stop` | Stop processing and join workers (`Drain` or `Abort`), while preserving restartable state | Every completed active run |
-| `dispose` | Release the object's remaining resources; with `StateIntent::Erase`, first erase state this component owns | Final retirement, also after partial initialization failure |
+| `initialize(&InitializeContext)` | Once per object, after its resources are bound and before its first start | Open resources that last as long as the object; load and check initial data |
+| `start(&StartContext)` | Each time the component is activated | Start the workers and connections used while processing |
+| `pause(&PauseContext)` | When the graph holds processing at a safe point, for example to apply an update | Hold your own workers without closing anything |
+| `resume(&ResumeContext)` | After a completed pause | Let held workers continue |
+| `stop(&StopContext)` | Each time an activation ends, including after a failed start | Stop and join workers; keep what a later `start` needs |
+| `dispose(&DisposeContext)` | Once, when the object is retired | Release everything the object holds; erase its saved data only when asked |
 
-Initialization failure is not retried on the same partially initialized object.
-Drasi disposes that object with `DisposeReason::InitializationFailure` and retains unfinished cleanup before constructing a
-replacement. A normal stop/start reuses the initialized object; it does not call
-`initialize` again or allocate another UUID. `shutdown()` is terminal for the
-`DrasiLib` instance, but does not mean "delete the database."
+The graph calls processing methods such as `next`, `transform` and `handle`
+only while the component is running: after `start` succeeds and before the next
+`pause` or `stop`. Hooks and processing methods take `&mut self`, so they never
+run concurrently on one object. A normal stop and start reuse the same
+initialized object: `initialize` does not run again, and the component keeps its
+ID. Keeping the object does not by itself keep all of its data; each component
+documents which state survives a stop and start. `DrasiLib::shutdown` stops and
+disposes every object, and the instance cannot be started again. It does not
+delete stored data.
 
-Keeping the object alive does not by itself promise to keep all its data.
-Each component documents which state survives stop/start. Stockroom's file
-comparison state and persistent consumer remain usable; a plugin explicitly
-designed to discard volatile state on stop must be rebuilt from input.
+Failures follow the same shape:
 
-Stockroom's file source loads its initial snapshot in `initialize`:
+- If `initialize` fails, the object never starts. The graph disposes it with
+  `DisposeReason::InitializationFailure`, records the failure, and never
+  initializes that object again. Trying again needs a new object: reconcile a
+  factory-created component after fixing the cause, and correct its definition
+  first if the failure was terminal. An object you supplied directly stays
+  failed.
+- If `start` fails or is cancelled, the object is left partly started, and the
+  component cannot start again until it has been stopped. The graph runs `stop`
+  when you stop the component or shut the instance down, so write `stop` to
+  clean up after a partial start as well as a full one.
+- If `stop` or `dispose` fails, the graph keeps the object and its unfinished
+  cleanup, and does not start the component again until cleanup succeeds.
+  A retried `dispose` receives the same reason and intent.
 
-<!-- excerpt: stockroom/src/main.rs#file-initialization -->
+**Pausing** is temporary: the activation, its connections and its workers stay
+in place. The graph itself stops calling processing methods, so a component
+whose work happens only inside those calls has nothing to do in `pause` and
+`resume`. A component that runs its own task must hold that task in `pause`.
+If it cannot, it returns `Err(LifecycleError::unsupported("reason").into())`;
+the graph then reports that the pause failed instead of assuming that the work
+stopped.
+
+Each hook receives a context describing the call:
+
+| Context method | Meaning |
+|---|---|
+| `cancellation()` | A `CancellationToken` that the graph cancels when it stops waiting for the current operation |
+| `deadline()` | When the graph stops waiting; reaching it does not undo work already done |
+| `StopContext::mode()` | `StopMode::Drain` for ordinary stops, shutdown and updates: finish in-flight work, then join workers. `StopMode::Abort` when the object has been quarantined, for example after it panicked: cancel promptly, then join |
+| `DisposeContext::reason()` | `Shutdown`, `Removal`, `Replacement` or `InitializationFailure` |
+| `DisposeContext::intent()` | `StateIntent::Preserve`, or `StateIntent::Erase` when the application explicitly asked to delete the component's data |
+
+A slow hook should watch its token, for example in `tokio::select!`, and
+return when it is cancelled. The token belongs to the graph operation that
+called the hook, not to the component's activation: a worker started in `start`
+needs its own token, which `stop` cancels before joining the worker. Keep the
+worker's `JoinHandle` until the join completes, so that a cancelled `stop` can
+be retried.
+
+Only an explicit request to delete data produces `StateIntent::Erase`:
+
+| Request | `dispose` receives |
+|---|---|
+| Omit the component from a desired definition | `Removal` with `Preserve` |
+| `remove_source_by_name(name, false)` | `Removal` with `Preserve` |
+| `remove_source_by_name(name, true)` | `Removal` with `Erase` |
+| `remove_query_by_name(name)` | `Removal` with `Erase`; removing a query always deletes its saved state |
+| A `Recreate` update replaces the object | `Replacement` with `Preserve` |
+| `DrasiLib::shutdown` or a failed `initialize` | `Shutdown` or `InitializationFailure`, always with `Preserve` |
+
+An erasing `dispose` deletes only state that this component saved itself, and
+must be safe to repeat because a failed attempt is retried.
+
+Hooks return `anyhow::Result<()>`. A plain error is reported as a terminal
+failure of that operation; common transient I/O errors, such as a refused
+connection, are reported as retryable. Return
+`Err(LifecycleError::retryable(error).into())` when you know that retrying
+could succeed.
+
+Stockroom's file source shows the common case. Its work happens in
+`initialize` and in the graph-driven `next` method:
+
+<!-- excerpt: stockroom/src/main.rs#file-lifecycle -->
 ```rust
-async fn initialize(
-    &mut self,
-    _context: &drasi_lib::computation::v1::InitializeContext,
-) -> anyhow::Result<()> {
+async fn initialize(&mut self, _context: &InitializeContext) -> anyhow::Result<()> {
     self.reload().await
+}
+
+// The graph drives `next`; this source owns no worker to start, pause or stop.
+async fn start(&mut self, _context: &StartContext) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn pause(&mut self, _context: &PauseContext) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn resume(&mut self, _context: &ResumeContext) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn stop(&mut self, _context: &StopContext) -> anyhow::Result<()> {
+    Ok(())
+}
+
+// The source saves nothing, so there is nothing to release or erase.
+async fn dispose(&mut self, _context: &DisposeContext) -> anyhow::Result<()> {
+    Ok(())
 }
 ```
 
-The graph owns file polling, so the source needs no separate task to cancel.
-It opts into passive `start`, `pause`, `resume` and `stop` hooks with
-`passive_component_lifecycle!`, and its `dispose` refuses `StateIntent::Erase`; the pending changes and
-comparison state remain in the object between runs. In Part III, the alert
-consumer likewise keeps its transaction owner across stop/start and closes it
-in `dispose`.
+`initialize` validates and loads the file once for the object. The other hooks
+have nothing to do: the graph drives polling, and the pending changes and
+comparison state remain in the object between runs. The source saves no data,
+so `dispose` succeeds for both intents.
+
+A component with no lifecycle work at all, such as Chapter 5's `Audit`
+transformer, can write all six hooks with `passive_component_lifecycle!()`.
+The macro's hooks succeed, except that its `dispose` refuses an erase request
+because the macro cannot know whether the component saved anything. Its `pause`
+also succeeds immediately, so use it only for a component that runs no work of
+its own. Chapter 12 shows the hooks of a component with saved state.
 
 **Try it.** Run
 `cargo test --locked component_identity_and_lifecycle -- --nocapture`.
-It creates a component through the library's ID allocator, starts it, renames
-it, stops and starts it, then shuts down. Its lifecycle log is:
+The test creates a component through the library's ID allocator, starts it,
+renames it, stops and starts it through its handle, then shuts the instance
+down. Its probe records each hook, with the stop mode and the dispose reason
+and intent:
 
 ```text
-["initialize", "start", "stop", "start", "stop", "dispose"]
+Lifecycle: ["initialize", "start", "stop(Drain)", "start", "stop(Drain)", "dispose(Shutdown, Preserve)"]
 ```
 
 One UUID identifies the logical component. A **generation** identifies a
 particular constructed object with that UUID. Replacement creates a new
-generation; renaming and normal stop/start do not.
+generation; renaming and a normal stop and start do not.
 
 #### Exercise startup and shutdown
 
@@ -2412,10 +2513,11 @@ that cannot undo an external action already performed.
 | Operation | Purpose |
 |---|---|
 | Quiesce selected components | Park processing at supported safe boundaries while retaining ownership |
-| `ComponentHandle::stop` or `DrasiLib::stop` | Stop processing and retain the initialized objects for later start |
-| `DrasiLib::shutdown` | Stop and dispose the instance's owned objects; this instance cannot restart |
+| `ComponentHandle::stop` or `DrasiLib::stop` | Stop processing and keep the initialized objects for a later start |
+| `DrasiLib::shutdown` | Stop and dispose every object with `DisposeReason::Shutdown`, preserving saved state; this instance cannot restart |
 | Standalone graph `dispose` | Release graph-owned resources after its run/cleanup boundary |
-| Explicit permanent removal | Stop, then dispose with `StateIntent::Erase` to erase permitted component-owned state; distinct from removing a definition while preserving data |
+| Remove a component from the desired definition | Stop it and dispose it with `DisposeReason::Removal`, preserving its saved state |
+| `remove_source_by_name(name, true)` or `remove_query_by_name(name)` | Stop the component, then dispose it with `StateIntent::Erase` so that it deletes the data it saved |
 
 Quiescence is not a universal drain. Work from selected producers drains to
 the supported boundary, while other queued input can remain owned.
@@ -2434,15 +2536,9 @@ does not abandon the accepted stop operation or authorize a replacement owner.
 Unrelated cleanup remains independent; a failed producer is not permission to
 retire the owners it still needs.
 
-Temporary graph-coordinated pauses use the `pause` and `resume` hooks, not
-another initialization. These hooks matter for a component that owns background
-work: merely pausing calls to `next` or `transform` would leave that worker
-running. A component that cannot pause returns `unsupported`; it never succeeds
-as a silent no-op.
-
-Permanent state erasure is not a pause button. Because a failed dispose is
-retried with the same reason and intent, erasure must be idempotent. Similarly, a configuration change that
-removes a component is not an ordinary stop; its recovery obligations need
+Saved state is deleted only by the explicit removal calls above; stopping,
+pausing, replacing an object or shutting down never deletes it. A configuration
+change that removes a component also has recovery obligations that need
 separate consideration in Chapter 17.
 
 #### Name resource owners before sharing them
@@ -2530,10 +2626,11 @@ with retained component ownership. This is different from a supported
 Use a `ComponentBatch` when the pipeline belongs to an existing `DrasiLib`,
 and obtain query handles from that owner.
 
-**Summary.** Readiness is an explicit boundary, cancellation is a request, and
-cleanup is awaited work. Retain the owner after unsuccessful operations instead
-of hiding it behind a timeout. These rules make both recovery and live
-replacement possible.
+**Summary.** A component's object moves through six awaited hooks, and every
+failure has a defined next step. Readiness is an explicit boundary,
+cancellation is a request, and cleanup is awaited work. Retain the owner after
+unsuccessful operations instead of hiding it behind a timeout. These rules make
+both recovery and live replacement possible.
 
 <a id="observing-the-application"></a>
 
@@ -3707,6 +3804,28 @@ ensure!(first == retry, "identical retry must return the original receipt");
 Here `input` is the same encoded inventory envelope in both calls. The receipt
 proves storage-backed acceptance at the configured failure scope, not query
 completion or a business effect.
+
+`admit` never waits. When the admission mailbox is full, or a subscriber is
+committing its progress, it returns `Busy`; retry with the same session,
+sequence and unchanged input. To wait for capacity instead, call `admit_wait`
+and bound it with your own deadline:
+
+<!-- illustration: admission-wait -->
+```rust
+let receipt = tokio::time::timeout(
+    Duration::from_secs(5),
+    admission.admit_wait(&producer, 2, &next),
+)
+.await
+.context("the inventory journal stayed full")??;
+```
+
+`admit_wait` is woken by the admission service rather than polling, and follows
+the same session, sequence and receipt rules as `admit`. It never carries a
+request into a restarted activation. If the deadline cancels it before the write
+starts, the input and its sequence remain unused. Once the write has started, a
+lost response is uncertain in the same way as with `admit`: resolve it as
+described below instead of resubmitting automatically.
 Wait for the admission service's own `wait_active` boundary after activating
 the graph. Component startup alone does not establish that its admission mailbox
 is ready. Before activation and while stopped, durable admission rejects sends;
@@ -3876,12 +3995,48 @@ the stable instance, graph, and consumer. The module's `size` helper constructs
 positive `NonZeroUsize` bounds. `DeliveryRetryPolicy::default` makes
 one attempt; a retry policy is not implied by persistence.
 
-The sink owns this runner, returns `contract` from `recovery_contract`, awaits
-`deliver_transactional`, and shuts the runner down in its final `dispose` hook.
-A healthy stop/start retains that transaction owner. Closing it during ordinary
-stop would make the same initialized sink unusable on restart. Run
+The sink owns this runner, returns `contract` from `recovery_contract`, and
+awaits `deliver_transactional` in `handle`. Its lifecycle hooks show what a
+component with saved state does at each boundary:
+
+<!-- excerpt: stockroom/src/persistence.rs#durable-lifecycle -->
+```rust
+async fn start(&mut self, _context: &StartContext) -> anyhow::Result<()> {
+    saved_reorders(&mut *self.runner.lock().await).await?;
+    Ok(())
+}
+
+async fn pause(&mut self, _context: &PauseContext) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn resume(&mut self, _context: &ResumeContext) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn stop(&mut self, _context: &StopContext) -> anyhow::Result<()> {
+    Ok(())
+}
+
+async fn dispose(&mut self, context: &DisposeContext) -> anyhow::Result<()> {
+    ensure!(
+        !context.erases_owned_state(),
+        "the alert consumer does not erase its saved reorders"
+    );
+    self.runner.lock().await.shutdown().await
+}
+```
+
+`start` reads the saved reorder view, so a damaged store fails activation
+instead of failing on a later alert. `pause`, `resume` and `stop` have nothing
+to do, because the graph drives `handle`. `dispose` closes the runner. A healthy
+stop and start therefore keep the same transaction owner; closing it in `stop`
+would leave the same initialized sink unusable after a restart. Stockroom never
+asks this consumer to delete its data. If something did, refusing the erase
+request is safer than reporting success while saved reorders remain. Run
 `cargo test --locked --features persistence durable_consumer_stop_start`
 to exercise this distinction.
+
 `SaveReorder` updates a versioned, keyed reorder view and advances a handled
 counter through the borrowed `TransactionContext`. The view and the operation's
 completion share the same actual storage transaction.
@@ -4645,30 +4800,15 @@ The graph captures it at construction and reconfiguration boundaries.
 Keep configuration stable during processing. Report a missing getter as
 unavailable so the host retains the external binding.
 
-Updates are separate from the lifecycle: they are assessed, then applied at a
-boundary the graph establishes. An idle live component may assess a change
-through its optional `ComponentManagement` (returned by `management()`);
-returning `Ok(None)` defers to the registered factory's pure
-`plan_update(current, proposed)`, which also plans replacement. The resulting
-`UpdateBoundary` is `Pause` (stored as `InPlace`), `Stop` (`Restart`) or
-`Replace` (`Recreate`). Pause and Stop execute
-`ComponentManagement::apply(&ApplyContext, ComponentUpdateContext)` on the same
-initialized object and retain the descriptor and construction generation;
-the graph re-assesses first and refuses an update that now needs a stronger
-boundary. Replace disposes the old object and constructs and initializes a new
-generation under the same UUID. `ApplyError::Refused` and `Failed` leave the
-object unchanged; `Damaged` leaves the component failed (stopped with `Abort`
-and disposed) rather than replaced. Creation support does not imply any update
-support.
-
-Native lifecycle hooks are required async fallible methods taking typed
-contexts: `initialize`, `start`, `pause`, `resume`, `stop` and `dispose`.
-Explicit permanent removal alone disposes with `StateIntent::Erase`; other
-disposal and updates do not imply erasure. See the
-[accepted update and recovery contract](../computation-graph-configuration.md#object-lifecycle-and-assessed-updates).
+A factory can also plan changes to a component it created. Its
+`plan_update(current, proposed)` method compares two specifications, without
+I/O, and returns a `ComponentUpdatePlan` or an error. The default rejects every
+change: being able to construct a component does not mean that a running one
+can be changed. Chapter 17 plans and applies a change to Stockroom's alert sink.
 
 The managed lesson's `FileFactory` reads a saved path setting and constructs
-the file source; `AlertFactory` constructs the in-memory view sink.
+the file source; `AlertFactory` constructs the in-memory view sink with an
+optional `label` setting.
 An admission-backed source or transactional sink follows the same pattern with
 declared QoS or completion resources. Keep live handles out of serialized
 configuration and save the recipes that reconstruct them.
@@ -5007,7 +5147,9 @@ definition for existing members.
 
 Use `apply_desired_state` to update the existing assigned definition, not to
 invent new IDs. Omitted existing components are removals. A same-name addition
-is a conflict, not an update. This helper waits for a reconciliation pass:
+is a conflict, not an update. A changed component specification is an update,
+which the component's factory must plan; Chapter 17 shows one. This helper
+waits for a reconciliation pass:
 
 <!-- illustration: apply-configuration -->
 ```rust
@@ -5332,20 +5474,160 @@ that a raw graph mutation is rejected and an unsupported query-text update
 leaves the accepted definition and revision unchanged. Read this test in
 [managed.rs](stockroom/src/managed.rs).
 
-Renaming is a metadata change, not a component reconstruction. In contrast,
-changing a factory's configuration requires an assessment: the live component's
-optional `ComponentManagement::assess`, or else that factory's `plan_update`.
-Inspect the returned strategy: `InPlace` (the Pause boundary) updates a paused
-object; `Restart` (Stop) updates it between stop and start; `Recreate` (Replace)
-constructs a new generation
-under the same UUID. The accompanying data strategy says whether state is
-preserved, rebuilt from bootstrap, or reset. Only combinations supported by
-the factory and its actual dependencies can be accepted.
+Renaming is a metadata change: it neither reconstructs the component nor
+touches its configuration. The query-text change is rejected because this
+lesson's linked-reference query factory does not plan updates.
 
-An accepted update may still be unfinished. Its pending intent and operation ID
-are recorded before lifecycle effects. On reopen the owner resumes that intent;
-it does not infer completion from an object existing or replay a historical
-authorization as a new update.
+#### Change a component's configuration
+
+Changing a running component's configuration changes what its object does, so
+Drasi first **assesses** the change and then **applies** it at a safe point.
+Stockroom's managed alert sink supports one such change: its `label`, the text
+printed before each view.
+
+Its factory plans the update. The plan says that the change can be made to the
+running object while it is paused, and that the sink's data is preserved:
+
+<!-- excerpt: stockroom/src/managed.rs#plan-alert-update -->
+```rust
+fn plan_update(
+    &self,
+    current: &ComponentSpecification,
+    proposed: &ComponentSpecification,
+) -> anyhow::Result<ComponentUpdatePlan> {
+    self.validate(proposed)?;
+    let without_label = |specification: &ComponentSpecification| {
+        let mut specification = specification.clone();
+        specification.configuration.remove("label");
+        specification
+    };
+    ensure!(
+        without_label(current) == without_label(proposed),
+        "an alert update can change only its label"
+    );
+    Ok(ComponentUpdatePlan {
+        mode: ComponentUpdateMode::InPlace,
+        data: ComponentUpdateData::Preserve,
+    })
+}
+```
+
+`plan_update` only compares the two specifications; it must not perform I/O.
+It removes `label` from both and requires everything else to be identical, so a
+change to anything but the label is rejected. The `alert_plan_accepts_only_label_changes`
+test checks both outcomes.
+
+The sink applies an accepted change through `ComponentManagement`, which it
+returns from its `management()` and `management_mut()` methods:
+
+<!-- excerpt: stockroom/src/main.rs#apply-alert-update -->
+```rust
+fn alert_label(configuration: &BTreeMap<Arc<str>, serde_json::Value>) -> String {
+    configuration
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("low-stock")
+        .to_owned()
+}
+
+#[async_trait]
+impl ComponentManagement for Alerts {
+    async fn apply(
+        &mut self,
+        _context: &ApplyContext,
+        update: ComponentUpdateContext,
+    ) -> std::result::Result<(), ApplyError> {
+        self.label = alert_label(update.proposed.configuration());
+        Ok(())
+    }
+}
+```
+
+`apply` reads the label exactly as the factory's `create` does, so the updated
+object matches one constructed from the new definition. The test holds the
+sink's handle as `alerts` and submits the change as a new desired definition:
+
+<!-- excerpt: stockroom/src/managed.rs#relabel-alerts -->
+```rust
+let saved = core.desired_configuration()?;
+let mut desired = saved.desired.clone();
+let component = desired
+    .topology
+    .components
+    .iter_mut()
+    .find(|component| component.descriptor.id() == alerts.id())
+    .context("saved topology omitted the alert sink")?;
+let ComponentConstruction::Factory(specification) = &mut component.construction else {
+    anyhow::bail!("the alert sink is not reconstructible");
+};
+specification.configuration.insert(
+    "label".into(),
+    ConfigurationValue::Literal(serde_json::json!("reorder")),
+);
+let receipt = core
+    .apply_desired_state(saved.revision, "relabel-alerts", desired)
+    .await?;
+```
+
+It then calls `reconcile_desired_state` until
+`desired_configuration()?.pending_updates`, the list of accepted but unfinished
+updates, is empty. Finally, it looks the sink up again with `component_by_id`.
+A `ComponentHandle` keeps the generation it was created for, so only a fresh
+lookup shows whether the object was replaced.
+
+**Try it.** Run
+`cargo test --locked --features management alert_label_updates_in_place -- --nocapture`:
+
+```text
+Accepted revision 2: InPlace update with Preserve data.
+The running sink now reports label "reorder"; its generation is unchanged.
+```
+
+Then change `ComponentUpdateMode::InPlace` to `ComponentUpdateMode::Recreate`
+in `plan_update` and run the test again. Predict which check fails before you
+look. The update is still accepted, but the graph now replaces the sink with a
+new object, so its generation changes and the test reports
+`an in-place update keeps the same object`. Restore `InPlace` afterwards.
+
+An update moves through three steps:
+
+1. **Assess.** When `apply_desired_state` receives a changed specification,
+   the configuration owner asks for a plan. If the component's object exists
+   and implements `ComponentManagement::assess`, its answer comes first: a
+   supported assessment becomes the plan, and an unsupported assessment or an
+   error rejects the request. The factory's `plan_update` decides only when the
+   object gives no answer: it returned `Ok(None)`, as Stockroom's sink does,
+   provides no management, has not been constructed, or was busy with another
+   operation. A rejected change leaves the accepted definition unchanged.
+2. **Accept.** The new revision and the plan are recorded together, with a
+   stable operation ID, in `receipt.updates`. This happens before any hook runs,
+   so an update interrupted by a crash is resumed under the same operation ID
+   when the configuration is reopened.
+3. **Apply.** The graph establishes the plan's boundary and performs it:
+
+| Plan `mode` | Boundary | What runs | Same object? |
+|---|---|---|---|
+| `InPlace` | Pause | `pause`, `ComponentManagement::apply`, `resume` | Yes |
+| `Restart` | Stop | `stop`, `ComponentManagement::apply`, `start` | Yes |
+| `Recreate` | Replace | `stop`, `dispose` with `DisposeReason::Replacement`, then the factory's `create`, `initialize` and `start` | No: a new generation with the same ID |
+
+Before calling `apply`, the graph asks the object to assess the change again.
+If the object now needs a stronger boundary, the update is refused rather than
+applied at the wrong point. `apply` returns `ApplyError::Refused` or
+`ApplyError::Failed` when it left the object unchanged, so the update can be
+retried. `ApplyError::Damaged` means that the object cannot continue: the graph
+quarantines it and reports the component as failed, rather than replacing it
+automatically. If the object is still running, its later stop, for example
+during shutdown, uses `StopMode::Abort`.
+
+The plan's `data` field says what happens to the component's processing state.
+Use `ComponentUpdateData::Preserve` unless the state must be rebuilt.
+`Rebootstrap` (rebuild from a consistent snapshot) and `Reset` (discard the
+state and start from the configured streaming or replay position) are accepted
+only for a query whose factory supports rebuilding, with `Recreate`. Its
+implementation, descriptor, role, completion, dependencies and output streams
+must stay unchanged, and every downstream consumer must be able to accept the
+reset.
 
 For a persistent query, a changed query definition can require a migration
 instead of ordinary replacement. Choose one of three explicit strategies:
@@ -5555,9 +5837,10 @@ Opaque external bindings remain explicitly unavailable. Preserve their actual
 construction requirements and treat these exports as privileged data.
 
 **Summary.** Live changes operate on revisions, generations, and real resource
-owners. Preview before mutation, inspect every outcome, and preserve retained
-obligations through replacement. Stop, force, reset, and permanent retirement
-are different decisions.
+owners. A configuration change is planned before it runs and applied at a pause,
+a stop, or by replacing the object. Preview before mutation, inspect every
+outcome, and preserve retained obligations through replacement. Stop, force,
+reset, and permanent retirement are different decisions.
 
 ### 18. Package and isolate extensions
 
@@ -5583,6 +5866,19 @@ A plugin implements `NativeComponent` and the appropriate `NativeSource`,
 Its factory publishes configuration-only metadata and returns the corresponding
 created component. It does not depend on drasi-lib merely to obtain data types,
 and it does not own another query executor.
+
+A native component has the same six lifecycle hooks as the in-process
+components of Chapter 7, called in the same order and with the same meaning.
+The plugin SDK differs in these places:
+
+| In-process component (`drasi-lib`) | Native plugin (`drasi-computation-plugin-sdk`) |
+|---|---|
+| Hooks return `anyhow::Result<()>` | Hooks return `LifecycleResult`. Classify a failure with `LifecycleError::retryable`, `terminal`, `unsupported` or `cancelled`; a plain `anyhow::Error` becomes a terminal failure |
+| `start(&StartContext)` | `start(&mut StartContext)`. The context also carries activation credentials when the factory declares them, and `activation_scope()` creates an owner for the activation's workers |
+| `passive_component_lifecycle!()`, whose `dispose` refuses an erase request | `passive_lifecycle!()`, whose hooks all succeed |
+| An explicit request to delete data reaches `dispose` as `StateIntent::Erase`, which the component honors or refuses | The host requests `StateIntent::Erase` only from a factory that declares `Capabilities::erases_owned_state` |
+| `ComponentManagement` with `assess` and `apply` | `NativeManagement`, declared with `Capabilities::management` and the supported `Capabilities::update_modes` |
+| Factory `plan_update` returns a `ComponentUpdatePlan` | Factory `assess` returns an `Assessment`, and `supports_update_planning()` returns `true` |
 
 Keep metadata discovery and constructors free of I/O and processing tasks.
 Declare ports, schemas, completion, configuration version, and capabilities
@@ -5644,11 +5940,20 @@ Keep handles in their owner slots until an awaited join completes. If that
 wait is cancelled, the owner can finish cleanup later. Serialize
 restart with cleanup, including after a timeout or cancellation.
 
+For workers that live exactly as long as one activation, the plugin SDK's
+`ActivationScope` does this bookkeeping. Create it in `start` with
+`context.activation_scope()` and spawn workers through it. Each worker can
+watch the scope's `token()` and wait on a `PauseGate` from `gate()`; the
+component's `pause` and `resume` hooks call the scope's `pause()` and
+`resume()`. In `stop`, `scope.stop(context.mode()).await` cancels the token,
+aborts the workers for `StopMode::Abort`, joins them, and returns the first
+worker error.
+
 For services, a pause can drop the `run` future. Pause any independently
 owned workers in `pause` and resume them in `resume`. A clean no-worker service
-can opt into passive hooks; a listener cannot treat dropping its controller
+can use the passive hooks; a listener cannot treat dropping its controller
 future as proof that its connections stopped, and must return `unsupported`
-from `pause` if it cannot gate them.
+from `pause` if it cannot hold them.
 
 #### Validate custom records
 
@@ -6073,8 +6378,10 @@ own. The final application must still identify who owns every unfinished action.
 | Recovery domain | Actual owners whose state and progress must remain consistent |
 | Desired / observed | Accepted intent / the realized and running state |
 | Factory / resource | Code that constructs a component from a specification / a shared service it uses |
-| Initialize / start / stop / dispose | Prepare an object once / activate it / stop it for possible reuse / release it permanently |
-| Quiesce / delete owned resources | Park processing with ownership retained / explicitly remove owned state; disposal alone is not persistent deletion |
+| Lifecycle hooks | `initialize` prepares an object once; `start` and `stop` begin and end an activation; `pause` and `resume` hold processing temporarily; `dispose` retires the object |
+| Quiesce / erase | Park processing with ownership retained / dispose with `StateIntent::Erase`, deleting a component's saved data only on explicit request |
+| Assess / apply | Decide whether and at which boundary a configuration change can be made / make an accepted change at that boundary |
+| Update plan | A `ComponentUpdatePlan`: whether a change is made in place, across a stop, or by replacing the object, and what happens to its state |
 | Fence | Prevent further use of an owner whose state or operation outcome cannot yet be trusted |
 | Frontier | An accepted progress boundary, such as an element's latest effective time or a merger's emitted time |
 | Watermark | A source boundary known to be covered by a coordinated snapshot |
@@ -6099,7 +6406,8 @@ The book supplies the application path; the reference supplies the catalog.
 | Embed and own an application | `DrasiLib`, `DrasiLibBuilder`; [Stockroom starter](stockroom) and [source](stockroom/src/main.rs) |
 | Compose components and connections | `drasi_lib::computation::v1`; [schemas, ports, and pipes](../computation-graph-schemas-ports-pipes.md) |
 | Create, find and rename components | `ComponentId`, `ComponentName`, `ComponentIds`, `component_by_name`, `component_by_id`, `rename_component_by_id`; [identity](#keep-identity-scopes-separate) |
-| Manage an object's lifetime | `ComputationComponent`, `ComponentHandle`; [initialize, start, stop and dispose](#follow-an-object-from-creation-to-disposal) |
+| Manage an object's lifetime | `ComputationComponent`, `ComponentHandle`, `passive_component_lifecycle!`; [lifecycle hooks](#follow-an-object-from-creation-to-disposal) |
+| Change a running component's configuration | `ComponentFactory::plan_update`, `ComponentManagement`, `apply_desired_state`; [assess and apply](#change-a-components-configuration) |
 | Configure and read a native query | `ContinuousQueryDefinition`, `QueryExecutionSettings`, `QueryOptions`, `QueryResults` |
 | Test time-dependent queries | `test-support`, `QueryTestControl`, `with_query_test_control_by_name`; [tests](../../tests/query_test_control.rs) |
 | Select inputs through the ordinary query API | `Query::from_input_by_name`, `from_input_port_by_name`; [chaining and initialization](#chain-maintained-outputs) |

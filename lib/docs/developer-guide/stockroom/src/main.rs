@@ -311,27 +311,33 @@ impl<T: FileRow> ComputationComponent for FileSource<T> {
         Ok(serde_json::json!({"path": self.path}))
     }
 
-    // ANCHOR: file-initialization
-    async fn initialize(
-        &mut self,
-        _context: &drasi_lib::computation::v1::InitializeContext,
-    ) -> anyhow::Result<()> {
+    // ANCHOR: file-lifecycle
+    async fn initialize(&mut self, _context: &InitializeContext) -> anyhow::Result<()> {
         self.reload().await
     }
-    // ANCHOR_END: file-initialization
-    drasi_lib::passive_component_lifecycle!(@hook start, StartContext);
-    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
-    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
-    drasi_lib::passive_component_lifecycle!(@hook stop, StopContext);
-    async fn dispose(
-        &mut self,
-        context: &drasi_lib::computation::v1::DisposeContext,
-    ) -> anyhow::Result<()> {
-        if context.erases_owned_state() {
-            anyhow::bail!("this component does not support permanent state removal");
-        }
+
+    // The graph drives `next`; this source owns no worker to start, pause or stop.
+    async fn start(&mut self, _context: &StartContext) -> anyhow::Result<()> {
         Ok(())
     }
+
+    async fn pause(&mut self, _context: &PauseContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn resume(&mut self, _context: &ResumeContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&mut self, _context: &StopContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    // The source saves nothing, so there is nothing to release or erase.
+    async fn dispose(&mut self, _context: &DisposeContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+    // ANCHOR_END: file-lifecycle
 }
 
 #[async_trait]
@@ -382,13 +388,16 @@ struct Audit {
     sequence: u64,
 }
 
+// ANCHOR: audit-component
 #[async_trait]
 impl ComputationComponent for Audit {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
+
     drasi_lib::passive_component_lifecycle!();
 }
+// ANCHOR_END: audit-component
 
 // ANCHOR: audit-transform
 #[async_trait]
@@ -460,7 +469,7 @@ impl ResultView {
 
 struct Alerts {
     descriptor: ComponentDescriptor,
-    label: &'static str,
+    label: String,
     view: watch::Sender<ResultView>,
     output: tokio::io::Stdout,
     audit: bool,
@@ -515,36 +524,64 @@ impl ComputationComponent for Alerts {
     }
 
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
-        Ok(serde_json::json!({}))
+        Ok(serde_json::json!({"label": self.label}))
     }
 
-    async fn start(
-        &mut self,
-        _context: &drasi_lib::computation::v1::StartContext,
-    ) -> anyhow::Result<()> {
+    async fn initialize(&mut self, _context: &InitializeContext) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn stop(
-        &mut self,
-        _context: &drasi_lib::computation::v1::StopContext,
-    ) -> anyhow::Result<()> {
+    async fn start(&mut self, _context: &StartContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn pause(&mut self, _context: &PauseContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn resume(&mut self, _context: &ResumeContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&mut self, _context: &StopContext) -> anyhow::Result<()> {
         self.output.flush().await?;
         Ok(())
     }
-    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
-    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
-    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
-    async fn dispose(
+
+    async fn dispose(&mut self, _context: &DisposeContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn management(&self) -> Option<&dyn ComponentManagement> {
+        Some(self)
+    }
+
+    fn management_mut(&mut self) -> Option<&mut dyn ComponentManagement> {
+        Some(self)
+    }
+}
+
+// ANCHOR: apply-alert-update
+fn alert_label(configuration: &BTreeMap<Arc<str>, serde_json::Value>) -> String {
+    configuration
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("low-stock")
+        .to_owned()
+}
+
+#[async_trait]
+impl ComponentManagement for Alerts {
+    async fn apply(
         &mut self,
-        context: &drasi_lib::computation::v1::DisposeContext,
-    ) -> anyhow::Result<()> {
-        if context.erases_owned_state() {
-            anyhow::bail!("this component does not support permanent state removal");
-        }
+        _context: &ApplyContext,
+        update: ComponentUpdateContext,
+    ) -> std::result::Result<(), ApplyError> {
+        self.label = alert_label(update.proposed.configuration());
         Ok(())
     }
 }
+// ANCHOR_END: apply-alert-update
 
 // ANCHOR: alert-sink
 #[async_trait]
@@ -703,7 +740,7 @@ async fn build_application(
                     QueryChangeCodec::schema().descriptor().clone(),
                 )],
             )?,
-            label: query_name,
+            label: query_name.into(),
             view,
             output: tokio::io::stdout(),
             audit,
@@ -1116,9 +1153,36 @@ async fn run_cli() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    type Events = Arc<std::sync::Mutex<Vec<(ComponentId, String)>>>;
+
+    fn operation(name: &str) -> OperationScope {
+        OperationScope::new(name, "stockroom-test", 1, None, CancellationToken::new())
+    }
+
+    fn initialize_context() -> InitializeContext {
+        InitializeContext::new(operation("initialize"))
+    }
+
+    fn start_context() -> StartContext {
+        StartContext::new(operation("start"))
+    }
+
+    fn stop_context() -> StopContext {
+        StopContext::new(operation("stop"), StopMode::Drain)
+    }
+
     struct LifecycleProbe {
         descriptor: ComponentDescriptor,
-        events: Arc<std::sync::Mutex<Vec<(ComponentId, &'static str)>>>,
+        events: Events,
+    }
+
+    impl LifecycleProbe {
+        fn record(&self, event: String) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((self.descriptor.id().clone(), event));
+        }
     }
 
     #[async_trait]
@@ -1126,51 +1190,34 @@ mod tests {
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn initialize(
-            &mut self,
-            _context: &drasi_lib::computation::v1::InitializeContext,
-        ) -> anyhow::Result<()> {
-            self.events
-                .lock()
-                .unwrap()
-                .push((self.descriptor.id().clone(), "initialize"));
+        async fn initialize(&mut self, _context: &InitializeContext) -> anyhow::Result<()> {
+            self.record("initialize".into());
             Ok(())
         }
-        async fn start(
-            &mut self,
-            _context: &drasi_lib::computation::v1::StartContext,
-        ) -> anyhow::Result<()> {
-            self.events
-                .lock()
-                .unwrap()
-                .push((self.descriptor.id().clone(), "start"));
+        async fn start(&mut self, _context: &StartContext) -> anyhow::Result<()> {
+            self.record("start".into());
             Ok(())
         }
-        async fn stop(
-            &mut self,
-            _context: &drasi_lib::computation::v1::StopContext,
-        ) -> anyhow::Result<()> {
-            self.events
-                .lock()
-                .unwrap()
-                .push((self.descriptor.id().clone(), "stop"));
+        async fn pause(&mut self, _context: &PauseContext) -> anyhow::Result<()> {
+            self.record("pause".into());
             Ok(())
         }
-        async fn dispose(
-            &mut self,
-            context: &drasi_lib::computation::v1::DisposeContext,
-        ) -> anyhow::Result<()> {
-            if context.erases_owned_state() {
-                anyhow::bail!("this component does not support permanent state removal");
-            }
-            self.events
-                .lock()
-                .unwrap()
-                .push((self.descriptor.id().clone(), "dispose"));
+        async fn resume(&mut self, _context: &ResumeContext) -> anyhow::Result<()> {
+            self.record("resume".into());
             Ok(())
         }
-        drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
-        drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+        async fn stop(&mut self, context: &StopContext) -> anyhow::Result<()> {
+            self.record(format!("stop({:?})", context.mode()));
+            Ok(())
+        }
+        async fn dispose(&mut self, context: &DisposeContext) -> anyhow::Result<()> {
+            self.record(format!(
+                "dispose({:?}, {:?})",
+                context.reason(),
+                context.intent()
+            ));
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -1182,7 +1229,7 @@ mod tests {
 
     struct ProbeFactory {
         descriptor: FactoryDescriptor,
-        events: Arc<std::sync::Mutex<Vec<(ComponentId, &'static str)>>>,
+        events: Events,
     }
 
     #[async_trait]
@@ -1233,6 +1280,16 @@ mod tests {
         cli::accepted_component(core, &receipt, &name).await
     }
 
+    fn trace(events: &Events, id: &ComponentId) -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(component, _)| component == id)
+            .map(|(_, event)| event.clone())
+            .collect()
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn component_identity_and_lifecycle_are_separate() -> anyhow::Result<()> {
         let core = DrasiLib::builder()
@@ -1277,18 +1334,12 @@ mod tests {
             handle.stop().await?;
             handle.start().await?;
             ensure!(
-                handle.generation() == generation,
+                core.component_by_id(&id)?.generation() == generation,
                 "stop/start retains the same object"
             );
-            let trace: Vec<_> = events
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(component, _)| component == &id)
-                .map(|(_, event)| *event)
-                .collect();
+            let trace = trace(&events, &id);
             ensure!(
-                trace == ["initialize", "start", "stop", "start"],
+                trace == ["initialize", "start", "stop(Drain)", "start"],
                 "{trace:?}"
             );
             println!(
@@ -1300,15 +1351,17 @@ mod tests {
         .await;
         finish(&core, work).await?;
         let id = original_id.context("missing original probe identity")?;
-        let trace: Vec<_> = events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(component, _)| component == &id)
-            .map(|(_, event)| *event)
-            .collect();
+        let trace = trace(&events, &id);
         ensure!(
-            trace == ["initialize", "start", "stop", "start", "stop", "dispose"],
+            trace
+                == [
+                    "initialize",
+                    "start",
+                    "stop(Drain)",
+                    "start",
+                    "stop(Drain)",
+                    "dispose(Shutdown, Preserve)"
+                ],
             "{trace:?}"
         );
         println!("Lifecycle: {trace:?}");
@@ -1451,7 +1504,7 @@ mod tests {
                                     QueryChangeCodec::schema().descriptor().clone(),
                                 )],
                             )?,
-                            label: "low-stock",
+                            label: "low-stock".into(),
                             view,
                             output: tokio::io::stdout(),
                             audit: false,
@@ -1718,7 +1771,8 @@ mod tests {
                 payload: Some(payload),
             };
             let mut transformer = normalization()?;
-            transformer.start().await?;
+            transformer.initialize(&initialize_context()).await?;
+            transformer.start(&start_context()).await?;
             let error = transformer
                 .transform(InputEnvelope {
                     port: PortId::try_new("in")?,
@@ -1733,7 +1787,7 @@ mod tests {
                 })
                 .await
                 .expect_err("the configured limit must reject this input");
-            transformer.stop().await?;
+            transformer.stop(&stop_context()).await?;
             ensure!(format!("{error:#}").contains(expected), "{error:#}");
         }
         Ok(())
@@ -1852,8 +1906,8 @@ mod tests {
         let path = directory.path().join("inventory.json");
         save(&path, &inventory(3)).await?;
         let mut source = Inventory::new(&path)?;
-        source.initialize().await?;
-        source.start().await?;
+        source.initialize(&initialize_context()).await?;
+        source.start(&start_context()).await?;
         source.pending.clear();
         tokio::fs::write(&path, "[").await?;
         ensure!(source.reload().await.is_err());
@@ -1864,7 +1918,7 @@ mod tests {
             source.pending.front(),
             Some(SourceChange::Replace { .. })
         ));
-        source.stop().await?;
+        source.stop(&stop_context()).await?;
         Ok(())
     }
 
@@ -1874,10 +1928,10 @@ mod tests {
         let path = directory.path().join("inventory.json");
         save(&path, &inventory(3)).await?;
         let mut source = Inventory::new(&path)?;
-        source.initialize().await?;
-        source.start().await?;
-        source.stop().await?;
-        source.start().await?;
+        source.initialize(&initialize_context()).await?;
+        source.start(&start_context()).await?;
+        source.stop(&stop_context()).await?;
+        source.start(&start_context()).await?;
         let output = tokio::time::timeout(Duration::from_secs(1), source.next())
             .await??
             .context("file source unexpectedly exhausted")?;
@@ -1886,7 +1940,7 @@ mod tests {
             GraphChangeCodec::decode_changes(&output.envelope)?.as_slice(),
             [SourceChange::Insert { .. }]
         ));
-        source.stop().await?;
+        source.stop(&stop_context()).await?;
         Ok(())
     }
 
