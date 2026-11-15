@@ -68,6 +68,11 @@ async fn row_graph(
     QueryResults,
     tokio::sync::mpsc::Receiver<InputEnvelope>,
 )> {
+    let row_settings = if coordinated {
+        coordinated_config(&database.config)
+    } else {
+        database.config.clone()
+    };
     let progress = Arc::new(QuerySourceProgress::new(
         ComponentBatch::GRAPH_ID,
         component_id(46),
@@ -102,11 +107,7 @@ async fn row_graph(
             .context("row bootstrap factory")?;
         query = query.with_bootstrap(factory.create_provider(
             component_id(46),
-            json!({
-                "source": component_id(77).to_string(),
-                "stream": "changes",
-                "settings": database.config
-            }),
+            bootstrap_flat(component_id(77).to_string(), &row_settings),
             Some(libraries::scope(ComponentBatch::GRAPH_ID)),
             Some(progress.clone()),
         )?);
@@ -145,18 +146,17 @@ async fn row_graph(
                 ConfigurationValue::Literal(json!(persistent.is_some())),
             ),
             (
-                "coordinated_snapshot".into(),
+                "coordinatedSnapshot".into(),
                 ConfigurationValue::Literal(json!(coordinated)),
             ),
-            (
-                "settings".into(),
-                ConfigurationValue::Reference {
-                    resource: settings.clone(),
-                    key: "postgres".into(),
-                    secret: true,
-                },
-            ),
-        ]),
+        ])
+        .into_iter()
+        .chain(
+            settings_fields(&row_settings, &settings)
+                .into_iter()
+                .map(|(key, value)| (key.into(), value)),
+        )
+        .collect(),
         dependencies: BTreeMap::from([("source_progress".into(), vec![owner.clone()])]),
     };
     let batch = ComponentBatch::builder()
@@ -183,9 +183,9 @@ async fn row_graph(
             settings,
             ResourceHandle::new(
                 ResourceRole::SecretStore,
-                Arc::new(ConfigurationResolverResource(Arc::new(Settings(
-                    serde_json::to_value(&database.config)?,
-                )))),
+                Arc::new(ConfigurationResolverResource(Arc::new(Settings(json!(
+                    database.config.password
+                ))))),
             ),
         )?
         .component(
@@ -312,7 +312,10 @@ async fn native_rows_support_ordinary_memory_queries_without_transaction_setting
     for dynamic in [false, true] {
         let plugins = libraries::plugins(dynamic)?;
         let mut database = Database::new().await?;
-        database.config.connection.slot_name = "ordinary_slot".into();
+        // A managed slot: the volatile row source creates its own.
+        database.config.slot_ownership = drasi_computation_source_postgres::SlotOwnership::Managed;
+        database.config.slot_name = None;
+        database.config.start_lsn = None;
         let (core, progress, results, mut received) =
             row_graph(&plugins, &database, None, false).await?;
         database
@@ -336,11 +339,20 @@ async fn native_rows_support_ordinary_memory_queries_without_transaction_setting
                 .context("volatile row position")?,
         )?;
         assert_eq!(position.sequence, 3);
+        // The source created its managed slot, named from its identity.
+        let slot: String = database
+            .client()
+            .query_one(
+                "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'drasi\\_%'",
+                &[],
+            )
+            .await?
+            .get(0);
         database
-            .wait_slot_feedback("ordinary_slot", position.feedback_lsn())
+            .wait_slot_feedback(&slot, position.feedback_lsn())
             .await?;
         let retired: bool = database.client().query_one(
-            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name='ordinary_slot'", &[],
+            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name=$1", &[&slot],
         ).await?.get(0);
         assert!(retired);
         database
@@ -426,12 +438,7 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
             database.config.clone(),
             SourceProgressReader::from(progress.clone()).read_only(),
             false,
-            drasi_computation_source_postgres::RowSourceOptions {
-                persistent: true,
-                auto_create_slot: false,
-                start_from_slot: false,
-                ..Default::default()
-            },
+            true,
         )?;
         source.start(&mut lifecycle_ctx::native_start()).await?;
         if !restart {
@@ -466,7 +473,7 @@ async fn ordinary_row_restart_replays_only_the_unhandled_postgres_transaction_su
             database.wait_feedback(position.commit_lsn).await?;
         } else {
             assert!(!position.complete());
-            assert_eq!(database.feedback().await?, database.config.start_lsn);
+            assert_eq!(database.feedback().await?, start_lsn(&database.config));
         }
         source.stop(&lifecycle_ctx::native_stop()).await?;
         query.stop(&lifecycle_ctx::stop()).await?;
@@ -501,13 +508,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
         database.config.clone(),
         SourceProgressReader::from(progress.clone()).read_only(),
         false,
-        drasi_computation_source_postgres::RowSourceOptions {
-            persistent: true,
-            auto_create_slot: false,
-            start_from_slot: false,
-            reconnect_attempts: 3,
-            reconnect_delay_ms: 100,
-        },
+        true,
     )?;
     source.start(&mut lifecycle_ctx::native_start()).await?;
     database
@@ -559,7 +560,7 @@ async fn ordinary_row_reconnect_keeps_queued_work_and_replays_from_the_actual_pa
     .await??;
     assert_eq!(
         database.feedback().await?,
-        database.config.start_lsn,
+        start_lsn(&database.config),
         "a queued suffix is not completion"
     );
     let output = query
@@ -1027,7 +1028,7 @@ async fn temporary_exported_snapshot_preserves_configured_slot_and_imported_read
     let mut query = query(path.path(), progress.clone()).await?;
     query.start(&lifecycle_ctx::start()).await?;
     let mut settings = database.config.clone();
-    settings.start_lsn = boundary;
+    settings.start_lsn = Some(boundary);
     let mut source = super::source(settings, progress)?;
     source.start(&lifecycle_ctx::start()).await?;
     let next = super::next(&mut source).await?;

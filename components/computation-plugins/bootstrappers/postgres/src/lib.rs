@@ -14,6 +14,8 @@ use drasi_computation_plugin_sdk::{
     NativeSourceProgress, PluginDefinition,
 };
 use serde::Deserialize;
+
+pub use drasi_postgres_common::replication::SlotOwnership;
 use std::sync::Arc;
 
 pub use drasi_computation_plugin_sdk::NativeBootstrapProvider;
@@ -36,13 +38,60 @@ pub struct PostgresRowBootstrapFactory;
 pub struct PostgresSharedRowBootstrapFactory;
 pub struct PostgresSharedTransactionBootstrapFactory;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A coordinated provider's configuration: `source` and `stream` beside the
+/// same flat settings the paired source accepts, so both compute one binding
+/// and one managed slot identity.
 struct Configuration {
     source: String,
     stream: String,
     settings: PostgresTransactionConfig,
 }
+
+impl Configuration {
+    fn from_value(value: &serde_json::Value) -> Result<Self> {
+        let mut object = value
+            .as_object()
+            .context("PostgreSQL bootstrap configuration must be an object")?
+            .clone();
+        let mut take = |name: &str| match object.remove(name) {
+            Some(serde_json::Value::String(value)) => Ok(value),
+            _ => anyhow::bail!("{name} must be a string"),
+        };
+        let source = take("source")?;
+        let stream = take("stream")?;
+        let settings = serde_json::from_value(serde_json::Value::Object(object))
+            .context("invalid PostgreSQL settings")?;
+        Ok(Self {
+            source,
+            stream,
+            settings,
+        })
+    }
+}
+
+/// The flat settings fields shared with the native source.
+const SETTINGS_FIELDS: &[(&str, ConfigType, bool)] = &[
+    ("host", ConfigType::String, false),
+    ("port", ConfigType::Integer, false),
+    ("database", ConfigType::String, true),
+    ("user", ConfigType::String, true),
+    ("password", ConfigType::String, false),
+    ("sslMode", ConfigType::String, false),
+    ("tlsCaPem", ConfigType::String, false),
+    ("publication", ConfigType::String, true),
+    ("tables", ConfigType::Array, false),
+    ("tableKeys", ConfigType::Array, false),
+    ("slotOwnership", ConfigType::String, false),
+    ("slotName", ConfigType::String, false),
+    ("startLsn", ConfigType::String, false),
+    ("maxTransactionChanges", ConfigType::Integer, false),
+    ("maxTransactionBytes", ConfigType::Integer, false),
+    ("maxTransactionDurationMs", ConfigType::Integer, false),
+    ("maxProtocolBytes", ConfigType::Integer, false),
+    ("ioTimeoutMs", ConfigType::Integer, false),
+    ("feedbackIntervalMs", ConfigType::Integer, false),
+    ("reconnectBudgetMs", ConfigType::Integer, false),
+];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,11 +170,23 @@ impl BootstrapFactory for PostgresSharedRowBootstrapFactory {
 
 impl BootstrapFactory for StandalonePostgresBootstrapFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut metadata = PostgresBootstrapFactory.metadata();
-        metadata.implementation = ImplementationIdentity::try_new(POSTGRES_SNAPSHOT, "1")
-            .expect("constant implementation");
-        metadata.source_progress = false;
-        metadata
+        let mut configuration = ConfigSchema::from_fields([
+            ("source", ConfigType::ComponentId, true),
+            ("stream", ConfigType::String, true),
+            ("settings", ConfigType::Object, true),
+        ]);
+        configuration
+            .fields
+            .get_mut("settings")
+            .expect("settings")
+            .secret = true;
+        BootstrapFactoryMetadata {
+            implementation: ImplementationIdentity::try_new(POSTGRES_SNAPSHOT, "1")
+                .expect("constant implementation"),
+            configuration_version: 1,
+            configuration,
+            source_progress: false,
+        }
     }
 
     fn create(
@@ -179,15 +240,18 @@ impl BootstrapFactory for PostgresRowBootstrapFactory {
 
 impl BootstrapFactory for PostgresBootstrapFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut configuration = ConfigSchema::from_fields([
-            ("source", ConfigType::ComponentId, true),
-            ("stream", ConfigType::String, true),
-            ("settings", ConfigType::Object, true),
-        ]);
+        let mut configuration = ConfigSchema::from_fields(
+            [
+                ("source", ConfigType::ComponentId, true),
+                ("stream", ConfigType::String, true),
+            ]
+            .into_iter()
+            .chain(SETTINGS_FIELDS.iter().copied()),
+        );
         configuration
             .fields
-            .get_mut("settings")
-            .expect("settings")
+            .get_mut("password")
+            .expect("password")
             .secret = true;
         BootstrapFactoryMetadata {
             implementation: ImplementationIdentity::try_new(POSTGRES_BOOTSTRAP, "1")
@@ -240,7 +304,7 @@ fn scoped_configuration(
         .metadata()
         .configuration
         .validate(&request.configuration)?;
-    let config: Configuration = serde_json::from_value(request.configuration.clone())?;
+    let config = Configuration::from_value(&request.configuration)?;
     let scope = request
         .scope
         .clone()
@@ -269,7 +333,15 @@ mod tests {
         ExportedPlugin::new(plugin()?)?;
         let metadata = PostgresBootstrapFactory.metadata();
         assert!(metadata.source_progress);
-        assert!(metadata.configuration.fields["settings"].secret);
+        assert!(metadata.configuration.fields["password"].secret);
+        assert!(!metadata.configuration.fields.contains_key("settings"));
+        assert!(
+            StandalonePostgresBootstrapFactory
+                .metadata()
+                .configuration
+                .fields["settings"]
+                .secret
+        );
         Ok(())
     }
 

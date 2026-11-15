@@ -365,11 +365,7 @@ pub(super) async fn late_query_group(output: SharedOutput) -> Result<()> {
             .with_bootstrap(gated(
                 bootstrap_factory.create_provider(
                     id(450),
-                    json!({
-                        "source": id(77).to_string(),
-                        "stream": "changes",
-                        "settings": database.config
-                    }),
+                    bootstrap_flat(id(77).to_string(), &database.config),
                     Some(libraries::scope(ComponentBatch::GRAPH_ID)),
                     Some(late_owner.clone()),
                 )?,
@@ -384,11 +380,8 @@ pub(super) async fn late_query_group(output: SharedOutput) -> Result<()> {
             owners,
         )?);
         let configuration = match output {
-            SharedOutput::Rows => json!({
-                "stream":"changes","settings":database.config,
-                "persistent":false,"auto_create_slot":false,"start_from_slot":false,
-            }),
-            SharedOutput::Transactions => json!({"stream":"changes","settings":database.config}),
+            SharedOutput::Rows => flat(&database.config, json!({"persistent": false})),
+            SharedOutput::Transactions => flat(&database.config, json!({})),
         };
         let source = factory_for(&plugins, output)?.create_component_with_consumer_progress(
             id(77),

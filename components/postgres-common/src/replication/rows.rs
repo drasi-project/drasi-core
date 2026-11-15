@@ -225,10 +225,7 @@ pub fn row_checkpoint(
 ) -> Result<Option<RowPosition>> {
     let position = row_position(snapshot, source)?;
     if let Some(position) = &position {
-        anyhow::ensure!(
-            position.binding == binding,
-            "PostgreSQL row checkpoint source binding mismatch"
-        );
+        super::ensure_binding(position.binding, binding)?;
     }
     Ok(position)
 }
@@ -248,11 +245,8 @@ pub fn row_live_config(
     let slot = position
         .managed_slot
         .context("PostgreSQL row snapshot has no slot ownership")?;
-    validate_managed_slot(&config.connection.slot_name, &slot)?;
-    let mut config = config.clone();
-    config.connection.slot_name = slot;
-    config.start_lsn = format_lsn(position.commit_lsn);
-    Ok(config)
+    validate_managed_slot(config.managed_prefix()?, &slot)?;
+    Ok(config.with_active_slot(slot, position.commit_lsn))
 }
 
 #[cfg(test)]

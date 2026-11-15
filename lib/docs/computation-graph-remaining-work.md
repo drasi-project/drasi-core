@@ -52,7 +52,7 @@ compatibility-shim or automatic old-state migration programme is implied.
 | Testing quality and selection | [Testing overview](#testing-and-qualification), [production-path oracles](#cw-83), [honest runners](#cw-84), [CI selection](#cw-85), [duplication](#cw-86), [behavior ledgers](#cw-88) |
 | Recovery and behavior qualification | [Pending input](#cw-14), [reset](#cw-20), [completion evidence](#cw-36), [combined failures](#cw-39), [FFI](#cw-41), [Server](#cw-46), [examples](#cw-90) |
 | Query-plugin follow-ups | [Large items](#cw-76), [native parity coverage](#cw-77), [complete test run](#cw-78), [performance](#cw-79), [linked-reference retirement](#cw-80) |
-| Integration and applications | [Connectors](#cw-44), [native network sources](#cw-100), [native network and log sinks](#cw-101), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
+| Integration and applications | [Connectors](#cw-44), [native network sources](#cw-100), [native network and log sinks](#cw-101), [native PostgreSQL source](#cw-102), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
 | Scaling and maintainability | [Publication](#cw-31), [storage](#cw-28), [hot paths](#cw-32), [decomposition](#cw-34) |
 | Testing reliability and cost | [Asynchronous tests](#cw-37), [MySQL/Postgres container failures](#cw-99), [build/fixture cost](#cw-87), [shared conformance](#cw-89), [application benchmarks](#cw-40), [native-query comparison](#cw-79) |
 | Public API and release | [API curation](#cw-69), [formats](#cw-18), [lints/MSRV](#cw-61), [release documentation](#cw-73) |
@@ -445,12 +445,17 @@ Option B (and, in part, Option C) also requires the following:
 and Resume as no-ops. Graph output stops while paused, but the following
 workers keep running:
 
-- the Postgres and Bridge sources keep accepting input into their admission
-  queues or channels;
+- the Bridge source keeps accepting input into its admission queue;
 - the MySQL, SQL Server and SQLite sources keep their replication or polling
   workers (and SQLite its REST listener) running. These were found by the
   [native source review](native-source-production-readiness-plan.md);
 - the profiler keeps logging its periodic reports.
+
+**Implemented for the PostgreSQL source (2026-11-15):** Pause stops reading
+and emitting at the next transaction boundary while standby feedback keeps
+the replication session alive; a live test pauses longer than
+`wal_sender_timeout`. The legacy in-process wrapper now forwards pause and
+resume instead of treating them as no-ops.
 
 **Implemented for HTTP and gRPC:** Pause now closes admission in the shared
 network runtime:
@@ -524,6 +529,13 @@ removal; see [CW-100](#cw-100). The HTTP, gRPC, SSE and log sinks (and the
 sink conformance kit runs it twice. Whether removing the HTTP delivery consumer
 erases its DeliveryRunner progress is not yet tested.
 
+The PostgreSQL source (2026-11-15) declares `erases_owned_state` with a real
+erase: managed slot names derive from the graph and component identifiers, so
+Erase drops exactly this source's live and coordinated-snapshot slots, refuses
+while one is active, and treats an already-dropped slot as success. External
+slots are never dropped. A live test runs erasure twice and checks the
+active-slot refusal and external-slot preservation.
+
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
 <a id="current-required-family-boundary"></a>
@@ -541,7 +553,7 @@ conversion and protocol logic:
 |---|---|
 | Kafka and Kubernetes | Native sources and initial-data providers, independently packaged. |
 | SQL Server | Close capture-table permission, large sink-batch and orphan-marker gaps. |
-| Database discovery | Populate the remaining family catalogs through the existing native schema reader and Server APIs; factory configuration schemas are not source data schemas. |
+| Database discovery | Populate the remaining family catalogs through the existing native schema reader and Server APIs; factory configuration schemas are not source data schemas. The native PostgreSQL source now implements `source_schema_reader` (selected publication tables, emitted labels and types). |
 | Network profiles | Implement stronger snapshot/progress replacement or destination-backed completion only for profiles that require them. Native gRPC TLS and mutual TLS are now implemented for the source and the sink (tonic `tls-ring`); their qualification through the loaded library is owned by [CW-41](#cw-41). The HTTP sink no longer treats a queued `202` as completion (`successStatusCodes`), offers destination-backed completion through the `drasi.network/http-delivery` consumer, and the HTTP and gRPC sinks send an `x-drasi-delivery-id` idempotency key. gRPC sink consumer completion remains in [CW-101](#cw-101). |
 | HTTP ingress authentication | **Implemented.** Bearer tokens protect the standard single-event, batch and producer-session routes on HTTP, and every gRPC RPC; two tokens are supported for rotation. Per-client rate limits and connection limits apply, and TLS/mTLS is optional. Listeners default to `127.0.0.1`; a non-loopback listener needs a token or an explicit `allowUnauthenticated: true`. Remaining follow-ups are in [CW-100](#cw-100). |
 | Application components | Move remaining old-interface application/example consumers to the native components. Test-consumer migration is owned by [CW-41](#cw-41) and [CW-77](#cw-77). |
@@ -610,8 +622,9 @@ These items remain:
   through the control sender; logs depend on the plugin logging bridge in
   [CW-24](#cw-24).
 - **Tests:** port the legacy webhook end-to-end and integration suites to
-  native construction. Run the Host SDK PostgreSQL + HTTP bootstrap container
-  tests against the rebuilt libraries; they were not run when this work landed.
+  native construction. (The Host SDK PostgreSQL + HTTP bootstrap container
+  test now runs and passes against rebuilt libraries; its stale component IDs,
+  HTTP route and topology names were fixed on 2026-11-15.)
 
 **Finish when:** removal-with-erase of a durable network source leaves no
 host-owned admission state, webhook secrets can be secret references, the
@@ -653,6 +666,43 @@ These items remain:
 **Finish when:** object-secret resolution is proven or replaced, the gRPC sink
 has a consumer mode, every sink's conformance kit runs through the loaded
 library in CI, and sink metrics are reported.
+
+<a id="cw-102"></a>
+
+### Finish the native PostgreSQL source follow-ups (CW-102)
+
+**Kind:** Issue/hardening. **Area:** Native PostgreSQL source and bootstrap
+providers (`postgres-common`). **Priority:** Medium. **Effort:** Medium.
+
+**Current boundary:** the native PostgreSQL source implements all six
+lifecycle hooks (real pause, Drain/Abort stop, deadline- and
+cancellation-aware start, real erase of managed slots), managed updates,
+reconnection in every mode, typed failures, a flat configuration with one
+secret field and activation credentials, schema discovery, and decisions
+D-7 to D-10. Its review is
+[the native source plan, §3](native-source-production-readiness-plan.md#3-postgresql-drasi-computation-source-postgres).
+The configuration change is breaking: existing cursors no longer match the
+narrowed binding, so existing sources must be removed and re-added. These
+items remain:
+
+- **Bootstrap coordination (PG-13):** the source and providers share one
+  configuration and derived slot identity but are still configured
+  separately; adopt `supports_bootstrap_coordination` /
+  `create_bootstrap_coordinator` as SQLite does.
+- **TRUNCATE (D-9 follow-up):** a typed reset that forces a rebuild, instead
+  of refusing truncate-publishing publications.
+- **Keyless tables (D-10 follow-up):** optional `REPLICA IDENTITY FULL`
+  whole-row identity.
+- **Tests:** run the SDK conformance kit for this source; add live tests for
+  activation credentials through the built library and for the PostgreSQL 12
+  refusal; add the rows and shared modes to the CW-14 crash matrix.
+- **Observability:** no metrics ([CW-26](#cw-26)).
+- **Consumers:** the Server examples listed in the source's `DESIGN.md` still
+  use the ordinary PostgreSQL source.
+
+**Finish when:** source and provider are paired through the coordinator, the
+conformance kit and the remaining live tests run in CI, and the Server
+consumers use a native factory.
 
 <a id="cw-45"></a>
 
@@ -2713,7 +2763,7 @@ this run into a replacement test framework.
 
 <a id="cw-99"></a>
 
-#### Investigate MySQL multi-thread timeouts and Postgres TLS failures (CW-99)
+#### Investigate MySQL multi-thread timeouts (CW-99)
 
 **Kind:** Investigation. **Area:** Core, MySQL and Postgres sources.
 **Priority:** Medium. **Effort:** Small to medium.
@@ -2726,19 +2776,16 @@ this run into a replacement test framework.
   fails when run alone. Their `current_thread` variants pass. No baseline run
   from before the ABI 4 lifecycle change exists, so it is unknown whether this
   is a regression.
-- **Postgres:** two `tls::` tests in `drasi-source-postgres --test
-  native_transactions` fail on macOS with certificate errors ("An expired
-  certificate was detected").
-- **Postgres crash helper:** running that suite with `--ignored` also runs the
-  `postgres_abrupt_process_exit` crash-helper worker as a test.
+- **Postgres (resolved 2026-11-15):** the two `tls::` tests asserted the TLS
+  error's type on the outermost error only; the certificate error was further
+  down the chain. They now search the chain. The abrupt-exit test ran its
+  helper subprocess without `--ignored`, so the helper was skipped; it now
+  passes `--ignored`. The full suite (60 tests) passes on macOS.
 
 **Work:**
 
 - **MySQL:** compare against a run on the prior commit, then fix the
   multi-thread deadline.
-- **Postgres TLS:** regenerate or refresh the TLS fixtures, or confirm the
-  failure is specific to the local machine.
-- **Crash helper:** exclude the helper from `--ignored` runs.
 
 ### Application and native-query performance qualification
 

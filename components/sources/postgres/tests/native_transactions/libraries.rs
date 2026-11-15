@@ -144,7 +144,7 @@ fn sink_inputs() -> Result<Vec<InputBinding>> {
 }
 
 fn sink_settings(database: &Database) -> Value {
-    let connection = &database.config.connection;
+    let connection = &database.config;
     json!({
         "hostname": connection.host, "port": connection.port,
         "database": connection.database, "user": connection.user, "password": connection.password,
@@ -217,11 +217,10 @@ async fn open(
     )?);
     let bootstrap = plugins.bootstrap.bootstrap_factories()[0].create_provider(
         component_id(46),
-        json!({
-            "source": component_id(77).to_string(),
-            "stream": "changes",
-            "settings": database.config
-        }),
+        bootstrap_flat(
+            component_id(77).to_string(),
+            &coordinated_config(&database.config),
+        ),
         Some(scope(ComponentBatch::GRAPH_ID)),
         Some(progress.clone()),
     )?;
@@ -252,18 +251,17 @@ async fn open(
                 ConfigurationValue::Literal(json!("changes")),
             ),
             (
-                "coordinated_snapshot".into(),
+                "coordinatedSnapshot".into(),
                 ConfigurationValue::Literal(json!(true)),
             ),
-            (
-                "settings".into(),
-                ConfigurationValue::Reference {
-                    resource: settings.clone(),
-                    key: "postgres".into(),
-                    secret: true,
-                },
-            ),
-        ]),
+        ])
+        .into_iter()
+        .chain(
+            settings_fields(&coordinated_config(&database.config), &settings)
+                .into_iter()
+                .map(|(key, value)| (key.into(), value)),
+        )
+        .collect(),
         dependencies: BTreeMap::from([("source_progress".into(), vec![resource.clone()])]),
     };
     let batch = ComponentBatch::builder()
@@ -290,9 +288,9 @@ async fn open(
             settings,
             ResourceHandle::new(
                 ResourceRole::SecretStore,
-                Arc::new(ConfigurationResolverResource(Arc::new(Settings(
-                    serde_json::to_value(&database.config)?,
-                )))),
+                Arc::new(ConfigurationResolverResource(Arc::new(Settings(json!(
+                    database.config.password
+                ))))),
             ),
         )?
         .component(
@@ -533,11 +531,10 @@ async fn native_bootstrap_rejects_a_same_named_but_different_actual_owner() -> R
     let other = progress();
     let snapshot = plugins.bootstrap.bootstrap_factories()[0].create_provider(
         component_id(46),
-        json!({
-            "source": component_id(77).to_string(),
-            "stream": "changes",
-            "settings": database.config
-        }),
+        bootstrap_flat(
+            component_id(77).to_string(),
+            &coordinated_config(&database.config),
+        ),
         Some(scope(expected.graph_id())),
         Some(expected.clone()),
     )?;
@@ -559,7 +556,7 @@ async fn native_bootstrap_rejects_a_same_named_but_different_actual_owner() -> R
     let slots: i64 = database
         .client()
         .query_one(
-            "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'native_slot\\_%'",
+            "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'drasi\\_%'",
             &[],
         )
         .await?
@@ -912,11 +909,10 @@ fn bootstrap(
 ) -> Result<Arc<dyn ComputationBootstrapProvider>> {
     Ok(plugins.bootstrap.bootstrap_factories()[0].create_provider(
         component_id(46),
-        json!({
-            "source": component_id(77).to_string(),
-            "stream": "changes",
-            "settings": database.config
-        }),
+        bootstrap_flat(
+            component_id(77).to_string(),
+            &coordinated_config(&database.config),
+        ),
         Some(scope(owner.graph_id())),
         Some(owner),
     )?)
@@ -1064,7 +1060,7 @@ async fn native_bootstrap_commits_exact_snapshot_before_concurrent_wal() -> Resu
     let (mut source, _) = PostgresTransactionSource::coordinated(
         component_id(77),
         StreamId::try_new("changes")?,
-        database.config.clone(),
+        coordinated_config(&database.config),
         owner,
     )?;
     source.start(&lifecycle_ctx::start()).await?;

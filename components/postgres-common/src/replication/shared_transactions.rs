@@ -122,10 +122,7 @@ pub fn checkpoint(
 ) -> Result<Option<SharedTransactionPosition>> {
     let position = read_position(snapshot, source)?;
     if let Some(position) = &position {
-        anyhow::ensure!(
-            position.binding == binding,
-            "PostgreSQL shared transaction source binding mismatch"
-        );
+        super::ensure_binding(position.binding, binding)?;
     }
     Ok(position)
 }

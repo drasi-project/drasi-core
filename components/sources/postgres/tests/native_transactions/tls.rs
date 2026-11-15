@@ -72,8 +72,8 @@ impl Certificates {
             .start()
             .await?;
         let mut database = Database::from_container(container).await?;
-        database.config.connection.host = "localhost".into();
-        database.config.connection.ssl_mode = SslMode::Require;
+        database.config.host = "localhost".into();
+        database.config.ssl_mode = SslMode::Require;
         database.config.tls_ca_pem = Some(self.ca.clone());
         Ok(database)
     }
@@ -118,7 +118,7 @@ fn paired(
         let (source, snapshot) = PostgresTransactionSource::coordinated(
             ComponentId::try_new("9822e285-3fa0-54e3-82b5-58fa220b5f79")?,
             StreamId::try_new("changes")?,
-            config,
+            super::coordinated_config(&config),
             owner,
         )?;
         Ok((source, Some(snapshot)))
@@ -156,7 +156,7 @@ async fn postgres_verified_tls_streams_initial_and_live_state_and_recovers() -> 
     for initialize in [false, true] {
         let mut database = certificates.database().await?;
         if !initialize {
-            database.config.connection.ssl_mode = SslMode::Prefer;
+            database.config.ssl_mode = SslMode::Prefer;
         }
         let path = tempfile::tempdir()?;
         if initialize {
@@ -239,8 +239,8 @@ async fn postgres_tls_rejects_untrusted_wrong_host_and_invalid_ca_without_progre
             ("localhost", Some("not a certificate".into())),
         ] {
             let mut config = database.config.clone();
-            config.connection.ssl_mode = mode;
-            config.connection.host = host.into();
+            config.ssl_mode = mode;
+            config.host = host.into();
             config.tls_ca_pem = ca;
             let mut source = source(config, owner.clone())?;
             let error = source
@@ -248,7 +248,7 @@ async fn postgres_tls_rejects_untrusted_wrong_host_and_invalid_ca_without_progre
                 .await
                 .expect_err("invalid TLS identity");
             anyhow::ensure!(
-                error.downcast_ref::<native_tls::Error>().is_some(),
+                error.chain().any(|cause| cause.is::<native_tls::Error>()),
                 "{error:#}"
             );
             source.stop(&lifecycle_ctx::stop()).await?;
@@ -266,7 +266,7 @@ async fn postgres_tls_rejects_untrusted_wrong_host_and_invalid_ca_without_progre
     previous
         .as_object_mut()
         .context("configuration object")?
-        .remove("tls_ca_pem");
+        .remove("tlsCaPem");
     assert!(
         serde_json::from_value::<PostgresTransactionConfig>(previous)?
             .tls_ca_pem
@@ -287,14 +287,14 @@ async fn postgres_tls_rejects_expired_certificates_without_plaintext_retry() -> 
     query.start(&lifecycle_ctx::start()).await?;
     for mode in [SslMode::Prefer, SslMode::Require] {
         let mut config = database.config.clone();
-        config.connection.ssl_mode = mode;
+        config.ssl_mode = mode;
         let mut source = source(config, owner.clone())?;
         let error = source
             .start(&lifecycle_ctx::start())
             .await
             .expect_err("expired certificate");
         anyhow::ensure!(
-            error.downcast_ref::<native_tls::Error>().is_some(),
+            error.chain().any(|cause| cause.is::<native_tls::Error>()),
             "{error:#}"
         );
         source.stop(&lifecycle_ctx::stop()).await?;

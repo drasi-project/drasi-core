@@ -6,8 +6,11 @@ network runtime, the HTTP source and the gRPC source are implemented, with
 X-01, X-02 and X-09 delivered as scaffolding. See the status columns in
 [§7](#7-shared-network-runtime-commonnetwork), [§8](#8-http-drasi-computation-source-http)
 and [§9](#9-grpc-drasi-computation-source-grpc), and
-[Implementation status](#implementation-status-2026-11-14). The other plugins
-have not been started.
+[Implementation status](#implementation-status-2026-11-14). **Progress
+(2026-11-15):** the PostgreSQL source is implemented, with decisions D-7 to
+D-10 taken; see the status column in [§3](#3-postgresql-drasi-computation-source-postgres)
+and [PostgreSQL implementation status](#postgresql-implementation-status-2026-11-15).
+MySQL, SQL Server, SQLite, bridge and counter have not been started.
 **Scope:** The eight native ComputationGraph source plugins under
 `components/computation-plugins/sources/`, the shared crates they depend on, and
 the native bootstrappers where a source depends on them.
@@ -53,6 +56,7 @@ test before a fix is chosen.
 12. [Sequencing](#12-sequencing)
 13. [Definition of done (per plugin)](#13-definition-of-done-per-plugin)
 14. [Implementation status (2026-11-14)](#implementation-status-2026-11-14)
+    and [PostgreSQL implementation status (2026-11-15)](#postgresql-implementation-status-2026-11-15)
 15. [Appendix: remaining-work cross reference](#appendix-remaining-work-cross-reference)
 
 ---
@@ -76,36 +80,39 @@ test before a fix is chosen.
 
 | Concern | postgres | mysql | mssql | sqlite | http | grpc | bridge | counter |
 |---|---|---|---|---|---|---|---|---|
-| `pause`/`resume` real or `unsupported` | ✗ no-op, worker runs | ✗ no-op, worker runs | ✗ no-op | ✗ no-op, worker+REST run | ✓ gate | ✓ gate | ✗ passive macro, admits | ✓ (no workers; still undocumented) |
-| `stop` honours `StopMode` + ctx deadline | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | n/a |
-| `start` honours ctx cancellation/deadline | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | – |
-| `dispose` honours `StateIntent::Erase` | ✗ (leaks slots) | ✗ | ✗ | ✗ (leaks journal tables) | ✓ declared no-op* | ✓ declared no-op* | refuses | ✗ (host refuses: capability undeclared) |
-| `NativeManagement` / `Factory::assess` | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ (`plan_update` default) | ✓ (`interval_ms` only; bugs) |
-| `configuration_details` | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✓ |
-| Secrets modelled per field | ✗ whole `settings` secret | ✗ whole `settings` secret | ✗ whole `settings` secret | n/a | ✓ tokens/TLS; webhook secrets env-var | ✓ | resource | n/a |
-| Activation credentials | ✗ | ✗ (helper exists, unused) | ✗ (helper exists, unused) | n/a | n/a | n/a | n/a | n/a |
-| `source_schema_reader` | ✗ (legacy had it) | ✓ | ✓ | ✓ | ✓ webhook schema | n/a | n/a | ✗ (mock had it) |
-| Reconnect / transient retry | rows only, fixed delay; none for transaction modes | ✗ (legacy had backoff) | ✗ (legacy had backoff) | n/a | n/a | n/a | sender retry only | n/a |
-| Structured logging / metrics | `log` only | `log::error` only | none | `log` only | `diag!` (`log`/stderr); no metrics | `diag!` (`log`/stderr); no metrics | **none** | none |
-| DESIGN + CONFIGURATION docs | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| README ABI version current | ✗ says 2.0.0 | ✗ defers to legacy README | ✗ says 2.0.0 | ✗ says 2.0.0 | ✓ | ✓ | ✗ says wire v1 (is v2) | ✓ |
+| `pause`/`resume` real or `unsupported` | ✓ gate at a transaction boundary; feedback continues | ✗ no-op, worker runs | ✗ no-op | ✗ no-op, worker+REST run | ✓ gate | ✓ gate | ✗ passive macro, admits | ✓ (no workers; still undocumented) |
+| `stop` honours `StopMode` + ctx deadline | ✓ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | n/a |
+| `start` honours ctx cancellation/deadline | ✓ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | – |
+| `dispose` honours `StateIntent::Erase` | ✓ drops managed slots | ✗ | ✗ | ✗ (leaks journal tables) | ✓ declared no-op* | ✓ declared no-op* | refuses | ✗ (host refuses: capability undeclared) |
+| `NativeManagement` / `Factory::assess` | ✓ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ (`plan_update` default) | ✓ (`interval_ms` only; bugs) |
+| `configuration_details` | ✓ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✓ |
+| Secrets modelled per field | ✓ `password` only | ✗ whole `settings` secret | ✗ whole `settings` secret | n/a | ✓ tokens/TLS; webhook secrets env-var | ✓ | resource | n/a |
+| Activation credentials | ✓ | ✗ (helper exists, unused) | ✗ (helper exists, unused) | n/a | n/a | n/a | n/a | n/a |
+| `source_schema_reader` | ✓ | ✓ | ✓ | ✓ | ✓ webhook schema | n/a | n/a | ✗ (mock had it) |
+| Reconnect / transient retry | ✓ every mode, jittered backoff, budget | ✗ (legacy had backoff) | ✗ (legacy had backoff) | n/a | n/a | n/a | sender retry only | n/a |
+| Structured logging / metrics | `log`; no metrics | `log::error` only | none | `log` only | `diag!` (`log`/stderr); no metrics | `diag!` (`log`/stderr); no metrics | **none** | none |
+| DESIGN + CONFIGURATION docs | ✓ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| README ABI version current | ✓ | ✗ defers to legacy README | ✗ says 2.0.0 | ✗ says 2.0.0 | ✓ | ✓ | ✗ says wire v1 (is v2) | ✓ |
 
 \* HTTP/gRPC durable admission state is host-owned (QoS channel). Both declare
 `erases_owned_state` with an idempotent no-op erase (D-1, option a). Host-side
 erasure of that state is still open question [D-12](#2-decisions-required).
-The HTTP and gRPC columns reflect the 2026-11-14 implementation; the other
-columns describe `6d294f43`.
+The HTTP and gRPC columns reflect the 2026-11-14 implementation and the
+PostgreSQL column the 2026-11-15 implementation; the other columns describe
+`6d294f43`.
 
 ### 0.3 Highest-risk findings (production blockers)
 
-1. **PostgreSQL leaks replication slots and requires unbounded WAL retention.**
+1. ~~**PostgreSQL leaks replication slots and requires unbounded WAL retention.**~~
+   *Resolved 2026-11-15 (PG-01, PG-02, PG-09).*
    Startup requires `max_slot_wal_keep_size = -1`
    (`postgres-common/src/replication.rs:434-437`). `dispose` never drops managed or
    auto-created slots, so every removed source eventually fills the database
    server's disk. Slot creation also *adopts* an existing slot by matching the
    error text "already exists" (`postgres-common/src/connection.rs:348-360`), so
    two sources sharing the default `drasi_slot` silently share one slot.
-2. **PostgreSQL TRUNCATE causes a permanent replay failure loop**
+2. ~~**PostgreSQL TRUNCATE causes a permanent replay failure loop**~~
+   *Resolved 2026-11-15 (PG-04: refused at start).*
    (`replication/transaction.rs:172` bails; every restart replays the same commit).
 3. **MySQL has no reconnect and fences on unrelated DDL.** Any worker error ends
    replication (`mysql-common/src/native/source.rs:947-957`). Any non-`CREATE`
@@ -410,6 +417,28 @@ tasks start.
 - **D-13:** reject fast.
 - **Still open:** D-12 (host erasure of durable admission state) and NET-08.
 
+**Decisions taken (2026-11-15), for PostgreSQL:**
+
+- **D-1:** not applicable: the source owns slots, so it declares
+  `erases_owned_state` with a real erase.
+- **D-2:** flatten. `password` is the only secret field; activation
+  credentials are supported.
+- **D-7:** both options. The binding (format version 2) covers only key
+  columns, key column types, replica identity, publication operations and row
+  filters of the selected tables, so non-key column changes no longer fence the
+  cursor. Changes to bound facts, and a table joining an all-tables
+  publication, fail with a typed `SchemaChanged`. Instead of an assess-driven
+  Recreate with Rebootstrap, the documented action is removal with erase and
+  re-addition (see PG-05).
+- **D-8:** a finite `max_slot_wal_keep_size` is allowed with a warning; an
+  invalidated slot (`wal_status = lost`, or a slot that can no longer stream)
+  fails with a typed `PositionUnavailable`. The `idle_replication_slot_timeout
+  = 0` requirement was dropped for the same reason.
+- **D-9:** a publication that publishes TRUNCATE is refused at start; a
+  TRUNCATE published later fails with a typed `Unsupported`. The typed reset is
+  a follow-up (CW-102).
+- **D-10:** keyless tables stay rejected and are documented.
+
 ---
 
 ## 3. PostgreSQL (`drasi-computation-source-postgres`)
@@ -434,13 +463,13 @@ tasks start.
 
 ### 3.2 Lifecycle and management tasks
 
-| ID | Pri | Task |
-|---|---|---|
-| PG-01 | P0 | **Erase and slot ownership.** Declare `erases_owned_state`. In `dispose(Erase)`, drop the managed coordinated slot (from the committed position's `managed_slot`, `replication.rs:128-131`, read via `recovery_reader`) and any slot the source provably created. Never drop configured or external slots (shared modes, `start_lsn` mode). Treat SQLSTATE 42704 ("undefined object") as success; refuse while the slot is active; keep it retry-safe. Replace `auto_create_slot` with explicit `slot_ownership: managed \| external`, and persist the ownership marker. |
-| PG-02 | P0 | **Stop adopting slots by text match.** `create_replication_slot` (`postgres-common/src/connection.rs:348-360`) must use SQLSTATE 42710 and fail unless ownership is established. Remove the shared default `slot_name: drasi_slot` (`config.rs:113-115`): require it, or derive it from the component UUID. |
-| PG-03 | P0 | **Pause.** Gate `run_connected` behind a paused watch: stop reading CopyData, but keep sending standby status so `wal_sender_timeout` does not fire. Otherwise return `unsupported`. Also fix the legacy-side wrapper `components/sources/postgres/src/native.rs`, which uses `passive_component_lifecycle!` for pause. |
-| PG-05 | P0 | **Management.** `Factory::assess` with `update_modes = [Restart, Recreate]` and `NativeManagement` for Stop-boundary apply (classification below). A Recreate must route through Erase so it does not leak slots. |
-| PG-06 | P1 | **Context-aware lifecycle.** Select on cancellation and deadline in `start`, including the unbounded `wait_ready()` (`component.rs:637,643`). `StopMode::Drain` sends final standby feedback then Terminate (legacy did this); `Abort` drops. Stop must not re-raise an earlier worker failure (`join(true)?`, `component.rs:684`). |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| PG-01 | P0 | **Erase and slot ownership.** Declare `erases_owned_state`. In `dispose(Erase)`, drop the managed coordinated slot (from the committed position's `managed_slot`, `replication.rs:128-131`, read via `recovery_reader`) and any slot the source provably created. Never drop configured or external slots (shared modes, `start_lsn` mode). Treat SQLSTATE 42704 ("undefined object") as success; refuse while the slot is active; keep it retry-safe. Replace `auto_create_slot` with explicit `slot_ownership: managed \| external`, and persist the ownership marker. | Done: `slotOwnership` managed/external; managed names derived from graph and component IDs, so no persisted marker is needed; Erase drops every slot with the prefix, refuses active ones, treats 42704 as success |
+| PG-02 | P0 | **Stop adopting slots by text match.** `create_replication_slot` (`postgres-common/src/connection.rs:348-360`) must use SQLSTATE 42710 and fail unless ownership is established. Remove the shared default `slot_name: drasi_slot` (`config.rs:113-115`): require it, or derive it from the component UUID. | Done: catalog lookup plus SQLSTATE 42710; no default slot name |
+| PG-03 | P0 | **Pause.** Gate `run_connected` behind a paused watch: stop reading CopyData, but keep sending standby status so `wal_sender_timeout` does not fire. Otherwise return `unsupported`. Also fix the legacy-side wrapper `components/sources/postgres/src/native.rs`, which uses `passive_component_lifecycle!` for pause. | Done, including the legacy in-process wrapper |
+| PG-05 | P0 | **Management.** `Factory::assess` with `update_modes = [Restart, Recreate]` and `NativeManagement` for Stop-boundary apply (classification below). A Recreate must route through Erase so it does not leak slots. | Done with a deviation: bound fields are Unsupported (remove with erase and re-add) rather than Recreate with Rebootstrap, which this source cannot coordinate; `update_modes = [InPlace, Restart]` |
+| PG-06 | P1 | **Context-aware lifecycle.** Select on cancellation and deadline in `start`, including the unbounded `wait_ready()` (`component.rs:637,643`). `StopMode::Drain` sends final standby feedback then Terminate (legacy did this); `Abort` drops. Stop must not re-raise an earlier worker failure (`join(true)?`, `component.rs:684`). | Done: connection setup bounded by `ioTimeoutMs`; readiness (which can include a coordinated snapshot) bounded only by the host deadline; a failed start still requires stop |
 
 Field classification for PG-05:
 
@@ -453,27 +482,27 @@ Field classification for PG-05:
 
 ### 3.3 Defects and functional gaps
 
-| ID | Pri | Task |
-|---|---|---|
-| PG-04 | P0 | **TRUNCATE.** Today `WalMessage::Truncate` bails (`replication/transaction.rs:172`) and the commit replays forever. Reject publications with `pubtruncate = true` at startup with guidance (`replication.rs:377-380` reads but ignores the flag). Later, a typed reset per D-9. |
-| PG-07 | P1 | **`source_schema_reader`.** Port legacy `introspect_postgres_schema` (`sources/postgres/src/lib.rs:464,902`) into `postgres-common` over the existing catalog queries (CW-44 discovery). |
-| PG-08 | P1 | **Schema drift (D-7).** ALTER TABLE changes the binding hash (`replication.rs:395-410`), so the next start fails with a binding mismatch. A new table in a `FOR ALL TABLES` publication fails at runtime (`transaction.rs:110-113`). Implement the chosen policy with a typed `SchemaChanged` and an assess-driven Recreate. |
-| PG-09 | P1 | **Retention (D-8).** Handle NULL `max_slot_wal_keep_size` on PostgreSQL ≤12 with a clear version error (`replication.rs:420-437`). Implement the chosen finite-retention mode and detect `wal_status = lost`. |
-| PG-10 | P2 | Keyless-table decision (D-10); document it. |
-| PG-11 | P0 | **Reconnect (X-06)** for all four modes. Transaction modes have none; rows mode uses a fixed delay (`component.rs:921-923`). |
-| PG-12 | P1 | **Activation credentials and secret modelling (X-03):** a top-level `password` secret, a non-secret `settings`, a redacting `Debug`. |
-| PG-13 | P1 | **Bootstrap coordination.** Adopt `supports_bootstrap_coordination` / `create_bootstrap_coordinator` (as SQLite does), so the source and bootstrapper share one configuration and secret rather than duplicating `settings` (`bootstrappers/postgres/src/lib.rs:39-45`). The element-ID and type mapping must stay shared through `postgres-common` (components/AGENTS.md). |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| PG-04 | P0 | **TRUNCATE.** Today `WalMessage::Truncate` bails (`replication/transaction.rs:172`) and the commit replays forever. Reject publications with `pubtruncate = true` at startup with guidance (`replication.rs:377-380` reads but ignores the flag). Later, a typed reset per D-9. | Done (refused at start; runtime typed failure) |
+| PG-07 | P1 | **`source_schema_reader`.** Port legacy `introspect_postgres_schema` (`sources/postgres/src/lib.rs:464,902`) into `postgres-common` over the existing catalog queries (CW-44 discovery). | Done (`postgres-common::replication::schema`) |
+| PG-08 | P1 | **Schema drift (D-7).** ALTER TABLE changes the binding hash (`replication.rs:395-410`), so the next start fails with a binding mismatch. A new table in a `FOR ALL TABLES` publication fails at runtime (`transaction.rs:110-113`). Implement the chosen policy with a typed `SchemaChanged` and an assess-driven Recreate. | Done (D-7 as taken) |
+| PG-09 | P1 | **Retention (D-8).** Handle NULL `max_slot_wal_keep_size` on PostgreSQL ≤12 with a clear version error (`replication.rs:420-437`). Implement the chosen finite-retention mode and detect `wal_status = lost`. | Done (D-8 as taken; servers older than 13 refused with `Unsupported`) |
+| PG-10 | P2 | Keyless-table decision (D-10); document it. | Documented |
+| PG-11 | P0 | **Reconnect (X-06)** for all four modes. Transaction modes have none; rows mode uses a fixed delay (`component.rs:921-923`). | Done: every mode, including both transaction modes |
+| PG-12 | P1 | **Activation credentials and secret modelling (X-03):** a top-level `password` secret, a non-secret `settings`, a redacting `Debug`. | Done |
+| PG-13 | P1 | **Bootstrap coordination.** Adopt `supports_bootstrap_coordination` / `create_bootstrap_coordinator` (as SQLite does), so the source and bootstrapper share one configuration and secret rather than duplicating `settings` (`bootstrappers/postgres/src/lib.rs:39-45`). The element-ID and type mapping must stay shared through `postgres-common` (components/AGENTS.md). | **Open**: shared configuration and slot identity only; coordinator API not adopted (CW-102) |
 
 ### 3.4 Code quality
 
-| ID | Pri | Task |
-|---|---|---|
-| PG-20 | P2 | Replace the `Option` combination mode model (`progress`, `shared`, `rows`, `coordinated_snapshot`; `component.rs:49-62`, `777-788`) with an enum over the four modes. This removes the runtime "invalid binding" bails. |
-| PG-21 | P2 | Deduplicate: the slot-retention check (four copies: `component.rs:241-272`, `360-397`, `506-514`, `1032-1044`), `Worker` construction (three copies) and the constructors. Split `component.rs` (1,148 lines): `prepare`, `reopen`, `run_connected`. |
-| PG-22 | P2 | Central SQL literal/identifier quoting helper instead of ad hoc `format!` and `replace('\'', "''")` (`replication.rs:292,369,389,396`; `component.rs:761-771`). |
-| PG-23 | P2 | Named constants for protocol offsets (`component.rs:1117,1132`), the SSLRequest bytes (`replication.rs:250`) and the PostgreSQL epoch (`connection.rs:516`). |
-| PG-24 | P2 | Typed errors (X-05) replacing downcast/`Elapsed`-based `transient()`. |
-| PG-25 | P2 | Centralise row defaults; `configuration_details`; serde defaults for the currently required operational fields. |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| PG-20 | P2 | Replace the `Option` combination mode model (`progress`, `shared`, `rows`, `coordinated_snapshot`; `component.rs:49-62`, `777-788`) with an enum over the four modes. This removes the runtime "invalid binding" bails. | Partial: a `Mode` enum drives configuration and planning; the component keeps its progress bindings |
+| PG-21 | P2 | Deduplicate: the slot-retention check (four copies: `component.rs:241-272`, `360-397`, `506-514`, `1032-1044`), `Worker` construction (three copies) and the constructors. Split `component.rs` (1,148 lines): `prepare`, `reopen`, `run_connected`. | Done: one retained-cursor check, worker split into `worker.rs` |
+| PG-22 | P2 | Central SQL literal/identifier quoting helper instead of ad hoc `format!` and `replace('\'', "''")` (`replication.rs:292,369,389,396`; `component.rs:761-771`). | Done (`quote_literal`, `quote_identifier`) |
+| PG-23 | P2 | Named constants for protocol offsets (`component.rs:1117,1132`), the SSLRequest bytes (`replication.rs:250`) and the PostgreSQL epoch (`connection.rs:516`). | Done |
+| PG-24 | P2 | Typed errors (X-05) replacing downcast/`Elapsed`-based `transient()`. | Done (`PostgresCdcError`, `is_transient`) |
+| PG-25 | P2 | Centralise row defaults; `configuration_details`; serde defaults for the currently required operational fields. | Done |
 
 ### 3.5 Legacy parity
 
@@ -492,20 +521,20 @@ Field classification for PG-05:
 
 ### 3.6 Tests
 
-| ID | Pri | Task |
-|---|---|---|
-| PG-30 | P0 | Run the X-02 conformance kit (static and dynamic, both flavours). |
-| PG-31 | P0 | Erase: managed slot dropped, external slot preserved, idempotent double erase, active-slot refusal, slot-name collision refused. |
-| PG-32 | P0 | TRUNCATE rejection; ALTER TABLE then restart; new table in a FOR ALL TABLES publication. |
-| PG-33 | P1 | Reconnect for every mode with fault injection mid-transaction; classification of 55006 and 57P01 against a real server. |
-| PG-34 | P1 | Pause longer than `wal_sender_timeout`; activation credentials through the dylib; schema reader; PostgreSQL ≤12 error. |
-| PG-35 | P1 | Fix the CW-99 TLS fixtures and the crash helper. Add rows and shared modes to the CW-14 crash matrix. Strengthen the CW-90 getting-started assertions. |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| PG-30 | P0 | Run the X-02 conformance kit (static and dynamic, both flavours). | Partial: the live suite runs static and built libraries; the SDK kit is not wired up (CW-102) |
+| PG-31 | P0 | Erase: managed slot dropped, external slot preserved, idempotent double erase, active-slot refusal, slot-name collision refused. | Done |
+| PG-32 | P0 | TRUNCATE rejection; ALTER TABLE then restart; new table in a FOR ALL TABLES publication. | Done |
+| PG-33 | P1 | Reconnect for every mode with fault injection mid-transaction; classification of 55006 and 57P01 against a real server. | Partial: walsender termination (57P01) tested for transaction mode; rows and shared rows covered by existing tests; mid-transaction fault injection and 55006 not added |
+| PG-34 | P1 | Pause longer than `wal_sender_timeout`; activation credentials through the dylib; schema reader; PostgreSQL ≤12 error. | Partial: long pause and schema reader tested; activation credentials through the library and the PostgreSQL 12 refusal not (CW-102) |
+| PG-35 | P1 | Fix the CW-99 TLS fixtures and the crash helper. Add rows and shared modes to the CW-14 crash matrix. Strengthen the CW-90 getting-started assertions. | Partial: TLS and crash-helper tests fixed (CW-99); crash matrix and CW-90 not |
 
 ### 3.7 Documentation
 
-| ID | Pri | Task |
-|---|---|---|
-| PG-40 | P0 | `DESIGN.md`: modes, cursor and binding model, feedback, bootstrap handover, slot ownership, failure semantics, unsupported features. `CONFIGURATION.md`: every field; PostgreSQL prerequisites by mode and version (`wal_level`, REPLICATION role, publication, `max_slot_wal_keep_size`, REPLICA IDENTITY); secrets and credentials; update matrix; erase behaviour; WAL-retention and slot runbook. Fix the ABI text (README:4). The field reference must no longer live only in the legacy README. |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| PG-40 | P0 | `DESIGN.md`: modes, cursor and binding model, feedback, bootstrap handover, slot ownership, failure semantics, unsupported features. `CONFIGURATION.md`: every field; PostgreSQL prerequisites by mode and version (`wal_level`, REPLICATION role, publication, `max_slot_wal_keep_size`, REPLICA IDENTITY); secrets and credentials; update matrix; erase behaviour; WAL-retention and slot runbook. Fix the ABI text (README:4). The field reference must no longer live only in the legacy README. | Done |
 
 **Related CW:** 96, 98, 44 (discovery), 41, 14, 17, 99, 90, 83, 35, 39, 18, 22, 26.
 
@@ -913,7 +942,9 @@ kit), X-09 (doc templates), and the X-03 mechanism.
 
 **Phase 1: safety-critical P0s, in parallel per family.**
 
-- PostgreSQL: PG-01, 02, 04, 03, 11.
+- PostgreSQL: PG-01, 02, 04, 03, 11. **Done 2026-11-15**, together with the
+  PostgreSQL Phase 2 and 3 items except PG-13; see
+  [PostgreSQL implementation status](#postgresql-implementation-status-2026-11-15).
 - MySQL: MY-01, 02, 03.
 - SQLite: SQ-01, 03, 02.
 - SQL Server: MS-06, 05, 07, 01–03.
@@ -1000,8 +1031,9 @@ Verification:
 Clippy with `-D warnings`, `cargo fmt` and `check-native-dependencies` are clean
 for the changed crates.
 
-**Not run:** the Host SDK `native_postgres_http_bootstrap` container tests,
-because no container runtime was available. Run them before merging.
+**Not run at the time:** the Host SDK `native_postgres_http_bootstrap`
+container tests. *They were run and pass on 2026-11-15, after fixing stale
+component IDs, the HTTP route and topology names in the test.*
 
 **New issues found during implementation** (also recorded in the remaining-work
 document):
@@ -1030,13 +1062,57 @@ document):
 8. NET-06/NET-12 throughput.
 9. NET-14 metrics.
 
+## PostgreSQL implementation status (2026-11-15)
+
+**Delivered:** §3, per its status column, with decisions D-7 to D-10. The
+changes stayed inside `components/`; `Cargo.lock` is unchanged.
+
+- **Configuration (breaking, no migration):** one flat camelCase object shared
+  by the source and its coordinated and shared bootstrap providers; operational
+  fields have defaults; `password` is the only secret. Removed:
+  `auto_create_slot`, `start_from_slot`, `reconnect_attempts`,
+  `reconnect_delay_ms`, the nested `settings`/`connection` objects and the
+  `drasi_slot`/`drasi_publication` defaults. Existing cursors do not match the
+  narrowed binding and are reported as `SchemaChanged`; existing sources must
+  be removed and re-added.
+- **Shared code:** `postgres-common` gained `replication::{settings, error,
+  schema}`, slot management (`ensure_slot`, `drop_owned_slots`), a single
+  retained-cursor check and `start_streaming`. The update planner moved from
+  `common/network` into the SDK (`update_planning`), re-exported by the network
+  crate.
+- **Docs:** `DESIGN.md` and `CONFIGURATION.md` (field table, prerequisites,
+  erase and failure runbook, migration table); the source and bootstrapper
+  READMEs were rewritten for the new configuration.
+
+Verification:
+
+| Target | Result |
+|---|---|
+| `drasi-postgres-common` | 107 tests |
+| PostgreSQL source | 32 tests |
+| PostgreSQL bootstrapper | 3 tests |
+| `drasi-source-postgres --test native_transactions` (live, Podman, PostgreSQL 16) | 60 passed, static and built libraries; includes 7 new tests (erase, missing slot and TRUNCATE refusal, schema drift, all-tables join, reconnect, long pause, schema reader) |
+| Host SDK `native_postgres_http_bootstrap` (live) | 2 passed |
+
+Clippy with `-D warnings`, `cargo fmt --check` and `check-native-dependencies`
+are clean for the changed crates.
+
+Before this work the live suite had 50 of 53 passing; the three failures were
+test bugs (CW-99), now fixed.
+
+**Remaining PostgreSQL work** (recorded as CW-102): PG-13 coordination, the
+D-9 typed reset and D-10 opt-in full-row identity, the SDK conformance kit,
+the activation-credential and PostgreSQL 12 live tests, the CW-14 crash
+matrix for rows and shared modes, metrics, and converting the Server
+consumers listed in the source's `DESIGN.md`.
+
 ---
 
 ## Appendix: remaining-work cross reference
 
 | Component | Applicable CW IDs |
 |---|---|
-| postgres | 96, 98, 44 (discovery), 41, 14, 17, 99, 90, 83, 35, 39, 18, 22, 23, 25, 26, 63, 72, 73, 03, 05, 08, 10, 37, 46, 77, 85, 87, 88, 95, 97 |
+| postgres | 102, 96, 98, 44 (discovery), 41, 14, 17, 99, 90, 83, 35, 39, 18, 22, 23, 25, 26, 63, 72, 73, 03, 05, 08, 10, 37, 46, 77, 85, 87, 88, 95, 97 |
 | mysql | 96, 98, 44 (discovery), 41, 14, 17, 99, 87, 66, 83, 35, 39, 18, 22, 23, 25, 26, 63, 72, 73, 03, 05, 06, 08, 10, 37, 46, 77, 85, 88, 95, 97 |
 | mssql | 96, 98, 44 (permission, orphan markers, discovery), 78, 41, 14, 17, 47, 66, 83, 35, 39, 18, 22, 23, 25, 26, 63, 72, 73, 03, 05, 08, 10, 37, 46, 85, 87, 88, 95, 97 |
 | sqlite | 96 (not listed; should be), 98, 44, 82, 41, 14, 17, 35, 39, 18, 22, 23, 25, 26, 63, 72, 73, 03, 05, 08, 10, 37, 46, 77, 85, 88, 95, 97 |
@@ -1056,6 +1132,9 @@ Notes:
 - **CW-97** (Server ABI 4 port) must rebuild every source library. Server
   examples referenced by these READMEs (for example `drasi-server/examples/native-sqlite.rs`)
   depend on it.
+- **Recorded in the remaining-work document (2026-11-15):** PostgreSQL
+  progress under CW-96 (pause), CW-98 (erase), CW-44 (discovery) and CW-99
+  (TLS and crash-helper tests resolved), and the follow-ups as CW-102.
 - **Recorded in the remaining-work document (2026-11-14):** HTTP/gRPC progress
   under CW-96, CW-98, CW-44 and CW-41; MySQL, SQL Server and SQLite pause gaps
   under CW-96; the native logging bridge under CW-24; the network-source

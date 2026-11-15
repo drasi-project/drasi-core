@@ -68,7 +68,7 @@ fn coordinated(
     PostgresTransactionSource::coordinated(
         ComponentId::try_new("2158a414-62d4-50b8-88a2-49b63b00f3fd")?,
         StreamId::try_new("changes")?,
-        config,
+        super::coordinated_config(&config),
         progress,
     )
 }
@@ -77,7 +77,7 @@ pub(super) async fn managed_slot(database: &Database) -> Result<String> {
     Ok(database
         .client()
         .query_one(
-            "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'native_slot\\_%'",
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'drasi\\_%'",
             &[],
         )
         .await?
@@ -274,7 +274,7 @@ struct CrashSnapshot(Arc<PostgresSnapshot>);
 #[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
 async fn completed_snapshot_refuses_missing_history_or_changed_publication_without_reinitializing(
 ) -> Result<()> {
-    for damage in ["missing-slot", "publication-filter", "column-type"] {
+    for damage in ["missing-slot", "publication-filter", "key-type"] {
         let database = Database::new().await?;
         database
             .client()
@@ -309,7 +309,7 @@ async fn completed_snapshot_refuses_missing_history_or_changed_publication_witho
             _ => {
                 database
                     .client()
-                    .batch_execute("ALTER TABLE person ALTER COLUMN name TYPE varchar(100);")
+                    .batch_execute("ALTER TABLE person ALTER COLUMN id TYPE bigint;")
                     .await?
             }
         };
@@ -323,15 +323,34 @@ async fn completed_snapshot_refuses_missing_history_or_changed_publication_witho
             .start(&lifecycle_ctx::start())
             .await
             .expect_err("changed recovery boundary");
+        let typed = error.chain().find_map(|cause| {
+            cause.downcast_ref::<drasi_postgres_common::replication::PostgresCdcError>()
+        });
         if damage == "missing-slot" {
-            assert!(error.to_string().contains("existing slot"), "{error:#}");
+            assert!(
+                matches!(
+                    typed,
+                    Some(
+                        drasi_postgres_common::replication::PostgresCdcError::PositionUnavailable(
+                            _
+                        )
+                    )
+                ),
+                "{error:#}"
+            );
         } else {
-            assert!(error.to_string().contains("binding"), "{error:#}");
+            assert!(
+                matches!(
+                    typed,
+                    Some(drasi_postgres_common::replication::PostgresCdcError::SchemaChanged(_))
+                ),
+                "{error:#}"
+            );
         }
         let remaining: i64 = database
             .client()
             .query_one(
-                "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'native_slot\\_%'",
+                "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'drasi\\_%'",
                 &[],
             )
             .await?

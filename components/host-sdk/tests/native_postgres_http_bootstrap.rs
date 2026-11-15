@@ -32,8 +32,16 @@ use tokio::{
 const INSTANCE: &str = "postgres-http-composition";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Component IDs are UUIDs; each fixture name has a fixed one.
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("test ID")
+    let number = match value {
+        "joined" => 1,
+        "output" => 2,
+        "price-feed" => 3,
+        "stocks" => 4,
+        other => panic!("missing fixture component ID for {other}"),
+    };
+    ComponentId::try_new(format!("00000000-0000-0000-0000-{number:012x}")).expect("test ID")
 }
 fn resource(value: &str) -> ResourceId {
     ResourceId::try_new(value).expect("test resource")
@@ -143,13 +151,23 @@ impl Database {
     }
     fn settings(&self) -> Value {
         json!({
-            "connection":{"host":"127.0.0.1","port":self.port,"database":"postgres",
-                "user":"postgres","password":"isolated-composition-test","ssl_mode":"disable",
-                "tables":["stocks"],"slot_name":"composition","publication_name":"composition",
-                "table_keys":[{"table":"stocks","key_columns":["id"]}]},
-            "start_lsn":"0/0","transactions":{"max_changes":64,"max_bytes":1048576,"max_duration_ms":10000},
-            "max_protocol_bytes":1048576,"io_timeout_ms":10000,"feedback_interval_ms":100,
+            "host":"127.0.0.1","port":self.port,"database":"postgres",
+            "user":"postgres","password":"isolated-composition-test","sslMode":"disable",
+            "tables":["stocks"],"slotOwnership":"external","slotName":"composition",
+            "publication":"composition",
+            "tableKeys":[{"table":"stocks","keyColumns":["id"]}],
+            "startLsn":"0/0","maxTransactionChanges":64,"maxTransactionBytes":1048576,
+            "maxTransactionDurationMs":10000,"maxProtocolBytes":1048576,"ioTimeoutMs":10000,
+            "feedbackIntervalMs":100,
         })
+    }
+    /// The flat settings merged into `fields`.
+    fn flat(&self, fields: Value) -> Value {
+        let mut settings = self.settings();
+        for (key, value) in fields.as_object().expect("fields object") {
+            settings[key] = value.clone();
+        }
+        settings
     }
     fn remove(&mut self) -> Result<()> {
         if self.container.is_empty() {
@@ -272,7 +290,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
     database.sql(
         "CREATE TABLE stocks(id INTEGER PRIMARY KEY,symbol TEXT,name TEXT);
         INSERT INTO stocks VALUES(1,'AAPL','before'); ALTER TABLE stocks REPLICA IDENTITY FULL;
-        CREATE PUBLICATION composition FOR TABLE stocks;
+        CREATE PUBLICATION composition FOR TABLE stocks WITH (publish = 'insert, update, delete');
         SELECT pg_create_logical_replication_slot('composition','pgoutput');",
     )?;
     let feedback = database.sql(
@@ -320,12 +338,12 @@ async fn exercise(dynamic: bool) -> Result<()> {
             .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.postgres/shared-row-bootstrap")
             .context("configured PG bootstrap")?;
         let pg = pg_factory.create_provider(id("joined"),
-            json!({"source":"stocks","stream":stream("stocks"),"settings":database.settings()}),
+            database.flat(json!({"source":id("stocks").to_string(),"stream":stream("stocks")})),
             Some(scope.clone()), Some(owner.clone()))?;
         let prices = native[3].bootstrap_factories().iter()
             .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.network/http-bootstrap")
             .context("HTTP bootstrap")?.create_provider(id("joined"), json!({
-                "source":"price-feed","stream":stream("price-feed"),"outputCapacity":1,
+                "source":id("price-feed").to_string(),"stream":stream("price-feed"),"outputCapacity":1,
                 "settings":{"endpoints":[{"url":format!("http://{address}/prices"),
                     "response":{"itemsPath":"$.items","mappings":[{"elementType":"node","template":{
                         "id":"{{item.id}}","labels":["stock_prices"],
@@ -350,11 +368,10 @@ async fn exercise(dynamic: bool) -> Result<()> {
         let pg_source = native[0].factories().iter()
             .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.postgres/shared-changes")
             .context("shared PG source")?.clone();
-        let mut specification = pg_source.specification(id("stocks"), json!({
-            "stream":stream("stocks"),"settings":{},"persistent":false,
-            "auto_create_slot":false,"start_from_slot":false,
-        }))?;
-        specification.configuration.insert("settings".into(), ConfigurationValue::Reference {
+        let mut literal = database.flat(json!({"stream":stream("stocks"),"persistent":false}));
+        literal.as_object_mut().expect("settings object").remove("password");
+        let mut specification = pg_source.specification(id("stocks"), literal)?;
+        specification.configuration.insert("password".into(), ConfigurationValue::Reference {
             resource:resource("settings"), key:"postgres".into(), secret:true,
         });
         specification.dependencies.insert("consumer_progress".into(), vec![resource("consumers")]);
@@ -365,7 +382,8 @@ async fn exercise(dynamic: bool) -> Result<()> {
         let mut builder = ComponentBatch::builder();
         for (name, role, handle) in [
             ("settings",ResourceRole::SecretStore,ResourceHandle::new(ResourceRole::SecretStore,
-                Arc::new(ConfigurationResolverResource(Arc::new(Settings(database.settings())))))),
+                Arc::new(ConfigurationResolverResource(Arc::new(Settings(
+                    database.settings()["password"].clone())))))),
             ("consumers",ResourceRole::Checkpoint,ResourceHandle::new(ResourceRole::Checkpoint,
                 Arc::new(ConsumerProgressSet::new(ComponentBatch::GRAPH_ID,id("stocks"),vec![owner.clone()])?))),
         ] {
@@ -373,10 +391,10 @@ async fn exercise(dynamic: bool) -> Result<()> {
                 id:resource(name),role,ownership:ResourceOwnership::Borrowed,binding:name.into(),
             })?.provide_resource(resource(name),handle)?;
         }
-        let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone()).with_id(INSTANCE).with_components(builder
+        let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone()).with_id(INSTANCE).with_allow_external_component_ids(true).with_components(builder
             .component(drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1").expect("fixture component name"), specification,pg_source)
             .component(drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2").expect("fixture component name"), price_factory.specification(id("price-feed"),json!({
-                "stream":stream("price-feed"),"sourceId":"price-feed","host":"127.0.0.1","port":price_port,
+                "stream":stream("price-feed"),"host":"127.0.0.1","port":price_port,
             }))?,price_factory)
             .transformer(drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1").expect("fixture component name"), Box::new(query))
             .sink(drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1").expect("fixture component name"), Box::new(Output { descriptor: ComponentDescriptor::try_new(id("output"), vec![
@@ -393,7 +411,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
         let proof = async {
             let initialize = async {
                 core.start().await?;
-                core.component_by_name(&drasi_core_types::ComponentName::try_new("joined").expect("fixture component name"))?.wait_started().await?;
+                core.component_by_name(&drasi_core_types::ComponentName::try_new("fixture-transformer-1").expect("fixture component name"))?.wait_started().await?;
                 Result::<()>::Ok(())
             };
             let concurrent_write = async {
@@ -429,7 +447,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
             };
             wait("during-snapshot",175.5).await?;
             anyhow::ensure!(owner.snapshot().bootstrap_complete && !owner.snapshot().persistent, "wrong query completion/durability");
-            reqwest::Client::new().post(format!("http://127.0.0.1:{price_port}/sources/price-feed/events"))
+            reqwest::Client::new().post(format!("http://127.0.0.1:{price_port}/sources/{}/events", id("price-feed")))
                 .json(&json!({"operation":"update","element":{"type":"node","id":"price_AAPL",
                     "labels":["stock_prices"],"properties":{"symbol":"AAPL","price":200.0}}}))
                 .send().await?.error_for_status()?;
@@ -444,7 +462,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
             lease.resume();
             database.sql("UPDATE stocks SET name='offline' WHERE id=1")?;
             core.start().await?;
-            core.component_by_name(&drasi_core_types::ComponentName::try_new("joined").expect("fixture component name"))?.wait_started().await?;
+            core.component_by_name(&drasi_core_types::ComponentName::try_new("fixture-transformer-1").expect("fixture component name"))?.wait_started().await?;
             wait("offline",175.5).await?;
             anyhow::ensure!(snapshots.load(Ordering::SeqCst) == 2, "price initialization was skipped or duplicated");
             Result::<()>::Ok(())

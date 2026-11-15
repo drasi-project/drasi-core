@@ -114,9 +114,10 @@ fn constructor_retains_capability_without_reading_and_policy_identity_is_stable(
     let provider = provider(snapshot(None, None));
     let view = ConsumerProgressView::new(provider.clone());
     let config = serde_json::from_value(serde_json::json!({
-        "connection":{"database":"database","user":"user"},
-        "start_lsn":"0/10", "transactions":{"max_changes":16,"max_bytes":4096,"max_duration_ms":1000},
-        "max_protocol_bytes":4096,"io_timeout_ms":1000,"feedback_interval_ms":100
+        "database": "database", "user": "user", "publication": "publication",
+        "startLsn": "0/10", "maxTransactionChanges": 16, "maxTransactionBytes": 4096,
+        "maxTransactionDurationMs": 1000, "maxProtocolBytes": 4096, "ioTimeoutMs": 1000,
+        "feedbackIntervalMs": 100
     }))?;
     let source = crate::PostgresTransactionSource::shared_rows(
         id("source"),
@@ -124,7 +125,7 @@ fn constructor_retains_capability_without_reading_and_policy_identity_is_stable(
         config,
         view.clone(),
         &[id("left"), id("right")],
-        Default::default(),
+        false,
     )?;
     assert!(source
         .consumer_progress_reader()
@@ -136,17 +137,14 @@ fn constructor_retains_capability_without_reading_and_policy_identity_is_stable(
         &source.input_position_policy().unwrap(),
         &source.input_position_policy().unwrap()
     ));
-    assert!(source
-        .configuration()?
-        .get("coordinated_snapshot")
-        .is_none());
+    assert!(source.configuration()?.get("coordinatedSnapshot").is_none());
     assert!(crate::PostgresSharedRowsFactory.supports_consumer_progress());
     assert!(!crate::PostgresSharedRowsFactory.supports_source_progress());
     assert!(!crate::PostgresSharedRowsFactory
         .metadata()
         .configuration
         .fields
-        .contains_key("coordinated_snapshot"));
+        .contains_key("coordinatedSnapshot"));
     assert!(SharedBinding::new(&id("wrong"), view.clone(), &[id("left")]).is_err());
     assert!(SharedBinding::new(&id("source"), view, &[id("left"), id("left")]).is_err());
     Ok(())
@@ -439,14 +437,11 @@ fn transaction_binding_is_constructor_safe_and_has_no_single_owner_or_row_option
         metadata.ports[0].schema(),
         drasi_computation_contracts::GraphChangeCodec::schema().descriptor()
     );
-    assert_eq!(
-        metadata
-            .configuration
-            .fields
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["settings", "stream"]
+    let fields = &metadata.configuration.fields;
+    assert!(fields.contains_key("stream") && fields["password"].secret);
+    assert!(
+        !fields.contains_key("coordinatedSnapshot") && !fields.contains_key("persistent"),
+        "shared transactions have no single-owner or row options"
     );
     assert!(crate::PostgresSharedTransactionsFactory.supports_consumer_progress());
     assert!(!crate::PostgresSharedTransactionsFactory.supports_source_progress());

@@ -353,30 +353,18 @@ async fn build_graph_mode(
     let resource = ResourceId::try_new("consumers")?;
     let settings = ResourceId::try_new("settings")?;
     let factory = factory_for(plugins, output)?;
-    let mut configuration = BTreeMap::from([
-        (
-            "stream".into(),
-            ConfigurationValue::Literal(json!("changes")),
-        ),
-        (
-            "settings".into(),
-            ConfigurationValue::Reference {
-                resource: settings.clone(),
-                key: "postgres".into(),
-                secret: true,
-            },
-        ),
-    ]);
+    let mut configuration = BTreeMap::from([(
+        "stream".into(),
+        ConfigurationValue::Literal(json!("changes")),
+    )]);
+    for (key, value) in settings_fields(&database.config, &settings) {
+        configuration.insert(key.into(), value);
+    }
     if output == SharedOutput::Rows {
-        for (name, value) in [
-            ("persistent", json!(path.is_some())),
-            ("auto_create_slot", json!(false)),
-            ("start_from_slot", json!(false)),
-            ("reconnect_attempts", json!(3)),
-            ("reconnect_delay_ms", json!(100)),
-        ] {
-            configuration.insert(name.into(), ConfigurationValue::Literal(value));
-        }
+        configuration.insert(
+            "persistent".into(),
+            ConfigurationValue::Literal(json!(path.is_some())),
+        );
     }
     let specification = ComponentSpecification {
         descriptor: factory.metadata().descriptor(id(77))?,
@@ -408,9 +396,9 @@ async fn build_graph_mode(
             settings,
             ResourceHandle::new(
                 ResourceRole::SecretStore,
-                Arc::new(ConfigurationResolverResource(Arc::new(Settings(
-                    serde_json::to_value(&database.config)?,
-                )))),
+                Arc::new(ConfigurationResolverResource(Arc::new(Settings(json!(
+                    database.config.password
+                ))))),
             ),
         )?
         .component(
@@ -446,11 +434,7 @@ async fn build_graph_mode(
                 .context("shared PostgreSQL bootstrap factory")?;
             let provider = factory.create_provider(
                 named_id(name),
-                json!({
-                    "source": id(77).to_string(),
-                    "stream": "changes",
-                    "settings": database.config
-                }),
+                bootstrap_flat(id(77).to_string(), &database.config),
                 Some(libraries::scope(ComponentBatch::GRAPH_ID)),
                 Some(owners[index].clone()),
             )?;
@@ -774,10 +758,7 @@ async fn seed_different_progress(
     )?);
     let mut source = factory(plugins)?.create_component_with_consumer_progress(
         id(77),
-        json!({
-            "stream":"changes", "settings":database.config, "persistent":true,
-            "auto_create_slot":false,"start_from_slot":false,
-        }),
+        flat(&database.config, json!({"persistent": true})),
         libraries::scope(ComponentBatch::GRAPH_ID),
         consumers,
     )?;
@@ -812,7 +793,7 @@ async fn seed_different_progress(
         position(&owners[1])?.context("slow seed cursor")?.offset,
         Some(0)
     );
-    assert_eq!(database.feedback().await?, database.config.start_lsn);
+    assert_eq!(database.feedback().await?, start_lsn(&database.config));
     fast.stop(&lifecycle_ctx::stop()).await?;
     slow.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
@@ -902,10 +883,10 @@ async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Res
             database.wait_feedback(slow.feedback_lsn()).await?;
         } else {
             database
-                .wait_feedback(lsn(&database.config.start_lsn))
+                .wait_feedback(lsn(&start_lsn(&database.config)))
                 .await?;
         }
-        assert_eq!(database.feedback().await?, database.config.start_lsn);
+        assert_eq!(database.feedback().await?, start_lsn(&database.config));
         let old_pid: i32 = database
             .client()
             .query_one(
@@ -925,7 +906,7 @@ async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Res
         .await?;
         assert_eq!(
             database.feedback().await?,
-            database.config.start_lsn,
+            start_lsn(&database.config),
             "one complete owner cannot acknowledge the other owner's suffix"
         );
         assert_eq!(
