@@ -2835,6 +2835,48 @@ async fn rejected_query_and_reaction_errors_retain_graph_owned_cleanup() {
     assert_eq!(reaction_control.drops.load(Ordering::Acquire), 1);
 }
 
+#[tokio::test]
+async fn reaction_object_with_missing_query_is_rejected_without_blocking_later_additions() {
+    let core = builder()
+        .with_allow_external_component_ids(true)
+        .build()
+        .await
+        .unwrap();
+    let missing = drasi_core_types::ComponentName::try_new("missing").unwrap();
+    let (reaction, reaction_control, _) =
+        ControlledReaction::new(ComponentId::generate(), std::slice::from_ref(&missing));
+    let error = core
+        .add_reaction_with_handle(
+            drasi_core_types::ComponentName::try_new("reaction").unwrap(),
+            reaction,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("does not name an existing query"),
+        "{error:#}"
+    );
+    assert_eq!(reaction_control.initializations.load(Ordering::Acquire), 0);
+    assert!(core.list_reactions().await.unwrap().is_empty());
+
+    let query = core
+        .add_query_with_handle(config(missing.clone(), None))
+        .await
+        .unwrap();
+    query.wait_created().await.unwrap();
+    let (reaction, _, _) = ControlledReaction::new(ComponentId::generate(), &[missing]);
+    core.add_reaction_with_handle(
+        drasi_core_types::ComponentName::try_new("reaction").unwrap(),
+        reaction,
+    )
+    .await
+    .unwrap()
+    .wait_created()
+    .await
+    .unwrap();
+    core.shutdown().await.unwrap();
+}
+
 mockall::mock! {
     InventoryWal {}
 

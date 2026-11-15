@@ -65,7 +65,10 @@ impl DrasiLib {
 
     /// Declare a reaction and return its generation-bound computation handle.
     ///
-    /// Dependency and constructor validation happen after declaration. Await `wait_created()` or
+    /// Every query input must name an existing query: a reaction object has fixed
+    /// inputs and cannot wait for one to be added. Use [`Self::create_reaction`] to
+    /// declare a reaction that waits for missing queries.
+    /// Other dependency and constructor validation happens after declaration. Await `wait_created()` or
     /// `wait_started()` on the handle for initialization or activation outcomes.
     /// `wait_started()` requires the reaction to report `Running`, not merely to
     /// return successfully from its start hook.
