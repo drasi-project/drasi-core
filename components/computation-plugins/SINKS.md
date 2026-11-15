@@ -96,8 +96,11 @@ protocol is shaped like a query result. Every native sink states, per change:
 
 A valid identity-only deletion with no before image and no envelope timestamp is
 delivered as `{operation: "DELETE", identity, output, sequence}` and nothing
-else. A template that reads an absent field fails strictly instead of rendering
-an empty value.
+else. The HTTP, SSE and log sinks render templates in non-strict mode, so a
+template that reads an absent field renders an empty value. The gRPC sink
+renders strictly, so an absent field is a render failure. A render failure is a
+per-change failure under the sink's failure policy, never a silent fallback to
+another body. Every templating sink registers the `json` helper.
 
 Template routes use the operation's group: `added` (ADD), `updated` (REPLACE
 and PATCH; the context's `operation` tells them apart) and `deleted` (DELETE).
@@ -126,9 +129,11 @@ element is a no-op.
 | Sink | Input handling | Delivery |
 |---|---|---|
 | `drasi.standard/capture` | Writes the complete envelope frame; needs no decoding | `Handled` after write and flush |
-| `drasi.network/http-sink` | One request per ordered change (or one `{"batch":[…]}` request per output) | `Handled` after every request completes or is deliberately skipped |
+| `drasi.network/http-sink` | One request per ordered change (or one `{"batch":[…]}` request per output) | `Handled` after every request returns a configured success status (`202` is not success by default) or is deliberately skipped |
+| `drasi.network/http-delivery` | One batch-confirming request per delivery batch | Consumer (`External`): completes only on an exact `200` echoing the batch identity |
 | `drasi.network/grpc-sink` | One `ChangeService.ProcessChanges` item per ordered change, batched per output and rendered metadata | `Handled` after an exact acknowledgement |
 | `drasi.network/sse-sink` | One browser frame per envelope (or one event per routed change); empty envelopes publish nothing | `Accepted` (volatile broadcast) |
+| `drasi.standard/log` | One line per change (template, `json` or `compact` format), optionally under a header line | `Handled` after the records are emitted (`log`) or written and flushed (`stdout`/`stderr`) |
 | `drasi.postgres/storedproc`, `drasi.mysql/storedproc`, `drasi.mssql/storedproc` | Each change selects the output alias's `added`/`updated`/`deleted` template | `Handled` after the commands complete; PostgreSQL may also use transactional delivery |
 | `drasi.bridge/sink` | Forwards graph records unchanged, including patches and removals | Per its transport contract |
 

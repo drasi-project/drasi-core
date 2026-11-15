@@ -14,10 +14,17 @@ use axum::{
     Json, Router,
 };
 use drasi_computation_contracts::{DeliveryHandler, EnvelopeCodec, InputEnvelope, ReplayRejection};
+use drasi_computation_network_common::{config::sanitize, diag};
 use drasi_lib::computation::v1::{DeliveryError, DeliveryRunner};
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
+
+/// Requests processed at once: the runner handles one batch at a time, so
+/// further requests are refused with 429 instead of queuing.
+pub const ADMISSION_SLOTS: usize = 1;
+/// Deadline for processing one admitted request.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct Consumer {
     runner: DeliveryRunner,
@@ -58,7 +65,7 @@ impl HttpDeliveryEndpoint {
                 handler: Some(handler),
             })),
             admission: Arc::new(Admission {
-                slots: Arc::new(Semaphore::new(1)),
+                slots: Arc::new(Semaphore::new(ADMISSION_SLOTS)),
                 cancelled: CancellationToken::new(),
             }),
             max_message_bytes,
@@ -86,13 +93,24 @@ impl HttpDeliveryEndpoint {
     }
 }
 
+/// Logs the internal cause and answers with only a generic description of
+/// the status, so clients learn nothing about internal state.
 fn failure(status: StatusCode, error: anyhow::Error) -> Response {
-    eprintln!("drasi.network HTTP delivery failed: {error:#}");
-    (
-        status,
-        Json(serde_json::json!({"error": error.to_string()})),
-    )
-        .into_response()
+    diag!(
+        Warn,
+        "HTTP delivery request failed: status={} error={}",
+        status.as_u16(),
+        sanitize(&format!("{error:#}"))
+    );
+    let message = match status {
+        StatusCode::BAD_REQUEST => "invalid delivery request",
+        StatusCode::CONFLICT => "delivery conflicts with recorded progress",
+        StatusCode::UNPROCESSABLE_ENTITY => "delivery was rejected",
+        StatusCode::TOO_MANY_REQUESTS => "delivery endpoint is busy",
+        StatusCode::GATEWAY_TIMEOUT => "delivery timed out",
+        _ => "delivery endpoint is unavailable",
+    };
+    (status, Json(serde_json::json!({"error": message}))).into_response()
 }
 
 async fn admit(State(admission): State<Arc<Admission>>, request: Request, next: Next) -> Response {
@@ -110,7 +128,7 @@ async fn admit(State(admission): State<Arc<Admission>>, request: Request, next: 
     tokio::select! {
         biased;
         _ = admission.cancelled.cancelled() => failure(StatusCode::SERVICE_UNAVAILABLE, anyhow::anyhow!("delivery endpoint is stopping")),
-        result = tokio::time::timeout(Duration::from_secs(60), next.run(request)) => match result {
+        result = tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)) => match result {
             Ok(response) => response,
             Err(error) => failure(StatusCode::GATEWAY_TIMEOUT, error.into()),
         },

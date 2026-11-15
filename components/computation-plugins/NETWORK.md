@@ -2,7 +2,9 @@
 
 The six [independent network component crates](README.md) provide native
 ComputationGraph HTTP/gRPC transport, HTTP bootstrap and browser SSE delivery. Each library
-registers only its own factory and uses its package name as its plugin identity.
+registers its own factories and uses its package name as its plugin identity. The
+HTTP sink library registers two: the ordinary sink and the opt-in
+`drasi.network/http-delivery` consumer.
 Native ABI is **4.0.0**, independently of the workspace package version.
 Native wire version is **2**, using binary computation envelopes
 and bulk MessagePack buffers. Rebuild libraries built against an older native ABI.
@@ -15,6 +17,7 @@ ordinary layouts are rejected.
 | `drasi.network/http-source` | `EnvelopeSource` | `out`, `GraphChangeCodec::schema()` |
 | `drasi.network/grpc-source` | `EnvelopeSource` | `out`, `GraphChangeCodec::schema()` |
 | `drasi.network/http-sink` | `EnvelopeSink` | `in`, `GraphChangeCodec::schema()` |
+| `drasi.network/http-delivery` | consumer (`External`) | `in`, `GraphChangeCodec::schema()` |
 | `drasi.network/grpc-sink` | `EnvelopeSink` | `in`, `GraphChangeCodec::schema()` |
 | `drasi.network/sse-sink` | `EnvelopeSink` (`Accepted`) | `in`, `GraphChangeCodec::schema()` |
 | `drasi.network/http-bootstrap` | `NativeBootstrapProvider` | query-scoped snapshot, `GraphChangeCodec::schema()` |
@@ -23,7 +26,7 @@ HTTP webhook/auth/mapping, REST bootstrap, HTTP/gRPC rendering and protocol
 helpers are extracted from the existing implementations into shared crates.
 Native execution constructs no legacy
 `Source`, `Reaction`, `SourceBase`, `ReactionBase`, `SourceEventWrapper`,
-adapter or subscription queue. The three sinks accept the standard graph-change
+adapter or subscription queue. The HTTP, gRPC and SSE sinks accept the standard graph-change
 schema from **any** producer — a source, a transformer or a query — through one
 decoder (see [Native sink input](SINKS.md)). They project typed changes to the
 truthful change JSON at the actual network boundary (`operation`, canonical
@@ -49,8 +52,9 @@ consuming standard graph-change envelopes from any producer directly from graph 
 ```
 
 Use the producer's assigned UUID in `component`; `example-query` is only an
-output alias. No listener setting is required; the default host is `0.0.0.0`, with the other
-defaults shown above. Each input's stream selects the declared incoming output
+output alias. No listener setting is required; the default host is `127.0.0.1`, with the other
+defaults shown above. A non-loopback host requires `authToken`, or an explicit
+`allowUnauthenticated: true` behind an authenticating proxy. Each input's stream selects the declared incoming output
 (a real component and output port of a source, transformer or query); a stream
 that is not a declared edge fails. Connect every output to the sink's `in` port. The untemplated data frame is
 `{"output":{"alias","component","port"},"sequence","publishedAt","changes":[…]}`
@@ -71,32 +75,45 @@ Delivery is explicitly **volatile, Accepted**, not handled by a browser.
 No connected listener is required; disconnected clients receive no history.
 Each listener uses the bounded broadcast channel; lag closes that stream rather
 than silently delivering a truncated tail. Clients must reconnect and fetch a
-fresh snapshot. Stop cancels active streams and joins the HTTP server, retaining
-ownership after cancelled or timed-out cleanup. Restart requires that cleanup.
-Construction binds no socket or worker.
+fresh snapshot. Pause is a real gate: new subscriptions and snapshot reads get
+`503` with `Retry-After`, heartbeats stop and connected subscribers receive only
+keep-alive comments until Resume. Stop honours `StopMode` and the lifecycle
+deadline: `Drain` ends streams and joins the server gracefully, `Abort` closes
+connections immediately, and a timed-out Drain retains ownership so a later
+Stop finishes it. Restart requires that cleanup. Construction binds no socket
+or worker.
 
 The native sink also reuses the legacy SSE renderer for per-query/default
 templates and static/dynamic paths, with explicit path-count bounds.
 Output snapshot readers have bounded admission, cancellation and host
-runtime ownership. See the [SSE guide](sinks/sse/README.md) for configuration and
-the snapshot resource recipe. Incoming recovery snapshot/progress control
-envelopes remain unsupported; configuration does not pretend otherwise. GET/OPTIONS permit
-cross-origin reads, as the existing SSE transport does. Configure an
-authenticated reverse proxy before exposing private results.
+runtime ownership. Incoming recovery snapshot/progress control envelopes remain
+unsupported; configuration does not pretend otherwise.
+
+The listener uses the shared network server: optional bearer authentication
+(`authToken`, `authTokenSecondary`, also accepted as `?access_token=` for
+browser `EventSource` clients unless `allowQueryToken` is false), optional TLS
+and mutual TLS, `maxConnections`, `maxSubscribers`, `headerReadTimeoutMs` and
+an optional per-client rate limit. CORS is off unless `corsAllowedOrigins` is
+set. See [DESIGN.md](sinks/sse/DESIGN.md) and
+[CONFIGURATION.md](sinks/sse/CONFIGURATION.md) for every field, the management
+boundaries and the snapshot resource recipe.
 
 ## Opt-in HTTP completion service
 
 The `drasi_computation_sink_http::delivery` module provides `HttpDeliveryHandler` and
-`HttpDeliveryEndpoint`. None of the factories constructs them automatically;
-ordinary configurations and legacy protocols do not opt into them. These
-services are not yet exposed through native service negotiation.
-
-Use `HttpDeliveryHandler` with the shared
+`HttpDeliveryEndpoint`. The `drasi.network/http-delivery` factory constructs
+`HttpDeliveryHandler` as a `ConsumerMode::External` consumer, so the host's shared
 [`DeliveryRunner`](../../lib/docs/computation-graph-qos.md#opt-in-operation-completion)
-on the sending side. Supply a reqwest client, the complete endpoint URL, an
-`EnvelopeCodec` with the allowed schemas, a message limit and a timeout. Configure
-redirects/authentication/TLS on that client explicitly; disable redirects when
-delivery must stay at that exact destination.
+drives it; configuration (URL, secret token, timeouts, message limit, client TLS)
+is listed in [the HTTP sink configuration](sinks/http/CONFIGURATION.md#http-delivery-consumer-fields).
+The ordinary `drasi.network/http-sink` never uses it. `HttpDeliveryEndpoint` is a
+reference receiver that an application hosts itself (feature `delivery-receiver`).
+
+The handler can also be constructed directly: supply a reqwest client, the
+complete endpoint URL, an `EnvelopeCodec` with the allowed schemas, a message limit
+and a timeout, and configure redirects/TLS on that client explicitly. Each request
+carries `x-drasi-delivery-id: {identity stream}/{sequence}` and, when configured,
+a bearer token.
 
 The reference endpoint exposes `POST /drasi/delivery/v1`. A JSON request contains
 `version: 1`, the input `port`, expected batch `identity` and the complete
@@ -126,10 +143,11 @@ Admission allows one active request per endpoint and rejects excess requests
 before parsing their bodies. Message limits are explicit and at most **16 MiB**;
 confirmation/error replies are limited to **4,096 bytes**. Sender timeouts must be
 positive and at most 60 seconds; the endpoint also bounds active requests to
-60 seconds. Connection/time-out errors and explicit HTTP 429/503 responses are
-retryable only through the runner's configured bounded policy. Permanent handler
-failures return 422; conflicting identity/history returns 409. Nothing silently
-skips a failed operation.
+60 seconds. Transport errors (connect, timeout, in flight) and HTTP 408, 425, 429
+and 5xx responses are retryable only through the runner's configured bounded
+policy. Permanent handler failures return 422; conflicting identity/history
+returns 409. Error replies carry only a generic message; internal causes are
+logged. Nothing silently skips a failed operation.
 
 Construction spawns no workers or listener. The application owns the HTTP server
 and destination connection driver. Call endpoint `shutdown()` to reject/cancel
@@ -345,7 +363,6 @@ is not a successful graceful drain or proof that the write rolled back.
     }
   },
   "url": "http://127.0.0.1:9001/reaction",
-  "headers": {"Content-Type": "application/json"},
   "timeoutMs": 60000,
   "maxRetries": 3,
   "failurePolicy": "strict"
@@ -354,10 +371,15 @@ is not a successful graceful drain or proof that the write rolled back.
 
 Supply `url` or `baseUrl`, and optionally `outputs` (aliases for incoming
 source, transformer or query outputs); `baseUrl` alone selects
-`/changes/{alias}`, where an unaliased output is named after its component. Every request carries `x-drasi-component` and
-`x-drasi-port` naming the real producing output; configuring either header
-rejects. Headers default to `application/json`. Invalid/duplicate
-case-insensitive header names/values reject. Redirects are disabled.
+`/changes/{alias}`, where an unaliased output is named after its component.
+Every request carries `x-drasi-component` and `x-drasi-port` naming the real
+producing output and a stable `x-drasi-delivery-id`; configuring any of them,
+including in template headers, rejects at construction. `token`,
+`secretHeaders` and `tlsClientPrivateKeyPem` are secret fields. Redirects are
+never followed. Success means a status in `successStatusCodes`
+(`[200, 201, 203, 204]` by default; 202 only when configured). Retries are
+jittered, honour `Retry-After` on 429/503 and are bounded by `maxRetries` and
+`retryBudgetMs`.
 
 Each graph change produces one truthful notification: `operation` (`ADD`,
 `REPLACE`, `PATCH`, `DELETE`), `output` (`alias`, `component`, `port`),
@@ -366,12 +388,14 @@ canonical `identity`, and only the `element`, `before`, `after`,
 `removedProperties` and `effectiveFrom` that the record carries. For a patch,
 `after` holds only the properties it sets and an explicit `null` stays `null`.
 Empty change sets produce no request; a scheduling control or recovery frame
-fails. `token` and `outputTemplates` reuse the legacy body/URL/method/header
-renderer, with `added`/`updated`/`deleted` routing (keyed by output alias) and
-logged canonical fallbacks; the template context is the notification object. `adaptive` plus `batchEndpoint` enables
-a `{"batch":[...]}` protocol of notifications with host-owned collection and
-timers, one batch per output. `maxBatchBytes` bounds collected inputs;
-`maxRequestBytes` splits rendered requests. See the [HTTP sink guide](sinks/http/README.md).
+fails. `outputTemplates` render body/URL/method/headers with
+`added`/`updated`/`deleted` routing keyed by output alias; templates compile at
+construction and a render failure is a per-change failure under
+`failurePolicy`, never a fallback. `adaptive` plus `batchEndpoint` enables a
+`{"batch":[...]}` protocol with host-owned collection and timers, one batch per
+output. `maxBatchBytes` bounds collected inputs; `maxRequestBytes` splits
+rendered requests. See [DESIGN.md](sinks/http/DESIGN.md) and
+[CONFIGURATION.md](sinks/http/CONFIGURATION.md).
 
 ## gRPC sink configuration
 
@@ -387,15 +411,17 @@ timers, one batch per output. `maxBatchBytes` bounds collected inputs;
   "batchSize": 1,
   "batchFlushTimeoutMs": 100,
   "maxRetries": 5,
-  "connectionRetryAttempts": 10,
-  "initialConnectionTimeoutMs": 15000,
+  "retryBudgetMs": 120000,
+  "connectTimeoutMs": 10000,
   "outputFormat": "canonicalJson",
   "failurePolicy": "strict"
 }
 ```
 
-Supply `outputs`; other defaults are shown. Endpoint schemes `grpc://` and
-plaintext `http://` are supported. TLS is not advertised.
+Supply `outputs`; other defaults are shown. Plaintext `grpc://` and `http://`,
+and TLS `grpcs://` and `https://` endpoints are supported, with an optional
+private CA, client certificate (mutual TLS) and `tlsDomainName`. Credentials go
+in the secret `secretMetadata` field.
 
 The new `drasi.v1.ChangeService/ProcessChanges` protocol carries an
 `OutputIdentity` (`alias`, `component`, `port`) and ordered `Change` items; the
@@ -415,12 +441,14 @@ Configured metadata is sent in both the request body and actual gRPC headers
 together with `x-drasi-component` and `x-drasi-port`.
 `canonicalJson` includes the canonical JSON `payload`; `proto` omits it unless a
 body template is configured. `outputTemplates` reuses the legacy renderer and
-metadata templates without changing typed images. See the
-[gRPC sink guide](sinks/grpc/README.md).
+metadata templates without changing typed images. Every request also carries
+`x-drasi-delivery-id`. See [DESIGN.md](sinks/grpc/DESIGN.md) and
+[CONFIGURATION.md](sinks/grpc/CONFIGURATION.md).
 
-Startup actually attempts the connection, with up to `connectionRetryAttempts`
-total attempts and `initialConnectionTimeoutMs` per attempt; errors are not
-disguised as successful lazy activation.
+Connection is lazy by default: Start does not contact the receiver, and the
+first delivery connects within `connectTimeoutMs` and the retry budget. With
+`requireConnectedAtStart: true`, Start connects with retries bounded by its own
+cancellation and deadline, and fails rather than reporting a lazy success.
 
 ### Sink completion, retry, skip and cancellation
 
@@ -431,21 +459,32 @@ annotation is read.
 
 `Handled` means network delivery completed successfully, or a failed delivery was
 deliberately skipped under the explicitly configured policy. There is no early
-`Accepted` queue. A gRPC success must also acknowledge the exact requested item
-count; partial or excessive counts fail. `maxRetries` counts additional attempts after the first; backoff
-starts at 100 ms and caps at 5 s. Retries send the same sequence and payload in
-order. One multi-change envelope can already have partially delivered before a
-later change fails. Retries/cancellation can duplicate external effects.
+`Accepted` queue. HTTP success is a status in `successStatusCodes` (default 200,
+201, 203, 204; a queued `202` is not completion unless configured). A gRPC
+success must also acknowledge the exact requested item count; partial or
+excessive counts fail, and `success: false` is a permanent rejection.
 
-`failurePolicy="strict"` propagates failure (default). `"skip"` reports every
-exhausted delivery to stderr with component/output/sequence/error and deliberately
-continues. It is not an implementation of the full legacy `auto_skip_gap`
+`maxRetries` counts additional attempts after the first, and `retryBudgetMs`
+bounds the total retry time of one request. Backoff is exponential with full
+jitter (100 ms doubling to a 5 s ceiling) and honours `Retry-After` (HTTP) or
+`grpc-retry-pushback-ms`/`retry-after` (gRPC). Failures are classified by HTTP
+status, `tonic::Code` or transport error kind, never by message text; permanent
+failures are not retried. Retries send the same sequence, payload and
+`x-drasi-delivery-id` in order, so a receiver can deduplicate them. One
+multi-change envelope can already have partially delivered before a later change
+fails, and retries or cancellation can duplicate external effects.
+
+A template that fails to render is a per-change failure under `failurePolicy`;
+it never falls back to the default body. `failurePolicy="strict"` propagates
+failure (default). `"skip"` logs every exhausted delivery as a sanitized warning
+with component/output/sequence/error and deliberately continues. It is not an implementation of the full legacy `auto_skip_gap`
 recovery policy. The native HTTP strict path does not silently drop permanent
 poison outcomes as the legacy checkpoint loop did. Healthy paired runs should not measure failed
 request/retry timings.
 
 Client requests live in host-polled operation futures, not background sink
-processing queues. Cancellation drops pending calls/backoff; stop drops owned
+processing queues. Cancellation drops pending calls/backoff, so `Abort` ends an
+in-flight delivery at once and `Drain` waits at most for the retry budget; stop drops owned
 client/channel handles after the host drains/cancels operations. The plugin's I/O
 runtime and library remain process-pinned according to ABI 4.0. Cancellation is
 not rollback or exactly-once delivery.

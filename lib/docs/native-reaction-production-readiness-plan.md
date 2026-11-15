@@ -1,7 +1,13 @@
 # Native reaction (sink) plugins: production-readiness plan
 
 **Status:** Proposed plan, written 2026-11-14 against `6d294f43` ("Native lifecycle
-and component management (ABI 4.0)").
+and component management (ABI 4.0)"). **Progress (2026-11-15):** the shared
+network sink runtime and the HTTP, gRPC, SSE and log sinks are implemented, with
+X-01, X-02, X-05 and X-07 delivered as scaffolding. See the status columns in
+[§3](#3-shared-network-sink-runtime-commonnetwork) to [§6](#6-sse-sink-drasi-computation-sink-sse)
+and [§13](#13-log-drasi-computation-sink-log), and
+[Implementation status](#implementation-status-2026-11-15). The stored-procedure,
+bridge, capture and profiler sinks and the §15 ports have not been started.
 **Scope:** The ten native ComputationGraph sink plugins under
 `components/computation-plugins/sinks/`, the sink-side parts of the shared
 crates they depend on (`computation-plugins/common/network`,
@@ -59,7 +65,8 @@ code but need a failing test before a fix is chosen.
 15. [Legacy reactions with no native sink](#15-legacy-reactions-with-no-native-sink)
 16. [Sequencing](#16-sequencing)
 17. [Definition of done (per plugin)](#17-definition-of-done-per-plugin)
-18. [Appendix: remaining-work cross reference](#appendix-remaining-work-cross-reference)
+18. [Implementation status (2026-11-15)](#implementation-status-2026-11-15)
+19. [Appendix: remaining-work cross reference](#appendix-remaining-work-cross-reference)
 
 ---
 
@@ -105,23 +112,26 @@ and per-reaction tasks are in §15.
 | Concern | http | grpc | sse | sp-pg | sp-mysql | sp-mssql | bridge | capture | log | profiler |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Owns independent workers | no | no | **server** | conn. driver | no | per-input task | no | no | no | **report task** |
-| `pause` real or `unsupported` | no-op (host-driven; in-flight retry not cancelled) | same | ✗ **no-op, server keeps serving** (CW-96) | no-op | no-op | no-op | passive macro | no-op (OK) | no-op (OK) | ✗ **no-op, reports continue** (CW-96) |
-| `stop` honours `StopMode` + ctx deadline | ✗ | ✗ | ✗ fixed 5 s | ✗ config timeout | ✗ config timeout | ✗ config timeout, cannot abort | ✗ | ✗ | n/a | ✗ |
-| `start` honours ctx cancellation/deadline | – | ✗ (≈3 min connect loop) | – | ✗ | ✗ | ✗ | ✗ | – | – | – |
-| `dispose` / `StateIntent::Erase` | n/a* | n/a* | n/a* | ✗ **leaks cursor rows** | n/a* | n/a* | ✗ refuses; ledger orphaned | n/a (file kept) | n/a* | n/a* |
-| `NativeManagement` / `Factory::assess` | ✗ | ✗ | ✗ (CW-94) | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| `configuration_details` | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ (opaque `routes`) | ✓ |
-| Secrets modelled per field | ✗ `token`, `headers` plain | ✗ `metadata` plain | n/a | ✗ whole `settings` secret | ✗ whole `settings` secret | ✗ whole `settings` secret | resource | n/a | n/a | n/a |
+| `pause` real or `unsupported` | ✓ host-driven (D-6); retry wait is drop-safe | ✓ host-driven (D-6) | ✓ gate (503, keep-alives only) | no-op | no-op | no-op | passive macro | no-op (OK) | ✓ host-driven (D-6) | ✗ **no-op, reports continue** (CW-96) |
+| `stop` honours `StopMode` + ctx deadline | ✓ (Drain bounded by `retryBudgetMs`) | ✓ (Drain bounded by `retryBudgetMs`) | ✓ deadline, Drain/Abort | ✗ config timeout | ✗ config timeout | ✗ config timeout, cannot abort | ✗ | ✗ | n/a | ✗ |
+| `start` honours ctx cancellation/deadline | – | ✓ lazy; `requireConnectedAtStart` within deadline | ✓ | ✗ | ✗ | ✗ | ✗ | – | – | – |
+| `dispose` / `StateIntent::Erase` | ✓ declared no-op | ✓ declared no-op | ✓ declared no-op | ✗ **leaks cursor rows** | n/a* | n/a* | ✗ refuses; ledger orphaned | n/a (file kept) | ✓ declared no-op | n/a* |
+| `NativeManagement` / `Factory::assess` | ✓ | ✓ | ✓ (outputs Recreate; CW-94) | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
+| `configuration_details` | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ typed `routes` | ✓ |
+| Secrets modelled per field | ✓ `token`, `secretHeaders` | ✓ `secretMetadata` | n/a | ✗ whole `settings` secret | ✗ whole `settings` secret | ✗ whole `settings` secret | resource | n/a | n/a | n/a |
 | Activation credentials | ✗ | ✗ | n/a | ✗ (legacy had identity providers) | ✓ | ✓ (SQL auth only) | n/a | n/a | n/a | n/a |
-| Delivery via DeliveryRunner | ✗ (handler exists, unused) | ✗ | n/a (`Accepted`) | ✓ External | ✗ | ✗ | ✗ own ledger | ✗ | ✗ | ✗ |
-| Retry / backoff | fixed 100 ms·2ⁿ ≤5 s, no jitter, not cancellable | same; string-classified | n/a | host runner, rollback SQLSTATEs only | connect only | **none** | fixed delay, no backoff | n/a | n/a | n/a |
-| Recovers after a failed `handle` without Stop/Start | yes | yes | yes | ✗ wedged | ✗ wedged | ✗ wedged | yes | yes | ✗ render error retried forever (reproduce first) | ✗ non-query input fails |
-| Structured logging / metrics | `eprintln!` | `eprintln!` | `eprintln!` | `log` | `log` | none | **none** | none | is the log | `log` reports |
-| DESIGN + CONFIGURATION docs | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| README ABI text current | NETWORK.md says 2.0 | same | same | ✗ says 2.0.0 | no mention | ✗ says 2.0.0 / wire 2 | ✗ says wire 1 | STANDARD.md says 2.0.0 | same | same |
+| Delivery via DeliveryRunner | ✓ opt-in `drasi.network/http-delivery` | ✗ (needs a `grpc-common` protocol field) | n/a (`Accepted`) | ✓ External | ✗ | ✗ | ✗ own ledger | ✗ | ✗ | ✗ |
+| Retry / backoff | ✓ shared policy: jitter, `Retry-After`, budget, status classes | ✓ shared policy; `tonic::Code` classes, pushback | n/a | host runner, rollback SQLSTATEs only | connect only | **none** | fixed delay, no backoff | n/a | n/a | n/a |
+| Recovers after a failed `handle` without Stop/Start | yes | yes | yes | ✗ wedged | ✗ wedged | ✗ wedged | yes | yes | ✓ render failure falls back (or strict, opt-in) | ✗ non-query input fails |
+| Structured logging / metrics | `log` facade, sanitised; no metrics | same | same | `log` | `log` | none | **none** | none | is the log | `log` reports |
+| DESIGN + CONFIGURATION docs | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
+| README ABI text current | ✓ | ✓ | ✓ | ✗ says 2.0.0 | no mention | ✗ says 2.0.0 / wire 2 | ✗ says wire 1 | ✓ (STANDARD.md) | ✓ | ✓ (STANDARD.md) |
 
 \* The component owns no external state. Erase removal still fails in the host
 because `erases_owned_state` is undeclared; see source D-1 and [D-1](#2-decisions-required).
+
+Columns for HTTP, gRPC, SSE and log show the state on 2026-11-15; the other
+columns are unchanged from `6d294f43`.
 
 ### 0.4 Highest-risk findings (production blockers)
 
@@ -162,12 +172,15 @@ because `erases_owned_state` is undeclared; see source D-1 and [D-1](#2-decision
    consumer on that database. On PostgreSQL 15+ a least-privilege user may not
    be able to create the table in `public` (reproduce first).
 6. **Two sinks report a silent successful Pause while their workers run**
-   (CW-96): SSE keeps accepting connections, heartbeats and snapshot reads
+   (CW-96). *SSE resolved 2026-11-15 (SS-01); profiler open.* SSE keeps accepting connections, heartbeats and snapshot reads
    (`sse/src/component.rs:456-458`), and the profiler keeps its report task
    (`profiler/src/component.rs:195-197`). This violates
    `computation-plugin-sdk/src/component.rs:85-88` and `lib/AGENTS.md`.
 7. **No sink honours `StopMode` or the lifecycle deadline, and in-flight
-   retries ignore Stop.** HTTP retries inside `handle` can take about
+   retries ignore Stop.** *Resolved for HTTP, gRPC and SSE on 2026-11-15
+   (NS-01, HS-01, GS-01, SS-02); the host's drop of an in-flight `handle` on
+   Abort or a deadline is relied on and tested through the retry budget. Open
+   for the other sinks and for the SDK `ActivationScope::stop`.* HTTP retries inside `handle` can take about
    4 × 60 s plus backoff (`http/src/component.rs:99-123`). gRPC `start` runs up
    to 10 connection attempts of 15 s each with no cancellation check
    (`grpc/src/component.rs:323-345`). The shared `backoff`
@@ -177,13 +190,15 @@ because `erases_owned_state` is undeclared; see source D-1 and [D-1](#2-decision
    (`computation-plugin-sdk/src/lifecycle.rs:273-292`). Whether the host drops
    an in-flight `handle` future on `Stop(Abort)` is unconfirmed
    (reproduce first).
-8. **Network sinks have no idempotency key and treat queued 202 as
-   completion.** HTTP marks any 2xx `Handled` (`http/src/component.rs:107`;
+8. ~~**Network sinks have no idempotency key and treat queued 202 as
+   completion.**~~ *Resolved 2026-11-15 (HS-02, HS-06, GS-08 key part).* HTTP marks any 2xx `Handled` (`http/src/component.rs:107`;
    documented at `http/README.md:33`). The DeliveryRunner path that requires an
    exact 200 plus `DeliveryBatchIdentity` (`http/src/delivery.rs:122-141`)
    exists but no factory exposes it. No request carries a stable delivery
    identity for the receiver to deduplicate retries or replays.
-9. **Sink credentials are plain configuration.** HTTP `token` and `headers`
+9. **Sink credentials are plain configuration.** *Resolved for HTTP and gRPC
+   on 2026-11-15 (HS-04, GS-05); open for the stored-procedure sinks and the
+   SDK `ConfigOption::secret()`.* HTTP `token` and `headers`
    and gRPC `metadata` are not marked secret, and legacy accepted
    `ConfigValue` secret/env references for them. The SDK `ConfigOption` builder
    has no `secret()`; MySQL sets the flag by hand
@@ -191,9 +206,9 @@ because `erases_owned_state` is undeclared; see source D-1 and [D-1](#2-decision
    whole `settings` object secret, including the templates. PostgreSQL has no
    activation credentials, so the legacy identity-provider support
    (`reactions/storedproc-postgres/src/executor.rs:51-72`) is lost.
-10. **SSE exposes an unauthenticated server on `0.0.0.0:8080` with CORS `*`**
-    and no subscriber limit (`sse/src/component.rs:43-46,358-367`).
-11. **Log sink regressions.** It omits the legacy `json` helper
+10. ~~**SSE exposes an unauthenticated server on `0.0.0.0:8080` with CORS `*`**
+    and no subscriber limit~~ *Resolved 2026-11-15 (SS-03, SS-04).* (`sse/src/component.rs:43-46,358-367`).
+11. ~~**Log sink regressions.**~~ *Resolved 2026-11-15 (LG-01, LG-02).* It omits the legacy `json` helper
     (`log/src/component.rs:126` uses a bare `Handlebars::new()`; legacy
     registered it at `reactions/log/src/log.rs:458-475`). A template that uses
     `{{json after}}` compiles (`component.rs:99`) but fails at render, and the
@@ -225,6 +240,10 @@ are cited as "source X-nn".
 
 ### X-01: Native sink lifecycle conformance standard (P0)
 
+**Status (2026-11-15): done.** `components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md`
+holds the standard, delivery profiles, retry and failure rules and the doc
+template. The SDK `ActivationScope::stop` follow-up below is still open.
+
 Add a sink section to the source plan's conformance standard (source X-01), or
 a `components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md`. It replaces
 `components/reactions/README.md` §14 for native sinks (the legacy checklist
@@ -245,6 +264,12 @@ SDK follow-up: give `ActivationScope::stop` a deadline-aware variant
 workers on timeout, in line with `context::workers`.
 
 ### X-02: Sink lifecycle conformance test kit (P0)
+
+**Status (2026-11-15): linked kit done.** `computation-plugin-sdk::testing::SinkConformance`
+(with a `SinkProbe` destination fixture) covers lifecycle, retry after a failure
+without Stop/Start, Erase, configuration round-trip, the assess matrix and live
+apply; HTTP, gRPC, SSE and log use it. Running it through the dynamic library
+on both Tokio flavours, and the consumer crash case, remain open.
 
 Extend the source plan's kit (source X-02) with a sink driver. It runs through
 the linked `plugin()` definition and the freshly built dynamic library, on both
@@ -299,6 +324,15 @@ so, D-4).
 
 ### X-05: Retry, backoff and failure classification (P0)
 
+**Status (2026-11-15): done for the network sinks.** `common/network::retry`
+(feature `sink`) provides full-jitter exponential backoff (100 ms to 5 s),
+`Retry-After` parsing, and a `retryBudgetMs` total budget (default 120 s, at
+most 1 h). Waits are drop-safe, so a host cancellation ends them. HTTP
+classifies by status code and gRPC by `tonic::Code` (with
+`grpc-retry-pushback-ms`; `RetryInfo` details are not parsed). Skips are logged
+with sanitised fields but not counted (X-11). The database sinks and the bridge
+have not adopted it.
+
 One shared helper (in `common/network` or a small shared crate, reused by the
 database sinks and the bridge, and aligned with source X-06):
 
@@ -330,6 +364,11 @@ Typed errors follow source X-05.
 
 ### X-07: Idempotency keys (P1)
 
+**Status (2026-11-15): done for HTTP and gRPC.** Every request carries
+`x-drasi-delivery-id: {component}/{port}/{sequence}.{ordinal}[-{sequence}.{ordinal}]`
+(`common/network::config::delivery_id`), a range for a batch request. The
+header name is reserved.
+
 Every remote sink sends a stable, content-bound delivery identity that the
 destination can deduplicate on: an HTTP header (for example
 `x-drasi-delivery-id` from `DeliveryItem::id` or producer sequence + ordinal),
@@ -338,6 +377,14 @@ Grid event ID, Loki timestamp. The key must exclude retry transport identity and
 replacement configuration (`lib/AGENTS.md`, DeliveryRunner bullet).
 
 ### X-08: Output templates (P0)
+
+**Status (2026-11-15): partly done.** HTTP, gRPC, SSE and log compile templates
+once at construction, register `json`, reject unknown helpers at construction
+and follow D-5 (as taken in §2). Log route matching is consistent (LG-02) and
+its `routes`/`defaultTemplate` schemas are typed. **Open:** the single shared
+renderer in `reaction-common` (gRPC keeps a strict renderer of its own; SSE and
+log carry local helper registration), the SQL validators, and the
+legacy-to-native context mapping beyond the four sinks' CONFIGURATION.md files.
 
 - One shared renderer and validator in `reaction-common`, used by HTTP, gRPC,
   SSE, log, the stored-procedure sinks and new ports. Today there are three
@@ -362,6 +409,12 @@ replacement configuration (`lib/AGENTS.md`, DeliveryRunner bullet).
 
 ### X-09: Configuration, secrets and credentials (P0)
 
+**Status (2026-11-15): HTTP and gRPC done.** HTTP `token` and a new
+`secretHeaders` object, and gRPC `secretMetadata`, are top-level secret fields;
+client TLS keys are secret. It is unverified that the host resolves a secret
+reference to a whole JSON object (see [Implementation status](#implementation-status-2026-11-15)).
+`ConfigOption::secret()` in the SDK and the stored-procedure items are open.
+
 As source X-03 (flatten secrets to top-level fields, D-2), plus:
 
 - Add `ConfigOption::secret()` to the SDK so factories stop hand-setting the
@@ -375,6 +428,10 @@ As source X-03 (flatten secrets to top-level fields, D-2), plus:
   them).
 
 ### X-10: Update planning and management (P1)
+
+**Status (2026-11-15):** HTTP, gRPC, SSE and log implement `Factory::assess`
+and `NativeManagement` with every field classified; each CONFIGURATION.md has
+the matrix. Other sinks open.
 
 As source X-04. Sink-specific guidance:
 
@@ -397,6 +454,10 @@ log-field sanitiser (`http-common/src/reaction/process.rs:38-50`,
 
 ### X-12: Server-style sinks: exposure and draining (P0 for SSE)
 
+**Status (2026-11-15): done for SSE.** The listener moved from the HTTP source
+to `common/network::server` (feature `listener`) and SSE uses it with
+`common/network::security`. Dashboard and MCP will reuse it when ported.
+
 SSE today, and dashboard/MCP after porting, run HTTP servers. Share with source
 NET-03/NET-04: default bind `127.0.0.1`; non-loopback requires authentication
 or an explicit opt-in; configurable CORS origins; a subscriber/session cap and
@@ -411,6 +472,11 @@ paths in sinks (`grpc/src/component.rs:200,270,366`;
 list in BS-20).
 
 ### X-14: Documentation (P0 for release)
+
+**Status (2026-11-15):** DESIGN.md and CONFIGURATION.md exist for HTTP, gRPC,
+SSE and log. `computation-plugins/README.md`, `NETWORK.md`, `SINKS.md` and
+`STANDARD.md` carry ABI 4.0.0 text and list log and profiler. The
+stored-procedure READMEs and `common/bridge/README.md` are still stale.
 
 As source X-09, with a sink template. Every plugin gets:
 
@@ -463,6 +529,35 @@ and the legacy per-reaction suites into native tests (CW-41, CW-77).
 | D-14 | **gRPC connection at start.** Legacy connected lazily, so start succeeded while the receiver was down; native connects eagerly. | Eager (fail start) vs lazy (`not_ready` status until connected). | Lazy by default with readiness reporting, bounded by the start deadline when `requireConnectedAtStart: true`. | GS-02 |
 | D-15 | **SQL Server authentication.** Only SQL authentication; tokens are collapsed into a SQL-auth pair (`storedproc-mssql/src/lib.rs:242-243`). Azure SQL needs Entra ID. | Add access-token authentication (Tiberius `AADToken`) via activation credentials, or document the gap. | Add it (shared with source MS-12). | SMS-06 |
 
+**Decisions taken (2026-11-15)** for the HTTP, gRPC, SSE and log sinks:
+
+- **D-1:** accepted. The four sinks declare `erases_owned_state` with a no-op
+  Erase.
+- **D-2:** accepted (flatten). HTTP `token`/`secretHeaders` and gRPC
+  `secretMetadata` are top-level secret fields. `ConfigOption::secret()` is not
+  yet added.
+- **D-4:** (a) and (b). HTTP `successStatusCodes` defaults to `[200, 201, 203,
+  204]`; `202` must be listed. The HTTP library also registers
+  `drasi.network/http-delivery`, a DeliveryRunner consumer that requires the
+  exact `DeliveryBatchIdentity` confirmation. gRPC keeps the exact
+  acknowledgement and adds the delivery ID; its consumer mode waits for a
+  protocol field (GS-08).
+- **D-5:** (a) for HTTP and gRPC: a render failure is a permanent per-change
+  failure under `failurePolicy`. **Log differs:** `renderFailurePolicy`
+  defaults to `fallback` (the legacy behaviour: emit the plain format and warn),
+  with `strict` opt-in. **SSE also differs:** a body that fails to render
+  falls back to the per-change frame and a path to the configured path, with a
+  warning; only an invalid rendered path fails the input (a volatile broadcast
+  has no useful strict mode).
+- **D-6:** (a) for HTTP, gRPC and log (host-driven pause; retry waits are
+  drop-safe). SSE has a real gate.
+- **D-9:** (a). Each CONFIGURATION.md has a legacy mapping.
+- **D-12:** (a) plus (b): `level`, `target`, `output: log | stdout | stderr`.
+- **D-14:** lazy by default; `requireConnectedAtStart: true` connects within the
+  start deadline.
+
+D-3, D-7, D-8, D-10, D-11, D-13 and D-15 are untouched by this work.
+
 ---
 
 ## 3. Shared network sink runtime (`common/network`)
@@ -470,14 +565,14 @@ and the legacy per-reaction suites into native tests (CW-41, CW-77).
 HTTP, gRPC and SSE share configuration helpers, batching, backoff and the
 failure policy in `common/network`. Fix these once.
 
-| ID | Pri | Task |
-|---|---|---|
-| NS-01 | P0 | **Cancellable, deadline-aware backoff (X-05).** Replace `backoff(attempt)` (`config.rs:174-179`: 100 ms × 2ⁿ, cap 5 s, no jitter) with the shared policy: jitter, `Retry-After`, a time budget and a cancellation token supplied by the component's activation scope. |
-| NS-02 | P0 | SDK `ConfigOption::secret()` and secret header/metadata maps (X-09). |
-| NS-03 | P1 | Replace `eprintln!` (HTTP, gRPC and SSE sinks; receiver) with `tracing`, sanitise logged fields (port `MAX_LOG_FIELD_LEN`), count skips under `FailurePolicy::Skip` (`config.rs:97`). |
-| NS-04 | P1 | One retry/classification implementation shared with `http-common`/`grpc-common` (the native loops duplicate `http-common/src/reaction/process.rs:462-557` and `grpc-common/src/send.rs` with different semantics). |
-| NS-05 | P2 | Publish or remove the silent `max_inputs` clamp (`batching.rs:39`). Deduplicate adaptive validation (also flagged as source NET-07). |
-| NS-06 | P2 | Fix `NETWORK.md` ABI text (`:6-11,231,438`) and add lifecycle and delivery-profile sections per sink. |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| NS-01 | P0 | **Cancellable, deadline-aware backoff (X-05).** Replace `backoff(attempt)` (`config.rs:174-179`: 100 ms × 2ⁿ, cap 5 s, no jitter) with the shared policy: jitter, `Retry-After`, a time budget and a cancellation token supplied by the component's activation scope. | Done: `common/network::retry` (feature `sink`); drop-safe waits |
+| NS-02 | P0 | SDK `ConfigOption::secret()` and secret header/metadata maps (X-09). | Secret fields done; SDK `ConfigOption::secret()` open |
+| NS-03 | P1 | Replace `eprintln!` (HTTP, gRPC and SSE sinks; receiver) with `tracing`, sanitise logged fields (port `MAX_LOG_FIELD_LEN`), count skips under `FailurePolicy::Skip` (`config.rs:97`). | `eprintln!` replaced by the `diag!` log macro with `MAX_LOG_FIELD_LEN` sanitising; skip counters open (X-11) |
+| NS-04 | P1 | One retry/classification implementation shared with `http-common`/`grpc-common` (the native loops duplicate `http-common/src/reaction/process.rs:462-557` and `grpc-common/src/send.rs` with different semantics). | One native policy in `common/network`; the legacy `http-common`/`grpc-common` loops are not converged |
+| NS-05 | P2 | Publish or remove the silent `max_inputs` clamp (`batching.rs:39`). Deduplicate adaptive validation (also flagged as source NET-07). | Clamp kept and published (`maxInputs` ≤ 1024 in CONFIGURATION.md); adaptive-validation dedup open |
+| NS-06 | P2 | Fix `NETWORK.md` ABI text (`:6-11,231,438`) and add lifecycle and delivery-profile sections per sink. | Done |
 
 ---
 
@@ -497,24 +592,24 @@ failure policy in `common/network`. Fix these once.
 
 ### 4.2 Lifecycle and management tasks
 
-| ID | Pri | Task |
-|---|---|---|
-| HS-01 | P0 | **In-flight retries observe stop and pause.** The retry loop (`component.rs:99-123`) uses NS-01's cancellable policy. `Abort` cancels within the deadline; `Drain` lets the current request finish. Test with a stalled server. |
-| HS-02 | P0 | **Completion semantics (D-4).** A configurable success-status set, default excluding 202; document it. Add a `delivery: consumer` factory mode or flag that uses `delivery::HttpDeliveryHandler` (`delivery.rs:87-141`) with the DeliveryRunner, or delete the module per D-4. |
-| HS-03 | P1 | **Management (X-10).** InPlace: templates, headers, timeouts, retry, failure policy. Restart: `url`/`baseUrl`, TLS. Recreate: `outputs`, delivery mode. |
-| HS-04 | P0 | **Secrets (X-09):** `token` and header values secret; secret references or activation credentials. |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| HS-01 | P0 | **In-flight retries observe stop and pause.** The retry loop (`component.rs:99-123`) uses NS-01's cancellable policy. `Abort` cancels within the deadline; `Drain` lets the current request finish. Test with a stalled server. | Done: budgeted, drop-safe retries; Drain waits at most `retryBudgetMs` |
+| HS-02 | P0 | **Completion semantics (D-4).** A configurable success-status set, default excluding 202; document it. Add a `delivery: consumer` factory mode or flag that uses `delivery::HttpDeliveryHandler` (`delivery.rs:87-141`) with the DeliveryRunner, or delete the module per D-4. | Done: `successStatusCodes`; `drasi.network/http-delivery` factory |
+| HS-03 | P1 | **Management (X-10).** InPlace: templates, headers, timeouts, retry, failure policy. Restart: `url`/`baseUrl`, TLS. Recreate: `outputs`, delivery mode. | Done |
+| HS-04 | P0 | **Secrets (X-09):** `token` and header values secret; secret references or activation credentials. | Done: `token`, `secretHeaders` (object-secret resolution unverified) |
 
 ### 4.3 Defects and functional gaps
 
-| ID | Pri | Task |
-|---|---|---|
-| HS-05 | P1 | Honour `Retry-After` on 429/503; read a capped error body for diagnostics and connection reuse (`component.rs:106-121`). |
-| HS-06 | P1 | Idempotency header (X-07). |
-| HS-07 | P1 | Reject templated `x-drasi-*` headers at parse time instead of at runtime (`component.rs:177-189`). |
-| HS-08 | P1 | Under `failurePolicy: strict`, a batch-template render failure falls back to the default body (`component.rs:211-218`); apply D-5 instead. |
-| HS-09 | P1 | TLS options: custom CA and client certificate (mTLS); pool and connect-timeout tuning (legacy set idle 90 s and 10 idle per host, `reactions/http/src/http.rs:101-107`). |
-| HS-10 | P2 | Document default drift from legacy (timeout 5 000 → 60 000; base URL default removed; redirects no longer followed) per D-9. |
-| HS-11 | P2 | Name the batch-envelope overhead constant `12` (`component.rs:276,288,305`). In `delivery/receiver.rs`: replace `eprintln!` (`:90`), stop returning internal error text to clients (`:93`), name the constants (`:61,113`). |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| HS-05 | P1 | Honour `Retry-After` on 429/503; read a capped error body for diagnostics and connection reuse (`component.rs:106-121`). | Done: `Retry-After`; capped, sanitised error body |
+| HS-06 | P1 | Idempotency header (X-07). | Done: `x-drasi-delivery-id` |
+| HS-07 | P1 | Reject templated `x-drasi-*` headers at parse time instead of at runtime (`component.rs:177-189`). | Done: reserved headers rejected at parse |
+| HS-08 | P1 | Under `failurePolicy: strict`, a batch-template render failure falls back to the default body (`component.rs:211-218`); apply D-5 instead. | Done (D-5) |
+| HS-09 | P1 | TLS options: custom CA and client certificate (mTLS); pool and connect-timeout tuning (legacy set idle 90 s and 10 idle per host, `reactions/http/src/http.rs:101-107`). | Done: CA, mTLS, pool and connect timeouts |
+| HS-10 | P2 | Document default drift from legacy (timeout 5 000 → 60 000; base URL default removed; redirects no longer followed) per D-9. | Done (CONFIGURATION.md) |
+| HS-11 | P2 | Name the batch-envelope overhead constant `12` (`component.rs:276,288,305`). In `delivery/receiver.rs`: replace `eprintln!` (`:90`), stop returning internal error text to clients (`:93`), name the constants (`:61,113`). | Done |
 
 ### 4.4 Legacy parity (`reactions/http`, `http-common`)
 
@@ -531,10 +626,10 @@ failure policy in `common/network`. Fix these once.
 
 ### 4.5 Tests and documentation
 
-| ID | Pri | Task |
-|---|---|---|
-| HS-30 | P0 | X-02 kit. Today: 3 config unit tests (`config.rs:182-236`), loopback retry/skip/pending (`host-sdk/tests/native_network_loopback.rs:858-918`), templates and coalescing (`native_network/http_family.rs:351`). Add: stop/pause during backoff, `Retry-After`, 202/204, header rejection, `maxRequestBytes` splitting, TLS, redirect rejection, consumer mode crash/replay. |
-| HS-40 | P0 | `DESIGN.md` and `CONFIGURATION.md` (X-14), including the receiver contract for consumer mode and the template reference. |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| HS-30 | P0 | X-02 kit. Today: 3 config unit tests (`config.rs:182-236`), loopback retry/skip/pending (`host-sdk/tests/native_network_loopback.rs:858-918`), templates and coalescing (`native_network/http_family.rs:351`). Add: stop/pause during backoff, `Retry-After`, 202/204, header rejection, `maxRequestBytes` splitting, TLS, redirect rejection, consumer mode crash/replay. | Linked kit and destination tests done; dynamic-library kit and consumer crash case open |
+| HS-40 | P0 | `DESIGN.md` and `CONFIGURATION.md` (X-14), including the receiver contract for consumer mode and the template reference. | Done |
 
 **Related CW:** 44, 41, 14, 36, 96 (confirm host-driven pause), 98, 17, 21, 22, 26.
 
@@ -554,20 +649,20 @@ failure policy in `common/network`. Fix these once.
 
 ### 5.2 Tasks
 
-| ID | Pri | Task |
-|---|---|---|
-| GS-01 | P0 | **Start honours cancellation and deadline.** The connect loop (`component.rs:323-345`) can run about 3 minutes regardless of `StartContext`. |
-| GS-02 | P1 | **Connection policy (D-14):** lazy connect with readiness/status reporting, or eager bounded by the deadline. |
-| GS-03 | P0 | **TLS/mTLS** (`https://` endpoints, CA, client identity via secret references; CW-44 "Native gRPC TLS is not advertised"). |
-| GS-04 | P1 | **Classification by `tonic::Code` (X-05).** Stop retrying InvalidArgument, Unauthenticated, PermissionDenied and Unimplemented (`component.rs:158-180`; `grpc-common/src/send.rs:309-333`, where `"connection reset"` shadows BrokenPipe). Treat `success=false` per D-5. Remove the triple timeout (`component.rs:97,128,130`) and the double connect timeout (`:93-103`). Make the ResourceExhausted 5 s delay (`:177`) part of the backoff policy. |
-| GS-05 | P0 | `metadata` values secret (X-09). |
-| GS-06 | P1 | In-flight retries observe stop and pause (as HS-01). |
-| GS-07 | P1 | Management: InPlace templates/metadata/timeouts/batching; Restart endpoint/TLS; Recreate outputs. |
-| GS-08 | P1 | Consumer mode with `DeliveryBatchIdentity` on the acknowledgement (D-4), and an idempotency metadata entry (X-07). |
-| GS-09 | P2 | Keepalive, HTTP/2 tuning, optional compression. Replace `expect("pending batch")` (`:270`) and `unreachable!` (`:200,366`). |
-| GS-10 | P2 | Migration guide from legacy `ReactionService` and default drift (batch 100 → 1, flush 1 000 → 100 ms, timeout 5 000 → 60 000, `grpc-common/src/output/config.rs:21-47`) per D-9. GoAway handling parity (`send.rs:235-253`). |
-| GS-30 | P0 | X-02 kit. Existing coverage: `native_network/grpc_family.rs`, `native_network_loopback.rs:1077`. Add: start cancellation, reconnect mid-batch, permanent status codes, stop during retry, TLS, and the CW-36 completion profile for native gRPC factories. |
-| GS-40 | P0 | `DESIGN.md` (service contract, acknowledgement rule, batching) and `CONFIGURATION.md`. |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| GS-01 | P0 | **Start honours cancellation and deadline.** The connect loop (`component.rs:323-345`) can run about 3 minutes regardless of `StartContext`. | Done |
+| GS-02 | P1 | **Connection policy (D-14):** lazy connect with readiness/status reporting, or eager bounded by the deadline. | Done: lazy; `requireConnectedAtStart` |
+| GS-03 | P0 | **TLS/mTLS** (`https://` endpoints, CA, client identity via secret references; CW-44 "Native gRPC TLS is not advertised"). | Done |
+| GS-04 | P1 | **Classification by `tonic::Code` (X-05).** Stop retrying InvalidArgument, Unauthenticated, PermissionDenied and Unimplemented (`component.rs:158-180`; `grpc-common/src/send.rs:309-333`, where `"connection reset"` shadows BrokenPipe). Treat `success=false` per D-5. Remove the triple timeout (`component.rs:97,128,130`) and the double connect timeout (`:93-103`). Make the ResourceExhausted 5 s delay (`:177`) part of the backoff policy. | Done: `tonic::Code` classes; `success=false` permanent; single timeout |
+| GS-05 | P0 | `metadata` values secret (X-09). | Done: `secretMetadata` |
+| GS-06 | P1 | In-flight retries observe stop and pause (as HS-01). | Done |
+| GS-07 | P1 | Management: InPlace templates/metadata/timeouts/batching; Restart endpoint/TLS; Recreate outputs. | Done |
+| GS-08 | P1 | Consumer mode with `DeliveryBatchIdentity` on the acknowledgement (D-4), and an idempotency metadata entry (X-07). | Delivery ID done; consumer mode open (needs a `grpc-common` protocol field) |
+| GS-09 | P2 | Keepalive, HTTP/2 tuning, optional compression. Replace `expect("pending batch")` (`:270`) and `unreachable!` (`:200,366`). | Done: keepalive, gzip; panics removed |
+| GS-10 | P2 | Migration guide from legacy `ReactionService` and default drift (batch 100 → 1, flush 1 000 → 100 ms, timeout 5 000 → 60 000, `grpc-common/src/output/config.rs:21-47`) per D-9. GoAway handling parity (`send.rs:235-253`). | Done (CONFIGURATION.md); GOAWAY handled by classification |
+| GS-30 | P0 | X-02 kit. Existing coverage: `native_network/grpc_family.rs`, `native_network_loopback.rs:1077`. Add: start cancellation, reconnect mid-batch, permanent status codes, stop during retry, TLS, and the CW-36 completion profile for native gRPC factories. | Linked kit and loopback done; TLS and permanent codes tested; dynamic-library kit open |
+| GS-40 | P0 | `DESIGN.md` (service contract, acknowledgement rule, batching) and `CONFIGURATION.md`. | Done |
 
 ### 5.3 Legacy parity (`reactions/grpc`, `grpc-common`)
 
@@ -600,16 +695,16 @@ failure policy in `common/network`. Fix these once.
 
 ### 6.2 Tasks
 
-| ID | Pri | Task |
-|---|---|---|
-| SS-01 | P0 | **Real pause (CW-96).** Gate new connections and snapshot reads (503 with `Retry-After`), stop heartbeats or keep only keep-alive comments, and reopen on resume. Otherwise return `unsupported`. |
-| SS-02 | P0 | **Stop:** use `ctx.deadline()` instead of 5 s; `Abort` closes connections immediately. |
-| SS-03 | P0 | **Exposure (X-12):** default `127.0.0.1`; configurable CORS origins (hard-coded `*` at `:358-367,507-516,535-551`); optional bearer authentication from a secret reference; optional TLS. |
-| SS-04 | P1 | Subscriber cap and per-client admission; prune idle dynamic-path broadcasters. |
-| SS-05 | P1 | **Management (CW-94):** assess with InPlace templates/heartbeat, Restart host/port, Recreate outputs. Re-enable `sse_tests::native_sse_declared_inputs_follow_a_live_rebind_*` (`host-sdk/tests/native_network/sse.rs:914,923`) once CW-94 is settled. |
-| SS-06 | P2 | SSE comment keep-alive (legacy `reactions/sse/src/sse.rs:588-591`) and optional `id:` fields with `Last-Event-ID` semantics documented as volatile. Replace `eprintln!` (`:334,403,429,553,571,609`) and the `expect`s (`:349,636`). `Running::drop` cancels without joining (`:255-259`); make sure no path relies on it. |
-| SS-30 | P0 | X-02 kit. Existing: roundtrip on both flavours, dynamic routes, snapshot policy and templates (`native_network/sse.rs`), in-crate lag/cleanup/bind tests (`component.rs:707-799`). Add: pause, short stop deadline, Abort, subscriber flood, CORS configuration, authentication. |
-| SS-40 | P0 | `DESIGN.md` (broadcast model, volatility, snapshot handover, lifecycle) and `CONFIGURATION.md` (security deployment guidance). |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| SS-01 | P0 | **Real pause (CW-96).** Gate new connections and snapshot reads (503 with `Retry-After`), stop heartbeats or keep only keep-alive comments, and reopen on resume. Otherwise return `unsupported`. | Done |
+| SS-02 | P0 | **Stop:** use `ctx.deadline()` instead of 5 s; `Abort` closes connections immediately. | Done |
+| SS-03 | P0 | **Exposure (X-12):** default `127.0.0.1`; configurable CORS origins (hard-coded `*` at `:358-367,507-516,535-551`); optional bearer authentication from a secret reference; optional TLS. | Done |
+| SS-04 | P1 | Subscriber cap and per-client admission; prune idle dynamic-path broadcasters. | Done |
+| SS-05 | P1 | **Management (CW-94):** assess with InPlace templates/heartbeat, Restart host/port, Recreate outputs. Re-enable `sse_tests::native_sse_declared_inputs_follow_a_live_rebind_*` (`host-sdk/tests/native_network/sse.rs:914,923`) once CW-94 is settled. | Assess/apply done; the two ignored rebind tests stay ignored under CW-94 |
+| SS-06 | P2 | SSE comment keep-alive (legacy `reactions/sse/src/sse.rs:588-591`) and optional `id:` fields with `Last-Event-ID` semantics documented as volatile. Replace `eprintln!` (`:334,403,429,553,571,609`) and the `expect`s (`:349,636`). `Running::drop` cancels without joining (`:255-259`); make sure no path relies on it. | Done: keep-alive comments, `eventIds`; `Running::drop` is a safety net only |
+| SS-30 | P0 | X-02 kit. Existing: roundtrip on both flavours, dynamic routes, snapshot policy and templates (`native_network/sse.rs`), in-crate lag/cleanup/bind tests (`component.rs:707-799`). Add: pause, short stop deadline, Abort, subscriber flood, CORS configuration, authentication. | Linked kit and in-crate tests done; dynamic-library kit open |
+| SS-40 | P0 | `DESIGN.md` (broadcast model, volatility, snapshot handover, lifecycle) and `CONFIGURATION.md` (security deployment guidance). | Done |
 
 ### 6.3 Legacy parity (`reactions/sse`)
 
@@ -841,15 +936,15 @@ Configuration `outputs`, `routes` (alias → added/updated/deleted templates),
 `defaultTemplate`; logs via `log::info!("[{id}] {msg}")`
 (`log/src/component.rs:20-55,216`).
 
-| ID | Pri | Task |
-|---|---|---|
-| LG-01 | P0 | **`json` helper and render-failure policy** (X-08, D-5): register the shared helper set (missing; `component.rs:126`); validate helper names at construction; apply D-5 so a render error never retries forever. Port the legacy template tests (`reactions/log/src/tests.rs:146-661`). |
-| LG-02 | P0 | **Route matching:** validation accepts `.{route}` suffixes (`component.rs:80`) that lookup never matches (`reaction-common/src/templates.rs:297`); make them consistent and test with real aliases (reproduce first). |
-| LG-03 | P1 | Precompile templates once (today re-parsed per message, `component.rs:149`); configurable level and target, plus a `stdout` option (D-12). |
-| LG-04 | P1 | Management: templates/routes/level InPlace. |
-| LG-05 | P2 | Typed schema for `routes`/`defaultTemplate` (legacy DTOs at `reactions/log/src/descriptor.rs:26-80`); optional per-envelope header line and legacy compact formats (`[ADD] …`, `before -> after`) as a `format` option; document the context mapping (D-9). |
-| LG-30 | P0 | Host-sdk real-library tests (none today; add to `plugin_package`): six hooks, templates, routes, render failure. |
-| LG-40 | P0 | `DESIGN.md` and `CONFIGURATION.md` with the template reference and legacy mapping. |
+| ID | Pri | Task | Status |
+|---|---|---|---|
+| LG-01 | P0 | **`json` helper and render-failure policy** (X-08, D-5): register the shared helper set (missing; `component.rs:126`); validate helper names at construction; apply D-5 so a render error never retries forever. Port the legacy template tests (`reactions/log/src/tests.rs:146-661`). | Done (D-5 as taken: `fallback` default) |
+| LG-02 | P0 | **Route matching:** validation accepts `.{route}` suffixes (`component.rs:80`) that lookup never matches (`reaction-common/src/templates.rs:297`); make them consistent and test with real aliases (reproduce first). | Done |
+| LG-03 | P1 | Precompile templates once (today re-parsed per message, `component.rs:149`); configurable level and target, plus a `stdout` option (D-12). | Done |
+| LG-04 | P1 | Management: templates/routes/level InPlace. | Done |
+| LG-05 | P2 | Typed schema for `routes`/`defaultTemplate` (legacy DTOs at `reactions/log/src/descriptor.rs:26-80`); optional per-envelope header line and legacy compact formats (`[ADD] …`, `before -> after`) as a `format` option; document the context mapping (D-9). | Done |
+| LG-30 | P0 | Host-sdk real-library tests (none today; add to `plugin_package`): six hooks, templates, routes, render failure. | **Open** |
+| LG-40 | P0 | `DESIGN.md` and `CONFIGURATION.md` with the template reference and legacy mapping. | Done |
 
 Legacy parity (`reactions/log`): per-query and default templates (present,
 keyed by alias); dotted-suffix routing (LG-02); `json` helper (LG-01);
@@ -934,6 +1029,12 @@ under CW-63 once their native replacement passes.
 
 Each phase ships per plugin as a separate reviewable change.
 
+**Progress (2026-11-15):** from Phase 0, X-01, X-02 (linked), X-05 and the
+D-1, D-2, D-4, D-5, D-6 decisions are done for the network and log sinks. The
+network and log items of Phases 1 to 3 are done except GS-08 consumer mode. The
+next work is the stored-procedure safety items (SMS-01, SP-03), then the
+profiler (PF-01, PF-02) and the bridge.
+
 ---
 
 ## 17. Definition of done (per plugin)
@@ -972,6 +1073,45 @@ A native sink is production ready when:
 
 ---
 
+## Implementation status (2026-11-15)
+
+Implemented: `common/network` sink runtime (§3), HTTP (§4), gRPC (§5), SSE
+(§6) and log (§13), plus X-01, X-02 (linked), X-05, X-07 and X-12. Verified with
+the plugin test suites (HTTP 38, gRPC 29, SSE 28, log 32, network-common 24,
+SDK 105), the Host SDK `native_network_loopback` (34 passed, 2 ignored under
+CW-94), `native_network_wire` and `native_output_snapshots` suites against
+freshly built libraries, clippy with warnings as errors, `cargo fmt --check` and
+the native-dependency check.
+
+Breaking changes beyond the plan:
+
+- The HTTP library registers two factories (`drasi.network/http-sink`,
+  `drasi.network/http-delivery`).
+- gRPC `connectionRetryAttempts` and `initialConnectionTimeoutMs` are replaced
+  by `connectTimeoutMs` and `requireConnectedAtStart`; a `success=false`
+  acknowledgement is now permanent (a receiver signals a transient failure with
+  a retryable status such as `UNAVAILABLE`).
+- `SINKS.md` no longer claims that templates fail on absent fields: only gRPC
+  renders strictly.
+- The HTTP source's listener moved to `common/network::server`.
+
+New issues found during implementation:
+
+| ID | Pri | Issue | Owner |
+|---|---|---|---|
+| NI-01 | P0 | Confirm that the host resolves a secret reference to a whole JSON object (`secretHeaders`, `secretMetadata`). If not, replace the maps with one secret field per header. | host / D-2 |
+| NI-02 | P1 | gRPC consumer mode needs a `DeliveryBatchIdentity` field in the `grpc-common` acknowledgement (GS-08). | grpc-common |
+| NI-03 | P1 | SSE and log carry local copies of the pause gate, the exposure check and template-helper registration. Move a public pause gate and `Authenticator::authorize_token` into `common/network`, and the helper set into `reaction-common` (X-08). | common/network, reaction-common |
+| NI-04 | P1 | No sink metrics (X-11); skips are logged, not counted. | CW-22, CW-26 |
+| NI-05 | P1 | LG-30: log has no Host SDK real-library tests or `plugin_package` mapping (X-15). | host-sdk |
+| NI-06 | P2 | A strict-render log failure is deterministic and retried until the template changes; document the InPlace fix in the runbook or route it through `failurePolicy`. | log |
+| NI-07 | P2 | The sink conformance kit runs only through the linked definition; add the dynamic-library and dual-flavour drivers (X-02). | SDK, host-sdk |
+
+Remaining order for these four sinks: NI-01, NI-02/GS-08, NI-05, NI-07, NI-03,
+NI-04.
+
+---
+
 ## Appendix: remaining-work cross reference
 
 | Component | Applicable CW IDs |
@@ -998,10 +1138,13 @@ Notes:
   Starting every sink at configuration version 1 after this breaking change keeps
   that work clean.
 - **CW-97** (Server ABI 4 port) must rebuild every sink library.
-- **New items to record in the remaining-work document:** the SQL Server
+- **Recorded in the remaining-work document (2026-11-15):** the SSE pause gate
+  under CW-96, gRPC TLS and HTTP sink completion under CW-44, the four sinks'
+  Erase under CW-98, and the sink follow-ups (NI-01 to NI-07) as CW-101.
+- **Still to record in the remaining-work document:** the SQL Server
   stored-procedure injection gap; the stored-procedure wedge-after-failure
   behaviour; the MySQL large-input cap alongside the SQL Server one under
   CW-44; the PostgreSQL delivery-table cap and leak under CW-98; the bridge
   sink and PostgreSQL storedproc driver under CW-96; per-reaction entries for
-  the §15 legacy-only reactions under CW-44; the log and profiler regressions
-  (`json` helper, non-query input).
+  the §15 legacy-only reactions under CW-44; the profiler non-query input
+  regression. (The log `json` regression is fixed.)

@@ -9,11 +9,15 @@ readme = "README.md"
 
 [features]
 default = []
-ingress = ["dep:drasi-http-common", "drasi-http-common/adaptive", "dep:rustls", "dep:rustls-pemfile", "dep:subtle"]
+# An HTTP/TLS listener with bearer-token authentication, rate limiting and
+# connection limits, shared by the HTTP source and the SSE sink.
+listener = ["dep:rustls", "dep:rustls-pemfile", "dep:subtle", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio-rustls", "dep:tower"]
+ingress = ["listener", "dep:drasi-http-common", "drasi-http-common/adaptive"]
 http-source = ["ingress", "dep:drasi-http-common"]
 grpc-source = ["ingress", "dep:drasi-grpc-common", "drasi-grpc-common/source", "dep:prost-types"]
-http-sink = ["dep:reqwest", "dep:drasi-http-common", "drasi-http-common/adaptive"]
-grpc-sink = ["dep:drasi-grpc-common", "drasi-grpc-common/reaction", "dep:reqwest", "dep:drasi-http-common", "drasi-http-common/adaptive"]
+sink = ["dep:rustls-pemfile"]
+http-sink = ["sink", "dep:reqwest", "dep:drasi-http-common", "drasi-http-common/adaptive"]
+grpc-sink = ["sink", "dep:drasi-grpc-common", "drasi-grpc-common/reaction", "dep:reqwest", "dep:drasi-http-common", "drasi-http-common/adaptive"]
 
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }
@@ -26,6 +30,11 @@ log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
 subtle = { version = "2", optional = true }
+axum = { version = "0.7", optional = true }
+hyper = { version = "1", features = ["server", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "service", "tokio", "http1", "http2"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+tower = { version = "0.4", features = ["util"], optional = true }
 chrono = "0.4"
 futures-util = "0.3"
 prost-types = { version = "0.14", optional = true }
@@ -37,6 +46,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 rcgen = "0.13"
+tokio = { version = "1", features = ["test-util", "macros", "rt"] }
 
 [lints]
 workspace = true

@@ -35,13 +35,19 @@ checks every native library independently, including its build dependencies.
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
 | Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.experimental/volatile-query`, `drasi.experimental/indexed-query`, `drasi.experimental/provider-query` | Dynamic or Rust SDK; explicit ordinary-query adapter through Host |
 | Sink | [drasi-computation-sink-capture](sinks/capture) | `drasi.standard/capture` | Dynamic or Rust SDK |
-| Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink` | Dynamic or Rust SDK |
+| Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink`, `drasi.network/http-delivery` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-grpc](sinks/grpc) | `drasi.network/grpc-sink` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-sse](sinks/sse) | `drasi.network/sse-sink` | Dynamic or Rust SDK |
+| Sink | [drasi-computation-sink-log](sinks/log) | `drasi.standard/log` | Dynamic or Rust SDK |
+| Sink | [drasi-computation-sink-profiler](sinks/profiler) | `drasi.standard/profiler` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-storedproc-mysql](sinks/storedproc-mysql) | [MySQL stored-procedure factory](sinks/storedproc-mysql/README.md) | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-storedproc-mssql](sinks/storedproc-mssql) | `drasi.mssql/storedproc` | Dynamic or Rust SDK; qualification deferred |
 | Sink | [drasi-computation-sink-storedproc-postgres](sinks/storedproc-postgres) | `drasi.postgres/storedproc` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-bridge](sinks/bridge) | `drasi.bridge/sink` | Static Rust factory |
+
+Production native sources and sinks follow the
+[native source standard](sources/NATIVE-SOURCE-GUIDE.md) and the
+[native sink standard](sinks/NATIVE-SINK-GUIDE.md).
 
 Registration is not qualification. The selected MySQL and SQLite scopes have
 real-library and Server qualification; SQL Server remains explicitly incomplete
@@ -126,8 +132,8 @@ rejected.
 Existing implementation names, implementation version `"1"` and configuration
 version `1` remain stable. New factory modes have distinct identities; consult
 each family guide for its schemas, resource requirements and recovery boundaries.
-The native plugin ABI is **2.0.0**, including lifecycle operations and the factory
-update planner. Batching, query-snapshot, consumer-progress/cursor-policy,
+The native plugin ABI is **4.0.0**, including the six lifecycle operations and
+separate management (assess/apply). Batching, query-snapshot, consumer-progress/cursor-policy,
 source-schema, source/bootstrap coordination and activation credentials remain
 separately negotiated extensions.
 Source/bootstrap coordination exposes no application SQL API. The native ABI

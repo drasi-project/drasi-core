@@ -21,14 +21,13 @@ mod component;
 pub mod config;
 mod durable_http;
 mod schema;
-mod server;
 mod webhook;
 
 use drasi_computation_contracts::{
     ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, PipeRequirements,
     PortDescriptor, PortDirection, PortId,
 };
-use drasi_computation_network_common::{durable, ingress, wire};
+use drasi_computation_network_common::{durable, ingress, server, wire};
 use drasi_computation_plugin_sdk::{
     lifecycle::Assessment, Capabilities, Component, ControlSender, CreateRequest, CreatedComponent,
     Factory, FactoryMetadata, NativeAdmission, PluginDefinition, UpdateRequest,
