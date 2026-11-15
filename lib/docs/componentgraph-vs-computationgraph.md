@@ -567,7 +567,7 @@ and incomplete qualification visible.
 [completed-recovery]: https://github.com/drasi-project/test-infra/tree/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/e2e-test-framework/examples/recovery_comparison/goldens/building-comfort-small-v2
 [completed-workflow]: https://github.com/drasi-project/test-infra/blob/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/.github/workflows/e2e-building-comfort-completion.yml
 [qualification]: computation-graph-remaining-work.md#testing-and-qualification
-[view-transform]: computation-graph-remaining-work.md#cw-68
+[view-transform]: ../../components/computation-plugins/transformers/view/README.md
 [remaining]: computation-graph-remaining-work.md
 [maintainers]: computation-graph-maintainers-guide.md
 [developer]: developer-guide/README.md
