@@ -125,46 +125,46 @@ async fn database(listener: TcpListener, state: &State) -> Result<()> {
             .await?;
         } else if sql.starts_with("SELECT schemaname, tablename FROM") {
             response(&mut exporter, &[&[Some("public"), Some("person")]]).await?;
-        } else if sql.starts_with("SELECT pubinsert, pubupdate") {
+        } else if sql.starts_with("SELECT pubinsert::text, pubupdate") {
             response(
                 &mut exporter,
                 &[&[
-                    Some("t"),
-                    Some("t"),
-                    Some("t"),
-                    Some("t"),
-                    Some("f"),
-                    Some("f"),
+                    Some("true"),
+                    Some("true"),
+                    Some("true"),
+                    Some("false"),
+                    Some("false"),
+                    Some("false"),
                 ]],
             )
             .await?;
         } else if sql == "SHOW server_version_num" {
             response(&mut exporter, &[&[Some("160000")]]).await?;
-        } else if sql.starts_with("SELECT schemaname, tablename, attnames") {
+        } else if sql.starts_with("SELECT schemaname, tablename, coalesce(rowfilter") {
             response(
                 &mut exporter,
-                &[&[Some("public"), Some("person"), Some("{id,name}"), None]],
+                &[&[Some("public"), Some("person"), Some("")]],
             )
             .await?;
-        } else if sql.starts_with("SELECT p.schemaname, p.tablename, a.attname") {
+        } else if sql.starts_with("SELECT n.nspname, c.relname, c.relreplident::text") {
             response(
                 &mut exporter,
                 &[
                     &[
                         Some("public"),
                         Some("person"),
+                        Some("d"),
                         Some("id"),
                         Some("23"),
                         Some("-1"),
-                        Some("d"),
                     ],
                     &[
                         Some("public"),
                         Some("person"),
+                        Some("d"),
                         Some("name"),
                         Some("25"),
                         Some("-1"),
-                        Some("d"),
                     ],
                 ],
             )
@@ -220,7 +220,16 @@ async fn database(listener: TcpListener, state: &State) -> Result<()> {
     loop {
         let sql = query(&mut reader).await?;
         if sql.starts_with("SELECT current_setting('max_slot_wal_keep_size'") {
-            response(&mut reader, &[&[Some("-1"), None, Some("f")]]).await?;
+            response(
+                &mut reader,
+                &[&[
+                    Some("-1"),
+                    Some("false"),
+                    Some("reserved"),
+                    Some("pgoutput"),
+                ]],
+            )
+            .await?;
         } else if sql.starts_with("LOCK TABLE ") || sql.starts_with("DECLARE drasi_snapshot ") {
             response(&mut reader, &[]).await?;
         } else if sql.starts_with("SELECT a.attname, a.atttypid::text") {
@@ -251,14 +260,11 @@ async fn database(listener: TcpListener, state: &State) -> Result<()> {
 async fn snapshot_rows_use_database_clock_before_boundary_not_host_wall_clock() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let config: PostgresTransactionConfig = serde_json::from_value(serde_json::json!({
-        "connection": {
-            "host": "127.0.0.1", "port": listener.local_addr()?.port(),
-            "database": "database", "user": "user", "ssl_mode": "disable",
-            "slot_name": "owned", "publication_name": "publication",
-        },
-        "start_lsn": "0/0",
-        "transactions": {"max_changes": 16, "max_bytes": 65536, "max_duration_ms": 5000},
-        "max_protocol_bytes": 65536, "io_timeout_ms": 5000, "feedback_interval_ms": 100
+        "host": "127.0.0.1", "port": listener.local_addr()?.port(),
+        "database": "database", "user": "user", "sslMode": "disable",
+        "publication": "publication",
+        "maxTransactionChanges": 16, "maxTransactionBytes": 65536, "maxTransactionDurationMs": 5000,
+        "maxProtocolBytes": 65536, "ioTimeoutMs": 5000, "feedbackIntervalMs": 100
     }))?;
     let provider = PostgresSnapshot::new(
         ComponentId::try_new("084744af-5fa3-5cfc-beef-e8d2e5f2ce54")?,

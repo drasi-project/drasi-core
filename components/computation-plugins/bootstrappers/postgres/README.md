@@ -40,8 +40,10 @@ streams fail rather than returning an empty successful snapshot.
 ## Configured-slot shared snapshots
 
 Use `drasi.postgres/shared-row-bootstrap` with
-`drasi.postgres/shared-changes`. Its `source`, `stream` and secret `settings`
-(`PostgresTransactionConfig`) must match the live source's semantic binding.
+`drasi.postgres/shared-changes`. Its configuration is `source` and `stream`
+beside the same flat settings the live source takes (see the source's
+[CONFIGURATION.md](../../sources/postgres/CONFIGURATION.md); only `password` is
+secret), and must match the live source's semantic binding.
 Supply the actual query-owned `QuerySourceProgress`, query ID and graph/instance
 scope. Construction is configuration-only. The factory supports both persistent
 and ordinary memory query owners; it does not write a managed-slot ownership
@@ -54,8 +56,9 @@ transaction-enabled atomic queries. `PostgresSharedSnapshot::transactions`
 selects this mode; the existing `new` constructor remains row mode. Neither
 constructor reads progress before lifecycle initialization.
 
-The configured `pgoutput` slot must already exist in the correct database,
-with the same retention settings required by the source. The provider requires
+The live source's slot is used. With external ownership it must already exist
+in the correct database; with managed ownership the provider creates the
+source's derived slot if it is absent, since the name belongs to the source. The provider requires
 an idle live slot before capture. Core must await the old source's stop and
 establish all required consumers before producer resume; sampling an inactive
 slot is not a substitute for that lifecycle contract.
@@ -111,9 +114,12 @@ one live source for the group, not one source/slot per query.
 
 ## Managed coordinated snapshots
 
-The factory accepts `source`, `stream` and `settings`
-(`PostgresTransactionConfig`, as used by the
-[transaction source](../../sources/postgres)). The host must provide the actual
+The factory accepts `source` and `stream` beside the flat settings of the
+[transaction source](../../sources/postgres/CONFIGURATION.md). Coordinated
+snapshots require managed slot ownership: the slot prefix is derived from the
+graph and source identifiers, so the source and the provider agree on it
+without configuration, and erasing removal of the source drops every slot
+with that prefix, including an abandoned unfinished snapshot slot. The host must provide the actual
 query-owned `QuerySourceProgress`, a matching query ID and instance/graph scope.
 Attach the returned provider to that query's `QueryBootstrapResource` or
 `with_bootstrap`. The source and bootstrap may be independently loaded libraries;
@@ -125,7 +131,11 @@ let plugin = drasi_host_sdk::computation::NativePlugin::from_definition(
 )?;
 let snapshot = plugin.bootstrap_factories()[0].create_provider(
     query_id,
-    serde_json::json!({"source": "postgres", "stream": "postgres/out", "settings": settings}),
+    serde_json::json!({
+        "source": source_id, "stream": "postgres/out",
+        "database": "shop", "user": "drasi", "password": {"secret": "postgres-password"},
+        "publication": "drasi_orders"
+    }),
     Some(scope),
     Some(actual_query_progress.clone()),
 )?;
@@ -137,7 +147,7 @@ Host-side ownership checks compare the actual query owner, not names or paths.
 
 ## Snapshot and WAL boundary
 
-This mode requires PostgreSQL 15+ and a slot-name prefix of at most 30 characters.
+This mode requires PostgreSQL 15+.
 The provider persists initialization intent in the query's atomic storage before
 creating its dedicated UUID-suffixed persistent slot. It exports a PostgreSQL
 snapshot, imports it on a directly owned second connection, and reads bounded
@@ -162,7 +172,7 @@ not silently upgraded. They fail explicitly; this is not a state-transparent
 rollout onto an existing installation. Preserve its slot and durable data until
 an explicit transition is selected, rather than deleting state to force startup.
 
-The source uses `coordinated_snapshot=true` and the same source ID, stream and
+The source uses `coordinatedSnapshot: true` and the same source ID, stream and
 semantic settings. It waits for the committed position and verifies its binding
 against PostgreSQL before starting replication or sending feedback.
 

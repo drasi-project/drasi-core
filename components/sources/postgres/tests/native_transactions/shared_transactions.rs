@@ -57,7 +57,7 @@ async fn whole_commit_fanout() -> Result<()> {
             assert_eq!(output_count(&graph.accepted[index]), 0);
             assert!(position(&graph.owners[index])?.is_none());
         }
-        assert_eq!(database.feedback().await?, database.config.start_lsn);
+        assert_eq!(database.feedback().await?, start_lsn(&database.config));
         database.client().batch_execute("COMMIT").await?;
         wait_until(
             "fast whole transaction and one queued slow transaction",
@@ -68,7 +68,7 @@ async fn whole_commit_fanout() -> Result<()> {
         assert!(graph.results[1].snapshot()?.rows.is_empty());
         let first = position(&graph.owners[0])?.context("fast whole-commit cursor")?;
         assert_eq!(first.mode, TransactionBoundary::WholeCommit);
-        assert_eq!(database.feedback().await?, database.config.start_lsn);
+        assert_eq!(database.feedback().await?, start_lsn(&database.config));
         for inputs in &graph.accepted {
             let inputs = inputs.lock().expect("accepted transaction log");
             assert_eq!(
@@ -457,7 +457,7 @@ async fn different_counters() -> Result<()> {
         let mut source = factory_for(&plugins, SharedOutput::Transactions)?
             .create_component_with_consumer_progress(
                 id(77),
-                json!({"stream":"changes","settings":database.config}),
+                flat(&database.config, json!({})),
                 libraries::scope(ComponentBatch::GRAPH_ID),
                 Arc::new(ConsumerProgressSet::new(
                     ComponentBatch::GRAPH_ID,
@@ -497,7 +497,7 @@ async fn different_counters() -> Result<()> {
         let slow_position = position(&owners[1])?.context("newer physical cursor")?;
         assert!(fast_position.commit_lsn < slow_position.commit_lsn);
         assert!(fast_position.sequence > slow_position.sequence);
-        assert_eq!(database.feedback().await?, database.config.start_lsn);
+        assert_eq!(database.feedback().await?, start_lsn(&database.config));
         fast.stop(&lifecycle_ctx::stop()).await?;
         slow.stop(&lifecycle_ctx::stop()).await?;
         drop((fast, slow, source));
@@ -689,11 +689,7 @@ async fn interrupted_snapshots() -> Result<()> {
             .await?
             .with_bootstrap(factory.create_provider(
                 component_id,
-                json!({
-                    "source": id(77).to_string(),
-                    "stream": "changes",
-                    "settings": database.config
-                }),
+                bootstrap_flat(id(77).to_string(), &database.config),
                 Some(libraries::scope(ComponentBatch::GRAPH_ID)),
                 Some(owner),
             )?);
@@ -748,7 +744,7 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
         let plugins = libraries::plugins(dynamic)?;
         let database = Database::new().await?;
         let factory = factory_for(&plugins, SharedOutput::Transactions)?;
-        let configuration = json!({"stream":"changes","settings":database.config});
+        let configuration = flat(&database.config, json!({}));
         assert!(factory
             .create_component(id(77), configuration.clone())
             .is_err());
@@ -812,11 +808,7 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
                     == drasi_computation_bootstrap_postgres::POSTGRES_SHARED_TRANSACTION_BOOTSTRAP
             })
             .context("shared transaction bootstrap")?;
-        let snapshot_configuration = json!({
-            "source": id(77).to_string(),
-            "stream": "changes",
-            "settings": database.config
-        });
+        let snapshot_configuration = bootstrap_flat(id(77).to_string(), &database.config);
         let owner = Arc::new(QuerySourceProgress::new(
             ComponentBatch::GRAPH_ID,
             named_id("fast"),
@@ -966,7 +958,7 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
             format!("{error:#}").contains("actual committed-input owner"),
             "{error:#}"
         );
-        assert_eq!(database.feedback().await?, database.config.start_lsn);
+        assert_eq!(database.feedback().await?, start_lsn(&database.config));
         bootstrap::no_temporary_slots(&database).await?;
         bootstrap::no_snapshot_transactions(&database).await?;
         database.shutdown().await?;

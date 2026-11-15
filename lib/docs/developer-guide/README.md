@@ -3447,16 +3447,19 @@ Choose the source's shared interface and matching initialization contract:
 | MySQL positional rows | `drasi.mysql/shared-positional-changes` preserves real per-query row checkpoints, but has no coordinated snapshot or commit-clock claim |
 | SQLite | `drasi.sqlite/shared-transactions` with source-owned coordination and one `drasi.sqlite/shared-bootstrap` per actual persistent query owner |
 
-PostgreSQL's shared providers use independent temporary exported snapshots.
-They do not reset, recreate or claim managed ownership of the configured live
-slot. Each query commits its own handover before the source resumes. Whole
+PostgreSQL's shared providers use independent temporary exported snapshots
+and stream from the source's own slot: with the default managed ownership the
+provider creates the source's derived slot if it does not exist yet, and with
+external ownership the operator's slot must already exist. A provider never
+resets or recreates that slot. Each query commits its own handover before the
+source resumes. Whole
 transactions remain whole inputs; row-mode fan-out is not a substitute for
 transaction-preserving processing.
 
 The existing Stockroom lesson deliberately keeps its single-owner
 `SqliteSource::coordinated` path. Shared modes have their own source identities
 and recovery records; do not reopen single-owner state as shared state.
-See the [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md#shared-ordinary-row-queries),
+See the [PostgreSQL](../../../components/computation-plugins/sources/postgres/DESIGN.md#cursors-and-feedback),
 [MySQL](../../../components/computation-plugins/sources/mysql/README.md#row-recovery) and
 [SQLite](../../../components/computation-plugins/sources/sqlite/README.md#rust-handles-and-internal-coordination)
 contracts for retention and enrollment rules.
@@ -6161,7 +6164,7 @@ and its supported mode, not a connector package name alone.
 | Native SSE sink | Live graph-change notifications | Volatile acceptance; reconnecting clients need a current view |
 | Capture sink | Graph-change envelopes written to a file | Write/flush completion, including query output as ordinary result nodes |
 | SQLite source/bootstrap | Original Rust handle/callbacks or source-owned REST; file or paired initialization | Rows/transactions, or journal-backed single/shared persistent owners; file initialization requires quiescent writers |
-| PostgreSQL sources | Committed rows or whole transactions, selected by factory | Configured-slot shared recovery or distinct single-owner modes; whole-transaction queries require atomic persistent progress |
+| PostgreSQL sources | Committed rows or whole transactions, selected by factory | Shared or single-owner modes over a managed or operator-owned slot; whole-transaction queries require atomic persistent progress; key, publication and slot changes need removal with erase |
 | MySQL source/bootstrap | Rows, whole transactions or explicit MySQL 5.7 positional rows; coordinated or standalone loading | Actual single/fixed-member progress, partial-row replay and retained history; positional rows do not claim FULL metadata, coordinated snapshots or commit clocks |
 | MySQL procedure sink | Parameterized actions for query changes | Handled after command responses; owned cancellation/cleanup, not exactly-once effects or blind retry of a submitted call |
 | SQL Server source/bootstrap/sink | CDC, standalone/coordinated loading and parameterized procedures | Real-database qualification deferred; permission, large sink-batch and orphan-marker gaps remain. Not a qualified production replacement |
@@ -6179,7 +6182,7 @@ for executable schemas and configurations.
 | Database profile | Native interface | Required setup |
 |---|---|---|
 | [SQLite](../../../components/computation-plugins/sources/sqlite/README.md) | Independent source/bootstrap libraries and preserved `drasi_source_sqlite::native::SqliteSource` API | Source-owned SQL/REST; actual persistent owner/set for replay; `nativeSourceBootstrap` and per-query providers for paired initialization |
-| [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md) | Independent source/bootstrap factories | Matching row/transaction modes, publication/slot settings and actual owners; shared row mode can use memory queries without process-restart recovery |
+| [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md) | Independent source/bootstrap factories sharing one flat configuration ([fields](../../../components/computation-plugins/sources/postgres/CONFIGURATION.md)) | PostgreSQL 13+, a publication without TRUNCATE, keyed tables, matching row/transaction modes and actual owners; shared row mode can use memory queries without process-restart recovery |
 | [MySQL](../../../components/computation-plugins/sources/mysql/README.md) | Independent source/bootstrap/procedure libraries | Explicit row/transaction/positional semantics, actual owners, binlog retention and matching bootstrap resources |
 | [SQL Server](../../../components/computation-plugins/sources/mssql/README.md) | Independent libraries, not database-qualified | CDC/permissions; coordinated snapshots need a pre-provisioned marker and locking contract |
 

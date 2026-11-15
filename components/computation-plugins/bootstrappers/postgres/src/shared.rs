@@ -11,7 +11,7 @@ use drasi_computation_plugin_sdk::{NativeBootstrapProvider, Scope};
 use drasi_postgres_common::{
     connection::parse_lsn,
     replication::{
-        connect, field,
+        connect, ensure_slot, field, quote_literal,
         rows::{row_position, RowPosition},
         shared_transactions::{self as transactions, SharedTransactionPosition},
         source_binding, validate_retention, Connection, PostgresTransactionConfig,
@@ -97,10 +97,11 @@ impl PostgresSharedSnapshot {
     fn with_mode(
         source: ComponentId,
         stream: StreamId,
-        config: PostgresTransactionConfig,
+        mut config: PostgresTransactionConfig,
         progress: SourceProgressView,
         mode: Mode,
     ) -> Result<Self> {
+        config.resolve(progress.graph_id(), &source)?;
         config.validate()?;
         Ok(Self {
             source,
@@ -124,6 +125,9 @@ impl PostgresSharedSnapshot {
 
     async fn begin(&self, run: Arc<Run>) -> Result<Reader> {
         let mut exporter = connect(&self.config).await?;
+        // A managed slot is named for the source, so the provider may create
+        // it before the source's first start.
+        ensure_slot(&mut exporter, &self.config, true).await?;
         validate_retention(&mut exporter, &self.config).await?;
         let confirmed = idle_slot(&mut exporter, &self.config).await?;
         let (keys, binding) =
@@ -367,7 +371,7 @@ impl Reader {
             );
             let slot = reader
                 .connection()
-                .get_replication_slot_info(&self.config.connection.slot_name)
+                .get_replication_slot_info(self.config.slot_name())
                 .await?;
             anyhow::ensure!(
                 parse_lsn(
@@ -403,7 +407,7 @@ async fn idle_slot(connection: &mut Connection, config: &PostgresTransactionConf
             .query_rows(
                 format!(
             "SELECT plugin, temporary, active, confirmed_flush_lsn::text FROM pg_replication_slots \
-             WHERE slot_name='{}' AND database=current_database()", config.connection.slot_name,
+             WHERE slot_name={} AND database=current_database()", quote_literal(config.slot_name()),
         ),
                 config.max_protocol_bytes,
             )

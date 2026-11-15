@@ -15,16 +15,26 @@
 use super::*;
 use crate::rows::RowEmission;
 use bytes::Bytes;
-use drasi_computation_contracts::{SourceProgressKey, SourceTransactionLimits};
+use drasi_computation_contracts::{
+    SourceProgressKey, SourceTransactionError, SourceTransactionLimits,
+};
 use drasi_postgres_common::{
-    config::{PostgresSourceConfig, SslMode},
-    connection::ReplicationConnection,
+    config::SslMode,
+    connection::{parse_lsn, ReplicationConnection},
     replication::{Position, ReplicationIo},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
 };
+
+fn unpaused() -> PauseGate {
+    PauseGate {
+        requested: watch::channel(false).1,
+        acknowledged: watch::channel(false).0,
+    }
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const SOURCE_ID: &str = "5c3e49cc-32f8-5b75-888d-30b75b572221";
@@ -334,58 +344,56 @@ fn native_checkpoint_rejects_missing_damaged_or_rebound_positions() {
 #[test]
 fn native_configuration_rejects_malformed_connection_and_limits_before_start() {
     let valid = serde_json::json!({
-        "connection": {"database": "database", "user": "user"},
-        "start_lsn": "0/10",
-        "transactions": {"max_changes": 16, "max_bytes": 4096, "max_duration_ms": 1000},
-        "max_protocol_bytes": 4096,
-        "io_timeout_ms": 1000,
-        "feedback_interval_ms": 100,
+        "database": "database",
+        "user": "user",
+        "publication": "publication",
+        "slotOwnership": "external",
+        "slotName": "slot",
+        "startLsn": "0/10",
+        "maxTransactionChanges": 16,
+        "maxTransactionBytes": 4096,
+        "maxTransactionDurationMs": 1000,
+        "maxProtocolBytes": 4096,
+        "ioTimeoutMs": 1000,
+        "feedbackIntervalMs": 100,
     });
     let config: PostgresTransactionConfig = serde_json::from_value(valid.clone()).unwrap();
     config.validate().unwrap();
     let valid = serde_json::to_value(&config).unwrap();
     for (path, value) in [
-        ("/connection/host", serde_json::json!("host\0suffix")),
-        (
-            "/connection/database",
-            serde_json::json!("database\0suffix"),
-        ),
-        ("/connection/user", serde_json::json!("user\0suffix")),
-        (
-            "/connection/password",
-            serde_json::json!("password\0suffix"),
-        ),
-        ("/connection/database", serde_json::json!("")),
-        ("/max_protocol_bytes", serde_json::json!(63)),
-        ("/start_lsn", serde_json::json!("100000000/0")),
+        ("/host", serde_json::json!("host\0suffix")),
+        ("/database", serde_json::json!("database\0suffix")),
+        ("/user", serde_json::json!("user\0suffix")),
+        ("/password", serde_json::json!("password\0suffix")),
+        ("/database", serde_json::json!("")),
+        ("/maxProtocolBytes", serde_json::json!(63)),
+        ("/startLsn", serde_json::json!("100000000/0")),
+        ("/reconnectBudgetMs", serde_json::json!(86_400_001u64)),
     ] {
         let mut invalid = valid.clone();
-        *invalid
-            .pointer_mut(path)
-            .unwrap_or_else(|| panic!("missing test configuration path {path}")) = value;
+        invalid[&path[1..]] = value;
         let config: PostgresTransactionConfig = serde_json::from_value(invalid).unwrap();
         assert!(config.validate().is_err(), "{path}");
     }
-    for path in [
-        "/transactions/max_changes",
-        "/transactions/max_bytes",
-        "/transactions/max_duration_ms",
-        "/max_protocol_bytes",
-        "/io_timeout_ms",
-        "/feedback_interval_ms",
+    for field in [
+        "maxTransactionChanges",
+        "maxTransactionBytes",
+        "maxTransactionDurationMs",
+        "maxProtocolBytes",
+        "ioTimeoutMs",
+        "feedbackIntervalMs",
     ] {
         let mut invalid = valid.clone();
-        *invalid.pointer_mut(path).unwrap() = serde_json::json!(0);
+        invalid[field] = serde_json::json!(0);
         assert!(serde_json::from_value::<PostgresTransactionConfig>(invalid).is_err());
     }
     for slot in ["UPPERCASE", "unsafe';", &"a".repeat(64)] {
-        let mut config = config.clone();
-        config.connection.slot_name = slot.into();
+        let config = config.clone().with_external_slot(slot);
         assert!(config.validate().is_err());
     }
-    for field in ["hostname", "sslMode", "password_typo"] {
+    for field in ["hostname", "ssl_mode", "password_typo", "connection"] {
         let mut invalid = valid.clone();
-        invalid["connection"][field] = serde_json::json!("must not silently use a default");
+        invalid[field] = serde_json::json!("must not silently use a default");
         assert!(
             serde_json::from_value::<PostgresTransactionConfig>(invalid).is_err(),
             "{field}"
@@ -397,22 +405,19 @@ fn native_configuration_rejects_malformed_connection_and_limits_before_start() {
 fn managed_handover_requires_a_completed_owner_cursor_and_exact_slot_prefix() -> Result<()> {
     use drasi_core_types::interface::SourceCheckpoint;
     let source = ComponentId::try_new(SOURCE_ID)?;
-    let config: PostgresTransactionConfig = serde_json::from_value(serde_json::json!({
-        "connection": {"database": "database", "user": "user", "slot_name": "owned"},
-        "start_lsn": "0/0",
-        "transactions": {"max_changes": 16, "max_bytes": 4096, "max_duration_ms": 1000},
-        "max_protocol_bytes": 4096, "io_timeout_ms": 1000, "feedback_interval_ms": 100
-    }))?;
+    let mut config = PostgresTransactionConfig::new("host", 5432, "database", "user", "pub");
+    config.resolve("graph", &source)?;
+    let owned = config.managed_prefix()?.to_owned();
     let mut progress = SourceProgressSnapshot::default();
     assert!(live_config(&config, &progress, &source).is_err());
     progress.bootstrap_complete = true;
     assert!(live_config(&config, &progress, &source).is_err());
     for slot in [
         None,
-        Some("owned".into()),
+        Some(owned.clone()),
         Some(format!("someone_else_{}", "a".repeat(32))),
-        Some(format!("owned_{}", "A".repeat(32))),
-        Some(format!("owned_{}';", "a".repeat(32))),
+        Some(format!("{owned}_{}", "A".repeat(32))),
+        Some(format!("{owned}_{}';", "a".repeat(32))),
     ] {
         progress.checkpoints.insert(
             SourceProgressKey::Source(
@@ -435,7 +440,7 @@ fn managed_handover_requires_a_completed_owner_cursor_and_exact_slot_prefix() ->
         assert!(live_config(&config, &progress, &source).is_err());
     }
 
-    let slot = format!("owned_{}", "a".repeat(32));
+    let slot = format!("{owned}_{}", "a".repeat(32));
     progress.checkpoints.insert(
         SourceProgressKey::Source(
             drasi_core_types::ComponentId::try_new("5c3e49cc-32f8-5b75-888d-30b75b572221")
@@ -455,8 +460,12 @@ fn managed_handover_requires_a_completed_owner_cursor_and_exact_slot_prefix() ->
         ),
     );
     let recovered = live_config(&config, &progress, &source)?;
-    assert_eq!(recovered.connection.slot_name, slot);
-    assert_eq!(parse_lsn(&recovered.start_lsn)?, 100);
+    assert_eq!(recovered.slot_name(), slot);
+    assert_eq!(recovered.start_lsn()?, Some(100));
+    assert!(
+        !recovered.creates_slot(),
+        "a handed-over slot is never created"
+    );
     progress.bootstrap_complete = false;
     assert!(live_config(&config, &progress, &source).is_err());
     Ok(())
@@ -701,26 +710,18 @@ async fn native_worker_enforces_idle_transaction_deadline_without_publishing() -
         max_bytes: NonZeroUsize::new(4096).unwrap(),
         max_duration_ms: NonZeroU64::new(25).unwrap(),
     };
-    let config = PostgresTransactionConfig {
-        connection: PostgresSourceConfig {
-            host: "unused".into(),
-            port: 5432,
-            database: "database".into(),
-            user: "user".into(),
-            password: "".into(),
-            tables: vec![],
-            slot_name: "slot".into(),
-            publication_name: "publication".into(),
-            ssl_mode: SslMode::Disable,
-            table_keys: vec![],
-        },
-        tls_ca_pem: None,
-        start_lsn: "0/0".into(),
-        transactions: limits,
-        max_protocol_bytes: NonZeroUsize::new(4096).unwrap(),
-        io_timeout_ms: NonZeroU64::new(1000).unwrap(),
-        feedback_interval_ms: NonZeroU64::new(10).unwrap(),
-    };
+    let mut config =
+        PostgresTransactionConfig::new("unused", 5432, "database", "user", "publication")
+            .with_external_slot("slot");
+    config.ssl_mode = SslMode::Disable;
+    config.start_lsn = Some("0/0".into());
+    config.max_transaction_changes = limits.max_changes;
+    config.max_transaction_bytes = limits.max_bytes;
+    config.max_transaction_duration_ms = limits.max_duration_ms;
+    config.max_protocol_bytes = NonZeroUsize::new(4096).unwrap();
+    config.io_timeout_ms = NonZeroU64::new(1000).unwrap();
+    config.feedback_interval_ms = NonZeroU64::new(10).unwrap();
+    config.reconnect_budget_ms = 0;
     let (_progress, watch) = watch::channel(Arc::new(SourceProgressSnapshot {
         ready: true,
         persistent: true,
@@ -738,8 +739,9 @@ async fn native_worker_enforces_idle_transaction_deadline_without_publishing() -
         config,
         persistent: true,
         rows: None,
-        reconnect: None,
         whole: None,
+        pause: unpaused(),
+        reconnect_budget_ms: Arc::new(AtomicU64::new(0)),
     };
     let mut data = vec![b'w'];
     data.extend([0; 24]);

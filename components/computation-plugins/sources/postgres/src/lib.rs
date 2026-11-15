@@ -1,26 +1,41 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Native PostgreSQL logical-replication source.
+//!
+//! Four factories stream a pgoutput publication: whole commits
+//! (`drasi/postgres-transactions`), one envelope per row change
+//! (`drasi.postgres/changes`), and shared variants of each for a fixed
+//! consumer set. Each owns or borrows one replication slot, pauses at
+//! transaction boundaries, reconnects after transport failures, supports
+//! managed updates, and drops its managed slots on erasing removal.
+//!
+//! See `DESIGN.md` and `CONFIGURATION.md` in this crate.
+
 mod component;
+pub mod config;
+mod management;
 mod rows;
 mod shared;
+mod worker;
 
 use anyhow::{Context, Result};
-use drasi_computation_contracts::{ComponentRole, ImplementationIdentity, StreamId};
-use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress,
-    PluginDefinition,
+use config::{Mode, SourceConfig};
+use drasi_computation_contracts::{
+    ComponentRole, ComponentUpdateMode, ImplementationIdentity, PortDescriptor, StreamId,
 };
-use serde::Deserialize;
+use drasi_computation_plugin_sdk::{
+    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
+    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
+    NativeConsumerProgress, NativeSourceProgress, PluginDefinition, UpdateRequest,
+};
 use std::sync::Arc;
 
 pub use component::PostgresTransactionSource;
 pub use drasi_postgres_common::{
-    config::{PostgresSourceConfig, SslMode, TableKeyConfig},
-    replication::PostgresTransactionConfig,
+    config::SslMode,
+    replication::{PostgresTableKey, PostgresTransactionConfig, SlotIdentity, SlotOwnership},
 };
-pub use rows::RowSourceOptions;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const POSTGRES_SOURCE: &str = "drasi/postgres-transactions";
@@ -32,30 +47,6 @@ pub struct PostgresSourceFactory;
 pub struct PostgresRowsFactory;
 pub struct PostgresSharedRowsFactory;
 pub struct PostgresSharedTransactionsFactory;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    stream: String,
-    settings: PostgresTransactionConfig,
-    #[serde(default)]
-    coordinated_snapshot: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RowConfiguration {
-    stream: String,
-    settings: PostgresTransactionConfig,
-    #[serde(default)]
-    coordinated_snapshot: bool,
-    #[serde(default)]
-    persistent: bool,
-    auto_create_slot: Option<bool>,
-    start_from_slot: Option<bool>,
-    reconnect_attempts: Option<u32>,
-    reconnect_delay_ms: Option<u64>,
-}
 
 pub fn plugin() -> Result<PluginDefinition> {
     PluginDefinition::new(
@@ -71,15 +62,187 @@ pub fn plugin() -> Result<PluginDefinition> {
     )
 }
 
-impl Factory for PostgresSharedTransactionsFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        let mut metadata = PostgresSourceFactory.metadata();
-        metadata.implementation =
-            ImplementationIdentity::try_new(POSTGRES_SHARED_TRANSACTIONS, "1")
-                .expect("constant implementation");
-        metadata.configuration.fields.remove("coordinated_snapshot");
-        metadata
+#[cfg(feature = "dynamic-plugin")]
+drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
+
+fn metadata(mode: Mode) -> FactoryMetadata {
+    let (implementation, ports): (&str, Result<Vec<PortDescriptor>>) = match mode {
+        Mode::Transactions => (
+            POSTGRES_SOURCE,
+            PostgresTransactionSource::transaction_ports(),
+        ),
+        Mode::Rows => (POSTGRES_ROWS, PostgresTransactionSource::row_ports()),
+        Mode::SharedRows => (POSTGRES_SHARED_ROWS, PostgresTransactionSource::row_ports()),
+        Mode::SharedTransactions => (
+            POSTGRES_SHARED_TRANSACTIONS,
+            PostgresTransactionSource::transaction_ports(),
+        ),
+    };
+    FactoryMetadata {
+        implementation: ImplementationIdentity::try_new(implementation, "1")
+            .expect("constant implementation"),
+        role: ComponentRole::Source,
+        configuration_version: 1,
+        configuration: config::definition(mode).schema(),
+        ports: ports.expect("constant port descriptor"),
+        completion: None,
+        capabilities: Capabilities {
+            management: true,
+            update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Restart],
+            erases_owned_state: true,
+            ..Capabilities::default()
+        },
     }
+}
+
+/// Parses and validates a factory request for `mode`.
+fn parse(mode: Mode, request: &CreateRequest) -> Result<(SourceConfig, String)> {
+    metadata(mode)
+        .configuration
+        .validate(&request.configuration)?;
+    let config = SourceConfig::from_value(mode, &request.configuration)?;
+    let scope = request
+        .scope
+        .as_ref()
+        .context("PostgreSQL sources require graph scope")?;
+    Ok((config, scope.graph_id.clone()))
+}
+
+fn credential_context(mode: Mode, request: &CreateRequest) -> Result<ActivationCredentialContext> {
+    let config = SourceConfig::from_value(mode, &request.configuration)?;
+    let context = ActivationCredentialContext {
+        hostname: config.settings.host,
+        port: config.settings.port,
+    };
+    context.validate()?;
+    Ok(context)
+}
+
+macro_rules! common_factory_methods {
+    ($mode:expr) => {
+        fn metadata(&self) -> FactoryMetadata {
+            metadata($mode)
+        }
+        fn configuration_details(&self) -> Option<ConfigDetails> {
+            Some(config::definition($mode).details())
+        }
+        fn supports_update_planning(&self) -> bool {
+            true
+        }
+        fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+            management::assess($mode, request)
+        }
+        fn supports_activation_credentials(&self) -> bool {
+            true
+        }
+        fn activation_credential_context(
+            &self,
+            request: &CreateRequest,
+        ) -> Result<ActivationCredentialContext> {
+            credential_context($mode, request)
+        }
+    };
+}
+
+impl Factory for PostgresSourceFactory {
+    common_factory_methods!(Mode::Transactions);
+    fn supports_source_progress(&self) -> bool {
+        true
+    }
+    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
+        anyhow::bail!("PostgreSQL source requires its actual persistent query progress owner")
+    }
+    fn create_with_progress(
+        &self,
+        request: &CreateRequest,
+        _control: ControlSender,
+        progress: NativeSourceProgress,
+    ) -> Result<CreatedComponent> {
+        let (config, graph) = parse(Mode::Transactions, request)?;
+        let reader = progress.reader();
+        anyhow::ensure!(
+            reader.graph_id() == graph,
+            "PostgreSQL progress belongs to another graph"
+        );
+        Ok(Component::Source(Box::new(PostgresTransactionSource::new(
+            request.id.clone(),
+            StreamId::try_new(config.stream)?,
+            config.settings,
+            reader,
+            config.coordinated_snapshot,
+        )?))
+        .into())
+    }
+}
+
+impl Factory for PostgresRowsFactory {
+    common_factory_methods!(Mode::Rows);
+    fn supports_source_progress(&self) -> bool {
+        true
+    }
+    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
+        anyhow::bail!("PostgreSQL rows require their actual query progress owner")
+    }
+    fn create_with_progress(
+        &self,
+        request: &CreateRequest,
+        _control: ControlSender,
+        progress: NativeSourceProgress,
+    ) -> Result<CreatedComponent> {
+        let (config, graph) = parse(Mode::Rows, request)?;
+        let reader = progress.reader();
+        anyhow::ensure!(
+            reader.graph_id() == graph,
+            "PostgreSQL row progress belongs to another graph"
+        );
+        Ok(Component::Source(Box::new(PostgresTransactionSource::rows(
+            request.id.clone(),
+            StreamId::try_new(config.stream)?,
+            config.settings,
+            reader,
+            config.coordinated_snapshot,
+            config.persistent,
+        )?))
+        .into())
+    }
+}
+
+impl Factory for PostgresSharedRowsFactory {
+    common_factory_methods!(Mode::SharedRows);
+    fn supports_consumer_progress(&self) -> bool {
+        true
+    }
+    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
+        anyhow::bail!("shared PostgreSQL rows require their actual fixed consumer progress set")
+    }
+    fn create_with_consumer_progress(
+        &self,
+        request: &CreateRequest,
+        _control: ControlSender,
+        progress: NativeConsumerProgress,
+    ) -> Result<CreatedComponent> {
+        let (config, graph) = parse(Mode::SharedRows, request)?;
+        let reader = progress.reader();
+        anyhow::ensure!(
+            reader.graph_id() == graph && reader.producer_id() == &request.id,
+            "PostgreSQL consumer progress belongs to another graph or producer"
+        );
+        Ok(
+            Component::Source(Box::new(PostgresTransactionSource::shared_rows(
+                request.id.clone(),
+                StreamId::try_new(config.stream)?,
+                config.settings,
+                reader,
+                progress.consumer_ids(),
+                config.persistent,
+            )?))
+            .into(),
+        )
+    }
+}
+
+impl Factory for PostgresSharedTransactionsFactory {
+    common_factory_methods!(Mode::SharedTransactions);
     fn supports_consumer_progress(&self) -> bool {
         true
     }
@@ -89,20 +252,12 @@ impl Factory for PostgresSharedTransactionsFactory {
     fn create_with_consumer_progress(
         &self,
         request: &CreateRequest,
-        _: ControlSender,
+        _control: ControlSender,
         progress: NativeConsumerProgress,
     ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("shared PostgreSQL transactions require graph scope")?;
+        let (config, graph) = parse(Mode::SharedTransactions, request)?;
         anyhow::ensure!(
-            progress.reader().graph_id() == scope.graph_id
-                && progress.reader().producer_id() == &request.id,
+            progress.reader().graph_id() == graph && progress.reader().producer_id() == &request.id,
             "PostgreSQL transaction consumers belong to another graph or producer"
         );
         Ok(
@@ -114,212 +269,6 @@ impl Factory for PostgresSharedTransactionsFactory {
             )?))
             .into(),
         )
-    }
-}
-
-impl Factory for PostgresSharedRowsFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        let mut metadata = PostgresRowsFactory.metadata();
-        metadata.implementation = ImplementationIdentity::try_new(POSTGRES_SHARED_ROWS, "1")
-            .expect("constant implementation");
-        metadata.configuration.fields.remove("coordinated_snapshot");
-        metadata
-    }
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn create(
-        &self,
-        _request: &CreateRequest,
-        _control: ControlSender,
-    ) -> Result<CreatedComponent> {
-        anyhow::bail!("shared PostgreSQL rows require their actual fixed consumer progress set")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _control: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config: RowConfiguration = serde_json::from_value(request.configuration.clone())?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("shared PostgreSQL rows require graph scope")?;
-        let reader = progress.reader();
-        anyhow::ensure!(
-            reader.graph_id() == scope.graph_id && reader.producer_id() == &request.id,
-            "PostgreSQL consumer progress belongs to another graph or producer"
-        );
-        Ok(
-            Component::Source(Box::new(PostgresTransactionSource::shared_rows(
-                request.id.clone(),
-                StreamId::try_new(config.stream)?,
-                config.settings,
-                reader,
-                progress.consumer_ids(),
-                RowSourceOptions {
-                    persistent: config.persistent,
-                    auto_create_slot: config.auto_create_slot.unwrap_or(!config.persistent),
-                    start_from_slot: config.start_from_slot.unwrap_or(!config.persistent),
-                    reconnect_attempts: config.reconnect_attempts.unwrap_or(1),
-                    reconnect_delay_ms: config.reconnect_delay_ms.unwrap_or(5000),
-                },
-            )?))
-            .into(),
-        )
-    }
-}
-
-impl Factory for PostgresRowsFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        let mut metadata = PostgresSourceFactory.metadata();
-        metadata.implementation =
-            ImplementationIdentity::try_new(POSTGRES_ROWS, "1").expect("constant implementation");
-        metadata.ports =
-            PostgresTransactionSource::row_ports().expect("constant row port descriptor");
-        for name in ["persistent", "auto_create_slot", "start_from_slot"] {
-            metadata.configuration.fields.insert(
-                name.into(),
-                drasi_computation_plugin_sdk::ConfigField {
-                    constraint: None,
-                    value_type: ConfigType::Boolean,
-                    required: false,
-                    secret: false,
-                },
-            );
-        }
-        for name in ["reconnect_attempts", "reconnect_delay_ms"] {
-            metadata.configuration.fields.insert(
-                name.into(),
-                drasi_computation_plugin_sdk::ConfigField {
-                    constraint: None,
-                    value_type: ConfigType::Integer,
-                    required: false,
-                    secret: false,
-                },
-            );
-        }
-        metadata
-    }
-    fn supports_source_progress(&self) -> bool {
-        true
-    }
-    fn create(
-        &self,
-        _request: &CreateRequest,
-        _control: ControlSender,
-    ) -> Result<CreatedComponent> {
-        anyhow::bail!("PostgreSQL rows require their actual query progress owner")
-    }
-    fn create_with_progress(
-        &self,
-        request: &CreateRequest,
-        _control: ControlSender,
-        progress: NativeSourceProgress,
-    ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config: RowConfiguration = serde_json::from_value(request.configuration.clone())?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("PostgreSQL rows require graph scope")?;
-        let reader = progress.reader();
-        anyhow::ensure!(
-            reader.graph_id() == scope.graph_id,
-            "PostgreSQL row progress belongs to another graph"
-        );
-        let recoverable = config.persistent || config.coordinated_snapshot;
-        Ok(Component::Source(Box::new(PostgresTransactionSource::rows(
-            request.id.clone(),
-            StreamId::try_new(config.stream)?,
-            config.settings,
-            reader,
-            config.coordinated_snapshot,
-            RowSourceOptions {
-                persistent: config.persistent,
-                auto_create_slot: config.auto_create_slot.unwrap_or(!recoverable),
-                start_from_slot: config.start_from_slot.unwrap_or(!recoverable),
-                reconnect_attempts: config.reconnect_attempts.unwrap_or(1),
-                reconnect_delay_ms: config.reconnect_delay_ms.unwrap_or(5000),
-            },
-        )?))
-        .into())
-    }
-}
-
-#[cfg(feature = "dynamic-plugin")]
-drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
-
-impl Factory for PostgresSourceFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        let mut configuration = ConfigSchema::from_fields([
-            ("stream", ConfigType::String, true),
-            ("settings", ConfigType::Object, true),
-            ("coordinated_snapshot", ConfigType::Boolean, false),
-        ]);
-        configuration
-            .fields
-            .get_mut("settings")
-            .expect("settings")
-            .secret = true;
-        FactoryMetadata {
-            implementation: ImplementationIdentity::try_new(POSTGRES_SOURCE, "1")
-                .expect("constant implementation"),
-            role: ComponentRole::Source,
-            configuration_version: 1,
-            configuration,
-            ports: PostgresTransactionSource::transaction_ports()
-                .expect("constant transaction port descriptor"),
-            completion: None,
-            capabilities: Capabilities::default(),
-        }
-    }
-
-    fn supports_source_progress(&self) -> bool {
-        true
-    }
-
-    fn create(
-        &self,
-        _request: &CreateRequest,
-        _control: ControlSender,
-    ) -> Result<CreatedComponent> {
-        anyhow::bail!("PostgreSQL source requires its actual persistent query progress owner")
-    }
-
-    fn create_with_progress(
-        &self,
-        request: &CreateRequest,
-        _control: ControlSender,
-        progress: NativeSourceProgress,
-    ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("PostgreSQL source requires graph scope")?;
-        let reader = progress.reader();
-        anyhow::ensure!(
-            reader.graph_id() == scope.graph_id,
-            "PostgreSQL progress belongs to another graph"
-        );
-        Ok(Component::Source(Box::new(PostgresTransactionSource::new(
-            request.id.clone(),
-            StreamId::try_new(config.stream)?,
-            config.settings,
-            reader,
-            config.coordinated_snapshot,
-        )?))
-        .into())
     }
 }
 
@@ -372,7 +321,8 @@ mod tests {
                 metadata.ports[0].schema(),
                 drasi_computation_contracts::GraphChangeCodec::schema().descriptor()
             );
-            assert!(metadata.configuration.fields["settings"].secret);
+            assert!(metadata.configuration.fields["password"].secret);
+            assert!(metadata.capabilities.management && metadata.capabilities.erases_owned_state);
         }
         let transaction_id = drasi_computation_contracts::ComponentId::generate();
         let transaction = PostgresTransactionSource::describe(transaction_id.clone())?;

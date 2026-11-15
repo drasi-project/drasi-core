@@ -609,6 +609,12 @@ impl TransactionEmission {
         Ok((serde_json::to_vec(&position)?, logical))
     }
 
+    /// Raises the allocation floor to an observed consumer maximum, so a
+    /// replay after reconnection never reuses a logical sequence.
+    pub fn raise(&self, counter: u64, lsn: u64) {
+        self.counters.raise(&self.transport, counter, lsn);
+    }
+
     pub fn admit(&self, lsn: u64) {
         self.counters
             .admitted_lsn

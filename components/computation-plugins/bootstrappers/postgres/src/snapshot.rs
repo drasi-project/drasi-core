@@ -26,7 +26,7 @@ use drasi_postgres_common::replication::rows::{row_checkpoint, RowPosition};
 use drasi_postgres_common::{
     connection::{format_lsn, parse_lsn},
     replication::{
-        checkpoint, connect, field, read_position, row_element, source_binding,
+        checkpoint, connect, field, quote_literal, read_position, row_element, source_binding,
         validate_managed_slot, validate_retention, Connection, Position, PostgresTransactionConfig,
         TableKeys,
     },
@@ -70,9 +70,10 @@ impl PostgresSnapshot {
     pub fn new(
         source: ComponentId,
         stream: StreamId,
-        config: PostgresTransactionConfig,
+        mut config: PostgresTransactionConfig,
         progress: SourceProgressView,
     ) -> Result<Self> {
+        config.resolve(progress.graph_id(), &source)?;
         config.validate_coordinated()?;
         Ok(Self {
             source,
@@ -105,17 +106,16 @@ impl PostgresSnapshot {
     }
 
     fn config_for(&self, handover: &Handover) -> Result<PostgresTransactionConfig> {
-        validate_managed_slot(&self.config.connection.slot_name, &handover.slot)?;
+        validate_managed_slot(self.config.managed_prefix()?, &handover.slot)?;
         anyhow::ensure!(
             handover.version == 1
                 && handover.rows == self.rows
                 && (!handover.completed || handover.boundary.is_some_and(|lsn| lsn > 0)),
             "invalid PostgreSQL handover state"
         );
-        let mut config = self.config.clone();
-        config.connection.slot_name = handover.slot.clone();
-        config.start_lsn = format_lsn(handover.boundary.unwrap_or(0));
-        Ok(config)
+        Ok(self
+            .config
+            .with_active_slot(handover.slot.clone(), handover.boundary.unwrap_or(0)))
     }
 
     async fn begin(&self, state: &dyn BootstrapState) -> Result<ComputationBootstrapSnapshot> {
@@ -130,13 +130,13 @@ impl PostgresSnapshot {
                 "unfinished PostgreSQL slot binding changed"
             );
             let rows = connection.query_rows(
-                format!("SELECT plugin, database, temporary, active FROM pg_replication_slots WHERE slot_name = '{}'", previous.slot),
+                format!("SELECT plugin, database, temporary, active FROM pg_replication_slots WHERE slot_name = {}", quote_literal(&previous.slot)),
                 config.max_protocol_bytes,
             ).await?;
             if let [row] = rows.as_slice() {
                 anyhow::ensure!(
                     field(row, 0)? == "pgoutput"
-                        && field(row, 1)? == config.connection.database
+                        && field(row, 1)? == config.database
                         && field(row, 2)? == "f"
                         && field(row, 3)? == "f",
                     "unfinished PostgreSQL slot is incompatible or still active"
@@ -153,11 +153,10 @@ impl PostgresSnapshot {
         }
         let slot = format!(
             "{}_{}",
-            self.config.connection.slot_name,
+            self.config.managed_prefix()?,
             uuid::Uuid::new_v4().simple()
         );
-        let mut config = self.config.clone();
-        config.connection.slot_name = slot.clone();
+        let config = self.config.with_active_slot(slot.clone(), 0);
         let (keys, binding) =
             source_binding(&mut connection, &config, &self.source, &self.stream).await?;
         validate_snapshot_publication(&mut connection, &config).await?;
@@ -563,9 +562,9 @@ pub(super) async fn validate_snapshot_publication(
     connection: &mut Connection,
     config: &PostgresTransactionConfig,
 ) -> Result<()> {
-    let publication = config.connection.publication_name.replace('\'', "''");
+    let publication = quote_literal(&config.publication);
     let rows = connection.query_rows(
-        format!("SELECT current_setting('server_version_num')::int >= 150000, pubinsert, pubupdate, pubdelete, NOT pubviaroot FROM pg_publication WHERE pubname = '{publication}'"),
+        format!("SELECT current_setting('server_version_num')::int >= 150000, pubinsert, pubupdate, pubdelete, NOT pubviaroot FROM pg_publication WHERE pubname = {publication}"),
         config.max_protocol_bytes,
     ).await?;
     let [row] = rows.as_slice() else {
@@ -573,7 +572,7 @@ pub(super) async fn validate_snapshot_publication(
     };
     anyhow::ensure!((0..5).all(|index| field(row, index).is_ok_and(|value| value == "t")), "coordinated PostgreSQL snapshots require PostgreSQL 15+ and a complete insert/update/delete publication without partition-root remapping");
     let rows = connection.query_rows(
-        format!("SELECT 1 FROM pg_publication_tables p JOIN pg_namespace n ON n.nspname = p.schemaname JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = p.tablename WHERE p.pubname = '{publication}' AND (p.rowfilter IS NOT NULL OR cardinality(p.attnames) <> (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '')) LIMIT 1"),
+        format!("SELECT 1 FROM pg_publication_tables p JOIN pg_namespace n ON n.nspname = p.schemaname JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = p.tablename WHERE p.pubname = {publication} AND (p.rowfilter IS NOT NULL OR cardinality(p.attnames) <> (SELECT count(*) FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '')) LIMIT 1"),
         config.max_protocol_bytes,
     ).await?;
     anyhow::ensure!(

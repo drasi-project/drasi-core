@@ -107,10 +107,13 @@ impl Transactions {
                 {
                     self.validate_keys(&relation)?;
                 } else {
-                    anyhow::ensure!(
-                        self.filtered,
-                        "PostgreSQL publication membership changed; reconstruct the source"
-                    );
+                    if !self.filtered {
+                        return Err(PostgresCdcError::SchemaChanged(format!(
+                            "table {}.{} joined the publication",
+                            relation.namespace, relation.name
+                        ))
+                        .into());
+                    }
                 }
             }
             WalMessage::Insert { relation_id, tuple } => {
@@ -169,7 +172,13 @@ impl Transactions {
                     })?;
                 }
             }
-            WalMessage::Truncate { .. } => anyhow::bail!("transactional TRUNCATE is unsupported"),
+            WalMessage::Truncate { .. } => {
+                return Err(PostgresCdcError::Unsupported(
+                    "the publication published a TRUNCATE; publish only insert, update and delete"
+                        .into(),
+                )
+                .into())
+            }
         }
         Ok(None)
     }
@@ -190,15 +199,26 @@ impl Transactions {
             relation.name
         );
         for key in keys {
-            let column = relation
-                .columns
-                .iter()
-                .find(|column| &column.name == key)
-                .with_context(|| format!("key column {key} missing from {}", relation.name))?;
-            anyhow::ensure!(
-                relation.replica_identity == ReplicaIdentity::Full || column.is_key,
-                "replica identity does not carry key column {key}"
-            );
+            let carried = relation.columns.iter().find(|column| &column.name == key);
+            match carried {
+                None => {
+                    return Err(PostgresCdcError::SchemaChanged(format!(
+                        "key column {key} is missing from {}.{}",
+                        relation.namespace, relation.name
+                    ))
+                    .into())
+                }
+                Some(column)
+                    if relation.replica_identity != ReplicaIdentity::Full && !column.is_key =>
+                {
+                    return Err(PostgresCdcError::SchemaChanged(format!(
+                        "the replica identity of {}.{} does not carry key column {key}",
+                        relation.namespace, relation.name
+                    ))
+                    .into())
+                }
+                Some(_) => {}
+            }
         }
         Ok(())
     }
@@ -252,11 +272,7 @@ pub fn row_element(
     }
     anyhow::ensure!(parts.len() == keys.len(), "incomplete PostgreSQL key");
     let identity = crate::transaction_element_id(&relation.namespace, &relation.name, &parts)?;
-    let label = if relation.namespace == "public" {
-        relation.name.clone()
-    } else {
-        format!("{}.{}", relation.namespace, relation.name)
-    };
+    let label = super::schema::table_label(&relation.namespace, &relation.name);
     Ok(Element::Node {
         metadata: ElementMetadata {
             reference: ElementReference::new(source.as_str(), &identity),

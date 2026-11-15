@@ -22,7 +22,7 @@ use drasi_lib::{
     context::workers::{join_owned_worker, spawn_owned_worker, WorkerCompletion},
 };
 use drasi_source_postgres::{
-    config::{PostgresSourceConfig, SslMode},
+    config::SslMode,
     native::{
         PostgresTransactionConfig, PostgresTransactionSource, PostgresTransactionSourceFactory,
     },
@@ -46,6 +46,8 @@ use tokio_postgres::{Client, NoTls};
 mod libraries;
 #[path = "native_transactions/ordinary.rs"]
 mod ordinary;
+#[path = "native_transactions/production.rs"]
+mod production;
 #[path = "native_transactions/shared.rs"]
 mod shared;
 #[path = "native_transactions/snapshot.rs"]
@@ -91,32 +93,30 @@ impl Database {
         client
             .batch_execute(
                 "CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
-             CREATE PUBLICATION native_publication FOR TABLE person;",
+             CREATE PUBLICATION native_publication FOR TABLE person WITH (publish = 'insert, update, delete');",
             )
             .await?;
         let row = client.query_one(
             "SELECT lsn::text FROM pg_create_logical_replication_slot('native_slot', 'pgoutput')", &[],
         ).await?;
-        let config = PostgresTransactionConfig {
-            connection: PostgresSourceConfig {
-                host,
-                port,
-                database: "postgres".into(),
-                user: "postgres".into(),
-                password: "postgres".into(),
-                tables: vec!["person".into()],
-                slot_name: "native_slot".into(),
-                publication_name: "native_publication".into(),
-                ssl_mode: SslMode::Prefer,
-                table_keys: vec![],
-            },
-            tls_ca_pem: None,
-            start_lsn: row.get(0),
-            transactions: limits(16),
-            max_protocol_bytes: size(1 << 20),
-            io_timeout_ms: NonZeroU64::new(5000).expect("timeout"),
-            feedback_interval_ms: NonZeroU64::new(100).expect("heartbeat"),
-        };
+        let mut config = PostgresTransactionConfig::new(
+            host,
+            port,
+            "postgres",
+            "postgres",
+            "native_publication",
+        )
+        .with_external_slot("native_slot");
+        config.password = "postgres".into();
+        config.tables = vec!["person".into()];
+        config.ssl_mode = SslMode::Prefer;
+        config.start_lsn = Some(row.get(0));
+        config.max_transaction_changes = size(16);
+        config.max_transaction_bytes = size(1 << 20);
+        config.max_transaction_duration_ms = NonZeroU64::new(5000).expect("duration");
+        config.max_protocol_bytes = size(1 << 20);
+        config.io_timeout_ms = NonZeroU64::new(5000).expect("timeout");
+        config.feedback_interval_ms = NonZeroU64::new(100).expect("heartbeat");
         Ok(Self {
             container,
             client: Some(client),
@@ -164,6 +164,68 @@ impl Database {
 fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("positive limit")
 }
+/// The flat native configuration: `stream`, the settings fields and any
+/// mode fields in `extra`.
+fn flat(config: &PostgresTransactionConfig, extra: serde_json::Value) -> serde_json::Value {
+    let mut value = serde_json::to_value(config).expect("serializable settings");
+    let object = value.as_object_mut().expect("settings object");
+    object.insert("stream".into(), serde_json::json!("changes"));
+    for (key, field) in extra.as_object().expect("extra object") {
+        object.insert(key.clone(), field.clone());
+    }
+    value
+}
+
+/// Specification fields for the flat settings: literals, except `password`,
+/// which references `secret` (a resolver returning the password).
+fn settings_fields(
+    config: &PostgresTransactionConfig,
+    secret: &ResourceId,
+) -> Vec<(String, ConfigurationValue)> {
+    let mut fields = Vec::new();
+    for (key, value) in serde_json::to_value(config)
+        .expect("serializable settings")
+        .as_object()
+        .expect("settings object")
+    {
+        if key == "password" {
+            fields.push((
+                key.clone(),
+                ConfigurationValue::Reference {
+                    resource: secret.clone(),
+                    key: "postgres".into(),
+                    secret: true,
+                },
+            ));
+        } else {
+            fields.push((key.clone(), ConfigurationValue::Literal(value.clone())));
+        }
+    }
+    fields
+}
+
+/// A coordinated or shared bootstrap provider's flat configuration.
+fn bootstrap_flat(
+    source: impl Into<String>,
+    config: &PostgresTransactionConfig,
+) -> serde_json::Value {
+    flat(config, serde_json::json!({"source": source.into()}))
+}
+
+/// The fixture settings with managed slot ownership, as coordinated
+/// snapshots require: the provider creates and hands over its own slot.
+fn coordinated_config(config: &PostgresTransactionConfig) -> PostgresTransactionConfig {
+    let mut config = config.clone();
+    config.slot_ownership = drasi_computation_source_postgres::SlotOwnership::Managed;
+    config.slot_name = None;
+    config.start_lsn = None;
+    config
+}
+
+fn start_lsn(config: &PostgresTransactionConfig) -> String {
+    config.start_lsn.clone().expect("fixture start position")
+}
+
 fn component_id(value: u128) -> ComponentId {
     ComponentId::try_new(format!("{value:032x}")).expect("numeric fixture UUID")
 }
@@ -299,7 +361,7 @@ async fn postgres_whole_commits_hide_intermediate_rows_and_handle_key_changes() 
             .len(),
         5
     );
-    assert_eq!(database.feedback().await?, database.config.start_lsn);
+    assert_eq!(database.feedback().await?, start_lsn(&database.config));
     assert!(rows(&query).is_empty());
     let output = apply(&mut query, group).await?;
     assert_eq!(output.len(), 1);
@@ -348,7 +410,7 @@ async fn postgres_rejected_group_is_not_acknowledged_and_higher_limit_replays_it
         let mut query = query(path.path(), progress.clone()).await?;
         query.start(&lifecycle_ctx::start()).await?;
         let mut config = database.config.clone();
-        config.transactions.max_changes = size(1);
+        config.max_transaction_changes = size(1);
         let mut source = source(config, progress.clone())?;
         source.start(&lifecycle_ctx::start()).await?;
         database
@@ -438,7 +500,7 @@ async fn postgres_heartbeats_survive_backpressure_and_same_source_restart_replay
         .await?
         .get(0);
     assert!(active, "feedback stopped under output backpressure");
-    assert_eq!(database.feedback().await?, database.config.start_lsn);
+    assert_eq!(database.feedback().await?, start_lsn(&database.config));
     let first = next(&mut source).await?;
     apply(&mut query, first).await?;
     database.wait_feedback(committed(&progress)).await?;
@@ -486,7 +548,7 @@ async fn postgres_tls_requirement_and_unavailable_cursor_fail_before_publication
     let mut query = query(path.path(), progress.clone()).await?;
     query.start(&lifecycle_ctx::start()).await?;
     let mut config = database.config.clone();
-    config.connection.ssl_mode = SslMode::Require;
+    config.ssl_mode = SslMode::Require;
     let mut source_tls = source(config, progress.clone())?;
     let error = source_tls.start(&lifecycle_ctx::start()).await.unwrap_err();
     assert!(error.to_string().contains("refused required TLS"));
@@ -498,7 +560,7 @@ async fn postgres_tls_requirement_and_unavailable_cursor_fail_before_publication
         .contains("cleanup"));
     source_tls.stop(&lifecycle_ctx::stop()).await?;
     let mut config = database.config.clone();
-    config.start_lsn = "0/1".into();
+    config.start_lsn = Some("0/1".into());
     let mut source_gap = source(config, progress)?;
     assert!(source_gap
         .start(&lifecycle_ctx::start())
@@ -529,17 +591,14 @@ async fn postgres_tls_requirement_and_unavailable_cursor_fail_before_publication
         }
     })
     .await??;
-    let mut unsafe_retention = source(
+    // Decision D-8: a finite retention limit is allowed (with a warning);
+    // an invalidated slot is detected as PositionUnavailable instead.
+    let mut finite_retention = source(
         database.config.clone(),
         source_gap.recovery_progress().unwrap(),
     )?;
-    assert!(unsafe_retention
-        .start(&lifecycle_ctx::start())
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("max_slot_wal_keep_size"));
-    unsafe_retention.stop(&lifecycle_ctx::stop()).await?;
+    finite_retention.start(&lifecycle_ctx::start()).await?;
+    finite_retention.stop(&lifecycle_ctx::stop()).await?;
     query.stop(&lifecycle_ctx::stop()).await?;
     database.shutdown().await
 }
@@ -576,7 +635,7 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
             let (source, bootstrap) = PostgresTransactionSource::coordinated(
                 component_id(77),
                 StreamId::try_new("changes")?,
-                database.config.clone(),
+                coordinated_config(&database.config),
                 progress.clone(),
             )?;
             (source, Some(bootstrap))
@@ -684,7 +743,11 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
                     ResourceHandle::new(
                         ResourceRole::SecretStore,
                         Arc::new(ConfigurationResolverResource(Arc::new(Settings(
-                            serde_json::to_value(&database.config)?,
+                            serde_json::to_value(if coordinated_snapshot {
+                                coordinated_config(&database.config)
+                            } else {
+                                database.config.clone()
+                            })?,
                         )))),
                     ),
                 )?
@@ -832,7 +895,12 @@ async fn postgres_abrupt_process_exit_before_and_after_query_commit_recovers_wit
         let output = tokio::time::timeout(
             Duration::from_secs(20),
             tokio::process::Command::new(std::env::current_exe()?)
-                .args(["--exact", "postgres_process_exit_helper", "--nocapture"])
+                .args([
+                    "--exact",
+                    "postgres_process_exit_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
                 .env("DRASI_PG_TRANSACTION_CRASH", point)
                 .env(
                     "DRASI_PG_TRANSACTION_CONFIG",
@@ -866,7 +934,7 @@ async fn postgres_abrupt_process_exit_before_and_after_query_commit_recovers_wit
             }
         })
         .await??;
-        assert_eq!(database.feedback().await?, database.config.start_lsn);
+        assert_eq!(database.feedback().await?, start_lsn(&database.config));
         let progress = progress();
         let mut query = query(path.path(), progress.clone()).await?;
         query.start(&lifecycle_ctx::start()).await?;

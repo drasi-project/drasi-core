@@ -32,6 +32,7 @@ pub mod scheduling;
 pub mod testing;
 mod transaction;
 pub mod transport;
+pub mod update_planning;
 pub mod wire;
 
 pub use activation_credentials::{ActivationCredentialContext, ActivationCredentials};

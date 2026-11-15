@@ -104,8 +104,14 @@ impl ComputationComponent for PostgresTransactionSource {
         ComponentRecovery::admitted(StorageDurability::LOCAL_PROCESS_RESTART)
             .replay_until(self.progress.component_id().clone())
     }
+    /// This factory's own shape: the native settings nested under
+    /// `settings`, as [`PostgresTransactionSourceFactory`] accepts them.
     fn configuration(&self) -> Result<serde_json::Value> {
-        self.inner.configuration()
+        Ok(serde_json::json!({
+            "stream": self.stream.as_str(),
+            "settings": self.config,
+            "coordinated_snapshot": self.snapshot.is_some(),
+        }))
     }
     async fn start(&mut self, context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
         let mut native = native_lifecycle::StartContext::new(context.scope().clone(), None);
@@ -116,19 +122,35 @@ impl ComputationComponent for PostgresTransactionSource {
         Ok(self.inner.stop(&native).await?)
     }
 
-    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
-    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
-    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
-
+    async fn initialize(
+        &mut self,
+        context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> Result<()> {
+        let native = native_lifecycle::InitializeContext::new(context.scope().clone());
+        Ok(self.inner.initialize(&native).await?)
+    }
+    /// The native source pauses at a transaction boundary while feedback
+    /// keeps the replication connection alive.
+    async fn pause(&mut self, context: &drasi_lib::computation::v1::PauseContext) -> Result<()> {
+        let native = native_lifecycle::PauseContext::new(context.scope().clone());
+        Ok(self.inner.pause(&native).await?)
+    }
+    async fn resume(&mut self, context: &drasi_lib::computation::v1::ResumeContext) -> Result<()> {
+        let native = native_lifecycle::ResumeContext::new(context.scope().clone());
+        Ok(self.inner.resume(&native).await?)
+    }
+    /// Erasing disposal drops the managed slots this source owns.
     async fn dispose(
         &mut self,
         context: &drasi_lib::computation::v1::DisposeContext,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !context.erases_owned_state(),
-            "this component does not support permanent state removal"
-        );
-        Ok(())
+        let native = native_lifecycle::DisposeContext::new(
+            context.scope().clone(),
+            context.reason(),
+            context.intent(),
+            context.attempt(),
+        )?;
+        Ok(self.inner.dispose(&native).await?)
     }
 }
 

@@ -125,7 +125,8 @@ impl ComponentFactory for PostgresTransactionSourceFactory {
             "invalid native PostgreSQL ports/schema"
         );
         if let Some(ConfigurationValue::Literal(settings)) = spec.configuration.get("settings") {
-            serde_json::from_value::<PostgresTransactionConfig>(settings.clone())?.validate()?;
+            serde_json::from_value::<PostgresTransactionConfig>(settings.clone())?
+                .validate_static()?;
         }
         if let Some(ConfigurationValue::Literal(stream)) = spec.configuration.get("stream") {
             StreamId::try_new(stream.as_str().context("invalid PostgreSQL stream")?)?;
