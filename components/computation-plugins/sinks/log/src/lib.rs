@@ -1,25 +1,41 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Native ComputationGraph log sink (`drasi.standard/log`).
+//!
+//! Renders each standard graph change with a per-output Handlebars template
+//! (or as JSON / the legacy compact form) and emits it to the process `log`
+//! facade, stdout or stderr. Each input completes (`Handled`) only after all
+//! of its lines were emitted and, for stdout/stderr, flushed. Templates are
+//! compiled and validated at construction; render failures follow an
+//! explicit `fallback` or `strict` policy; most settings update in place.
+//!
+//! See `DESIGN.md` and `CONFIGURATION.md` in this crate.
+
 mod component;
+pub mod config;
+mod output;
+mod render;
 
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, SinkCompletion, SinkOutputs,
+    ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, PipeRequirements,
+    PortDescriptor, PortDirection, PortId, SinkCompletion, SinkOutputs,
 };
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
-    FactoryMetadata, PluginDefinition,
+    lifecycle::Assessment, Capabilities, Component, ControlSender, CreateRequest, CreatedComponent,
+    Factory, FactoryMetadata, PluginDefinition, UpdateRequest,
 };
 use std::sync::Arc;
 
-pub use component::LogSinkConfig;
+pub use config::LogSinkConfig;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const LOG_SINK: &str = "drasi.standard/log";
 
+/// Factory for `drasi.standard/log`.
 pub struct LogSinkFactory;
 
+/// The plugin definition exported by the dynamic library.
 pub fn plugin() -> anyhow::Result<PluginDefinition> {
     PluginDefinition::new(
         PLUGIN_ID,
@@ -34,17 +50,27 @@ drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for LogSinkFactory {
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(component::configuration_definition().details())
+        Some(LogSinkConfig::definition().details())
+    }
+
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
     }
 
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
-            implementation: ImplementationIdentity::try_new(LOG_SINK, "1").expect("constant"),
+            // Constant identifiers; validated by `metadata_is_valid`.
+            implementation: ImplementationIdentity::try_new(LOG_SINK, "1")
+                .expect("constant implementation identity"),
             role: ComponentRole::Sink,
             configuration_version: 1,
-            configuration: component::configuration_definition().schema(),
+            configuration: LogSinkConfig::definition().schema(),
             ports: vec![PortDescriptor::new(
-                PortId::try_new("in").expect("constant"),
+                PortId::try_new("in").expect("constant port"),
                 PortDirection::Input,
                 GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
@@ -52,6 +78,9 @@ impl Factory for LogSinkFactory {
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,
+                management: true,
+                update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Recreate],
+                erases_owned_state: true,
                 ..Capabilities::default()
             },
         }
@@ -74,17 +103,4 @@ impl Factory for LogSinkFactory {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use drasi_computation_plugin_sdk::ExportedPlugin;
-
-    #[test]
-    fn factory_exports_a_handled_native_sink() -> anyhow::Result<()> {
-        ExportedPlugin::new(plugin()?)?;
-        let metadata = LogSinkFactory.metadata();
-        assert_eq!(metadata.role, ComponentRole::Sink);
-        assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
-        assert!(metadata.capabilities.binds_inputs);
-        Ok(())
-    }
-}
+mod tests;

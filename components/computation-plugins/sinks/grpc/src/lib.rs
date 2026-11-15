@@ -1,27 +1,42 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Native ComputationGraph gRPC sink (`drasi.network/grpc-sink`).
+//!
+//! Calls `drasi.v1.ChangeService/ProcessChanges` with ordered, typed graph
+//! changes. A request completes (`Handled`) only when the receiver answers
+//! `success=true` with an exact `items_processed` count. Every request carries
+//! a stable `x-drasi-delivery-id` for receiver-side deduplication of retries
+//! and replays. Plaintext, TLS and mutual TLS endpoints are supported; the
+//! connection is lazy unless `requireConnectedAtStart` is set.
+//!
+//! See `DESIGN.md` and `CONFIGURATION.md` in this crate.
+
 mod component;
 pub mod config;
+mod render;
+mod transport;
 
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, SinkCompletion, SinkOutputs,
+    ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, PipeRequirements,
+    PortDescriptor, PortDirection, PortId, SinkCompletion, SinkOutputs,
 };
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
-    FactoryMetadata, PluginDefinition,
+    lifecycle::Assessment, Capabilities, Component, ControlSender, CreateRequest, CreatedComponent,
+    Factory, FactoryMetadata, PluginDefinition, UpdateRequest,
 };
 use std::sync::Arc;
 
-pub use config::{FailurePolicy, GrpcSinkConfig, OutputFormat};
+pub use config::{Compression, FailurePolicy, GrpcSinkConfig, OutputFormat};
 pub use drasi_computation_network_common::proto;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const GRPC_SINK: &str = "drasi.network/grpc-sink";
 
+/// Factory for `drasi.network/grpc-sink`.
 pub struct GrpcSinkFactory;
 
+/// The plugin definition exported by the dynamic library.
 pub fn plugin() -> anyhow::Result<PluginDefinition> {
     PluginDefinition::new(
         PLUGIN_ID,
@@ -41,15 +56,23 @@ impl Factory for GrpcSinkFactory {
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(GrpcSinkConfig::definition().details())
     }
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
+    }
 
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
-            implementation: ImplementationIdentity::try_new(GRPC_SINK, "1").expect("constant"),
+            // Constant identifiers; validated by `metadata_is_valid`.
+            implementation: ImplementationIdentity::try_new(GRPC_SINK, "1")
+                .expect("constant implementation identity"),
             role: ComponentRole::Sink,
             configuration_version: 1,
             configuration: GrpcSinkConfig::definition().schema(),
             ports: vec![PortDescriptor::new(
-                PortId::try_new("in").expect("constant"),
+                PortId::try_new("in").expect("constant port"),
                 PortDirection::Input,
                 GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),
@@ -57,6 +80,13 @@ impl Factory for GrpcSinkFactory {
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,
+                management: true,
+                update_modes: vec![
+                    ComponentUpdateMode::InPlace,
+                    ComponentUpdateMode::Restart,
+                    ComponentUpdateMode::Recreate,
+                ],
+                erases_owned_state: true,
                 ..Capabilities::default()
             },
         }
@@ -69,7 +99,6 @@ impl Factory for GrpcSinkFactory {
     ) -> anyhow::Result<CreatedComponent> {
         let config = GrpcSinkConfig::parse(request.configuration.clone())?;
         let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
-        config.validate_outputs(&outputs)?;
         Ok(Component::Sink(Box::new(component::GrpcSink::new(
             self.metadata().descriptor(request.id.clone())?,
             config,
@@ -78,3 +107,6 @@ impl Factory for GrpcSinkFactory {
         .into())
     }
 }
+
+#[cfg(test)]
+mod tests;

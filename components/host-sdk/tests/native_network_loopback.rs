@@ -107,16 +107,20 @@ fn plugin(kind: &str) -> Result<Arc<NativePlugin>> {
         path.display()
     );
     let plugin = computation::load(path)?;
+    // The HTTP sink package also exports its consumer factory,
+    // drasi.network/http-delivery, after the ordinary sink.
+    let expected: &[&str] = match kind {
+        HTTP_SINK => &[HTTP_SINK, "drasi.network/http-delivery"],
+        _ => &[kind],
+    };
+    let exported: Vec<String> = plugin
+        .factories()
+        .iter()
+        .map(|factory| factory.metadata().implementation.name.as_ref().to_owned())
+        .collect();
     anyhow::ensure!(
-        plugin.factories().len() == 1
-            && plugin.factories()[0]
-                .metadata()
-                .implementation
-                .name
-                .as_ref()
-                == kind
-            && plugin.metadata().plugin.id.as_ref() == package,
-        "{package} must expose only {kind} under its own plugin identity"
+        exported == expected && plugin.metadata().plugin.id.as_ref() == package,
+        "{package} must expose exactly {expected:?} under its own plugin identity, not {exported:?}"
     );
     plugins.insert(package.to_owned(), plugin.clone());
     Ok(plugin)
@@ -816,22 +820,18 @@ impl reaction::change_service_server::ChangeService for ReactionReceiver {
             .expect("gRPC capture")
             .push((headers, request.into_inner()));
         self.0.wait().await;
-        let fail = self.0.fail();
+        // A deliberate failure is transient (UNAVAILABLE), which the sink
+        // retries; `success: false` is a permanent rejection it does not retry.
+        if self.0.fail() {
+            return Err(tonic::Status::unavailable("deliberate receiver failure"));
+        }
         Ok(tonic::Response::new(reaction::ProcessResultsResponse {
-            success: !fail,
+            success: true,
             message: String::new(),
-            error: if fail {
-                "deliberate receiver failure".into()
-            } else {
-                String::new()
-            },
-            items_processed: if fail {
-                0
-            } else {
-                items_processed
-                    .try_into()
-                    .map_err(|_| tonic::Status::out_of_range("too many result items"))?
-            },
+            error: String::new(),
+            items_processed: items_processed
+                .try_into()
+                .map_err(|_| tonic::Status::out_of_range("too many result items"))?,
         }))
     }
 }
@@ -1027,8 +1027,7 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
         GRPC_SINK,
         NETWORK_SINK_ID,
         json!({"outputs":{"facilities-db":{"component":NETWORK_SOURCE_ID,"port":"out"}},"endpoint":format!("grpc://{}", grpc.address),
-            "maxRetries":0,"timeoutMs":1000,"connectionRetryAttempts":1,
-            "initialConnectionTimeoutMs":1000}),
+            "maxRetries":0,"timeoutMs":1000,"connectTimeoutMs":1000}),
     )?;
     sink.initialize(&crate::hooks::initialize_ctx()).await?;
     sink.start(&crate::hooks::start_ctx()).await?;
@@ -1082,7 +1081,7 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
 async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_success() -> Result<()> {
     let mut receiver = grpc_receiver().await?;
     let config = json!({"outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}", receiver.address),
-        "maxRetries":1,"timeoutMs":1000,"connectionRetryAttempts":1,"initialConnectionTimeoutMs":1000,
+        "maxRetries":1,"timeoutMs":1000,"connectTimeoutMs":1000,
         "metadata":{"x-custom":"custom"}});
     let mut sink = component(GRPC_SINK, NETWORK_SINK_ID, config)?;
     sink.initialize(&crate::hooks::initialize_ctx()).await?;
@@ -1144,13 +1143,13 @@ async fn grpc_sink_delivers_item_metadata_headers_retries_and_never_early_succes
         "00000000-0000-0000-0000-000000000606",
         json!({
             "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://127.0.0.1:{}", free_port()?),
-            "connectionRetryAttempts":1,"initialConnectionTimeoutMs":50,"timeoutMs":50
+            "requireConnectedAtStart":true,"maxRetries":0,"connectTimeoutMs":50,"timeoutMs":50
         }),
     )?;
     failed.initialize(&crate::hooks::initialize_ctx()).await?;
     assert!(
         failed.start(&crate::hooks::start_ctx()).await.is_err(),
-        "connection failure must not be lazy startup success"
+        "a required connection that fails must fail start"
     );
     failed.stop(&crate::hooks::stop_ctx()).await?;
     failed.dispose(&crate::hooks::dispose_ctx()).await?;
