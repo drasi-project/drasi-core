@@ -3274,8 +3274,10 @@ dependencies = [
  "drasi-mssql-common",
  "drasi-reaction-common",
  "futures-util",
+ "log",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tiberius",
  "tokio",
 ]

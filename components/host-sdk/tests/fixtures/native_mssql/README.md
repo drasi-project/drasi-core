@@ -127,14 +127,17 @@ dynamic libraries under both current-thread and multi-thread Tokio runtimes:
 * **Exact procedure effects:** full-ID/short-ID/default routing, ADD/UPDATE/DELETE/
   aggregation contexts, exact `u64::MAX` decimal binding, `i64::MIN`, bool, float,
   NULL, Unicode/quotes and JSON object/array effects. Successful procedures emit
-  multiple result sets; a procedure that emits two result sets then THROWs must
-  fail after exactly one recorded effect, never silently succeed or retry, and
-  must not execute later commands from that failed input batch.
-* **Retained procedure work:** observe ENTERED/COMPLETED records in the actual
-  server, independently cancel or time out the Host call, require stop to fail
-  while work is retained, then explicitly release the owned procedure and verify
-  exactly one completion and successful cleanup. Socket closure is not used as
-  proof that server-side work stopped.
+  multiple result sets. Each operation runs in its own transaction together with
+  its row in `<schema>.DrasiDeliveryProgress` (pre-created by `setup.sql` and
+  granted to the application login): a procedure that emits two result sets
+  then THROWs rolls back with its cursor row, so no effect is recorded, later
+  operations of that input do not run, and a retry resumes at that operation.
+  Replaying an input whose operations already committed records no duplicate
+  effect.
+* **In-flight procedure work:** observe ENTERED records in the actual server,
+  cancel or time out the Host call, and require that the abandoned operation
+  rolls back with its connection and that the retry applies it exactly once.
+  Socket closure alone is not used as proof that server-side work stopped.
 
 The Server test reuses this explicit fixture and supplies its uniquely scoped
 settings/procedure through the normal configuration path.

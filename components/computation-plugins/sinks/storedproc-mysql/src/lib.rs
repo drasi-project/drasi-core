@@ -1,36 +1,42 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Native stored-procedure delivery with positional MySQL parameters.
+//! `drasi.mysql/storedproc`: native MySQL stored-procedure delivery.
+//!
+//! An external consumer of the host `DeliveryRunner`. Each operation of an
+//! input runs one rendered `CALL` with positional `?` parameters inside its
+//! own MySQL transaction, which also advances this component's row in a
+//! destination cursor table. The effect and its receipt commit together, so
+//! a retried or replayed operation is not applied twice unless the procedure
+//! ends the transaction itself. See `DESIGN.md` and `CONFIGURATION.md`.
 
 mod component;
-mod config;
+pub mod config;
+pub mod management;
 #[cfg(test)]
 mod tests;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, SinkCompletion,
+    ComponentRole, ComponentUpdateMode, DeliveryScope, GraphChangeCodec, ImplementationIdentity,
+    SinkCompletion,
 };
 use drasi_computation_plugin_sdk::{
-    ActivationCredentialContext, Capabilities, Component, ConfigSchema, ConfigType, ControlSender,
-    CreateRequest, CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
+    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
+    ConsumerMode, ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
+    PluginDefinition, UpdateRequest,
 };
-use serde::Deserialize;
 use std::sync::Arc;
 
 pub use component::MySqlStoredProcSink;
 pub use config::MySqlStoredProcConfig;
+pub use drasi_mysql_common::storedproc::delivery::owner_id;
 pub use drasi_reaction_common::{QueryConfig, TemplateSpec};
+
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const MYSQL_STOREDPROC: &str = "drasi.mysql/storedproc";
-pub struct MySqlStoredProcFactory;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    settings: MySqlStoredProcConfig,
-}
+pub struct MySqlStoredProcFactory;
 
 pub fn plugin() -> Result<PluginDefinition> {
     PluginDefinition::new(
@@ -51,57 +57,72 @@ impl Factory for MySqlStoredProcFactory {
         &self,
         request: &CreateRequest,
     ) -> Result<ActivationCredentialContext> {
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
+        let config = MySqlStoredProcConfig::parse_with_activation_credentials(
+            request.configuration.clone(),
+            true,
+        )?;
         let context = ActivationCredentialContext {
-            hostname: config.settings.hostname,
-            port: config.settings.port,
+            hostname: config.hostname,
+            port: config.port,
         };
         context.validate()?;
         Ok(context)
     }
+    fn configuration_details(&self) -> Option<ConfigDetails> {
+        Some(config::definition().details())
+    }
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+        management::assess(request)
+    }
+    fn consumer_mode(&self) -> Option<ConsumerMode> {
+        Some(ConsumerMode::External)
+    }
     fn metadata(&self) -> FactoryMetadata {
-        let mut configuration = ConfigSchema::from_fields([("settings", ConfigType::Object, true)]);
-        configuration.constrain(
-            "settings",
-            drasi_computation_contracts::ConfigurationConstraint::try_new(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "outputs": drasi_computation_contracts::ConfigurationConstraint::output_aliases().schema(),
-                },
-            })).expect("constant stored procedure identity schema"),
-        ).expect("settings field");
-        configuration
-            .fields
-            .get_mut("settings")
-            .expect("settings")
-            .secret = true;
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new(MYSQL_STOREDPROC, "1")
-                .expect("implementation"),
+                .expect("constant implementation identity"),
             role: ComponentRole::Sink,
             configuration_version: 1,
-            configuration,
+            configuration: config::definition().schema(),
             ports: MySqlStoredProcSink::ports().expect("constant port descriptor"),
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,
+                management: true,
+                update_modes: vec![
+                    ComponentUpdateMode::InPlace,
+                    ComponentUpdateMode::Restart,
+                    ComponentUpdateMode::Recreate,
+                ],
+                erases_owned_state: true,
                 ..Capabilities::default()
             },
         }
     }
     fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
-        Ok(Component::Sink(Box::new(
-            MySqlStoredProcSink::new_with_activation_credentials(
-                request.id.clone(),
-                config.settings,
-                request.activation_credentials_bound,
-                &request.inputs,
-            )?,
-        ))
+        let config = MySqlStoredProcConfig::parse_with_activation_credentials(
+            request.configuration.clone(),
+            request.activation_credentials_bound,
+        )?;
+        let scope = request
+            .scope
+            .as_ref()
+            .context("the MySQL stored-procedure sink requires its graph scope")?;
+        let scope = DeliveryScope::new(
+            scope.instance_id.clone(),
+            scope.graph_id.clone(),
+            request.id.clone(),
+        )?;
+        Ok(Component::Consumer(Box::new(MySqlStoredProcSink::new(
+            request.id.clone(),
+            config,
+            request.activation_credentials_bound,
+            &request.inputs,
+            scope,
+        )?))
         .into())
     }
 }
@@ -110,9 +131,8 @@ impl Factory for MySqlStoredProcFactory {
 #[allow(dead_code)]
 pub(crate) mod lifecycle_ctx {
     use drasi_computation_plugin_sdk::lifecycle::{
-        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
-        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
-        StopMode, UpdateBoundary,
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        StartContext, StateIntent, StopContext, StopMode,
     };
 
     pub(crate) fn scope() -> OperationScope {
@@ -129,24 +149,11 @@ pub(crate) mod lifecycle_ctx {
     ) -> StartContext {
         StartContext::new(scope(), Some(credentials))
     }
-    pub(crate) fn pause() -> PauseContext {
-        PauseContext::new(scope())
-    }
-    pub(crate) fn resume() -> ResumeContext {
-        ResumeContext::new(scope())
-    }
     pub(crate) fn stop() -> StopContext {
         StopContext::new(scope(), StopMode::Drain)
-    }
-    pub(crate) fn dispose() -> DisposeContext {
-        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
-            .expect("valid dispose context")
     }
     pub(crate) fn erase() -> DisposeContext {
         DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
             .expect("valid dispose context")
-    }
-    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
-        ApplyContext::new(scope(), boundary)
     }
 }

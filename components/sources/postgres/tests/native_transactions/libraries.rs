@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 const INSTANCE: &str = "postgres-native-libraries";
-const TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(super) struct Plugins {
     pub(super) source: Arc<NativePlugin>,
@@ -123,7 +123,7 @@ pub(super) fn indexes(path: &Path) -> Result<Arc<dyn ComputationIndexProvider>> 
     )))
 }
 
-fn options() -> DeliveryOptions {
+pub(super) fn options() -> DeliveryOptions {
     DeliveryOptions {
         scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
         max_streams: size(4),
@@ -135,7 +135,7 @@ fn options() -> DeliveryOptions {
     }
 }
 
-fn sink_inputs() -> Result<Vec<InputBinding>> {
+pub(super) fn sink_inputs() -> Result<Vec<InputBinding>> {
     Ok(vec![InputBinding {
         input_port: PortId::try_new("in")?,
         output: OutputEndpoint::new(component_id(46), PortId::try_new("out")?),
@@ -143,23 +143,27 @@ fn sink_inputs() -> Result<Vec<InputBinding>> {
     }])
 }
 
-fn sink_settings(database: &Database) -> Value {
+pub(super) fn sink_settings(database: &Database) -> Value {
     let connection = &database.config;
-    json!({
-        "hostname": connection.host, "port": connection.port,
+    let mut settings = json!({
+        "host": connection.host, "port": connection.port,
         "database": connection.database, "user": connection.user, "password": connection.password,
-        "ssl": connection.ssl_mode == SslMode::Require,
-        "tls_ca_pem": database.config.tls_ca_pem,
-        "command_timeout_ms": 5000, "connect_timeout_ms": 5000, "shutdown_timeout_ms": 5000,
-        "default_template": {
+        "sslMode": if connection.ssl_mode == SslMode::Require { "require" } else { "disable" },
+        "commandTimeoutMs": 5000, "connectTimeoutMs": 5000, "shutdownTimeoutMs": 5000,
+        "reconnectBudgetMs": 10000,
+        "defaultTemplate": {
             "added": {"template": "CALL native_upsert('ADD', {{param after.id}}, {{param after.name}})"},
             "updated": {"template": "CALL native_upsert('UPDATE', {{param after.id}}, {{param after.name}})"},
             "deleted": {"template": "CALL native_delete({{param before.id}}, {{param before.name}})"}
         }
-    })
+    });
+    if let Some(ca) = &database.config.tls_ca_pem {
+        settings["tlsCaPem"] = json!(ca);
+    }
+    settings
 }
 
-async fn prepare_destination(database: &Database) -> Result<()> {
+pub(super) async fn prepare_destination(database: &Database) -> Result<()> {
     database
         .client()
         .batch_execute(
@@ -197,7 +201,7 @@ async fn sink(
     plugin.factories()[0]
         .create_consumer_with_inputs(
             component_id(101),
-            json!({"settings": sink_settings(database)}),
+            sink_settings(database),
             scope(graph),
             indexes(path)?,
             options(),
@@ -402,7 +406,7 @@ async fn open(
     Ok((core, progress, results))
 }
 
-async fn count(database: &Database) -> Result<i64> {
+pub(super) async fn count(database: &Database) -> Result<i64> {
     Ok(database
         .client()
         .query_one("SELECT count(*) FROM calls", &[])
@@ -658,7 +662,7 @@ async fn native_storedproc_resumes_partial_batches_and_deduplicates_destination_
     database.shutdown().await
 }
 
-async fn captured(
+pub(super) async fn captured(
     database: &Database,
     path: &Path,
     statement: &str,
@@ -772,11 +776,11 @@ async fn native_storedproc_cancellation_rolls_back_and_requires_joined_cleanup()
     };
     let path = directory.path().join("consumer");
     let mut settings = sink_settings(&database);
-    settings["command_timeout_ms"] = json!(1000);
+    settings["commandTimeoutMs"] = json!(1000);
     let mut consumer = plugins.sink.factories()[0]
         .create_consumer_with_inputs(
             component_id(101),
-            json!({"settings": settings}),
+            settings,
             scope("native-postgres"),
             indexes(&path)?,
             options(),

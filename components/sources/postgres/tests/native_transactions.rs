@@ -52,6 +52,8 @@ mod production;
 mod shared;
 #[path = "native_transactions/snapshot.rs"]
 mod snapshot;
+#[path = "native_transactions/storedproc.rs"]
+mod storedproc;
 #[path = "native_transactions/tls.rs"]
 mod tls;
 

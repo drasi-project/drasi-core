@@ -9,6 +9,9 @@ pub mod templates;
 #[cfg(feature = "sse")]
 pub mod sse;
 
+#[cfg(feature = "sql")]
+pub mod sql_template;
+
 pub use config::AdaptiveBatchConfig;
 pub use templates::{
     input_alias, input_aliases, OperationType, QueryConfig, TemplateRouting, TemplateSpec,

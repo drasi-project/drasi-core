@@ -3,191 +3,49 @@
 
 use super::*;
 use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
-use std::{collections::HashMap, sync::Mutex};
 
 #[derive(Clone)]
-struct RotatingIdentity(Arc<Mutex<IdentityState>>);
-
-struct IdentityState {
-    next: Option<Credentials>,
-    contexts: Vec<HashMap<String, String>>,
-}
-
-impl RotatingIdentity {
-    fn state(&self) -> Result<std::sync::MutexGuard<'_, IdentityState>> {
-        self.0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("identity fixture poisoned"))
-    }
-}
+struct FixedIdentity;
 
 #[async_trait]
-impl IdentityProvider for RotatingIdentity {
-    async fn get_credentials(&self, context: &CredentialContext) -> Result<Credentials> {
-        let mut state = self.state()?;
-        state.contexts.push(context.properties.clone());
-        state
-            .next
-            .clone()
-            .context("expected identity-provider failure")
+impl IdentityProvider for FixedIdentity {
+    async fn get_credentials(&self, _context: &CredentialContext) -> Result<Credentials> {
+        Ok(Credentials::UsernamePassword {
+            username: "native_identity".into(),
+            password: "first-auth".into(),
+        })
     }
     fn clone_box(&self) -> Box<dyn IdentityProvider> {
         Box::new(self.clone())
     }
 }
 
-pub(super) async fn rotation(
-    database: &Database,
-    factory: &computation::NativeFactory,
-    envelope: ChangeEnvelope,
-) -> Result<()> {
-    database
-        .sql(
-            "SET SESSION sql_log_bin=0; \
-        CREATE TABLE credential_audit(auth_user VARCHAR(80),query_id VARCHAR(64)); \
-        CREATE USER native_identity@'%' IDENTIFIED BY 'first-auth';\n\
-        DELIMITER //\n\
-        CREATE PROCEDURE credential_effect(IN q VARCHAR(64)) BEGIN \
-          INSERT INTO credential_audit VALUES(SUBSTRING_INDEX(USER(),'@',1),q); END //\n\
-        DELIMITER ;\n\
-        GRANT EXECUTE ON test.* TO native_identity@'%';",
-        )
-        .await?;
-    let provider = RotatingIdentity(Arc::new(Mutex::new(IdentityState {
-        next: Some(Credentials::UsernamePassword {
-            username: "native_identity".into(),
-            password: "first-auth".into(),
-        }),
-        contexts: Vec::new(),
-    })));
+/// The plugin still declares activation credentials (its Start consumes
+/// them; see the crate's unit tests), but the Host does not yet bind an
+/// identity to an external consumer: the consumer creation paths take no
+/// identity and the ordinary identity path refuses a consumer factory.
+/// Until the Host forwards activation credentials to consumers, a consumer
+/// sink uses literal credentials.
+pub(super) fn rotation(factory: &computation::NativeFactory) -> Result<()> {
+    assert!(factory.supports_activation_credentials());
     let identity = Arc::new(computation::NativeIdentityResource::new(Arc::new(
-        provider.clone(),
+        FixedIdentity,
     )));
-    let mut settings = database.sink_settings();
-    for event in ["added", "updated", "deleted"] {
-        settings["default_template"][event]["template"] =
-            json!("CALL credential_effect({{param output.alias}})");
-    }
-    let literal_settings = settings.clone();
-    let object = settings.as_object_mut().context("MySQL settings object")?;
-    object.remove("user");
-    object.remove("password");
-    let mut sink = crate::sink_inputs::create_with_identity(
-        factory,
-        id("identity-procedures"),
-        json!({"settings":settings}),
-        identity.clone(),
-    )?;
-    assert!(provider.state()?.contexts.is_empty());
-    let declared = sink.configuration()?;
-    assert_eq!(declared["settings"]["user"], "");
-    assert_eq!(declared["settings"]["password"], "");
-    let input = || InputEnvelope {
-        port: PortId::try_new("in").expect("input"),
-        envelope: envelope.clone(),
-    };
-    let proof =
-        async {
-            sink.start(&crate::hooks::start_ctx()).await?;
-            assert_eq!(provider.state()?.contexts.len(), 1);
-            sink.handle(input()).await?;
-            sink.stop(&crate::hooks::stop_ctx()).await?;
-            assert_eq!(sink.configuration()?, declared);
-            database
-                .sql(
-                    "SET SESSION sql_log_bin=0; \
-            ALTER USER native_identity@'%' IDENTIFIED BY 'second-auth'",
-                )
-                .await?;
-            provider.state()?.next = Some(Credentials::Token {
-                username: "native_identity".into(),
-                token: "second-auth".into(),
-            });
-            sink.start(&crate::hooks::start_ctx()).await?;
-            assert_eq!(provider.state()?.contexts.len(), 2);
-            sink.handle(input()).await?;
-            sink.stop(&crate::hooks::stop_ctx()).await?;
-            assert_eq!(sink.configuration()?, declared);
-
-            for rejected in [
-                None,
-                Some(Credentials::Certificate {
-                    cert_pem: "not-a-password".into(),
-                    key_pem: "not-a-password".into(),
-                    username: Some("native_identity".into()),
-                }),
-                Some(Credentials::Token {
-                    username: "native_identity".into(),
-                    token: "x".repeat(64 * 1024 + 1),
-                }),
-                Some(Credentials::Token {
-                    username: "native_identity".into(),
-                    token: "expired-auth".into(),
-                }),
-            ] {
-                provider.state()?.next = rejected;
-                assert!(
-                    sink.start(&crate::hooks::start_ctx()).await.is_err(),
-                    "failed identity must not reuse old auth"
-                );
-                assert!(sink.handle(input()).await.is_err());
-                sink.stop(&crate::hooks::stop_ctx()).await?;
-                assert_eq!(sink.configuration()?, declared);
-
-                let reads = provider.state()?.contexts.len();
-                let mut fallback = crate::sink_inputs::create_with_identity(
-                    factory,
-                    id("literal-fallback-probe"),
-                    json!({"settings":literal_settings}),
-                    identity.clone(),
-                )?;
-                assert_eq!(provider.state()?.contexts.len(), reads);
-                let original = fallback.configuration()?;
-                let start = fallback.start(&crate::hooks::start_ctx()).await;
-                let stopped = fallback.stop(&crate::hooks::stop_ctx()).await;
-                assert!(
-                    start.is_err(),
-                    "bound identity must override valid root literals"
-                );
-                stopped?;
-                assert_eq!(fallback.configuration()?, original);
-            }
-
-            provider.state()?.next = Some(Credentials::UsernamePassword {
-                username: "native_identity".into(),
-                password: "second-auth".into(),
-            });
-            sink.start(&crate::hooks::start_ctx()).await?;
-            sink.handle(input()).await?;
-            sink.stop(&crate::hooks::stop_ctx()).await?;
-            assert_eq!(sink.configuration()?, declared);
-            assert_eq!(provider.state()?.contexts.len(), 11);
-            let expected = HashMap::from([
-                ("hostname".to_owned(), "127.0.0.1".to_owned()),
-                ("port".to_owned(), database.port.to_string()),
-            ]);
-            for context in &provider.state()?.contexts {
-                assert_eq!(context, &expected);
-            }
-            assert_eq!(
-                database
-                    .sql("SELECT COUNT(*) FROM credential_audit")
-                    .await?,
-                "3"
-            );
-            assert_eq!(
-                database
-                    .sql("SELECT DISTINCT auth_user,query_id FROM credential_audit")
-                    .await?,
-                "native_identity\tleft"
-            );
-            database.expect_count(
-            "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER='native_identity'",
-            "0",
-        ).await?;
-            Ok(())
-        }
-        .await;
-    let stopped = sink.stop(&crate::hooks::stop_ctx()).await;
-    combine("native MySQL activation credentials", [proof, stopped])
+    let mut settings = json!({
+        "hostname": "127.0.0.1", "database": "test",
+        "outputs": {"left": {"component": id("left").as_str(), "port": "out"}},
+        "defaultTemplate": {"added": {"template": "CALL credential_effect({{param output.alias}})"}}
+    });
+    settings["port"] = json!(3306);
+    assert!(
+        crate::sink_inputs::create_with_identity(
+            factory,
+            id("identity-procedures"),
+            settings,
+            identity,
+        )
+        .is_err(),
+        "the Host consumer path does not bind activation identities yet"
+    );
+    Ok(())
 }

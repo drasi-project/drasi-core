@@ -206,9 +206,24 @@ impl CompiledTemplate {
     /// Compile and validate a template string. Returns an error if the template
     /// fails to parse or contains an unsafe (non-`param`) interpolation.
     pub fn compile(template: &str) -> Result<Self> {
+        Self::build(template, ensure_param_only)
+    }
+
+    /// Compile a template under the shared parameter-only rule
+    /// ([`drasi_reaction_common::sql_template::ensure_parameter_only`]) used
+    /// by every native stored-procedure sink: only `{{param …}}` may emit a
+    /// value, and only `if`, `unless`, `each` and `with` blocks are allowed.
+    pub fn compile_parameter_only(template: &str) -> Result<Self> {
+        Self::build(
+            template,
+            drasi_reaction_common::sql_template::ensure_parameter_only,
+        )
+    }
+
+    fn build(template: &str, validate: fn(&Template) -> Result<()>) -> Result<Self> {
         let compiled =
             Template::compile(template).map_err(|e| anyhow!("invalid Handlebars template: {e}"))?;
-        ensure_param_only(&compiled)?;
+        validate(&compiled)?;
 
         let mut registry = Handlebars::new();
         registry.set_strict_mode(true);
@@ -413,6 +428,28 @@ mod tests {
     #[test]
     fn validate_template_rejects_bare_interpolation_inside_block() {
         assert!(validate_template("{{#if after.active}}CALL touch({{after.id}}){{/if}}").is_err());
+    }
+
+    #[test]
+    fn parameter_only_compilation_uses_the_shared_rule() {
+        let template =
+            CompiledTemplate::compile_parameter_only("CALL p({{param after.id}})").unwrap();
+        let (sql, params) = template.render(&json!({"after": {"id": 3}})).unwrap();
+        assert_eq!(sql, "CALL p($1)");
+        assert_eq!(params, vec![json!(3)]);
+        for unsafe_template in [
+            "CALL p({{after.id}})",
+            "CALL p({{{after.id}}})",
+            "CALL p({{json after}})",
+            "CALL p({{> partial}})",
+            "{{#custom after}}CALL p({{param after.id}}){{/custom}}",
+            "CALL p({{param}})",
+        ] {
+            assert!(
+                CompiledTemplate::compile_parameter_only(unsafe_template).is_err(),
+                "{unsafe_template}"
+            );
+        }
     }
 
     #[test]

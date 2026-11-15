@@ -45,7 +45,13 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "native")]
 pub mod config;
 #[cfg(feature = "native")]
+pub mod delivery;
+#[cfg(feature = "native")]
+pub mod render;
+#[cfg(feature = "native")]
 pub mod runtime;
+#[cfg(feature = "native")]
+pub mod session;
 
 /// The outcome of rendering a command template.
 #[derive(Debug, Clone, PartialEq)]
@@ -104,41 +110,6 @@ pub fn validate_routes(
         );
     }
     Ok(())
-}
-
-/// Native SQL permits control flow but only positional parameters may emit
-/// values. The legacy renderer's separately documented behavior is unchanged.
-pub fn validate_parameterized_template(source: &str) -> Result<()> {
-    use handlebars::template::{Parameter, TemplateElement};
-    fn validate(template: &handlebars::Template) -> Result<()> {
-        for element in &template.elements {
-            match element {
-                TemplateElement::RawString(_) | TemplateElement::Comment(_) => {}
-                TemplateElement::Expression(helper) => {
-                    anyhow::ensure!(
-                        matches!(&helper.name, Parameter::Name(name) if name == "param"),
-                        "native MySQL SQL values must use the positional param helper"
-                    );
-                }
-                TemplateElement::HelperBlock(helper) => {
-                    if let Some(inner) = &helper.template {
-                        validate(inner)?;
-                    }
-                    if let Some(inverse) = &helper.inverse {
-                        validate(inverse)?;
-                    }
-                }
-                _ => anyhow::bail!(
-                    "native MySQL SQL does not allow raw output, partials or decorators"
-                ),
-            }
-        }
-        Ok(())
-    }
-    if source.trim().is_empty() {
-        return Ok(());
-    }
-    validate(&handlebars::Template::compile(source)?)
 }
 
 pub fn build_context(

@@ -113,10 +113,10 @@ impl ComputationComponent for Procedures {
         self.0.descriptor()
     }
     async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
-        self.0.start().await
+        self.0.start(None, &CancellationToken::new(), None).await
     }
     async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
-        self.0.stop().await
+        self.0.stop(StopMode::Drain, None).await
     }
 
     drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
@@ -137,11 +137,21 @@ impl ComputationComponent for Procedures {
 #[async_trait]
 impl EnvelopeSink for Procedures {
     fn completion(&self) -> SinkCompletion {
-        self.0.completion()
+        SinkCompletion::Handled
     }
     async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
-        self.0.handle(input).await
+        self.0.handle_input(input).await
     }
+}
+
+/// The delivery scope of a directly driven procedure sink.
+fn procedure_scope(component: ComponentId) -> DeliveryScope {
+    DeliveryScope::new(
+        "native-mysql-rows".into(),
+        ComponentBatch::GRAPH_ID.into(),
+        component,
+    )
+    .expect("procedure delivery scope")
 }
 #[async_trait]
 impl ComputationComponent for Sink {
@@ -268,13 +278,13 @@ async fn memory_rows() -> Result<()> {
             serde_json::from_value(json!({
                 "hostname":"127.0.0.1","port":settings.connection.port,
                 "database":"test","user":"root","password":"root",
-                "default_template":{
+                "defaultTemplate":{
                     "added":{"template":"CALL apply_effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
                     "updated":{"template":"CALL apply_effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
                     "deleted":{"template":"CALL apply_effect({{param output.alias}},{{param operation}},{{param before.id}},NULL)"}
                 }
             }))?,
-            &procedure_inputs(&["left", "right"]))?
+            &procedure_inputs(&["left", "right"]), procedure_scope(id("procedures")))?
     )));
     let mut results = Vec::new();
     let mut outputs = Vec::new();
@@ -500,15 +510,16 @@ async fn memory_rows() -> Result<()> {
             use drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink;
             let config = |template: &str, stop_ms: u64| serde_json::from_value(json!({
                 "hostname":"127.0.0.1","port":port,"database":"test","user":"root","password":"root",
-                "command_timeout_ms":5000,"shutdown_timeout_ms":stop_ms,
-                "default_template":{
+                "commandTimeoutMs":5000,"shutdownTimeoutMs":stop_ms,
+                "defaultTemplate":{
                     "added":{"template":template},"updated":{"template":template},"deleted":{"template":template}
                 }
             }));
             let input = || InputEnvelope { port:PortId::try_new("in").unwrap(), envelope:envelope.clone() };
-            let mut sink = MySqlStoredProcSink::new(numeric_id(793),config("CALL wait_effect({{param output.alias}})",50)?,&procedure_inputs(&["left","right"]))?;
-            sink.start().await?;
-            let mut handle = Box::pin(sink.handle(input()));
+            let token = CancellationToken::new();
+            let mut sink = MySqlStoredProcSink::new(numeric_id(793),config("CALL wait_effect({{param output.alias}})",5000)?,&procedure_inputs(&["left","right"]),procedure_scope(numeric_id(793)))?;
+            sink.start(None, &token, None).await?;
+            let mut handle = Box::pin(sink.handle_input(input()));
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     tokio::select! {
@@ -521,20 +532,20 @@ async fn memory_rows() -> Result<()> {
                 }
             }).await??;
             drop(handle);
-            assert!(sink.handle(input()).await.is_err(), "interrupted work must block replacement input");
-            assert!(sink.stop().await.is_err(), "short cleanup timeout must retain the operation");
-            assert!(sink.start().await.is_err(), "cancelled cleanup must not permit restart");
-            tokio::time::sleep(Duration::from_millis(1100)).await;
-            sink.stop().await?;
+            // The abandoned session is KILLed (rolling its transaction back)
+            // before the same input is retried, without Stop and Start.
+            sink.handle_input(input()).await?;
+            sink.handle_input(input()).await?;
+            sink.stop(StopMode::Drain, None).await?;
             let count = admin.query("SELECT COUNT(*) FROM audit WHERE operation='wait'").await?;
-            assert_eq!(catalog::field(&count.values[0],0)?,"1");
-            let mut failing = MySqlStoredProcSink::new(numeric_id(794),config("CALL fail_effect({{param output.alias}})",5000)?,&procedure_inputs(&["left","right"]))?;
-            failing.start().await?;
-            assert!(failing.handle(input()).await.is_err());
-            assert!(failing.handle(input()).await.is_err(), "failed submitted calls are not retried automatically");
-            failing.stop().await?;
+            assert_eq!(catalog::field(&count.values[0],0)?,"1", "the cursor applies each operation once");
+            let mut failing = MySqlStoredProcSink::new(numeric_id(794),config("CALL fail_effect({{param output.alias}})",5000)?,&procedure_inputs(&["left","right"]),procedure_scope(numeric_id(794)))?;
+            failing.start(None, &token, None).await?;
+            assert!(failing.handle_input(input()).await.is_err());
+            assert!(failing.handle_input(input()).await.is_err(), "a permanent failure fails every retry");
+            failing.stop(StopMode::Drain, None).await?;
             let count = admin.query("SELECT COUNT(*) FROM audit WHERE operation='failed'").await?;
-            assert_eq!(catalog::field(&count.values[0],0)?,"1");
+            assert_eq!(catalog::field(&count.values[0],0)?,"0", "a failed procedure rolls back with its operation");
             Ok(())
         }
         Result::<()>::Ok(())

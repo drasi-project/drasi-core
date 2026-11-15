@@ -1,7 +1,13 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Transactional PostgreSQL destination shared by native and Rust delivery.
+//! Transactional PostgreSQL destinations.
+//!
+//! [`PostgresDeliveryHandler`] is the format-1 destination used by the legacy
+//! reaction (`public.drasi_delivery_stream_v1`). The native sink uses the
+//! per-consumer format-2 cursor in [`progress`].
+
+pub mod progress;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
