@@ -3,6 +3,11 @@
 
 //! Real SQL Server tests never skip ARM/emulation failures. Build the three
 //! matching native libraries, then run with Podman available.
+//!
+//! Live qualification is deferred (CW-78). The stored-procedure sink is an
+//! external consumer with a destination cursor; its live scenarios need the
+//! fixture to pre-create `<schema>.DrasiDeliveryProgress` and grant the
+//! application login SELECT, INSERT, UPDATE and DELETE on it.
 
 #[path = "fixtures/native_mssql/coverage.rs"]
 mod coverage;
@@ -67,6 +72,65 @@ fn plugins(dynamic: bool) -> Result<Vec<Arc<NativePlugin>>> {
             )))
         })
         .collect()
+}
+
+/// Flat native sink settings for the fixture's application login, merged
+/// with `extra` (outputs, templates, timeouts).
+fn sink_settings(db: &Database, extra: Value) -> Value {
+    let connection = db.settings()["connection"].clone();
+    let mut settings = json!({
+        "host": connection["host"], "port": connection["port"],
+        "database": connection["database"], "user": connection["user"],
+        "password": connection["password"], "encryption": "required",
+        "trustServerCertificate": connection["trust_server_certificate"],
+        "progressTable": format!("{}.DrasiDeliveryProgress", db.schema),
+        "commandTimeoutMs": 15000, "connectTimeoutMs": 15000, "retryBudgetMs": 10000,
+    });
+    if let (Some(settings), Some(extra)) = (settings.as_object_mut(), extra.as_object()) {
+        settings.extend(extra.clone());
+    }
+    settings
+}
+
+fn consumer_options() -> DeliveryOptions {
+    DeliveryOptions {
+        scope: RecoveryScope::MemoryLifetime,
+        max_streams: NonZeroUsize::new(8).expect("positive stream limit"),
+        receipts_per_stream: NonZeroUsize::new(8).expect("positive receipt limit"),
+        retry: DeliveryRetryPolicy::default(),
+    }
+}
+
+/// The sink through its actual consumer path: the host DeliveryRunner owns
+/// input progress (in the returned directory, which must outlive the proxy),
+/// the sink owns the destination cursor.
+async fn create_sink(
+    factory: &computation::NativeFactory,
+    id: ComponentId,
+    configuration: Value,
+) -> Result<(computation::NativeConsumerProxy, tempfile::TempDir)> {
+    let inputs = sink_inputs::inputs_for(&configuration);
+    let state = tempfile::Builder::new()
+        .prefix("native-mssql-consumer-")
+        .tempdir()?;
+    let provider = LegacyIndexProviderAdapter::new(Arc::new(
+        drasi_index_rocksdb::RocksDbIndexProvider::new(state.path(), false, false),
+    ));
+    let consumer = factory
+        .create_consumer_with_inputs(
+            id,
+            configuration,
+            drasi_computation_plugin_sdk::Scope {
+                instance_id: "native-mssql".into(),
+                graph_id: ComponentBatch::GRAPH_ID.into(),
+                generation: 1,
+            },
+            provider,
+            consumer_options(),
+            inputs,
+        )
+        .await?;
+    Ok((consumer, state))
 }
 
 struct Settings(BTreeMap<String, Value>);
@@ -170,22 +234,19 @@ async fn exercise(dynamic: bool) -> Result<()> {
     source
         .dependencies
         .insert("consumer_progress".into(), vec![resource("consumers")]);
-    let sink_settings = json!({"connection":db.settings()["connection"],"outputs":{"all":{"component":"all","port":"out"}},
-    "default_template":{
-        "added":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect {{param operation}},{{param after.id}},{{param after.value}}")},
-        "updated":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect {{param operation}},{{param after.id}},{{param after.value}}")},
-        "deleted":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect {{param operation}},{{param before.id}},{{param before.value}}")}
-    }});
-    let sink_factory = plugins[2].factories()[0].clone();
-    let mut sink = sink_factory.specification(id("effect"), json!({"settings":{}}))?;
-    sink.configuration.insert(
-        "settings".into(),
-        ConfigurationValue::Reference {
-            resource: resource("settings"),
-            key: "sink".into(),
-            secret: true,
-        },
-    );
+    let (sink, _sink_state) = create_sink(
+        &plugins[2].factories()[0],
+        id("effect"),
+        sink_settings(&db, json!({
+            "outputs":{"all":{"component":"all","port":"out"}},
+            "defaultTemplate":{
+                "added":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect {{param operation}},{{param after.id}},{{param after.value}}")},
+                "updated":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect {{param operation}},{{param after.id}},{{param after.value}}")},
+                "deleted":{"template":db.scoped_sql("EXEC {{schema}}.ApplyEffect {{param operation}},{{param before.id}},{{param before.value}}")}
+            }
+        })),
+    )
+    .await?;
     let mut builder = ComponentBatch::builder();
     for (name, role, handle) in [
         (
@@ -194,10 +255,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
             ResourceHandle::new(
                 ResourceRole::SecretStore,
                 Arc::new(ConfigurationResolverResource(Arc::new(Settings(
-                    BTreeMap::from([
-                        ("source".into(), db.settings()),
-                        ("sink".into(), sink_settings),
-                    ]),
+                    BTreeMap::from([("source".into(), db.settings())]),
                 )))),
             ),
         ),
@@ -230,11 +288,10 @@ async fn exercise(dynamic: bool) -> Result<()> {
             source,
             source_factory,
         )
-        .component(
+        .sink(
             drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
                 .expect("fixture component name"),
-            sink,
-            sink_factory,
+            Box::new(sink),
         )
         .bind_stream(endpoint("items", "out"), stream("items"));
     for query in queries {

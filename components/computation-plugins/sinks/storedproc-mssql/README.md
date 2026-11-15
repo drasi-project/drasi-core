@@ -1,55 +1,60 @@
 # Native SQL Server stored-procedure sink
 
-**User-approved deferral: SQL Server runtime qualification remains incomplete.**
+**Live SQL Server qualification is deferred by the user (CW-78).** The sink is
+verified by unit tests, construction tests and an in-memory model of its
+cursor protocol only. The live scenarios in
+`components/host-sdk/tests/native_mssql_components.rs` compile and stay
+ignored; do not seek or run a database without renewed approval.
 
-`drasi.mssql/storedproc` is a native sink, not a legacy reaction queue or adapter.
-`plugin()` and the gated dynamic entrypoint use the same implementation with
-computation ABI 2.0.0 / wire 2.
+`drasi.mssql/storedproc` is a native ComputationGraph sink for the
+computation plugin ABI 4.0.0. `plugin()` and the gated dynamic entry point
+(`dynamic-plugin` feature) export the same factory.
 
-The required secret-bearing `settings` object contains:
-
-* `connection`: the shared SQL Server connection configuration;
-* `outputs`: optional map from an alias to an incoming output's `{component, port?}`; the graph supplies each incoming source, transformer or query output and its stream;
-* `routes` and/or `default_template`: existing `QueryConfig` / `TemplateSpec`;
-* `command_timeout_ms`, `shutdown_timeout_ms` (default 30000, positive/bounded).
-
-For example:
+It is an external consumer of the host `DeliveryRunner`. Each change runs in
+its own SQL Server transaction that executes the rendered procedure call and
+advances this sink's row in a destination cursor table, so a change takes
+effect exactly once when the procedure does not commit on its own.
 
 ```json
 {
-  "outputs": {"all": {"component": "bc769198-8a46-426c-acb5-435b084520d0", "port": "out"}},
-  "default_template": {
-    "added": {"template":"EXEC dbo.ApplyEffect {{param operation}},{{param after.id}}"},
-    "updated": {"template":"EXEC dbo.ApplyEffect {{param operation}},{{param after.id}}"},
-    "deleted": {"template":"EXEC dbo.ApplyEffect {{param operation}},{{param before.id}}"}
+  "host": "sql.example.internal",
+  "database": "orders",
+  "user": "drasi_sink",
+  "password": {"secretRef": "orders-sink-password"},
+  "outputs": {"orders": {"component": "bc769198-8a46-426c-acb5-435b084520d0", "port": "out"}},
+  "defaultTemplate": {
+    "added":   {"template": "EXEC dbo.UpsertOrder {{param after.id}}, {{param (json after)}}"},
+    "updated": {"template": "EXEC dbo.UpsertOrder {{param after.id}}, {{param (json after)}}"},
+    "deleted": {"template": "EXEC dbo.DeleteOrder {{param before.id}}"}
   }
 }
 ```
 
-Add the connection through a Host secret/configuration reference rather than
-putting literal credentials in a persisted Server definition. Use the actual
-producer UUID in `component`; `all` is an alias, not a component identity.
+* [`DESIGN.md`](DESIGN.md): delivery profile, cursor protocol, exactly-once
+  conditions, retry classification, lifecycle, security.
+* [`CONFIGURATION.md`](CONFIGURATION.md): every field, templates, grants,
+  authentication, update matrix, Erase, runbook and the legacy mapping.
 
-## Preserved behavior and intentional safety changes
+## Capabilities
 
-| Capability | Native behavior |
+| Capability | Native behaviour |
 |---|---|
-| Rendering/routing | The extracted legacy `mssql-common::sql` implementation, including unchanged original renderer assertions. Full output alias → last dotted segment → per-operation default. |
-| Contexts | the truthful change context: `operation` (`ADD`, `REPLACE`, `PATCH`, `DELETE`), `output` (`alias`, `component`, `port`), `sequence`, `timestamp` (only when the envelope has one), `identity` (`namespace`, `id`) and only the `element`, `before`, `after`, `removedProperties` and `effectiveFrom` that the record carries. A patch's `after` holds only the properties it sets, an unknown `before` is absent (not null), and a template that reads an absent field fails strictly. `updated` covers `REPLACE` and `PATCH`; unconfigured operation/empty rendered command emits nothing. |
-| Values | Strict missing fields; exact positional Tiberius binding. Unsigned values beyond i64 bind as decimal text; null, Unicode, JSON objects/arrays preserve renderer semantics. |
-| Execution | Pre-render the entire input before any effect; execute commands in order and drain every result set. |
-| Errors | Render, connect and procedure errors propagate. No legacy log-and-drop while reporting success. |
-| Completion | `Handled` only after the command responses are drained. This is **not** durable deduplication, transactional delivery or once-only effects. Earlier commands may commit before a later command fails. |
-| Retry | No blind `retry_attempts`; rejected as unsupported. Legacy retried potentially executed commands whose effects were unknown. Removing that behavior is a safety correction, not a claim to preserve unsafe retry semantics. |
-| Stop/cancel | SQL work owns its connection and remains retained when its caller is cancelled or times out. Stop waits; failed/timed-out cleanup remains failure. Tiberius exposes no cancellation method, and socket drop/CLOSED does not prove a server-side procedure stopped. No sysadmin/KILL required. |
-| Authentication | Optional real Host `identity` binding uses the activation-credentials extension. The configured hostname/port are supplied to the provider; each start refreshes credentials, overrides literals for that activation only, and leaves declared configuration immutable. Empty literals require an actual binding. Provider errors never fall back to literals; certificates are rejected by Host. Token values preserve the legacy provider-to-SQL-auth-pair behavior, **not** an Azure AD protocol claim. |
-| TLS | Shared native-tls/rustls and encryption modes; trust-server-certificate is explicit, not silently forced as in the old reaction. |
-| Recovery snapshots | Rejected; this sink does not support arbitrary destination replacement. Cross-process replay may repeat effects and needs application idempotency. |
+| Delivery profile | `ConsumerMode::External` plus a destination cursor (`progressTable`, format 2) committed in the same transaction as each change's procedure call. Exactly once for transactional procedures; at-least-once for procedures that commit internally. |
+| Templates | Parameter-only: every value goes through `{{param …}}` and is bound as `@P1…@Pn`. Inline `{{json}}`, `{{x}}`, `{{{x}}}`, partials, decorators and other block helpers are rejected at construction. Compiled once; strict rendering. |
+| Routing | Full output alias, then its last dotted segment, then `defaultTemplate`, per operation. |
+| Context | Truthful change: `operation` (`ADD`, `REPLACE`, `PATCH`, `DELETE`), `output`, `sequence`, `timestamp`, `identity`, and only the `element`, `before`, `after`, `removedProperties`, `effectiveFrom` the record carries; plus `deliveryId`. |
+| Values | Exact positional binding; unsigned values beyond `BIGINT` bind as decimal text; objects and arrays as JSON text; at most 2 098 values per command. |
+| Large inputs | No input size limit; rendering per change; timeouts per server round trip. |
+| Retry | Classified by SQL Server error number and error type; reconnect and retry within `retryBudgetMs`; a lost commit reply is retried safely through the cursor. No latched failure state. |
+| Connection | One persistent connection per activation, reconnected with jittered backoff. |
+| Lifecycle | Start honours cancellation and the deadline and creates or checks the progress table; host-driven pause; Drain closes gracefully, Abort drops; Erase deletes only this sink's cursor rows. |
+| Authentication | SQL authentication; activation credentials (SQL login or Microsoft Entra ID access token as Tiberius `AADToken`). The Host does not yet bind identities to consumers. |
+| TLS | Required by default with certificate verification; extra CA via `trustedCaPem`; plaintext and `trustServerCertificate` are explicit opt-ins with warnings. |
+| Management | `Factory::assess` and `NativeManagement`; every field classified (InPlace, Restart, Recreate, or Unsupported for `database` and `progressTable`). |
+| Configuration | Flat camelCase, unknown fields rejected, only `password` secret, published defaults, redacting `Debug`. |
+| Cancellation | Tiberius cannot send ATTENTION; an interrupted statement drops the connection and SQL Server rolls the transaction back. |
 
-**Real SQL Server qualification is blocked on the current ARM64 Podman host.**
-Unit renderer assertions and successful static/dynamic loading are not database
-parameter-effect, rollback, cancellation or timeout proof. The real fixture fails
-explicitly on unavailable SQL Server rather than skipping. Exact parameter edge
-effects and server-observed cleanup still need a working SQL Server environment.
-The user has explicitly deferred that work; do not seek or run another database
-without renewed approval.
+## Features
+
+* `native-tls` (default) or `rustls`: TLS backend for Tiberius.
+* `dynamic-plugin`: export the C ABI entry point for the cdylib.

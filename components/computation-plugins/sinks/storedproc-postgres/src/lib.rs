@@ -1,34 +1,46 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-mod component;
-mod config;
+//! Native PostgreSQL stored-procedure sink (`drasi.postgres/storedproc`).
+//!
+//! An external consumer for the host `DeliveryRunner`: every operation's
+//! procedure call commits in one PostgreSQL transaction together with a
+//! per-consumer destination cursor row, so a retried operation whose earlier
+//! attempt committed is recognised and not repeated. See `DESIGN.md` and
+//! `CONFIGURATION.md` in this crate.
 
-use anyhow::Result;
+mod component;
+pub mod config;
+mod connection;
+pub mod management;
+mod retry;
+
+use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, SinkCompletion,
+    ComponentRole, ComponentUpdateData, ComponentUpdateMode, GraphChangeCodec,
+    ImplementationIdentity, PipeRequirements, PortDescriptor, PortDirection, PortId,
+    SinkCompletion, SinkOutputs,
 };
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ConsumerMode, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
+    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
+    ConsumerMode, ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
+    PluginDefinition, UpdateRequest,
 };
-use serde::Deserialize;
 use std::sync::Arc;
 
-pub use component::PostgresStoredProcSink;
-pub use config::PostgresStoredProcConfig;
-pub use drasi_reaction_common::{QueryConfig, TemplateSpec};
+pub use component::{PostgresStoredProcSink, RenderError};
+pub use config::{CommandRoute, CommandSpec, PostgresStoredProcConfig, SslMode};
+pub use connection::{ConnectError, APPLICATION_NAME};
+pub use drasi_postgres_common::delivery::progress::{
+    create_table_sql, DeliveryError, DeliveryOwner, Disposition, ProgressTable, ProgressTableError,
+    DEFAULT_MAX_STREAMS, DEFAULT_PROGRESS_TABLE, PROGRESS_FORMAT_VERSION,
+};
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const POSTGRES_SINK: &str = "drasi.postgres/storedproc";
 
+/// Factory for `drasi.postgres/storedproc`.
 pub struct PostgresStoredProcFactory;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    settings: PostgresStoredProcConfig,
-}
 
 pub fn plugin() -> Result<PluginDefinition> {
     PluginDefinition::new(
@@ -42,176 +54,105 @@ pub fn plugin() -> Result<PluginDefinition> {
 #[cfg(feature = "dynamic-plugin")]
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
+fn input_port() -> PortDescriptor {
+    PortDescriptor::new(
+        PortId::try_new("in").expect("constant port"),
+        PortDirection::Input,
+        GraphChangeCodec::schema().descriptor().clone(),
+        PipeRequirements::default(),
+    )
+}
+
+impl PostgresStoredProcFactory {
+    /// Constructs the consumer for a creation request without I/O.
+    pub fn build(&self, request: &CreateRequest) -> Result<PostgresStoredProcSink> {
+        if let Some(directive) = &request.update_directive {
+            anyhow::ensure!(
+                directive.plan.mode == ComponentUpdateMode::Recreate
+                    && directive.plan.data == ComponentUpdateData::Preserve,
+                "PostgreSQL sink reconstruction preserves its destination cursor; only Recreate \
+                 with Preserve is supported"
+            );
+        }
+        let config = PostgresStoredProcConfig::parse(request.configuration.clone())?;
+        let scope = request.scope.as_ref().context(
+            "PostgreSQL sink requires its construction scope: the graph identity names the \
+             destination cursor owner",
+        )?;
+        let owner = DeliveryOwner::derive(&scope.graph_id, request.id.as_str());
+        let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
+        PostgresStoredProcSink::new(
+            self.metadata().descriptor(request.id.clone())?,
+            config,
+            outputs,
+            owner,
+        )
+    }
+}
+
 impl Factory for PostgresStoredProcFactory {
     fn metadata(&self) -> FactoryMetadata {
-        let mut configuration = ConfigSchema::from_fields([("settings", ConfigType::Object, true)]);
-        configuration.constrain(
-            "settings",
-            drasi_computation_contracts::ConfigurationConstraint::try_new(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "outputs": drasi_computation_contracts::ConfigurationConstraint::output_aliases().schema(),
-                },
-            })).expect("constant stored procedure identity schema"),
-        ).expect("settings field");
-        configuration
-            .fields
-            .get_mut("settings")
-            .expect("settings")
-            .secret = true;
         FactoryMetadata {
+            // Constant identifiers; validated by the factory tests.
             implementation: ImplementationIdentity::try_new(POSTGRES_SINK, "1")
-                .expect("constant implementation"),
+                .expect("constant implementation identity"),
             role: ComponentRole::Sink,
             configuration_version: 1,
-            configuration,
-            ports: PostgresStoredProcSink::ports().expect("constant port descriptor"),
+            configuration: PostgresStoredProcConfig::definition().schema(),
+            ports: vec![input_port()],
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,
+                management: true,
+                update_modes: vec![
+                    ComponentUpdateMode::InPlace,
+                    ComponentUpdateMode::Restart,
+                    ComponentUpdateMode::Recreate,
+                ],
+                erases_owned_state: true,
                 ..Capabilities::default()
             },
         }
     }
+
+    fn configuration_details(&self) -> Option<ConfigDetails> {
+        Some(PostgresStoredProcConfig::definition().details())
+    }
+
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+        management::assess(request)
+    }
+
+    fn supports_activation_credentials(&self) -> bool {
+        true
+    }
+
+    /// The configured endpoint; pure configuration inspection.
+    fn activation_credential_context(
+        &self,
+        request: &CreateRequest,
+    ) -> Result<ActivationCredentialContext> {
+        let config = PostgresStoredProcConfig::parse(request.configuration.clone())?;
+        let context = ActivationCredentialContext {
+            hostname: config.host,
+            port: config.port,
+        };
+        context.validate()?;
+        Ok(context)
+    }
+
     fn consumer_mode(&self) -> Option<ConsumerMode> {
         Some(ConsumerMode::External)
     }
+
     fn create(&self, request: &CreateRequest, _control: ControlSender) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
-        Ok(Component::Consumer(Box::new(PostgresStoredProcSink::new(
-            request.id.clone(),
-            config.settings,
-            &request.inputs,
-        )?))
-        .into())
+        Ok(Component::Consumer(Box::new(self.build(request)?)).into())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use drasi_computation_contracts::{ComponentId, PortDirection};
-    use drasi_computation_plugin_sdk::{ExportedPlugin, NativeComponent};
-    use serde_json::json;
-
-    const OUTPUT_COMPONENT_ID: &str = "6439b52f-06c0-5e90-8905-d736f18e34ee";
-
-    fn config() -> serde_json::Value {
-        json!({
-            "hostname": "no-database-is-opened-at-construction",
-            "database": "test", "user": "user", "password": "secret",
-            "outputs": {"people": {"component": OUTPUT_COMPONENT_ID, "port": "out"}},
-            "default_template": { "added": {"template": "CALL add_user({{param after.id}})"} }
-        })
-    }
-
-    fn inputs() -> Result<Vec<drasi_computation_contracts::InputBinding>> {
-        use drasi_computation_contracts::{InputBinding, OutputEndpoint, PortId, StreamId};
-        Ok(vec![InputBinding {
-            input_port: PortId::try_new("in")?,
-            output: OutputEndpoint::new(
-                ComponentId::try_new(OUTPUT_COMPONENT_ID)?,
-                PortId::try_new("out")?,
-            ),
-            stream: StreamId::try_new("people/out")?,
-        }])
-    }
-
-    #[test]
-    fn factory_metadata_constructs_without_database_io() -> Result<()> {
-        ExportedPlugin::new(plugin()?)?;
-        #[cfg(feature = "dynamic-plugin")]
-        assert!(!drasi_computation_plugin_metadata().is_null());
-        let metadata = PostgresStoredProcFactory.metadata();
-        assert_eq!(metadata.role, ComponentRole::Sink);
-        assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
-        assert_eq!(metadata.ports, PostgresStoredProcSink::ports()?);
-        assert_eq!(metadata.ports.len(), 1);
-        assert_eq!(metadata.ports[0].id().as_str(), "in");
-        assert_eq!(metadata.ports[0].direction(), PortDirection::Input);
-        assert_eq!(
-            metadata.ports[0].schema(),
-            GraphChangeCodec::schema().descriptor()
-        );
-        let id = ComponentId::generate();
-        let descriptor = PostgresStoredProcSink::describe(id.clone())?;
-        assert_eq!(descriptor.id(), &id);
-        assert_eq!(descriptor.ports(), metadata.ports.as_slice());
-        assert!(metadata.configuration.fields["settings"].secret);
-        Ok(())
-    }
-
-    #[test]
-    fn factory_declares_destination_completion_and_configuration_roundtrips() -> Result<()> {
-        ExportedPlugin::new(plugin()?)?;
-        assert_eq!(
-            PostgresStoredProcFactory.consumer_mode(),
-            Some(ConsumerMode::External)
-        );
-        assert!(PostgresStoredProcFactory.metadata().configuration.fields["settings"].secret);
-        let sink = PostgresStoredProcSink::new(
-            ComponentId::try_new("a21a4fde-f642-54e1-93cf-bb9e177949d7")?,
-            serde_json::from_value(config())?,
-            &inputs()?,
-        )?;
-        let configuration = sink.configuration()?;
-        assert_eq!(configuration["settings"]["password"], "secret");
-        assert_eq!(configuration["settings"]["port"], 5432);
-        assert_eq!(configuration["settings"]["command_timeout_ms"], 30_000);
-        serde_json::from_value::<PostgresStoredProcConfig>(configuration["settings"].clone())?
-            .validate()?;
-        Ok(())
-    }
-
-    #[test]
-    fn configuration_rejects_unsafe_sql_unknown_routes_and_invalid_bounds() {
-        for (field, value) in [
-            (
-                "outputs",
-                json!({"bad id": {"component": OUTPUT_COMPONENT_ID}}),
-            ),
-            ("port", json!(0)),
-            ("command_timeout_ms", json!(0)),
-            ("shutdown_timeout_ms", json!(0)),
-            ("connect_timeout_ms", json!(0)),
-            (
-                "default_template",
-                json!({"added": {"template": "CALL x({{after.id}})"}}),
-            ),
-            (
-                "routes",
-                json!({"other": {"added": {"template": "CALL x()"}}}),
-            ),
-            ("tls_ca_pem", json!("certificate-with-ssl-disabled")),
-            ("retry_attempts", json!(3)),
-        ] {
-            let mut value_config = config();
-            value_config[field] = value;
-            let result = serde_json::from_value::<PostgresStoredProcConfig>(value_config)
-                .map_err(anyhow::Error::from)
-                .and_then(|config| {
-                    config.validate()?;
-                    let outputs = drasi_computation_contracts::SinkOutputs::from_inputs(
-                        &inputs()?,
-                        &config.outputs,
-                    )?;
-                    config.validate_outputs(&outputs)
-                });
-            assert!(result.is_err(), "{field}");
-        }
-    }
-
-    #[test]
-    fn a_sink_without_declared_inputs_fails_clearly() -> Result<()> {
-        assert!(PostgresStoredProcSink::new(
-            ComponentId::try_new("a21a4fde-f642-54e1-93cf-bb9e177949d7")?,
-            serde_json::from_value(config())?,
-            &[],
-        )
-        .is_err());
-        Ok(())
-    }
-}
+mod tests;

@@ -8,6 +8,17 @@ CREATE TABLE {{schema}}.Parameters(kind nvarchar(20), unsigned_value decimal(20,
   unicode_value nvarchar(max), json_value nvarchar(max), before_value nvarchar(max), after_value nvarchar(max));
 CREATE TABLE {{schema}}.Scalars(flag bit, signed_value bigint, floating_value float, json_value nvarchar(max));
 CREATE TABLE {{schema}}.Signals(name nvarchar(80) NOT NULL PRIMARY KEY);
+-- The stored-procedure sink's delivery cursor (format 2), pre-created so the
+-- least-privilege application login needs only DML on it.
+CREATE TABLE {{schema}}.DrasiDeliveryProgress(
+  owner nvarchar(64) NOT NULL,
+  stream_key nvarchar(128) NOT NULL,
+  version smallint NOT NULL CHECK (version = 2),
+  sequence nvarchar(20) NOT NULL,
+  digest varbinary(32) NOT NULL CHECK (DATALENGTH(digest) = 32),
+  operations bigint NOT NULL CHECK (operations > 0),
+  completed bigint NOT NULL CHECK (completed >= 0 AND completed <= operations),
+  PRIMARY KEY (owner, stream_key));
 EXEC sys.sp_cdc_enable_table @source_schema=N'{{schema_name}}',@source_name=N'Items',@role_name=NULL,@supports_net_changes=0;
 EXEC sys.sp_cdc_enable_table @source_schema=N'{{schema_name}}',@source_name=N'Companion',@role_name=NULL,@supports_net_changes=0;
 EXEC sys.sp_cdc_enable_table @source_schema=N'{{schema_name}}',@source_name=N'DrasiBarrier',@role_name=NULL,@supports_net_changes=0;
@@ -77,6 +88,7 @@ GRANT SELECT ON OBJECT::cdc.[fn_cdc_get_all_changes_{{schema_name}}_Items] TO {{
 GRANT SELECT ON OBJECT::cdc.[fn_cdc_get_all_changes_{{schema_name}}_Companion] TO {{app_user}};
 GRANT SELECT ON OBJECT::cdc.[fn_cdc_get_all_changes_{{schema_name}}_DrasiBarrier] TO {{app_user}};
 GRANT INSERT,DELETE ON {{schema}}.DrasiBarrier TO {{app_user}};
+GRANT SELECT,INSERT,UPDATE,DELETE ON {{schema}}.DrasiDeliveryProgress TO {{app_user}};
 GRANT EXECUTE ON SCHEMA::{{schema}} TO {{app_user}};
 GRANT SELECT, VIEW DEFINITION ON {{schema}}.ReadOnlyItems TO {{reader_user}};
 GO

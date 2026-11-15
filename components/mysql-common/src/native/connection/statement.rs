@@ -10,10 +10,32 @@ impl Connection {
     pub async fn execute_parameters(&mut self, sql: &str, parameters: &[Value]) -> Result<()> {
         timeout(
             self.packets.timeout,
-            self.execute_parameters_inner(sql, parameters),
+            self.execute_parameters_inner(sql, parameters, false),
         )
         .await
         .context("MySQL statement timed out; outcome is uncertain")?
+        .map(|_| ())
+    }
+
+    /// Like [`Self::execute_parameters`], for a statement issued inside an
+    /// explicit transaction that the caller owns (the stored-procedure
+    /// delivery cursor). The final status may report an open transaction.
+    /// Returns whether the transaction is still open after the statement, so
+    /// the caller can detect a procedure that committed or rolled back on its
+    /// own. A failed execution closes its prepared statement, so a persistent
+    /// session does not accumulate statements.
+    pub async fn execute_parameters_in_transaction(
+        &mut self,
+        sql: &str,
+        parameters: &[Value],
+    ) -> Result<bool> {
+        let status = timeout(
+            self.packets.timeout,
+            self.execute_parameters_inner(sql, parameters, true),
+        )
+        .await
+        .context("MySQL statement timed out; outcome is uncertain")??;
+        Ok(status & 1 != 0)
     }
 
     async fn statement_columns(
@@ -52,7 +74,12 @@ impl Connection {
         Ok(())
     }
 
-    async fn execute_parameters_inner(&mut self, sql: &str, parameters: &[Value]) -> Result<()> {
+    async fn execute_parameters_inner(
+        &mut self,
+        sql: &str,
+        parameters: &[Value],
+        transaction: bool,
+    ) -> Result<u16> {
         anyhow::ensure!(
             !sql.trim().is_empty() && sql.len() < self.packets.limit && parameters.len() <= 4096,
             "MySQL command or parameter count exceeds limits"
@@ -99,16 +126,31 @@ impl Connection {
         command.clear();
         probe.serialize(&mut command);
         self.command(&command).await?;
-        self.consume_statement_results().await?;
+        let status = match self.consume_statement_results(transaction).await {
+            Ok(status) => status,
+            Err(error) => {
+                if transaction
+                    && !self.command_incomplete
+                    && error.downcast_ref::<MySqlServerError>().is_some()
+                {
+                    command.clear();
+                    command.push(0x19);
+                    command.extend(id.to_le_bytes());
+                    self.command(&command).await?;
+                    self.command_incomplete = false;
+                }
+                return Err(error);
+            }
+        };
         command.clear();
         command.push(0x19);
         command.extend(id.to_le_bytes());
         self.command(&command).await?;
         self.command_incomplete = false;
-        Ok(())
+        Ok(status)
     }
 
-    async fn consume_statement_results(&mut self) -> Result<()> {
+    async fn consume_statement_results(&mut self, transaction: bool) -> Result<u16> {
         let mut consumed = 0;
         loop {
             let first = self.packets.read().await?;
@@ -145,8 +187,11 @@ impl Connection {
             };
             if status & 8 == 0 {
                 self.command_incomplete = false;
-                anyhow::ensure!(status & 1 == 0, "MySQL procedure left an open transaction");
-                return Ok(());
+                anyhow::ensure!(
+                    transaction || status & 1 == 0,
+                    "MySQL procedure left an open transaction"
+                );
+                return Ok(status);
             }
         }
     }

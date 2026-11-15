@@ -9,6 +9,38 @@ use std::{
     time::Duration,
 };
 
+/// Component IDs are UUIDs; fixtures name components and map each name to a
+/// stable UUID (a UUID is kept as is).
+pub(crate) fn fixture_id(name: &str) -> String {
+    if name.len() == 36
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return name.to_owned();
+    }
+    let hash = |seed: u64| {
+        name.bytes().fold(seed, |state, byte| {
+            (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    };
+    let hex = format!(
+        "{:016x}{:016x}",
+        hash(0xcbf2_9ce4_8422_2325),
+        hash(0x8422_2325_cbf2_9ce4)
+    );
+    // The canonical hyphenated form, so stream names derived from the
+    // configured component match the graph's.
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
 pub(crate) struct Database {
     pub(crate) container: String,
     pub(crate) port: u16,
@@ -296,8 +328,8 @@ impl Database {
     pub(crate) fn sink_settings(&self) -> Value {
         json!({
             "hostname":"127.0.0.1","port":self.port,"database":"test","user":"root","password":"native-test",
-            "outputs":{"left":{"component":"left","port":"out"},"right":{"component":"right","port":"out"}},
-            "default_template":{
+            "outputs":{"left":{"component":fixture_id("left"),"port":"out"},"right":{"component":fixture_id("right"),"port":"out"}},
+            "defaultTemplate":{
                 "added":{"template":"CALL effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
                 "updated":{"template":"CALL effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
                 "deleted":{"template":"CALL effect({{param output.alias}},{{param operation}},{{param before.id}},NULL)"}

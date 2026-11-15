@@ -2,8 +2,20 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! SQL Server command rendering, routing and parameter binding.
+//!
+//! [`render_command`] and [`validate_template`] serve the legacy reaction and
+//! accept any compilable template. The native stored-procedure sink compiles
+//! a [`CommandTemplate`] once, after applying the shared parameter-only rule
+//! from `drasi-reaction-common`.
 
+mod command;
+mod connect;
 mod template;
+pub use command::{
+    CommandTemplate, ParameterLimitExceeded, RenderedCommand, MAX_BOUND_PARAMETERS,
+    MAX_RPC_PARAMETERS,
+};
+pub use connect::{connect, SqlClient};
 pub use template::{build_context, render_command, validate_template};
 
 use drasi_reaction_common::{OperationType, QueryConfig, TemplateSpec};

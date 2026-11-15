@@ -31,11 +31,13 @@ mod identity;
 mod parity;
 #[path = "fixtures/native_sink_inputs.rs"]
 mod sink_inputs;
+#[path = "fixtures/native_mysql/storedproc.rs"]
+mod storedproc;
 #[path = "fixtures/native_mysql/teardown.rs"]
 mod teardown;
 use database::Database;
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("id")
+    ComponentId::try_new(database::fixture_id(value)).expect("id")
 }
 fn resource(value: &str) -> ResourceId {
     ResourceId::try_new(value).expect("resource")
@@ -141,15 +143,18 @@ struct Settings {
 #[async_trait]
 impl ConfigurationResolver for Settings {
     fn validate_reference(&self, key: &str) -> Result<()> {
-        anyhow::ensure!(matches!(key, "source" | "sink"), "unknown MySQL settings");
+        anyhow::ensure!(
+            matches!(key, "source" | "sink" | "sink-password"),
+            "unknown MySQL settings"
+        );
         Ok(())
     }
     async fn resolve(&self, key: &str) -> Result<Value> {
         self.validate_reference(key)?;
-        Ok(if key == "source" {
-            self.source.clone()
-        } else {
-            self.sink.clone()
+        Ok(match key {
+            "source" => self.source.clone(),
+            "sink-password" => self.sink["password"].clone(),
+            _ => self.sink.clone(),
         })
     }
 }
@@ -200,6 +205,7 @@ fn rows(results: &QueryResults) -> Result<Vec<Value>> {
 }
 
 async fn family(dynamic: bool) -> Result<()> {
+    let directory = tempfile::tempdir()?;
     let mut database = Database::new().await?;
     database.initialize().await?;
     let native = libraries(dynamic)?;
@@ -377,9 +383,16 @@ async fn family(dynamic: bool) -> Result<()> {
     source
         .dependencies
         .insert("consumer_progress".into(), vec![resource("consumers")]);
-    let mut sink = sink_factory.specification(id("procedures"), json!({"settings":{}}))?;
-    sink.configuration
-        .insert("settings".into(), reference("sink"));
+    let sink = storedproc::sink_specification(&sink_factory, &database.sink_settings())?;
+    builder = storedproc::declare_delivery(builder, &directory.path().join("delivery"))?;
+    let indexes: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
+        directory.path().join("queries"),
+        RocksIndexOptions::new(
+            false,
+            false,
+            RocksDbMemoryBudget::from_total_budget_bytes(32 << 20)?,
+        ),
+    ));
     builder = builder
         .component(
             drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
@@ -407,7 +420,7 @@ async fn family(dynamic: bool) -> Result<()> {
         )?;
         let query = ContinuousQueryTransformer::new_configured(
             query_definition(name),
-            Arc::new(InMemoryComputationProvider),
+            indexes.clone(),
             QueryOptions::default(),
             QueryExecutionSettings::default(),
             None,
@@ -529,9 +542,9 @@ async fn family(dynamic: bool) -> Result<()> {
             assert!(owner.snapshot().checkpoints[&key].sequence > previous,
                 "rewind must allocate above earlier consumer and source admissions");
         }
-        let actual_input = actual_input.context("single real query change")?;
-        procedure_lifecycle(&database,&sink_factory,actual_input.clone()).await?;
-        identity::rotation(&database,&sink_factory,actual_input).await?;
+        actual_input.context("single real query change")?;
+        storedproc::procedure_lifecycle(&database,&sink_factory).await?;
+        identity::rotation(&sink_factory)?;
         database.sql("BEGIN; DELETE FROM items; ROLLBACK;").await?;
         database.sql("UPDATE items SET value='barrier' WHERE id=2").await?;
         for output in &mut outputs { next(output).await?; }
@@ -588,91 +601,6 @@ fn position(owner: &QuerySourceProgress, key: &SourceProgressKey) -> Result<Valu
             .as_deref()
             .context("actual source-specific row position")?,
     )?)
-}
-
-async fn procedure_lifecycle(
-    database: &Database,
-    factory: &computation::NativeFactory,
-    envelope: ChangeEnvelope,
-) -> Result<()> {
-    let configuration = |template: &str, shutdown_ms: u64| {
-        let mut settings = database.sink_settings();
-        settings["shutdown_timeout_ms"] = json!(shutdown_ms);
-        settings["command_timeout_ms"] = json!(5000);
-        for event in ["added", "updated", "deleted"] {
-            settings["default_template"][event]["template"] = json!(template);
-        }
-        json!({"settings":settings})
-    };
-    let input = || InputEnvelope {
-        port: PortId::try_new("in").expect("input"),
-        envelope: envelope.clone(),
-    };
-    let mut sink = sink_inputs::create(
-        factory,
-        id("held-procedure"),
-        configuration("CALL wait_effect({{param output.alias}})", 50),
-    )?;
-    sink.start(&crate::hooks::start_ctx()).await?;
-    let mut pending = Box::pin(sink.handle(input()));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                result = &mut pending => {
-                    result?;
-                    anyhow::bail!("held native procedure completed before cancellation");
-                }
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                    if database.sql("SELECT COUNT(*) FROM information_schema.PROCESSLIST \
-                        WHERE (INFO LIKE '%wait_effect%' OR STATE='User sleep') AND ID<>CONNECTION_ID()").await? != "0"
-                    {
-                        return Result::<()>::Ok(());
-                    }
-                }
-            }
-        }
-    })
-    .await??;
-    drop(pending);
-    assert!(
-        sink.handle(input()).await.is_err(),
-        "pending CALL must not be replaced"
-    );
-    assert!(
-        sink.stop(&crate::hooks::stop_ctx()).await.is_err(),
-        "short stop must retain CALL ownership"
-    );
-    assert!(
-        sink.start(&crate::hooks::start_ctx()).await.is_err(),
-        "pending cleanup cannot authorize restart"
-    );
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    sink.stop(&crate::hooks::stop_ctx()).await?;
-    assert_eq!(
-        database
-            .sql("SELECT COUNT(*) FROM audit WHERE operation='wait'")
-            .await?,
-        "1"
-    );
-    let mut failed = sink_inputs::create(
-        factory,
-        id("failed-procedure"),
-        configuration("CALL fail_effect({{param output.alias}})", 5000),
-    )?;
-    failed.start(&crate::hooks::start_ctx()).await?;
-    assert!(failed.handle(input()).await.is_err());
-    assert!(
-        failed.handle(input()).await.is_err(),
-        "submitted failed CALL is not retried"
-    );
-    failed.stop(&crate::hooks::stop_ctx()).await?;
-    assert_eq!(
-        database
-            .sql("SELECT COUNT(*) FROM audit WHERE operation='failed'")
-            .await?,
-        "1"
-    );
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -756,9 +684,15 @@ async fn tracked_graph(
     let mut sink_settings = database.sink_settings();
     sink_settings["outputs"] = names
         .iter()
-        .map(|name| ((*name).to_owned(), json!({"component":name,"port":"out"})))
+        .map(|name| {
+            (
+                (*name).to_owned(),
+                json!({"component":id(name).as_str(),"port":"out"}),
+            )
+        })
         .collect::<serde_json::Map<_, _>>()
         .into();
+    let sink_settings_value = sink_settings.clone();
     let owners = names
         .iter()
         .map(|name| {
@@ -793,7 +727,7 @@ async fn tracked_graph(
                 ResourceRole::SecretStore,
                 Arc::new(ConfigurationResolverResource(Arc::new(Settings {
                     source: settings.clone(),
-                    sink: sink_settings,
+                    sink: sink_settings.clone(),
                 }))),
             ),
         ),
@@ -829,9 +763,11 @@ async fn tracked_graph(
         .into(),
         vec![resource("progress")],
     );
-    let mut sink = sink_factory.specification(id("procedures"), json!({"settings":{}}))?;
-    sink.configuration
-        .insert("settings".into(), reference("sink"));
+    let sink = storedproc::sink_specification(&sink_factory, &sink_settings_value)?;
+    builder = storedproc::declare_delivery(
+        builder,
+        &PathBuf::from(format!("{}-delivery", path.display())),
+    )?;
     builder = builder
         .component(
             drasi_lib::computation::v1::ComponentName::try_new("fixture-component-3")
@@ -1483,52 +1419,48 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
     source
         .configuration
         .insert("settings".into(), reference("source"));
-    let mut sink = sink_factory.specification(id("procedures"), json!({"settings":{}}))?;
-    sink.configuration
-        .insert("settings".into(), reference("sink"));
-    let mut builder = ComponentBatch::builder()
-        .declare_resource(ResourceSpecification {
-            id: resource("settings"),
-            role: ResourceRole::SecretStore,
-            ownership: ResourceOwnership::Borrowed,
-            binding: "settings".into(),
-        })?
-        .provide_resource(
-            resource("settings"),
-            ResourceHandle::new(
-                ResourceRole::SecretStore,
-                Arc::new(ConfigurationResolverResource(Arc::new(Settings {
-                    source: settings,
-                    sink: database.sink_settings(),
-                }))),
-            ),
-        )?
-        .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-5")
-                .expect("fixture component name"),
-            source,
-            source_factory,
-        )
-        .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-6")
-                .expect("fixture component name"),
-            sink,
-            sink_factory.clone(),
-        )
-        .bind_stream(endpoint("source", "out"), stream("changes"));
     let path = tempfile::tempdir()?;
-    let indexes: Arc<dyn ComputationIndexProvider> = if transactions {
-        Arc::new(RocksDbComputationProvider::new(
-            path.path(),
-            RocksIndexOptions::new(
-                false,
-                false,
-                RocksDbMemoryBudget::from_total_budget_bytes(32 << 20)?,
-            ),
-        ))
-    } else {
-        Arc::new(InMemoryComputationProvider)
-    };
+    let sink = storedproc::sink_specification(&sink_factory, &database.sink_settings())?;
+    let mut builder =
+        storedproc::declare_delivery(ComponentBatch::builder(), &path.path().join("delivery"))?
+            .declare_resource(ResourceSpecification {
+                id: resource("settings"),
+                role: ResourceRole::SecretStore,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "settings".into(),
+            })?
+            .provide_resource(
+                resource("settings"),
+                ResourceHandle::new(
+                    ResourceRole::SecretStore,
+                    Arc::new(ConfigurationResolverResource(Arc::new(Settings {
+                        source: settings,
+                        sink: database.sink_settings(),
+                    }))),
+                ),
+            )?
+            .component(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-5")
+                    .expect("fixture component name"),
+                source,
+                source_factory,
+            )
+            .component(
+                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-6")
+                    .expect("fixture component name"),
+                sink,
+                sink_factory.clone(),
+            )
+            .bind_stream(endpoint("source", "out"), stream("changes"));
+    // The consumer sink requires persistent producer identities.
+    let indexes: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
+        path.path().join("queries"),
+        RocksIndexOptions::new(
+            false,
+            false,
+            RocksDbMemoryBudget::from_total_budget_bytes(32 << 20)?,
+        ),
+    ));
     let mut results = Vec::new();
     let mut outputs = Vec::new();
     for name in ["left", "right"] {
@@ -1637,8 +1569,8 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
         assert_eq!(database.sql("SELECT query_id,id,value FROM effects ORDER BY query_id,id").await?,
             "left\t100\tchanged\nright\t100\tchanged");
         for query in &results { assert_eq!(rows(query)?,[json!({"id":100,"value":"changed"})]); }
-        if let Some(input) = actual_input {
-            procedure_lifecycle(&database, &sink_factory, input).await?;
+        if actual_input.is_some() {
+            storedproc::procedure_lifecycle(&database, &sink_factory).await?;
         }
         Result::<()>::Ok(())
     }.await;
@@ -1768,6 +1700,24 @@ async fn native_mysql_untracked_multi_thread_static_and_dynamic() -> Result<()> 
                 format!("untracked transactions={transactions}, dynamic={dynamic}")
             })?;
         }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Podman and rebuilt native MySQL libraries"]
+async fn native_mysql_storedproc_current_thread_static_and_dynamic() -> Result<()> {
+    for dynamic in [false, true] {
+        storedproc::proofs(dynamic).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Podman and rebuilt native MySQL libraries"]
+async fn native_mysql_storedproc_multi_thread_static_and_dynamic() -> Result<()> {
+    for dynamic in [false, true] {
+        storedproc::proofs(dynamic).await?;
     }
     Ok(())
 }

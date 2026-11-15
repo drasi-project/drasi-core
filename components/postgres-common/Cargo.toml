@@ -67,9 +67,10 @@ replication = [
 ]
 storedproc = [
     "dep:drasi-computation-contracts", "dep:drasi-reaction-common",
+    "drasi-reaction-common/sql",
     "dep:async-trait", "dep:bytes", "dep:handlebars",
-    "dep:postgres-types", "dep:thiserror", "dep:tokio-postgres",
-    "rust_decimal/db-tokio-postgres",
+    "dep:postgres-types", "dep:sha2", "dep:thiserror", "dep:tokio",
+    "dep:tokio-postgres", "rust_decimal/db-tokio-postgres",
 ]
 
 [target.'cfg(target_os = "linux")'.dependencies]

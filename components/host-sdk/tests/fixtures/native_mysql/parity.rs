@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 
 struct Graph {
     core: DrasiLib,
+    _directory: tempfile::TempDir,
     owners: Vec<Arc<QuerySourceProgress>>,
     rows: Vec<QueryResults>,
     outputs: Vec<mpsc::Receiver<ChangeEnvelope>>,
@@ -62,7 +63,8 @@ async fn graph_mode(
         .clone();
     let mut source =
         source_factory.specification(id("source"), json!({"stream":"changes","settings":{}}))?;
-    let mut sink = sink_factory.specification(id("procedures"), json!({"settings":{}}))?;
+    let directory = tempfile::tempdir()?;
+    let sink = super::storedproc::sink_specification(&sink_factory, &database.sink_settings())?;
     let reference = |key: &str| ConfigurationValue::Reference {
         resource: resource("settings"),
         key: key.into(),
@@ -85,38 +87,39 @@ async fn graph_mode(
             .dependencies
             .insert("consumer_progress".into(), vec![resource("consumers")]);
     }
-    sink.configuration
-        .insert("settings".into(), reference("sink"));
-    let mut builder = ComponentBatch::builder()
-        .declare_resource(ResourceSpecification {
-            id: resource("settings"),
-            role: ResourceRole::SecretStore,
-            ownership: ResourceOwnership::Borrowed,
-            binding: "settings".into(),
-        })?
-        .provide_resource(
-            resource("settings"),
-            ResourceHandle::new(
-                ResourceRole::SecretStore,
-                Arc::new(ConfigurationResolverResource(Arc::new(Settings {
-                    source: source_settings,
-                    sink: database.sink_settings(),
-                }))),
-            ),
-        )?
-        .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
-                .expect("fixture component name"),
-            source,
-            source_factory,
-        )
-        .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
-                .expect("fixture component name"),
-            sink,
-            sink_factory,
-        )
-        .bind_stream(endpoint("source", "out"), stream("changes"));
+    let mut builder = super::storedproc::declare_delivery(
+        ComponentBatch::builder(),
+        &directory.path().join("delivery"),
+    )?
+    .declare_resource(ResourceSpecification {
+        id: resource("settings"),
+        role: ResourceRole::SecretStore,
+        ownership: ResourceOwnership::Borrowed,
+        binding: "settings".into(),
+    })?
+    .provide_resource(
+        resource("settings"),
+        ResourceHandle::new(
+            ResourceRole::SecretStore,
+            Arc::new(ConfigurationResolverResource(Arc::new(Settings {
+                source: source_settings,
+                sink: database.sink_settings(),
+            }))),
+        ),
+    )?
+    .component(
+        drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+            .expect("fixture component name"),
+        source,
+        source_factory,
+    )
+    .component(
+        drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
+            .expect("fixture component name"),
+        sink,
+        sink_factory,
+    )
+    .bind_stream(endpoint("source", "out"), stream("changes"));
     if tracked {
         builder = builder
             .declare_resource(ResourceSpecification {
@@ -137,6 +140,15 @@ async fn graph_mode(
                 ),
             )?;
     }
+    // The consumer sink requires persistent producer identities.
+    let indexes: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
+        directory.path().join("queries"),
+        RocksIndexOptions::new(
+            false,
+            false,
+            RocksDbMemoryBudget::from_total_budget_bytes(32 << 20)?,
+        ),
+    ));
     let mut rows = Vec::new();
     let mut outputs = Vec::new();
     for owner in &owners {
@@ -145,7 +157,7 @@ async fn graph_mode(
         definition.query = query_text.into();
         let mut query = ContinuousQueryTransformer::new_configured(
             definition,
-            Arc::new(InMemoryComputationProvider),
+            indexes.clone(),
             QueryOptions::default(),
             QueryExecutionSettings::default(),
             None,
@@ -241,6 +253,7 @@ async fn graph_mode(
         .await?;
     Ok(Graph {
         core,
+        _directory: directory,
         owners,
         rows,
         outputs,

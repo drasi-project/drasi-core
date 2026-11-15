@@ -1,6 +1,12 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Authored, not yet qualified (CW-78): the native SQL Server sink is an
+//! external consumer whose operations each commit with a destination cursor
+//! row in `<schema>.DrasiDeliveryProgress`. The fixture must pre-create that
+//! table and grant the application login SELECT, INSERT, UPDATE and DELETE on
+//! it before these scenarios can run.
+
 use super::*;
 use drasi_computation_contracts::QueryOutputMetadata;
 use drasi_core::evaluation::{
@@ -89,16 +95,21 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
         "{{param (json before)}}",
         "{{param before.nullable}}",
     );
-    let mut sink = crate::sink_inputs::create(
+    let (mut sink, _sink_state) = crate::create_sink(
         factory,
         id("sink"),
-        json!({"settings":{
-            "connection":db.settings()["connection"],"outputs":{"source.q":{"component":"source.q","port":"out"},"other.q":{"component":"other.q","port":"out"},"unmatched":{"component":"unmatched","port":"out"}},
-            "routes":{"source.q":{"added":{"template":add("N'full'")}},
-                "q":{"added":{"template":add("N'short'")},"updated":{"template":update}}},
-            "default_template":{"added":{"template":add("N'default'")},"deleted":{"template":delete}}
-        }}),
-    )?;
+        crate::sink_settings(
+            &db,
+            json!({
+                "outputs":{"source.q":{"component":"source.q","port":"out"},"other.q":{"component":"other.q","port":"out"},"unmatched":{"component":"unmatched","port":"out"}},
+                "routes":{"source.q":{"added":{"template":add("N'full'")}},
+                    "q":{"added":{"template":add("N'short'")},"updated":{"template":update}}},
+                "defaultTemplate":{"added":{"template":add("N'default'")},"deleted":{"template":delete}}
+            }),
+        ),
+    )
+    .await?;
+    sink.initialize(&crate::hooks::initialize_ctx()).await?;
     sink.start(&crate::hooks::start_ctx()).await?;
     let proof = async {
         for (index,query) in ["source.q","other.q","unmatched"].into_iter().enumerate() {
@@ -130,28 +141,32 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
                     "update/delete/aggregation before context changed");
             }
         }
+        // Operations commit one at a time: the first change of this input
+        // commits with its cursor; the second fails to render (permanently).
         let mut missing = data.clone(); missing.as_object_mut().context("fixture object")?.remove("text");
         let invalid = input("source.q",7,vec![
             QueryPartEvaluationContext::Adding { after:before.clone(),row_signature:7 },
             QueryPartEvaluationContext::Adding { after:variables(missing),row_signature:8 },
         ])?;
         ensure!(sink.handle(invalid).await.is_err(),"strict missing field silently succeeded");
-        ensure!(db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.Parameters")?=="6",
-            "partial input executed before the complete batch rendered");
+        ensure!(db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.Parameters")?=="7",
+            "the completed operation prefix was not committed exactly once");
         Ok::<_,anyhow::Error>(())
     }.await;
     let cleanup = sink.stop(&crate::hooks::stop_ctx()).await;
     proof?;
     cleanup?;
 
-    let mut scalar = crate::sink_inputs::create(
+    let (mut scalar, _scalar_state) = crate::create_sink(
         factory,
         id("scalars"),
-        json!({"settings":{
-            "connection":db.settings()["connection"],"outputs":{"scalars":{"component":"scalars","port":"out"}},
-            "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.BindScalars {{param after.flag}},{{param after.signed}},{{param after.floating}},{{param (json after.payload)}}")}}
-        }}),
-    )?;
+        crate::sink_settings(&db, json!({
+            "outputs":{"scalars":{"component":"scalars","port":"out"}},
+            "defaultTemplate":{"added":{"template":db.scoped_sql("EXEC {{schema}}.BindScalars {{param after.flag}},{{param after.signed}},{{param after.floating}},{{param (json after.payload)}}")}}
+        })),
+    )
+    .await?;
+    scalar.initialize(&crate::hooks::initialize_ctx()).await?;
     scalar.start(&crate::hooks::start_ctx()).await?;
     let proof = async {
         scalar.handle(added("scalars",1,json!({
@@ -169,14 +184,16 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
     proof?;
     cleanup?;
 
-    let mut failing = crate::sink_inputs::create(
+    let (mut failing, _failing_state) = crate::create_sink(
         factory,
         id("failure"),
-        json!({"settings":{
-            "connection":db.settings()["connection"],"outputs":{"q":{"component":"q","port":"out"}},
-            "default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.PartialFailure {{param after.id}}")}}
-        }}),
-    )?;
+        crate::sink_settings(&db, json!({
+            "outputs":{"q":{"component":"q","port":"out"}},
+            "defaultTemplate":{"added":{"template":db.scoped_sql("EXEC {{schema}}.PartialFailure {{param after.id}}")}}
+        })),
+    )
+    .await?;
+    failing.initialize(&crate::hooks::initialize_ctx()).await?;
     failing.start(&crate::hooks::start_ctx()).await?;
     ensure!(
         failing
@@ -200,77 +217,68 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
     );
     ensure!(
         db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.Effects WHERE id=92")? == "0",
-        "later command in a partially failed batch executed after the error"
+        "a later operation ran after the failed one"
     );
+    // The failed operation's transaction rolled back its partial effect.
+    ensure!(db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.Effects WHERE operation=N'BEFORE-ERROR' AND id=91")?=="0",
+        "the failed procedure's effect escaped its transaction");
     ensure!(
-        failing
-            .handle(added("q", 2, json!({"id":91}))?)
-            .await
-            .is_err(),
-        "interrupted sink accepted more work without cleanup"
+        db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.DrasiDeliveryProgress WHERE completed > 0")? == "0",
+        "the cursor advanced for a failed operation"
     );
-    ensure!(db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.Effects WHERE operation=N'BEFORE-ERROR' AND id=91")?=="1",
-        "executed failing procedure was lost or blindly retried");
     failing.stop(&crate::hooks::stop_ctx()).await?;
     db.remove()
 }
 
+/// Exactly-once across an interrupted delivery: the host drops a call while
+/// the procedure runs; the connection goes with it, SQL Server rolls the
+/// transaction back, Stop succeeds immediately (nothing is retained), and a
+/// redelivery after restart commits the effect once.
 pub(super) async fn retained_work(dynamic: bool) -> Result<()> {
     let mut db = Database::new().await?;
     let native = plugins(dynamic)?;
     let factory = &native[2].factories()[0];
-    for cancellation in [false, true] {
-        db.sql("DELETE FROM {{schema}}.Signals WHERE name=N'release-procedure'")?;
-        let row = if cancellation { 202 } else { 201 };
-        let mut sink = crate::sink_inputs::create(
-            factory,
-            id("retained"),
-            json!({"settings":{
-                "connection":db.settings()["connection"],"outputs":{"q":{"component":"q","port":"out"}},"command_timeout_ms":if cancellation {15000}else{1000},
-                "shutdown_timeout_ms":50,"default_template":{"added":{"template":db.scoped_sql("EXEC {{schema}}.DelayedEffect {{param after.id}}")}}
-            }}),
-        )?;
-        sink.start(&crate::hooks::start_ctx()).await?;
-        let proof = async {
-            let mut handle = Box::pin(sink.handle(added("q",1,json!({"id":row}))?));
-            let entered = format!("SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE operation=N'ENTERED' AND id={row}");
-            tokio::select! {
-                result=&mut handle => anyhow::bail!("procedure did not reach retained server work before observation: {}",result.is_ok()),
-                observation=db.wait_sql(&entered,"1") => observation?,
-            }
-            if !cancellation {
-                ensure!(tokio::time::timeout(Duration::from_secs(3),&mut handle).await?.is_err(),"command timeout reported success");
-            }
-            drop(handle);
-            let failed = tokio::time::timeout(Duration::from_secs(2),sink.stop(&crate::hooks::stop_ctx())).await?;
-            ensure!(failed.is_err(),"stop reported success while procedure was still waiting");
-            ensure!(db.sql(&format!("SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE operation=N'COMPLETED' AND id={row}"))?=="0",
-                "test did not retain an incomplete server-side effect");
-            Ok::<_,anyhow::Error>(())
-        }.await;
-        // Release server work even if a native assertion failed, then await cleanup.
-        db.sql("INSERT INTO {{schema}}.Signals VALUES(N'release-procedure')")?;
-        db.wait_sql(&format!("SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE operation=N'COMPLETED' AND id={row}"),"1").await?;
-        let cleanup = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match sink.stop(&crate::hooks::stop_ctx()).await {
-                    Ok(()) => return Ok::<_, anyhow::Error>(()),
-                    Err(error) if format!("{error:#}").contains("timed out") => {
-                        tokio::time::sleep(Duration::from_millis(50)).await
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        })
-        .await?;
-        proof?;
-        cleanup?;
-        ensure!(
-            db.sql(&format!(
-                "SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE id={row}"
-            ))? == "2",
-            "cancelled/timed-out procedure was replayed or lost"
-        );
-    }
+    db.sql("DELETE FROM {{schema}}.Signals WHERE name=N'release-procedure'")?;
+    let row = 201;
+    let (mut sink, _sink_state) = crate::create_sink(
+        factory,
+        id("retained"),
+        crate::sink_settings(&db, json!({
+            "outputs":{"q":{"component":"q","port":"out"}},"commandTimeoutMs":15000,"retryBudgetMs":0,
+            "defaultTemplate":{"added":{"template":db.scoped_sql("EXEC {{schema}}.DelayedEffect {{param after.id}}")}}
+        })),
+    )
+    .await?;
+    sink.initialize(&crate::hooks::initialize_ctx()).await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
+    let proof = async {
+        let mut handle = Box::pin(sink.handle(added("q",1,json!({"id":row}))?));
+        // The uncommitted ENTERED row is visible only to a dirty read.
+        let entered = format!("SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WITH (NOLOCK) WHERE operation=N'ENTERED' AND id={row}");
+        tokio::select! {
+            result=&mut handle => anyhow::bail!("procedure did not reach server work before observation: {}",result.is_ok()),
+            observation=db.wait_sql(&entered,"1") => observation?,
+        }
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(2),sink.stop(&crate::hooks::stop_ctx())).await??;
+        Ok::<_,anyhow::Error>(())
+    }.await;
+    db.sql("INSERT INTO {{schema}}.Signals VALUES(N'release-procedure')")?;
+    // The abandoned session ends and its transaction rolls back.
+    db.wait_sql(
+        &format!("SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE id={row}"),
+        "0",
+    )
+    .await?;
+    proof?;
+    sink.start(&crate::hooks::start_ctx()).await?;
+    sink.handle(added("q", 1, json!({"id":row}))?).await?;
+    sink.stop(&crate::hooks::stop_ctx()).await?;
+    ensure!(
+        db.sql(&format!(
+            "SET NOCOUNT ON; SELECT COUNT(*) FROM {{{{schema}}}}.Effects WHERE id={row}"
+        ))? == "2",
+        "the interrupted procedure was lost or committed twice"
+    );
     db.remove()
 }

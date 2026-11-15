@@ -372,23 +372,53 @@ impl EnvelopeSink for NativeConsumerProxy {
             &input.envelope,
             PortDirection::Input,
         )?;
+        // Held while a batch may be open on the plugin: a cancelled delivery
+        // (this future dropped mid-await) leaves it set, so cleanup is
+        // required before more input.
         self.cleanup_required = true;
         let runner = self.runner.as_mut().expect("running consumer");
-        let mut batch = Batch::begin(
+        let identity = runner.batch_identity(&input)?;
+        let mut batch = match Batch::begin(
             self.component.inner.clone(),
             self.extension,
             self.component.codec.clone(),
             &input,
-            runner.batch_identity(&input)?,
+            identity,
         )
-        .await?;
-        match self.mode {
-            ConsumerMode::External => runner.deliver(&input, &mut batch).await?,
-            ConsumerMode::Transactional => runner.deliver_transactional(&input, &batch).await?,
-        }
+        .await
+        {
+            Ok(batch) => batch,
+            Err(error) => {
+                // No batch was opened, so nothing remains to clean up.
+                self.cleanup_required = false;
+                return Err(error);
+            }
+        };
+        let delivered = match self.mode {
+            ConsumerMode::External => runner.deliver(&input, &mut batch).await,
+            ConsumerMode::Transactional => runner.deliver_transactional(&input, &batch).await,
+        };
+        // The batch is closed whatever the outcome; a failed close keeps the
+        // cleanup requirement.
         batch.finish()?;
-        self.cleanup_required = false;
-        Ok(())
+        match delivered {
+            Ok(()) => {
+                self.cleanup_required = false;
+                Ok(())
+            }
+            // An External delivery that returned an error has settled: the
+            // runner kept only the completed operation prefix and never skips
+            // the failed operation, and the consumer deduplicates by
+            // `DeliveryItem::id`, so the same input can be retried without
+            // Stop/Start. Transactional failures may leave commit uncertainty
+            // that fences the owner, so they keep the cleanup requirement.
+            Err(error) => {
+                if self.mode == ConsumerMode::External {
+                    self.cleanup_required = false;
+                }
+                Err(error)
+            }
+        }
     }
 }
 
